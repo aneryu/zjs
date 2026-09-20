@@ -2626,13 +2626,6 @@ src/core/json.zig	104	priv		appendEscapedJsonUtf16String
 src/core/json.zig	130	priv		appendEscapedJsonByte
 src/core/json.zig	144	priv		appendEscapedJsonUnit
 src/core/json.zig	151	priv		appendUtf8CodePoint
-src/core/list.zig	13	pub		isLinked
-src/core/list.zig	21	pub		init
-src/core/list.zig	26	pub		isEmpty
-src/core/list.zig	30	pub		add
-src/core/list.zig	34	pub		addTail
-src/core/list.zig	38	pub		remove
-src/core/list.zig	47	priv		insertBetween
 src/core/memory.zig	129	priv		lock
 src/core/memory.zig	133	priv		unlock
 src/core/memory.zig	137	priv		record
@@ -4164,9 +4157,6 @@ src/core/runtime.zig	4721	pub	inline	borrowedWeakCleanupIdentityMatchesSlice
 src/core/runtime.zig	4734	pub		clearBorrowedWeakCleanupIdentities
 src/core/runtime.zig	4743	priv		ensureBorrowedWeakCleanupIdentityCapacity
 src/core/runtime.zig	4766	pub		settlePendingDestructionForGateStats
-src/core/runtime.zig	4783	priv		appendRuntimeObject
-src/core/runtime.zig	4800	priv		appendRuntimeRootSlot
-src/core/runtime.zig	4817	priv		appendRuntimeWeakRootSlot
 src/core/runtime.zig	5135	pub		newRealmRandomSeed
 src/core/shape.zig	34	pub		propertyCapacityForNeeded
 src/core/shape.zig	70	priv		famRegionBytes
@@ -5474,41 +5464,15 @@ src/exec/class_init_ops.zig	208	priv		constructPromiseBuiltinSuperInScope
 src/exec/closure.zig	19	pub		create
 src/exec/closure.zig	29	pub		call
 src/exec/closure.zig	33	pub		callWithThis
-src/exec/closure.zig	242	priv		closureKind
-src/exec/closure.zig	247	pub		appendLog
 src/exec/closure.zig	262	priv		expectClosure
 src/exec/closure.zig	270	priv		defineIntProperty
 src/exec/closure.zig	275	priv		getIntProperty
-src/exec/closure.zig	281	priv		incrementGlobalInt
-src/exec/closure.zig	287	priv		iteratorFactory
-src/exec/closure.zig	316	priv		iteratorNextGlobalValue
-src/exec/closure.zig	322	priv		iteratorNextEmptyArray
-src/exec/closure.zig	328	priv		iteratorNextNull
-src/exec/closure.zig	333	priv		iteratorNextValueGetterThrows
-src/exec/closure.zig	344	priv		iteratorNextDoneIfConsumed
-src/exec/closure.zig	355	priv		iteratorResult
-src/exec/closure.zig	396	priv		createTestFunctionBytecodeValue
-src/exec/closure.zig	411	priv		expectObjectPropertySame
-src/exec/closure.zig	417	priv		expectArrayIndexSame
-src/exec/closure.zig	578	priv		arrayFromShape
-src/exec/closure.zig	629	priv		appendArrayValue
 src/exec/closure.zig	639	priv		setGlobalMapString
 src/exec/closure.zig	657	priv		setGlobalWeakMapString
-src/exec/closure.zig	668	priv		appendRecordToGlobalArray
-src/exec/closure.zig	684	priv		appendWeakMapAdderRecord
-src/exec/closure.zig	700	priv		assertAndShiftExpected
-src/exec/closure.zig	725	priv		setForEachMutation
-src/exec/closure.zig	748	priv		setAddInt
-src/exec/closure.zig	756	priv		setDeleteInt
 src/exec/closure.zig	766	priv		appendUnindexedCollectionEntryAndDefineSize
 src/exec/closure.zig	780	priv		rollbackLastUnindexedCollectionEntry
-src/exec/closure.zig	790	priv		removeUnindexedCollectionEntryAndDefineSize
-src/exec/closure.zig	813	priv		appendPairToGlobalArray
-src/exec/closure.zig	827	priv		appendToGlobalArray
 src/exec/closure.zig	841	priv		getGlobalObjectProperty
 src/exec/closure.zig	847	priv		getGlobalThisObject
-src/exec/closure.zig	854	priv		defineValueProperty
-src/exec/closure.zig	866	priv		appendIntField
 src/exec/coercion_ops.zig	26	pub	inline	toPrimitiveForAdditionFree
 src/exec/coercion_ops.zig	42	priv		toPrimitiveForAdditionObject
 src/exec/coercion_ops.zig	66	pub		toPrimitiveForNumber
@@ -5690,7 +5654,6 @@ src/exec/date_ops.zig	469	priv		dateCall
 src/exec/date_ops.zig	565	priv		dateInternalBodyCall
 src/exec/date_ops.zig	595	priv		dateExtendedPrototypeCall
 src/exec/date_ops.zig	628	pub		prototypeMethodId
-src/exec/date_ops.zig	685	priv		decodeExtendedPrototypeMethodId
 src/exec/date_ops.zig	704	pub		call
 src/exec/date_ops.zig	711	pub		construct
 src/exec/date_ops.zig	715	pub		constructWithPrototype
@@ -5901,8 +5864,6 @@ src/exec/forof_ops.zig	396	pub		abandonForOfIteratorAtDepth
 src/exec/forof_ops.zig	404	pub		hasCatchMarkerAboveForOfRecord
 src/exec/forof_ops.zig	415	pub		closeIteratorFromVm
 src/exec/forof_ops.zig	424	pub		closeIteratorFromVmImpl
-src/exec/frame.zig	35	pub		requiredStorageSlots
-src/exec/frame.zig	56	pub		partitionStorage
 src/exec/frame.zig	103	pub		carve
 src/exec/frame.zig	157	pub		allocHeap
 src/exec/frame.zig	219	pub		argumentsNeedsOriginalSnapshot
@@ -7036,13 +6997,11 @@ src/exec/reflect_proxy_ops.zig	69	priv		reflectEntry
 src/exec/reflect_proxy_ops.zig	86	priv		reflectCall
 src/exec/regexp_adapter.zig	24	pub		compile
 src/exec/regexp_adapter.zig	28	pub		compileWithRuntime
-src/exec/regexp_adapter.zig	35	priv		lreCheckStackOverflow
 src/exec/regexp_adapter.zig	45	pub		execCaptureSlotsOnResolvedStringFromIndex
 src/exec/regexp_adapter.zig	59	pub		captureSlotValue
 src/exec/regexp_adapter.zig	63	pub		groupName
 src/exec/regexp_adapter.zig	67	pub		testOnStringFromIndex
 src/exec/regexp_adapter.zig	77	priv		execOptions
-src/exec/regexp_adapter.zig	85	priv		checkRuntimeTimeout
 src/exec/regexp_adapter.zig	90	pub		flagBitsFromBytecode
 src/exec/regexp_adapter.zig	94	pub		appendCanonicalFlagsFromBits
 src/exec/regexp_adapter.zig	111	pub		flagsStringValueFromBytecode
@@ -7093,7 +7052,6 @@ src/exec/regexp_ops.zig	434	priv		regexpSymbolSplitCall
 src/exec/regexp_ops.zig	454	pub		constructWithPrototype
 src/exec/regexp_ops.zig	458	priv		constructWithPrototypeInRealm
 src/exec/regexp_ops.zig	495	priv		regExpStringValue
-src/exec/regexp_ops.zig	503	priv		lreCheckStackOverflow
 src/exec/regexp_ops.zig	509	priv		regexpCompileOptions
 src/exec/regexp_ops.zig	516	priv		throwRegExpStackOverflow
 src/exec/regexp_ops.zig	532	priv		compileSourceAndFlags
@@ -8827,10 +8785,6 @@ src/libs/regexp.zig	429	pub		compilePatternAndFlags
 src/libs/regexp.zig	433	pub		compilePatternAndFlagsWithOptions
 src/libs/regexp.zig	442	pub		compilePatternWithFlagBitsAndOptions
 src/libs/regexp.zig	451	priv		isSupportedUnicodePropertyExpression
-src/libs/regexp.zig	455	pub		exec
-src/libs/regexp.zig	459	pub		execWithOptions
-src/libs/regexp.zig	469	pub		execIntoMatchWithOptions
-src/libs/regexp.zig	492	pub		execIntoMatchTrustedWithOptions
 src/libs/regexp.zig	514	pub		execCaptureSlotsSliceTrustedWithOptions
 src/libs/regexp.zig	526	priv		execCaptureSlotsParsed
 src/libs/regexp.zig	595	pub		testMatchTrustedWithOptions
@@ -8877,10 +8831,8 @@ src/libs/regexp.zig	1070	priv	inline	scanGreedyClass8
 src/libs/regexp.zig	1108	priv	inline	matchRawForward
 src/libs/regexp.zig	1126	priv	inline	matchRawBackward
 src/libs/regexp.zig	1143	priv		lreExecBacktrack
-src/libs/regexp.zig	1564	priv		writeMatch
 src/libs/regexp.zig	1598	priv		parseHeader
 src/libs/regexp.zig	1610	priv		parseHeaderTrusted
-src/libs/regexp.zig	1622	priv		checkedAllocCount
 src/libs/regexp.zig	1629	priv	inline	decodeOp
 src/libs/regexp.zig	1634	priv	inline	isLineTerminator
 src/libs/regexp.zig	1638	priv	inline	lreIsSpaceByte

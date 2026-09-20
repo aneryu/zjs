@@ -4,8 +4,8 @@
 //! stack push transfers them, while guarded fast probes remain borrow-until-
 //! commit. Observable iterator and property work stays on the explicit call
 //! environment. The opcode bodies follow QuickJS object/field creation at
-//! quickjs.c:17961 and quickjs.c:19269, spread copying at quickjs.c:16814-16920,
-//! and rest-array construction at quickjs.c:18017.
+//! quickjs.c and quickjs.c, spread copying at quickjs.c,
+//! and rest-array construction at quickjs.c.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -47,7 +47,7 @@ pub noinline fn objectReserved2(
 }
 
 /// Frameless OP_object fast path (qjs CASE(OP_object): `*sp++ = JS_NewObject(ctx)`,
-/// quickjs.c:17961). Creates a bare `{}` and returns it OWNED for the handler to push
+/// quickjs.c). Creates a bare `{}` and returns it OWNED for the handler to push
 /// onto the register-resident sp, so no `publish`/stack round-trip is needed — object
 /// creation runs no user code and captures no backtrace (qjs sets no `sf->cur_pc`
 /// here), only OOM can fail (→ handler routes to the cold shell). Mirrors the object()
@@ -66,7 +66,7 @@ pub inline fn newPlainObjectReserved2Value(ctx: *core.JSContext, global: *core.O
 }
 
 /// Frameless OP_define_field fast leg (qjs CASE(OP_define_field): a single
-/// JS_DefinePropertyValue on sp[-2] with sp[-1], quickjs.c:19269). Handles the
+/// JS_DefinePropertyValue on sp[-2] with sp[-1], quickjs.c). Handles the
 /// plain-data-add/replace on a plain, extensible, non-array, non-exotic, non-proxy
 /// `obj` for ANY value shape — qjs's define path carries no value-form gate either:
 /// a refcounted value ({left:obj,right:obj} literals) takes the same
@@ -86,7 +86,7 @@ pub inline fn newPlainObjectReserved2Value(ctx: *core.JSContext, global: *core.O
 /// No private-atom probe: OP_define_field's u32 operand is a parser-minted
 /// property-name atom — every private name is discriminated at parse time into
 /// the define/get/put_private_field family (qjs OP_define_field likewise
-/// carries no JS_ATOM_TYPE_PRIVATE test, quickjs.c:19269), so the
+/// carries no JS_ATOM_TYPE_PRIVATE test, quickjs.c), so the
 /// mightBePrivate 3-load chain was a zjs-only tax on the trusted bytecode-atom
 /// path (op_get/put_field precedent). Debug keeps the precise kind claim.
 /// The receiver is likewise an evaluated expression value (OP_object /
@@ -149,7 +149,7 @@ pub noinline fn defineField(
     const obj = stack.peekBorrowed() orelse return error.StackUnderflow;
     if (!value.isTracerOwned()) {
         if (property_ops.expectObject(obj)) |target| {
-            // flags.extensible gate: qjs OP_define_field (quickjs.c:19269) goes
+            // flags.extensible gate: qjs OP_define_field goes
             // through JS_DefinePropertyValue with JS_PROP_THROW, which enforces
             // extensibility in JS_CreateProperty — a non-extensible
             // object must fall through to createDataPropertyOrThrow's TypeError.
@@ -179,7 +179,7 @@ pub noinline fn defineField(
             // No index properties to delete, so the length set reduces to the
             // dense case: growth keeps the fast array (tail holes), shrink frees
             // the dense tail via truncateArrayElements. No sparse conversion
-            // either way — faithful to set_array_length (quickjs.c:9447-9455).
+            // either way — faithful to set_array_length.
             // Arrays carrying index properties fall through to defineArrayLength.
             target.truncateArrayElements(ctx.runtime, new_len);
             target.setArrayLength(new_len);
@@ -198,7 +198,7 @@ pub noinline fn defineField(
         target.flags.extensible and
         target.shape_ref.prop_count == 0)
     {
-        try target.defineOwnPropertyAssumingNew(ctx.runtime, atom_id, core.Descriptor.data(rooted_value, true, true, true));
+        try target.defineOwnPropertyAssumingNew(ctx.runtime, atom_id, core.Descriptor.data(rooted_value, .all));
         return .done;
     }
     object_ops.createDataPropertyOrThrow(ctx, output, global, rooted_obj, target, atom_id, rooted_value, function, frame) catch |err| {
@@ -265,7 +265,7 @@ pub fn appendSpreadValues(
     const array_value = stack.peek() orelse return error.StackUnderflow;
     const array = try property_ops.expectObject(array_value);
     const start_index = index.as(.int) orelse 0;
-    // Faithful to qjs js_append_enumerate (quickjs.c:16814): resolve @@iterator
+    // Faithful to qjs js_append_enumerate: resolve @@iterator
     // and create the iterator, taking the dense bulk copy ONLY when the Array
     // iterator protocol is un-tampered. The former `is_array`-only fast path
     // silently ignored a user-patched src[Symbol.iterator] / %ArrayIteratorPrototype%.next.
@@ -315,7 +315,7 @@ pub noinline fn copyDataProperties(
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    // qjs JS_CopyDataProperties (quickjs.c:16912-16913) skips EVERY non-object
+    // qjs JS_CopyDataProperties skips EVERY non-object
     // source — `{...5}`, `{...true}`, `{..."ab"}`, `{...Symbol()}` all yield no
     // properties, not just null/undefined. (Object-rest destructuring still
     // copies from a wrapped string because its source is objectified upstream
@@ -337,7 +337,7 @@ pub noinline fn copyDataProperties(
         return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
     defer core.Object.freeKeys(rt, keys);
 
-    // qjs JS_CopyDataProperties (quickjs.c:16920) requests JS_GPN_ENUM_ONLY
+    // qjs JS_CopyDataProperties requests JS_GPN_ENUM_ONLY
     // for an ordinary (non-exotic) source, so the per-key enumerable
     // descriptor probe is folded into the key enumeration up-front: the key
     // set is already enumerable-filtered before the copy loop runs any
@@ -493,7 +493,7 @@ pub noinline fn rest(
 ) !void {
     const first_arg_idx = readInt(u16, function.byteCode()[frame.pc..][0..2]);
     frame.pc += 2;
-    // qjs OP_rest uses js_create_array → JS_NewArray (quickjs.c:18017, 9601-9607,
+    // qjs OP_rest uses js_create_array → JS_NewArray (quickjs.c,
     // 5841-5844), whose shape proto is the realm Array.prototype. Rest arrays
     // must walk that real chain; the deleted class-name Get fallback is gone.
     const prototype = if (ctx.global) |global| array_ops.arrayPrototypeFromGlobal(ctx.runtime, global) else null;

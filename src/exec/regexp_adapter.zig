@@ -12,10 +12,7 @@ const std = @import("std");
 pub const max_captures = regexp_bytecode.max_captures;
 pub const max_exec_slots = regexp_bytecode.max_exec_slots;
 pub const small_exec_slots = regexp_bytecode.small_exec_slots;
-pub const flag_bits = regexp_bytecode.flags;
-pub const Capture = regexp_bytecode.Capture;
-pub const Match = regexp_bytecode.Match;
-pub const ExecStatus = regexp_bytecode.ExecStatus;
+pub const Flags = regexp_bytecode.Flags;
 pub const ExecResult = regexp_bytecode.ExecResult;
 pub const ExecError = error{ OutOfMemory, BytecodeCorrupt, Timeout };
 
@@ -26,17 +23,10 @@ pub fn compile(allocator: std.mem.Allocator, pattern: []const u8, flags: []const
 }
 
 pub fn compileWithRuntime(rt: *core.JSRuntime, pattern: []const u8, flags: []const u8) !Compiled {
-    return regexp_lib.compilePatternAndFlagsWithOptions(rt.memory.allocator, pattern, flags, .{
-        .@"opaque" = rt,
-        .check_stack_overflow = lreCheckStackOverflow,
-    });
+    return regexp_lib.compilePatternAndFlagsWithOptions(rt.memory.allocator, pattern, flags, .{ .host = runtimeHost(rt) });
 }
 
-fn lreCheckStackOverflow(opaque_ptr: ?*anyopaque, alloca_size: usize) bool {
-    // qjs:quickjs.c:48000 lre_check_stack_overflow -> js_check_stack_overflow(ctx->rt, alloca_size)
-    const runtime: *core.JSRuntime = @ptrCast(@alignCast(opaque_ptr orelse return false));
-    return runtime.checkNativeStackOverflow(alloca_size);
-}
+pub const runtimeHost = core.regexp.libraryHost;
 
 /// Execute against the flat string payload already retained by the caller.
 /// QuickJS carries the same `JSString *`/buffer from `js_regexp_exec` into
@@ -75,67 +65,63 @@ pub fn testOnStringFromIndex(rt: *core.JSRuntime, compiled: Compiled, string_val
 }
 
 fn execOptions(rt: *core.JSRuntime) regexp_bytecode.ExecOptions {
-    if (!rt.hasInterruptHandler()) return .{};
-    return .{
-        .@"opaque" = rt,
-        .check_timeout = checkRuntimeTimeout,
-    };
+    return .{ .host = runtimeHost(rt) };
 }
 
-fn checkRuntimeTimeout(context: ?*anyopaque) bool {
-    const rt: *core.JSRuntime = @ptrCast(@alignCast(context orelse return false));
-    return rt.runInterruptHandler();
-}
-
-pub fn flagBitsFromBytecode(bytecode: []const u8) u16 {
+pub fn flagsFromBytecode(bytecode: []const u8) Flags {
     return regexp_bytecode.getFlags(bytecode);
 }
 
-pub fn appendCanonicalFlagsFromBits(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), bits: u16) !void {
-    const order = [_]struct { byte: u8, bit: u16 }{
-        .{ .byte = 'd', .bit = regexp_bytecode.flags.indices },
-        .{ .byte = 'g', .bit = regexp_bytecode.flags.global },
-        .{ .byte = 'i', .bit = regexp_bytecode.flags.ignore_case },
-        .{ .byte = 'm', .bit = regexp_bytecode.flags.multiline },
-        .{ .byte = 's', .bit = regexp_bytecode.flags.dot_all },
-        .{ .byte = 'u', .bit = regexp_bytecode.flags.unicode },
-        .{ .byte = 'v', .bit = regexp_bytecode.flags.unicode_sets },
-        .{ .byte = 'y', .bit = regexp_bytecode.flags.sticky },
+/// The `flags` getter's canonical spelling: alphabetical, `u` suppressed
+/// under `v`.
+pub fn appendCanonicalFlags(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), flags: Flags) !void {
+    const order = [_]struct { byte: u8, field: std.meta.FieldEnum(Flags) }{
+        .{ .byte = 'd', .field = .indices },
+        .{ .byte = 'g', .field = .global },
+        .{ .byte = 'i', .field = .ignore_case },
+        .{ .byte = 'm', .field = .multiline },
+        .{ .byte = 's', .field = .dot_all },
+        .{ .byte = 'u', .field = .unicode },
+        .{ .byte = 'v', .field = .unicode_sets },
+        .{ .byte = 'y', .field = .sticky },
     };
-    for (order) |entry| {
-        if (entry.byte == 'u' and (bits & regexp_bytecode.flags.unicode_sets) != 0) continue;
-        if ((bits & entry.bit) != 0) try buffer.append(allocator, entry.byte);
+    inline for (order) |entry| {
+        if (@field(flags, @tagName(entry.field)) and !(entry.byte == 'u' and flags.unicode_sets))
+            try buffer.append(allocator, entry.byte);
     }
 }
 
 pub fn flagsStringValueFromBytecode(rt: *core.JSRuntime, bytecode: []const u8) !core.JSValue {
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(rt.memory.allocator);
-    try appendCanonicalFlagsFromBits(rt.memory.allocator, &buffer, flagBitsFromBytecode(bytecode));
+    try appendCanonicalFlags(rt.memory.allocator, &buffer, flagsFromBytecode(bytecode));
     return (try core.string.String.createAscii(rt, buffer.items)).value();
 }
 
 test "JavaScript RegExp adapter compilation and execution" {
     var compiled = try compile(std.testing.allocator, "abc", "i");
     defer compiled.deinit(std.testing.allocator);
-    const status = try regexp_bytecode.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "xxAbCy" }, 0);
-    try std.testing.expect(status.result == .match);
-    try std.testing.expectEqual(@as(usize, 2), status.match.start);
-    try std.testing.expectEqual(@as(usize, 5), status.match.end);
+    var slots: [max_exec_slots]usize = undefined;
+    const result = try regexp_bytecode.execCaptureSlotsSliceTrustedWithOptions(std.testing.allocator, compiled.bytecode, .{ .latin1 = "xxAbCy" }, 0, .{}, &slots);
+    try std.testing.expect(result == .match);
+    try std.testing.expectEqual(@as(usize, 2), regexp_bytecode.captureSlotValue(slots[0]).?);
+    try std.testing.expectEqual(@as(usize, 5), regexp_bytecode.captureSlotValue(slots[1]).?);
 }
 
 test "JavaScript RegExp adapter preserves multiple named capture groups" {
     var compiled = try compile(std.testing.allocator, "(?<a>.)(?<b>.)(?<c>.)(?<d>.)", "");
     defer compiled.deinit(std.testing.allocator);
 
-    const status = try regexp_bytecode.exec(std.testing.allocator, compiled.bytecode, .{ .latin1 = "wxyz" }, 0);
-    try std.testing.expect(status.result == .match);
-    try std.testing.expectEqual(@as(usize, 4), status.match.capture_count);
+    var slots: [max_exec_slots]usize = undefined;
+    const result = try regexp_bytecode.execCaptureSlotsSliceTrustedWithOptions(std.testing.allocator, compiled.bytecode, .{ .latin1 = "wxyz" }, 0, .{}, &slots);
+    try std.testing.expect(result == .match);
+    try std.testing.expectEqual(@as(usize, 5), compiled.captureCount());
 
     const expected_names = [_][]const u8{ "a", "b", "c", "d" };
     for (expected_names, 0..) |name, i| {
-        try std.testing.expectEqual(i, status.match.captures[i].start.?);
-        try std.testing.expectEqual(i + 1, status.match.captures[i].end.?);
-        try std.testing.expectEqualStrings(name, status.match.captures[i].name.?);
+        const capture_index = i + 1;
+        try std.testing.expectEqual(i, regexp_bytecode.captureSlotValue(slots[2 * capture_index]).?);
+        try std.testing.expectEqual(i + 1, regexp_bytecode.captureSlotValue(slots[2 * capture_index + 1]).?);
+        try std.testing.expectEqualStrings(name, compiled.groupName(capture_index).?);
     }
 }

@@ -282,7 +282,7 @@ test "production embedding can inspect own property descriptors by JS key" {
 
     try std.testing.expect(try ctx.hasOwnPropertyKey(object, key, .{}));
     var desc = (try ctx.ownPropertyDescriptor(object, key, .{})) orelse return error.TestExpectedEqual;
-    try std.testing.expectEqual(zjs.PropertyDescriptor.data(zjs.JSValue.int32(17), false, false, true).kind, desc.kind);
+    try std.testing.expectEqual(zjs.PropertyDescriptor.data(zjs.JSValue.int32(17), .{ .configurable = true }).kind, desc.kind);
     try std.testing.expectEqual(@as(?i32, 17), desc.value.as(.int));
     try std.testing.expectEqual(false, desc.writable.?);
     try std.testing.expectEqual(false, desc.enumerable.?);

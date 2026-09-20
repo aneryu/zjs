@@ -5,12 +5,13 @@
 //! shapes before mutation. The extern header and
 //! inline FAM order (properties before buckets) are codegen- and GC-load-
 //! bearing; deletion compaction preserves insertion order. QuickJS source map:
-//! `JSShapeProperty`/`JSShape` at quickjs.c:968-987 and FAM sizing near
-//! quickjs.c:5121. This core object-layout authority may be imported by exec,
+//! `JSShapeProperty`/`JSShape` at quickjs.c and FAM sizing near
+//! quickjs.c. This core object-layout authority may be imported by exec,
 //! never the reverse.
 
 const atom = @import("atom.zig");
 const gc = @import("gc.zig");
+const gc_visit = @import("gc_visit.zig");
 const memory = @import("memory.zig");
 const Object = @import("object.zig").Object;
 const property = @import("property.zig");
@@ -19,14 +20,14 @@ const class = @import("class.zig");
 const descriptor = @import("descriptor.zig");
 const JSRuntime = @import("runtime.zig").JSRuntime;
 
-/// qjs `JS_PROP_INITIAL_SIZE` (quickjs.c:965).
+/// qjs `JS_PROP_INITIAL_SIZE`.
 pub const initial_prop_size = 2;
 pub const initial_hash_size = 4;
-/// qjs `rt->shape_hash_bits = 4` → 16 hashed shapes (quickjs.c:5134).
+/// qjs `rt->shape_hash_bits = 4` → 16 hashed shapes.
 pub const initial_shape_hash_bits: u6 = 4;
 pub const no_property_hash: u32 = 0;
 /// End-of-chain / not-found sentinel for the property hash list. Mirrors qjs's
-/// 8-byte JSShapeProperty packing (quickjs.c:968 `hash_next:26`): the chain index
+/// 8-byte JSShapeProperty packing (quickjs.c `hash_next:26`): the chain index
 /// is a 26-bit field, so the sentinel is `maxInt(u26)` rather than `maxInt(u32)`.
 /// Real property indices stay 0-based and are always `< prop_count < maxInt(u26)`.
 pub const no_property_index: u26 = std.math.maxInt(u26);
@@ -39,7 +40,7 @@ pub fn propertyCapacityForNeeded(needed: usize) usize {
 }
 
 /// 8-byte property record, bit-for-bit faithful to qjs `JSShapeProperty`
-/// (quickjs.c:968-972): `hash_next:26` and `flags:6` share one 32-bit word,
+///: `hash_next:26` and `flags:6` share one 32-bit word,
 /// followed by the 32-bit atom. `packed struct(u64)` keeps `hash_next`/`flags`/
 /// `atom_id` as direct field accesses (no nested `.hf.` rename) while collapsing
 /// the prior 12-byte layout to 8. `atom_id` lands at bit offset 32 (byte 4) so a
@@ -57,7 +58,7 @@ pub const InitialProperty = struct {
 
 /// Byte size of a shape's inline FAM region (prop array + hash table) for a
 /// given allocated prop capacity and bucket count. Byte-total identical to qjs
-/// get_shape_size minus `sizeof(JSShape)` (quickjs.c:5121): `prop_size*8 +
+/// get_shape_size minus `sizeof(JSShape)`: `prop_size*8 +
 /// hash_size*4` (bucket counts are powers of two >= 4, so the old
 /// buckets-first layout had no alignment slack either). Props come FIRST so
 /// `props()` is a constant offset from the shape — the property-array analogue
@@ -145,7 +146,7 @@ pub const Shape = extern struct {
         // header at offset 0 is load-bearing: BlockHeader.meta() reads ptr-8 and
         // GC tracing recovers the Shape via @fieldParentPtr("header", ...).
         std.debug.assert(@offsetOf(@This(), "header") == 0);
-        // Faithful to qjs JSShape (quickjs.c:974, 56B on aarch64): a 16-byte
+        // Faithful to qjs JSShape (quickjs.cB on aarch64): a 16-byte
         // intrusive header, scalar capacity/count fields, shape_hash_next, proto,
         // then the hash table + prop[] inlined as a flexible array member right
         // after the struct fields (qjs get_shape_prop). `prop_size` (allocated
@@ -223,7 +224,7 @@ pub const Shape = extern struct {
     // Addressed through famBase()/hashBuckets()/props().
 
     /// Base of the inline FAM region (just past the struct fields). Mirrors qjs
-    /// `(uint32_t *)(sh + 1)` (get_shape_prop, quickjs.c:5128).
+    /// `(uint32_t *)(sh + 1)` (get_shape_prop, quickjs.c).
     inline fn famBase(self: *const Shape) [*]u8 {
         const bytes: [*]u8 = @ptrCast(@constCast(self));
         return bytes + @sizeOf(Shape);
@@ -316,28 +317,13 @@ pub const Shape = extern struct {
 
     pub inline fn traceChildEdgesFallible(self: *Shape, rt: *JSRuntime, visitor: anytype) !void {
         _ = rt;
-        const Helper = struct {
-            inline fn callVisitObject(vis: anytype, obj_ptr: anytype) !void {
-                const VisType = @TypeOf(vis);
-                const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
-                if (comptime @hasDecl(CleanType, "visitObject")) {
-                    const ReturnType = @typeInfo(@TypeOf(CleanType.visitObject)).@"fn".return_type.?;
-                    if (comptime @typeInfo(ReturnType) == .error_union) {
-                        try vis.visitObject(obj_ptr);
-                    } else {
-                        vis.visitObject(obj_ptr);
-                    }
-                }
-            }
-        };
-
-        try Helper.callVisitObject(visitor, &self.proto);
+        try gc_visit.object(visitor, &self.proto);
         // TGC S3 §2.2 edge A: a shape names each of its property keys by atom
         // id. Deleted slots and the `null_atom` filler hold nothing.
         for (self.props()[0..self.prop_count]) |prop| {
             if (prop.atom_id == atom.null_atom) continue;
             if (property.Flags.fromBits(prop.flags).deleted) continue;
-            try atom.callVisitAtom(visitor, prop.atom_id);
+            try gc_visit.atom(visitor, prop.atom_id);
         }
     }
 
@@ -356,7 +342,7 @@ pub const Registry = struct {
     gc_registry: *gc.Registry,
 
     shape_hash_bits: u6 = initial_shape_hash_bits,
-    // qjs only counts *hashed* shapes (quickjs.c:388 `shape_hash_count`); every
+    // qjs only counts *hashed* shapes (quickjs.c `shape_hash_count`); every
     // shape lives on the GC object list, never a separate registry array.
     shape_hash_count: usize = 0,
     shape_hash_buckets: []?*Shape = &.{},
@@ -449,7 +435,7 @@ pub const Registry = struct {
     /// Leftover hashed proto-root lookup. Comptime identity is only whether a
     /// miss calls `createShape` or `createShapeReserved`; take that at runtime.
     noinline fn createObjectRootMaybeReserved(self: *Registry, proto: ?*Object, reserved: bool) !*Shape {
-        // qjs find_hashed_shape_proto (quickjs.c:5514-5527) rejects bucket
+        // qjs find_hashed_shape_proto rejects bucket
         // co-residents on the already-loaded `hash` field before touching
         // proto/prop_count: `sh1->hash == h && sh1->proto == proto &&
         // sh1->prop_count == 0`. Mirror that check order.
@@ -525,7 +511,7 @@ pub const Registry = struct {
             .prop_size = initial_prop_size,
             .hash = initialHash(proto),
         };
-        // qjs js_new_shape_nohash (quickjs.c:5228) only zeros the hash table.
+        // qjs js_new_shape_nohash only zeros the hash table.
         // Unused prop slots are written on append; walking uses prop_count.
         @memset(shape.hashBuckets(), no_property_index);
         try self.link(shape, true);
@@ -606,7 +592,7 @@ pub const Registry = struct {
     }
 
     /// Inline transition-cache probe + commit for the named-property append hot
-    /// path. Mirrors the qjs `add_property` cache-hit leg (quickjs.c:9209-9222):
+    /// path. Mirrors the qjs `add_property` cache-hit leg:
     /// `find_hashed_shape_prop` hit -> `js_dup_shape(new_sh)` -> shape swap ->
     /// `js_free_shape(sh)` all run inside the single add_property frame — no
     /// per-property call boundary on a hit (only the parent's rc==0 teardown
@@ -624,7 +610,7 @@ pub const Registry = struct {
 
     /// Apply a named-property transition after a `tryCachedTransition` miss.
     ///
-    /// Mirrors the qjs `add_property` miss legs (quickjs.c:9223-9236): clone a
+    /// Mirrors the qjs `add_property` miss legs: clone a
     /// shared shape, and append to an unshared shape in place. `shape_ptr` is
     /// threaded through the operation because either the clone branch or
     /// inline-FAM growth can replace the allocation. This function owns every
@@ -752,7 +738,7 @@ pub const Registry = struct {
 
     /// Grow-by-relocation: the inline FAM cannot grow in place, so a larger
     /// shape requires a brand-new allocation. Mirrors qjs `resize_properties`
-    /// (quickjs.c:5334): allocate a NEW block sized for (new_prop_size,
+    ///: allocate a NEW block sized for (new_prop_size,
     /// new_bucket_count), copy struct fields + proto/atom ownership + the prop
     /// array, splice the new block into the GC object list and (if hashed) the
     /// shape-hash chain in the OLD shape's place, free the old block, and write
@@ -883,7 +869,7 @@ pub const Registry = struct {
     }
 
     /// Remove deleted shape/property slots while preserving the relative order
-    /// of every live entry. Mirrors qjs `compact_properties` (quickjs.c:5400):
+    /// of every live entry. Mirrors qjs `compact_properties`:
     /// the caller prepares an unshared, unhashed shape first, then this rebuilds
     /// the inline descriptor/hash layout and the object's parallel value array.
     pub fn compactProperties(self: *Registry, object: *Object) !void {
@@ -1084,7 +1070,7 @@ pub const Registry = struct {
         var next_capacity: usize = shape.prop_size;
         while (next_capacity < needed) : (next_capacity *= 2) {}
         // Grow the hash table alongside the prop array (qjs resize_properties,
-        // quickjs.c:5354-5356) so bucket_count >= prop_size continues to hold and
+        // quickjs.c) so bucket_count >= prop_size continues to hold and
         // a subsequent appendProperty needs no hash rebuild.
         try self.relocateShape(shape_ptr, @intCast(next_capacity), lockstepBucketCount(shape.bucketCount(), next_capacity));
     }
@@ -1150,7 +1136,7 @@ pub const Registry = struct {
 
     fn destroyShape(self: *Registry, shape: *Shape) void {
         // qjs js_free_shape0 never re-derives block size from prop_size; the
-        // malloc header carries it (quickjs.c:1614). Slab shapes debit the
+        // malloc header carries it. Slab shapes debit the
         // class usable payload; standalone prefixes still read live fields.
         const accounted = memory.MemoryAccount.gcSlabAccountedPayload(shape) orelse
             (@sizeOf(Shape) + shape.famByteSize());
@@ -1175,14 +1161,14 @@ pub const Registry = struct {
         // the source already satisfies hash_size >= prop_size (resize_properties
         // grows both in lockstep). zjs can bump `capacity` above source.prop_size
         // here (propertyCapacityForNeeded on the transition), so grow the bucket
-        // count in lockstep too (resize_properties, quickjs.c:5354-5356) to keep
+        // count in lockstep too (resize_properties, quickjs.c) to keep
         // the same bucket_count >= prop_size invariant on the clone.
         const bucket_count: usize = if (source.bucketCount() != 0)
             lockstepBucketCount(source.bucketCount(), capacity)
         else
             lockstepBucketCount(@max(initial_hash_size, nextPowerOfTwo(source.prop_count + source.deletedPropCount() + 1)), capacity);
         // Single contiguous block (struct + inline FAM) = qjs js_clone_shape's
-        // js_malloc(get_shape_size(...)) (quickjs.c:5276).
+        // js_malloc(get_shape_size(...)).
         const fam_bytes = famRegionBytes(capacity, bucket_count);
         const shape = try self.memory.createWithFam(Shape, fam_bytes);
         errdefer self.memory.destroyWithFam(Shape, shape, fam_bytes);
@@ -1282,8 +1268,8 @@ pub const Registry = struct {
         // The only per-shape bookkeeping here is hash-table insertion.
         //
         // Inline: qjs pays this boundary as straight-line code inside
-        // js_new_shape2 — an inline resize check (quickjs.c:5244-5246) plus
-        // js_shape_hash_link's three stores (quickjs.c:5191-5198). With three
+        // js_new_shape2 — an inline resize check plus
+        // js_shape_hash_link's three stores. With three
         // call sites (createShape / createShapeWithPropertyCapacity /
         // cloneShape) LLVM outlined the whole body, adding a bl + full
         // prologue/epilogue to every shape creation. The grow path stays
@@ -1318,7 +1304,7 @@ pub const Registry = struct {
             self.shape_hash_buckets = try self.memory.alloc(?*Shape, bucket_count);
             @memset(self.shape_hash_buckets, null);
         }
-        // qjs js_new_shape2 (quickjs.c:5245) resizes BEFORE the load factor
+        // qjs js_new_shape2 resizes BEFORE the load factor
         // reaches 1/2: `if (2 * (rt->shape_hash_count + 1) > rt->shape_hash_size)`.
         // Growing only at load factor 1 doubles the average registry bucket
         // chain that every transition-cache probe walks.
@@ -1330,7 +1316,7 @@ pub const Registry = struct {
         errdefer self.memory.free(?*Shape, next);
         @memset(next, null);
         // Re-link every hashed shape by walking the OLD buckets, not a separate
-        // shapes array — faithful to qjs `resize_shape_hash` (quickjs.c:5165).
+        // shapes array — faithful to qjs `resize_shape_hash`.
         const old_buckets = self.shape_hash_buckets;
         for (old_buckets) |bucket| {
             var current = bucket;
@@ -1361,7 +1347,7 @@ pub const Registry = struct {
     }
 
     fn removeShapeHash(self: *Registry, shape: *Shape) void {
-        // qjs shape_hash is singly-linked (quickjs.c:984 `shape_hash_next`);
+        // qjs shape_hash is singly-linked (quickjs.c `shape_hash_next`);
         // js_shape_hash_unlink re-walks the bucket rather than keeping a back
         // pointer. Re-walk the current-hash bucket, falling back to a full scan
         // if the shape was filed under a stale hash.
@@ -1486,7 +1472,7 @@ fn nextPowerOfTwo(value: usize) usize {
 }
 
 /// Bucket count that keeps the property hash table covering the property array,
-/// mirroring qjs `resize_properties` (quickjs.c:5354-5356): start from the
+/// mirroring qjs `resize_properties`: start from the
 /// current hash size and double until it is at least `new_prop_size`. Keeping
 /// `bucket_count >= prop_size` for every grow / clone means an appended property
 /// (which lands at `prop_count <= prop_size`) is always representable in the
@@ -1499,7 +1485,7 @@ fn lockstepBucketCount(current_bucket_count: usize, new_prop_size: usize) usize 
 }
 
 pub fn initialHash(proto: ?*Object) u32 {
-    // qjs shape_initial_hash (quickjs.c:5156-5163) folds BOTH halves of the
+    // qjs shape_initial_hash folds BOTH halves of the
     // 64-bit prototype pointer into the seed:
     //   h = shape_hash(1, (uintptr_t)proto);
     //   if (sizeof(proto) > 4) h = shape_hash(h, (uint64_t)(uintptr_t)proto >> 32);
@@ -1694,10 +1680,10 @@ test "ordinary object additions reuse transition shapes" {
     const a = try rt.internAtom("shared_a");
     const b = try rt.internAtom("shared_b");
 
-    try first.defineOwnProperty(rt, a, descriptor.Descriptor.data(JSValue.int32(1), true, true, true));
-    try first.defineOwnProperty(rt, b, descriptor.Descriptor.data(JSValue.int32(2), true, true, true));
-    try second.defineOwnProperty(rt, a, descriptor.Descriptor.data(JSValue.int32(3), true, true, true));
-    try second.defineOwnProperty(rt, b, descriptor.Descriptor.data(JSValue.int32(4), true, true, true));
+    try first.defineOwnProperty(rt, a, descriptor.Descriptor.data(JSValue.int32(1), .all));
+    try first.defineOwnProperty(rt, b, descriptor.Descriptor.data(JSValue.int32(2), .all));
+    try second.defineOwnProperty(rt, a, descriptor.Descriptor.data(JSValue.int32(3), .all));
+    try second.defineOwnProperty(rt, b, descriptor.Descriptor.data(JSValue.int32(4), .all));
 
     try std.testing.expectEqual(first.shape_ref, second.shape_ref);
     try std.testing.expectEqual(@as(usize, 2), first.shape_ref.prop_count);

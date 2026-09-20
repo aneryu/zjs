@@ -616,7 +616,7 @@ test "standard Array prototype guard publication and invalidation are realm loca
         oom_mutation_object.defineOwnProperty(
             js.runtime,
             index_zero,
-            core.Descriptor.data(core.JSValue.int32(1), true, true, true),
+            core.Descriptor.data(core.JSValue.int32(1), .all),
         ),
     );
     js.runtime.setMemoryLimit(null);
@@ -1482,7 +1482,7 @@ test "collection callback adapter materializes errors in its explicit realm" {
     defer callback_realm.destroy();
     const callback_global = try engine.exec.zjs_vm.contextGlobal(callback_realm);
 
-    const callback = try engine.exec.closure.create(rt, 7, 0, 0, 0);
+    const callback = try engine.exec.closure.create(rt, .throws_type_error);
 
     const callback_host = engine.exec.collection_adapter.host(callback_realm, &.{});
     try std.testing.expectError(
@@ -1709,10 +1709,10 @@ test "Array species does not confuse a foreign native named Array with the intri
     const species_ctor_atom = try js.runtime.internAtom("__arraySpeciesResultCtor");
     const species_ctor = try global.getProperty(species_ctor_atom);
     const species_atom = core.atom.predefinedId("Symbol.species", .symbol) orelse return error.TestUnexpectedResult;
-    try fake_array_object.defineOwnProperty(js.runtime, species_atom, core.Descriptor.data(species_ctor, true, false, true));
+    try fake_array_object.defineOwnProperty(js.runtime, species_atom, core.Descriptor.data(species_ctor, .method));
 
     const fake_array_atom = try js.runtime.internAtom("__arraySpeciesNamedNative");
-    try global.defineOwnProperty(js.runtime, fake_array_atom, core.Descriptor.data(fake_array, true, false, true));
+    try global.defineOwnProperty(js.runtime, fake_array_atom, core.Descriptor.data(fake_array, .method));
 
     const result = try js.eval(
         \\var input = [1, 2];
@@ -2408,7 +2408,7 @@ test "host WeakMap mutation closure rejects registered symbol keys" {
     const map_value = try engine.exec.collection_ops.constructBare(rt, 3);
     const map_object = objectFromValue(map_value);
 
-    const closure_value = try engine.exec.closure.create(rt, 39, 0, 0, 0);
+    const closure_value = try engine.exec.closure.create(rt, .mutates_map_key3_then_throws);
 
     const registered_atom = try rt.atoms.internGlobalSymbol("registered");
 
@@ -2450,7 +2450,7 @@ test "host WeakMap mutation closure links entries into existing weak index" {
 
     const mutation_key = try core.Object.create(rt, core.class.ids.object, null);
 
-    const closure_value = try engine.exec.closure.create(rt, 39, 0, 0, 0);
+    const closure_value = try engine.exec.closure.create(rt, .mutates_map_key3_then_throws);
 
     const map_name = try rt.internAtom("map");
     const key_name = try rt.internAtom("obj3");
@@ -2523,7 +2523,7 @@ fn symmetricDifferenceMutatingKeysImpl(
     comptime var index: u32 = 0;
     inline for (.{ "x", "b", "c", "c" }) |name| {
         const value = (try core.string.String.createUtf8(rt, name)).value();
-        try array.defineOwnProperty(rt, core.Atom.taggedInt(index), core.Descriptor.data(value, true, true, true));
+        try array.defineOwnProperty(rt, core.Atom.taggedInt(index), core.Descriptor.data(value, .all));
         index += 1;
     }
     return array.value();
@@ -2824,15 +2824,15 @@ test "Set.prototype.symmetricDifference tracks receiver mutations from a set-lik
     const setlike_value = setlike.value();
 
     const size_key = try rt.internAtom("size");
-    try setlike.defineOwnProperty(rt, size_key, core.Descriptor.data(core.JSValue.int32(4), true, true, true));
+    try setlike.defineOwnProperty(rt, size_key, core.Descriptor.data(core.JSValue.int32(4), .all));
 
-    const noop = try engine.exec.closure.create(rt, 13, 0, 0, 0);
+    const noop = try engine.exec.closure.create(rt, .returns_undefined);
 
     const has_key = try rt.internAtom("has");
-    try setlike.defineOwnProperty(rt, has_key, core.Descriptor.data(noop, true, true, true));
+    try setlike.defineOwnProperty(rt, has_key, core.Descriptor.data(noop, .all));
 
     const keys_key = try rt.internAtom("keys");
-    try setlike.defineOwnProperty(rt, keys_key, core.Descriptor.data(noop, true, true, true));
+    try setlike.defineOwnProperty(rt, keys_key, core.Descriptor.data(noop, .all));
 
     const base_set_name = try rt.internAtom("baseSet");
     var globals = [_]engine.exec.globals.Slot{
@@ -2864,7 +2864,7 @@ test "host map closure releases appended value when entry allocation fails" {
     try std.testing.expectEqual(@as(usize, 8), map_object.collectionEntries().len);
     try std.testing.expectEqual(@as(usize, 8), map_object.collectionEntriesCapacity());
 
-    const closure_value = try engine.exec.closure.create(rt, 38, 0, 0, 0);
+    const closure_value = try engine.exec.closure.create(rt, .mutates_map_key1_then_throws);
 
     const map_name = try rt.internAtom("map");
     var globals = [_]engine.exec.globals.Slot{
@@ -2899,7 +2899,7 @@ test "host map closure rolls back appended entry when size update fails" {
     try fillOwnPropertyStorageForFailure(rt, map_object);
     try std.testing.expect(map_object.deleteProperty(rt, core.atom.predefinedId("size", .string).?));
 
-    const closure_value = try engine.exec.closure.create(rt, 39, 0, 0, 0);
+    const closure_value = try engine.exec.closure.create(rt, .mutates_map_key3_then_throws);
 
     const map_name = try rt.internAtom("map");
     var globals = [_]engine.exec.globals.Slot{
@@ -2919,11 +2919,11 @@ test "host map closure rolls back appended entry when size update fails" {
     rt.setMemoryLimit(null);
 
     const entries_slot = map_object.collectionEntriesSlot();
-    const observed_len = entries_slot.*.len;
+    const observed_len = entries_slot.items.len;
     const observed_active = map_object.collectionActiveCount();
-    if (entries_slot.*.len > old_len) {
-        entries_slot.*[old_len] = .{ .key = core.JSValue.undefinedValue(), .value = core.JSValue.undefinedValue(), .active = false };
-        entries_slot.* = entries_slot.*.ptr[0..old_len];
+    if (entries_slot.items.len > old_len) {
+        entries_slot.items[old_len] = .{ .key = core.JSValue.undefinedValue(), .value = core.JSValue.undefinedValue(), .active = false };
+        entries_slot.items = entries_slot.items.ptr[0..old_len];
         map_object.collectionActiveCountSlot().* = old_active;
         map_object.clearCollectionIndex(rt);
     }
@@ -3712,7 +3712,7 @@ fn fillOwnPropertyStorageForFailure(rt: *core.JSRuntime, object: *core.Object) !
         var name_buf: [32]u8 = undefined;
         const name = try std.fmt.bufPrint(&name_buf, "fill_{d}", .{index});
         const atom_id = try rt.internAtom(name);
-        try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true));
+        try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(core.JSValue.int32(@intCast(index)), .all));
     }
 }
 

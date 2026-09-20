@@ -5,8 +5,8 @@
 //! dispositions. `CallDepthGuard` balances logical, native, and byte budgets.
 //! Inline requests use caller-owned request storage to avoid an sret; hot native
 //! dispatch remains separate from generic fallback. This follows
-//! `JS_CallInternal` frame entry at quickjs.c:17828-17866 and class-call
-//! dispatch at quickjs.c:17746-17791.
+//! `JS_CallInternal` frame entry at quickjs.c and class-call
+//! dispatch at quickjs.c.
 
 const std = @import("std");
 
@@ -63,7 +63,7 @@ pub fn enterCallDepth(
         bytecodeStackBudgetWouldOverflow(rt, planned_stack_bytes))
     {
         // QuickJS JS_CallInternal stack guard -> JS_ThrowStackOverflow =
-        // InternalError "stack overflow" (quickjs.c:17837, 7789-7791).
+        // InternalError "stack overflow".
         _ = exception_ops.throwInternalErrorMessage(ctx, global, "stack overflow") catch |err| return err;
         return error.StackOverflow;
     }
@@ -74,7 +74,7 @@ pub fn enterCallDepth(
 }
 
 /// QuickJS JS_CallInternal's planned `alloca_size` for a normal bytecode
-/// target called without COPY_ARGV (quickjs.c:17828-17836). Tail opcodes use
+/// target called without COPY_ARGV. Tail opcodes use
 /// flags=0, so only missing arguments allocate the padded argv prefix.
 pub fn bytecodeFrameAllocaSize(
     function: *const bytecode.FunctionBytecode,
@@ -162,7 +162,7 @@ pub inline fn commitInlineCallDepthBytes(
 /// hot-line load cluster instead of the admission/commit split that reloaded
 /// ctx→runtime after the arena carve's aliasing store (M1 dossier K2: rt
 /// reloads #3/#4). Mirrors qjs check-then-alloca where the check IS the
-/// commitment (quickjs.c:17837/17845); a later chunk/carve miss must retreat
+/// commitment; a later chunk/carve miss must retreat
 /// the charge via `retreatInlineCallDepthBytesMiss` before the pure-miss
 /// null return. `bytecodeStackBudgetWouldOverflow` already rejects a wrapping
 /// add, so the commit needs no second overflow assert.
@@ -303,7 +303,7 @@ pub inline fn initFrameVarRefs(
             break :blk try allocFrameVarRefWindow(ctx, frame, var_refs.len);
         };
         // Inherit: pointer copy + rc++ per slot (qjs JS_CLOSURE_REF form,
-        // quickjs.c:17322-17324).
+        // quickjs.c).
         for (var_refs, 0..) |cell, idx| owned_refs[idx] = cell;
         frame.var_refs = owned_refs;
         return;
@@ -343,8 +343,7 @@ pub inline fn initFrameVarRefs(
         }
         break :blk try allocFrameVarRefWindow(ctx, frame, function.varRefNamesLen());
     };
-    var idx: usize = 0;
-    while (idx < function.varRefNamesLen()) : (idx += 1) {
+    for (0..function.varRefNamesLen()) |idx| {
         const var_name = function.varRefName(idx);
         // Top-level script let/const: share the cell that already lives in the
         // ctx.lexicals VARREF slot (qjs frame.var_refs[idx] aliases the global
@@ -371,7 +370,7 @@ pub inline fn initFrameVarRefs(
         } else if (call_runtime.globalLexicalCell(ctx, var_name)) |cell_value| {
             // Owned ref to the shared ctx.lexicals cell (already a cell by
             // construction; the JSValue handle transfers its refcount).
-            owned_refs[idx] = core.VarRef.fromValue(cell_value) orelse unreachable;
+            owned_refs[idx] = core.VarRef.fromValue(cell_value).?;
         } else {
             const val = call_runtime.globalLexicalValueForGlobal(ctx, global, var_name) orelse try global.getProperty(var_name);
             owned_refs[idx] = try core.VarRef.createClosed(ctx.runtime, val);
@@ -482,7 +481,7 @@ pub inline fn resolvedNativeCallTargetAssumeCFunction(
 
 /// Resolve the C-function record carried by a concrete native method object.
 /// QuickJS reaches the same terminal through the class call hook, which reads
-/// `p->u.cfunc.c_function` directly (quickjs.c:17746-17791). Keep the record
+/// `p->u.cfunc.c_function` directly. Keep the record
 /// memoization shared by every opcode that already holds the method object.
 pub inline fn resolvedNativeMethodRecord(
     ctx: *core.JSContext,
@@ -660,7 +659,7 @@ inline fn fastNativeMethodCall(
     // and then the generic value/bytecode dispatch. Among encoded native
     // domains, only the separate host mechanism intentionally has no standard
     // record table.
-    const function_object = property_ops.expectObject(func) catch return null;
+    const function_object = core.value_semantics.objectFromValue(func) orelse return null;
     // This is specifically the native c_function fast path. Bytecode functions
     // use the same FunctionPayload kind, but qjs discriminates their overlaid
     // union by class before reading `u.cfunc`; do the same before interpreting

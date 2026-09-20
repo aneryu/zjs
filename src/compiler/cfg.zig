@@ -547,35 +547,42 @@ pub fn anchorClassTotal(census: AnchorSplitCensus, class: AnchorClass) u64 {
 // local violation keys use bounded enum names and integers). Their
 // `catch unreachable` sites encode that capacity contract; extend the buffers
 // whenever a rendered schema grows.
-pub fn formatAnchorSplit(buffer: []u8, census: AnchorSplitCensus) []const u8 {
-    if (comptime !audit_oracles) {
-        return "ZJS-V2-ANCHOR-SPLIT unavailable: counters are comptime-erased in this build";
-    }
+/// Render one of the `write*` diagnostics into a caller buffer; a buffer too
+/// small for the line yields the truncated prefix rather than a panic.
+pub fn formatInto(buffer: []u8, comptime write: anytype, value: anytype) []const u8 {
     var writer = std.Io.Writer.fixed(buffer);
-    writer.print("ZJS-V2-ANCHOR-SPLIT A={d} B={d} C={d} D={d} cases{{", .{
+    write(&writer, value) catch {};
+    return writer.buffered();
+}
+
+pub fn writeAnchorSplit(writer: *std.Io.Writer, census: AnchorSplitCensus) std.Io.Writer.Error!void {
+    if (comptime !audit_oracles) {
+        return writer.writeAll("ZJS-V2-ANCHOR-SPLIT unavailable: counters are comptime-erased in this build");
+    }
+    try writer.print("ZJS-V2-ANCHOR-SPLIT A={d} B={d} C={d} D={d} cases{{", .{
         anchorClassTotal(census, .a),
         anchorClassTotal(census, .b),
         anchorClassTotal(census, .c),
         anchorClassTotal(census, .d),
-    }) catch unreachable;
+    });
     inline for (@typeInfo(AnchorCase).@"enum".fields, 0..) |field, index| {
         const case: AnchorCase = @enumFromInt(field.value);
-        writer.print("{s}{s}={d}", .{
+        try writer.print("{s}{s}={d}", .{
             if (index == 0) "" else " ",
             case.name(),
             census.cases[field.value],
-        }) catch unreachable;
+        });
     }
-    writer.print("}} folds{{", .{}) catch unreachable;
+    try writer.print("}} folds{{", .{});
     inline for (@typeInfo(OptimizationBoundaryKind).@"enum".fields, 0..) |field, index| {
-        writer.print("{s}{s}={d}/{d}", .{
+        try writer.print("{s}{s}={d}/{d}", .{
             if (index == 0) "" else " ",
             field.name,
             census.fold_contested_by_kind[field.value],
             census.fold_by_kind[field.value],
-        }) catch unreachable;
+        });
     }
-    writer.print(
+    try writer.print(
         "}} relax{{compactions={d} window-sources={d} window-labels={d} coincident={d}->{d} lost={d} gained={d}}} integrity{{fold-product-unknown={d} source-index-violations={d}}}",
         .{
             census.relax_compactions,
@@ -588,14 +595,12 @@ pub fn formatAnchorSplit(buffer: []u8, census: AnchorSplitCensus) []const u8 {
             census.fold_product_unknown,
             census.source_index_alignment_violations,
         },
-    ) catch unreachable;
-    return writer.buffered();
+    );
 }
 
 /// One exemplar row: `<class> <case> line=<n> col=<n> op=<name> off=<n>
 /// fanout=<n> roles=0x<n> owners{label#<n>@<product>, <other>@<product>}`.
-pub fn formatAnchorExemplar(buffer: []u8, exemplar: AnchorExemplar) []const u8 {
-    var writer = std.Io.Writer.fixed(buffer);
+pub fn writeAnchorExemplar(writer: *std.Io.Writer, exemplar: AnchorExemplar) std.Io.Writer.Error!void {
     const op_name = if (exemplar.op_id == 0xff)
         "<end-of-code>"
     else
@@ -606,7 +611,7 @@ pub fn formatAnchorExemplar(buffer: []u8, exemplar: AnchorExemplar) []const u8 {
         .b_multi_role_boundary, .b_barrier_with_reference => "label_group",
         else => "source_event",
     };
-    writer.print(
+    try writer.print(
         "ZJS-V2-ANCHOR-EXEMPLAR class={s} case={s} line={d} col={d} op={s} off={d} fanout={d} roles=0x{x:0>2} fold={s} owners{{label#{d}@{d}, {s}@{d}}}",
         .{
             exemplar.case.class().name(),
@@ -626,8 +631,7 @@ pub fn formatAnchorExemplar(buffer: []u8, exemplar: AnchorExemplar) []const u8 {
             other_kind,
             exemplar.other_product,
         },
-    ) catch unreachable;
-    return writer.buffered();
+    );
 }
 
 /// relaxJumps instrumentation sink (`.short` layout only). `window_sources` /
@@ -2272,16 +2276,16 @@ fn writeHistogramP95(
     writer: *std.Io.Writer,
     buckets: [8]u64,
     base_one: bool,
-) void {
+) std.Io.Writer.Error!void {
     const index = histogramP95Index(buckets) orelse {
-        writer.print("0", .{}) catch unreachable;
+        try writer.print("0", .{});
         return;
     };
     if (index == buckets.len - 1) {
-        writer.print("8+", .{}) catch unreachable;
+        try writer.print("8+", .{});
     } else {
         const value = index + @intFromBool(base_one);
-        writer.print("{d}", .{value}) catch unreachable;
+        try writer.print("{d}", .{value});
     }
 }
 
@@ -2295,12 +2299,11 @@ fn writeHistogramP95(
 /// adds per live alias group. They are reported separately so neither
 /// population skews the other's mean: end-to-end chain per reference is
 /// uniformly `chain + 1`.
-pub fn formatIdentityHealth(buffer: []u8, census: FanoutCensus) []const u8 {
+pub fn writeIdentityHealth(writer: *std.Io.Writer, census: FanoutCensus) std.Io.Writer.Error!void {
     const fanout_mean = fixedPointHundred(census.identities, census.semantic_boundaries);
     const chain_mean = fixedPointHundred(census.chain_depth_total, census.chain_depth_samples);
 
-    var writer = std.Io.Writer.fixed(buffer);
-    writer.print(
+    try writer.print(
         "identity kinds={d} instances={d} fan-out{{mean={d}.{d:0>2} p95=",
         .{
             identity_kinds.len,
@@ -2308,14 +2311,14 @@ pub fn formatIdentityHealth(buffer: []u8, census: FanoutCensus) []const u8 {
             fanout_mean / 100,
             fanout_mean % 100,
         },
-    ) catch unreachable;
-    writeHistogramP95(&writer, census.fanout_buckets, true);
-    writer.print(
+    );
+    try writeHistogramP95(writer, census.fanout_buckets, true);
+    try writer.print(
         " max={d}}} chain{{mean={d}.{d:0>2} p95=",
         .{ census.max_fanout, chain_mean / 100, chain_mean % 100 },
-    ) catch unreachable;
-    writeHistogramP95(&writer, census.chain_depth_buckets, false);
-    writer.print(
+    );
+    try writeHistogramP95(writer, census.chain_depth_buckets, false);
+    try writer.print(
         " max={d} +final-hop={d}}} final-source{{events={d} on-identity={d} between-identities={d}}} unanchored{{source={d} fold={d} contested={d}}}",
         .{
             census.max_chain_depth,
@@ -2327,21 +2330,19 @@ pub fn formatIdentityHealth(buffer: []u8, census: FanoutCensus) []const u8 {
             census.unanchored_fold_replacements,
             census.contested_fold_replacements,
         },
-    ) catch unreachable;
-    return writer.buffered();
+    );
 }
 
 /// The ruling's report block: Summary first, then Diff buckets. Never prints
 /// a bare "PASS", and never keys anything by instruction offset.
-pub fn formatOracleReport(buffer: []u8, report: OracleReport) []const u8 {
+pub fn writeOracleReport(writer: *std.Io.Writer, report: OracleReport) std.Io.Writer.Error!void {
     if (comptime !audit_oracles) {
-        return "ZJS-V2-ORACLE-REPORT unavailable: counters are comptime-erased in this build";
+        return writer.writeAll("ZJS-V2-ORACLE-REPORT unavailable: counters are comptime-erased in this build");
     }
 
     const atom_balanced = report.ownership_unbalanced == 0 and
         report.ownership_create == report.ownership_transfer + report.ownership_release;
-    var writer = std.Io.Writer.fixed(buffer);
-    writer.print(
+    try writer.print(
         \\ZJS-V2-ORACLE-REPORT
         \\Summary:
         \\  boundaries: legacy={d} v2={d} missing={d} extra={d} duplicated={d}
@@ -2386,8 +2387,7 @@ pub fn formatOracleReport(buffer: []u8, report: OracleReport) []const u8 {
         report.buckets[@intFromEnum(DiffBucket.continuation_mismatch)],
         DiffBucket.source_event_mismatch.name(),
         report.buckets[@intFromEnum(DiffBucket.source_event_mismatch)],
-    }) catch unreachable;
-    return writer.buffered();
+    });
 }
 
 /// Product offset a boundary resolves to: the offset of the first SURVIVING
@@ -3384,7 +3384,7 @@ test "compiler.cfg: alias group coalescing is downstream-indistinguishable" {
     var health_buffer: [256]u8 = undefined;
     try std.testing.expectEqualStrings(
         "identity kinds=5 instances=2 fan-out{mean=2.00 p95=2 max=2} chain{mean=3.00 p95=3 max=3 +final-hop=0} final-source{events=0 on-identity=0 between-identities=0} unanchored{source=0 fold=0 contested=0}",
-        formatIdentityHealth(&health_buffer, census),
+        formatInto(&health_buffer, writeIdentityHealth, census),
     );
 }
 
@@ -3643,7 +3643,7 @@ test "compiler.cfg: oracle report formats summary then diff buckets" {
         \\  CONTINUATION_MISMATCH=505
         \\  SOURCE_EVENT_MISMATCH=506
         \\
-    , formatOracleReport(&buffer, report));
+    , formatInto(&buffer, writeOracleReport, report));
 }
 
 test "compiler.cfg: diff bucket names are the ruling's six" {

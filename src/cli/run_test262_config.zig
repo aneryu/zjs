@@ -96,8 +96,7 @@ pub fn loadFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !Loa
 }
 
 pub fn applyFeatureOverrides(loaded: *LoadedConfig, overrides: BoundedFeatureOverrides) !void {
-    var i: usize = 0;
-    while (i < overrides.len) : (i += 1) {
+    for (0..overrides.len) |i| {
         const override = overrides.get(i);
         switch (override.kind) {
             .enable => {

@@ -332,7 +332,7 @@ pub const Table = struct {
             // The construction pin makes unregister defer record removal. Other
             // class registrations may still move the table, so reacquire by id
             // and validate the generation before publication.
-            const record_view = self.table.recordPtr(self.class_id) orelse unreachable;
+            const record_view = self.table.recordPtr(self.class_id).?;
             std.debug.assert(state.generation == self.definition.generation);
             std.debug.assert(record_view.id == self.class_id);
             std.debug.assert(state.construction_pins != 0);
@@ -576,7 +576,7 @@ pub const Table = struct {
         // owner-thread panic guard: `assertOwnerThread` survives release
         // builds (it is an explicit @panic, not a std.debug.assert) and its
         // cached-gettid TLS probe was the single hottest tail cost of every
-        // object destroy. qjs free_object has no thread check (quickjs.c:6340).
+        // object destroy. qjs free_object has no thread check.
         if (id < ids.init_count) return;
         self.assertOwnerThread();
         std.debug.assert(id < self.registration_states.len);

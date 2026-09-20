@@ -5,8 +5,8 @@
 //! Temporary BigInts, UTF buffers, and formatting storage are released in this
 //! module. Realm-aware coercion remains in exec callers, while bare-runtime
 //! string policy delegates to core. QuickJS coordinates include
-//! `JS_ToNumberHintFree` at quickjs.c:12955, `JS_StringToBigInt` at
-//! quickjs.c:14609, and `JS_ToCStringLen2` at quickjs.c:4458.
+//! `JS_ToNumberHintFree` at quickjs.c, `JS_StringToBigInt` at
+//! quickjs.c, and `JS_ToCStringLen2` at quickjs.c.
 
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
@@ -128,8 +128,8 @@ pub fn parseStringToBigInt(rt: *core.JSRuntime, value: core.JSValue) !bignum.Big
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(rt.memory.allocator);
     try appendRawString(rt, &buffer, value);
-    // qjs JS_StringToBigInt (quickjs.c:14609) skips the full JS whitespace set
-    // via skip_spaces (quickjs.c:11230) — the same trimmer ToNumber uses.
+    // qjs JS_StringToBigInt skips the full JS whitespace set
+    // via skip_spaces — the same trimmer ToNumber uses.
     const trimmed = core.value_format.trimJsWhitespace(buffer.items);
     if (trimmed.len == 0) return bignum.BigInt{ .allocator = rt.memory.allocator };
     return bignum.parseAutoAlloc(rt.memory.allocator, trimmed);
@@ -353,7 +353,7 @@ fn fastStringToInt32(bytes: []const u8) ?i32 {
 
 pub fn toNumberValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (value.is(.symbol)) return error.TypeError;
-    // qjs JS_ToNumberHintFree (quickjs.c:12955-12959): the BIG_INT/SHORT_BIG_INT
+    // qjs JS_ToNumberHintFree: the BIG_INT/SHORT_BIG_INT
     // arm throws TypeError "cannot convert bigint to number" under the plain
     // ToNumber hint; only ToNumeric passes bigints through. Callers that need
     // ToNumeric semantics convert via bigIntToNumber before calling.
@@ -509,7 +509,7 @@ pub fn bigIntToNumber(rt: *core.JSRuntime, value: core.JSValue) !f64 {
 pub fn toIntegerOrInfinity(rt: *core.JSRuntime, value: core.JSValue) !f64 {
     if (numberValue(value)) |number| return number;
     // ToIntegerOrInfinity starts with ToNumber: bigints throw TypeError
-    // (qjs JS_ToNumberHintFree quickjs.c:12955-12959 via JS_ToFloat64Free).
+    // (qjs JS_ToNumberHintFree quickjs.c via JS_ToFloat64Free).
     if (value.isBigInt()) return error.TypeError;
     if (value.as(.boolean)) |bool_value| return if (bool_value) 1 else 0;
     if (value.is(.null_value)) return 0;
@@ -540,12 +540,12 @@ pub fn toBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
     defer buffer.deinit(rt.memory.allocator);
     if (value.isString() or value.is(.object)) {
         try appendValueString(rt, &buffer, value);
-        // qjs JS_StringToBigInt (quickjs.c:14609) + skip_spaces (quickjs.c:11230).
+        // qjs JS_StringToBigInt + skip_spaces.
         const trimmed = core.value_format.trimJsWhitespace(buffer.items);
         if (trimmed.len == 0) return bignum.BigInt.fromIntAlloc(rt.memory.allocator, 0);
         return bignum.parseAutoAlloc(rt.memory.allocator, trimmed) catch |err| switch (err) {
             // qjs js_atobigint throws its RangeError through js_atof rather
-            // than folding it into the bad-literal SyntaxError (quickjs.c:12471).
+            // than folding it into the bad-literal SyntaxError.
             error.BigIntTooLarge => error.BigIntTooLarge,
             else => error.SyntaxError,
         };
@@ -619,7 +619,7 @@ pub fn atomNameEql(rt: *core.JSRuntime, atom_id: core.Atom, name: []const u8) bo
 }
 
 /// Append the UTF-8 (WTF-8 for lone surrogates) encoding of a string value.
-/// Mirrors qjs JS_ToCStringLen2 (quickjs.c:4458): ASCII latin1 is copied
+/// Mirrors qjs JS_ToCStringLen2: ASCII latin1 is copied
 /// as-is, latin1 code points 0x80-0xFF widen to two-byte UTF-8 sequences,
 /// and UTF-16 units encode with surrogate-pair combining. The latin1 bytes
 /// MUST NOT be appended raw: every consumer treats the buffer as UTF-8
@@ -663,7 +663,7 @@ fn binaryBigInt(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !
     // Single-allocation multiplication: the wrapper and the product's limbs
     // come from one createWithFam instead of mulAlloc's limb block plus
     // createFromOwned's wrapper. This is qjs's topology (js_bigint_new is one
-    // js_malloc of header + limbs, quickjs.c:11860). Only heap x heap is
+    // js_malloc of header + limbs, quickjs.c). Only heap x heap is
     // routed, and either operand may already be in inline storage so a chain of
     // multiplies does not fall back after the first one.
     if (op == bytecode.opcode.op.mul) {
@@ -706,7 +706,7 @@ fn binaryBigInt(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !
             error.NegativeExponent => return err,
             // error.BigIntTooLarge propagates: the exception mapping renders it
             // as RangeError "BigInt is too large to allocate" (js_bigint_new
-            // quickjs.c:11593-11594).
+            // quickjs.c).
             else => return err,
         },
         bytecode.opcode.op.@"and" => try lhs.bitwise(rhs, allocator, .@"and"),
@@ -1063,7 +1063,7 @@ fn shiftBigInt(allocator: std.mem.Allocator, lhs: bignum.BigInt, rhs: bignum.Big
         // Shift counts beyond one limb: qjs saturates the effective right
         // shift to 0/-1 (js_bigint_shr d >= a->len arm) and fails the
         // effective left shift of a nonzero value against JS_BIGINT_MAX_SIZE
-        // (js_bigint_shl -> js_bigint_new quickjs.c:11592-11596).
+        // (js_bigint_shl -> js_bigint_new quickjs.c).
         if (effective_right) return bignum.BigInt.fromIntAlloc(allocator, if (lhs.negative) -1 else 0);
         if (lhs.isZero()) return bignum.BigInt{ .allocator = allocator };
         return error.BigIntTooLarge;

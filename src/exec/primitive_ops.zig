@@ -78,7 +78,7 @@ pub const symbol_entries = [_]core.host_function.InternalEntry{
 };
 
 /// `BigInt.asIntN` / `BigInt.asUintN`: qjs `js_bigint_funcs`
-/// (quickjs.c:56350), a two-entry `JS_CFUNC_MAGIC_DEF` list over the single
+///, a two-entry `JS_CFUNC_MAGIC_DEF` list over the single
 /// body `js_bigint_asUintN` whose magic selects the signedness (0 unsigned,
 /// 1 signed). They stay in the `.primitive` domain rather than getting one of
 /// their own because that domain already *is* the wrapper-primitive class
@@ -93,9 +93,9 @@ pub const bigint_static_entries = [_]core.host_function.InternalEntry{
     primitiveStaticEntry("asUintN", 2, bigint_asuintn_id),
 };
 
-/// `Symbol.for` / `Symbol.keyFor`: qjs `js_symbol_funcs` (quickjs.c:51672),
-/// two plain `JS_CFUNC_DEF` entries over `js_symbol_for` (quickjs.c:51648)
-/// and `js_symbol_keyFor` (quickjs.c:51659). Same domain rationale as the
+/// `Symbol.for` / `Symbol.keyFor`: qjs `js_symbol_funcs`,
+/// two plain `JS_CFUNC_DEF` entries over `js_symbol_for`
+/// and `js_symbol_keyFor`. Same domain rationale as the
 /// BigInt statics above; ids continue Symbol's class-tag-4 block past its
 /// prototype methods, the `Symbol(...)`-as-function path and the two
 /// Symbol-only accessors (41-45).
@@ -170,7 +170,7 @@ fn primitiveStaticCall(
     const realm = try builtin_dispatch.callableRealm(host_call);
     const ctx = realm.realm;
     return switch (host_call.magic) {
-        // qjs js_bigint_asUintN (quickjs.c:56322) with magic 1 == signed.
+        // qjs js_bigint_asUintN with magic 1 == signed.
         bigint_asintn_id => builtin_glue.bigIntAsN(
             ctx,
             host_call.output,
@@ -180,7 +180,7 @@ fn primitiveStaticCall(
             builtin_dispatch.callerBytecode(host_call),
             builtin_dispatch.callerFrame(host_call),
         ),
-        // qjs js_bigint_asUintN (quickjs.c:56322) with magic 0 == unsigned.
+        // qjs js_bigint_asUintN with magic 0 == unsigned.
         bigint_asuintn_id => builtin_glue.bigIntAsN(
             ctx,
             host_call.output,
@@ -190,7 +190,7 @@ fn primitiveStaticCall(
             builtin_dispatch.callerBytecode(host_call),
             builtin_dispatch.callerFrame(host_call),
         ),
-        // qjs js_symbol_for (quickjs.c:51648).
+        // qjs js_symbol_for.
         symbol_for_id => builtin_glue.symbolFor(
             ctx,
             host_call.output,
@@ -199,7 +199,7 @@ fn primitiveStaticCall(
             builtin_dispatch.callerBytecode(host_call),
             builtin_dispatch.callerFrame(host_call),
         ),
-        // qjs js_symbol_keyFor (quickjs.c:51659).
+        // qjs js_symbol_keyFor.
         symbol_key_for_id => builtin_glue.symbolKeyFor(ctx.runtime, host_call.args),
         else => error.TypeError,
     };

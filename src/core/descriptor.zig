@@ -2,7 +2,7 @@
 //!
 //! Descriptors borrow their JSValue fields; tracing keeps the referenced heap
 //! values alive. Presence bits distinguish absent from explicit `undefined`,
-//! matching QuickJS `JSPropertyDescriptor` near quickjs.c:1014. This compact
+//! matching QuickJS `JSPropertyDescriptor` near quickjs.c. This compact
 //! core value type may be imported by higher layers but depends only on core
 //! property/value representations.
 
@@ -27,26 +27,26 @@ pub const Descriptor = struct {
     enumerable: ?bool = null,
     configurable: ?bool = null,
 
-    pub fn data(value: JSValue, writable: bool, enumerable: bool, configurable: bool) Descriptor {
+    pub fn data(value: JSValue, attrs: property.Attrs) Descriptor {
         return .{
             .kind = .data,
             .value = value,
             .value_present = true,
-            .writable = writable,
-            .enumerable = enumerable,
-            .configurable = configurable,
+            .writable = attrs.writable,
+            .enumerable = attrs.enumerable,
+            .configurable = attrs.configurable,
         };
     }
 
-    pub fn accessor(getter: JSValue, setter: JSValue, enumerable: bool, configurable: bool) Descriptor {
+    pub fn accessor(getter: JSValue, setter: JSValue, attrs: property.Attrs) Descriptor {
         return .{
             .kind = .accessor,
             .getter = getter,
             .getter_present = true,
             .setter = setter,
             .setter_present = true,
-            .enumerable = enumerable,
-            .configurable = configurable,
+            .enumerable = attrs.enumerable,
+            .configurable = attrs.configurable,
         };
     }
 

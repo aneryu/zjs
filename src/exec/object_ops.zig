@@ -8,7 +8,7 @@
 //! explicit: the threaded `global` is cross-realm authority, not necessarily
 //! `ctx.globalObject()`. Benchmark-hot object/property arms must not be shared
 //! with cold generic paths. Core mappings include QuickJS primitive-prototype,
-//! closure, and function-object paths at quickjs.c:7995-8011 and 17228-17417.
+//! closure, and function-object paths at quickjs.c.
 
 const std = @import("std");
 const function_ops = @import("function_ops.zig");
@@ -125,7 +125,7 @@ pub fn objectPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*co
     // showed up as ~7.7% of empty-object allocation. `Object.prototype` is
     // non-writable/non-configurable so the cached value never goes stale.
     if (global.cachedRealmValue(rt, .object_prototype)) |stored| {
-        return property_ops.expectObject(stored) catch null;
+        return core.value_semantics.objectFromValue(stored);
     }
     if (rt.contextForGlobal(global)) |ctx| {
         if (ctx.classPrototypeObject(core.class.ids.object)) |prototype| return prototype;
@@ -159,7 +159,7 @@ pub fn functionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*
 
 pub fn cachedRealmObject(rt: *core.JSRuntime, global: *core.Object, slot: core.object.RealmValueSlot) ?*core.Object {
     const stored = global.cachedRealmValue(rt, slot) orelse return null;
-    return property_ops.expectObject(stored) catch null;
+    return core.value_semantics.objectFromValue(stored);
 }
 
 pub fn primitivePrototypeFromRealmOrGlobal(
@@ -168,7 +168,7 @@ pub fn primitivePrototypeFromRealmOrGlobal(
     slot: core.object.RealmValueSlot,
     constructor_atom: core.Atom,
 ) ?*core.Object {
-    // Mirror QuickJS JS_GetPrototypePrimitive (quickjs.c:7995-8011): primitive
+    // Mirror QuickJS JS_GetPrototypePrimitive: primitive
     // prototype lookup reads ctx->class_proto[...] directly. The realm slot is
     // the intrinsic pointer; fallback preserves bare-runtime/global-walk behavior.
     if (cachedRealmObject(rt, global, slot)) |stored| return stored;
@@ -239,16 +239,16 @@ pub fn installGeneratorPrototypeProperties(rt: *core.JSRuntime, global: *core.Ob
     const IntrinsicMethod = method_ids.iterator.IntrinsicMethod;
     const next_atom = core.atom.ids.next;
     const next = try core.function.nativeFunctionForGlobal(rt, global, "next", 1);
-    const next_object = property_ops.expectObject(next) catch return error.TypeError;
+    const next_object = try property_ops.expectObject(next);
     next_object.setNativeBuiltinIdAndRecord(rt, core.function.nativeBuiltinId(.iterator, @intFromEnum(IntrinsicMethod.generator_next)));
     try next_object.addGeneratorNextFunction(rt);
-    try object.defineOwnProperty(rt, next_atom, core.Descriptor.data(next, true, false, true));
+    try object.defineOwnProperty(rt, next_atom, core.Descriptor.data(next, .method));
     try builtin_glue.defineNativeDataMethodWithNativeId(rt, global, object, core.atom.ids.return_, 1, core.function.nativeBuiltinId(.iterator, @intFromEnum(IntrinsicMethod.generator_return)));
     try builtin_glue.defineNativeDataMethodWithNativeId(rt, global, object, core.atom.ids.throw, 1, core.function.nativeBuiltinId(.iterator, @intFromEnum(IntrinsicMethod.generator_throw)));
 
     const tag_atom = (comptime core.atom.predefinedId("Symbol.toStringTag", .symbol)) orelse return error.TypeError;
     const tag = try value_ops.createStringValue(rt, "Generator");
-    try object.defineOwnProperty(rt, tag_atom, core.Descriptor.data(tag, false, false, true));
+    try object.defineOwnProperty(rt, tag_atom, core.Descriptor.data(tag, .{ .configurable = true }));
 }
 
 pub fn generatorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !?*core.Object {
@@ -256,21 +256,21 @@ pub fn generatorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.O
     const object = try core.Object.create(rt, core.class.ids.object, functionPrototypeFromGlobal(rt, global));
     const object_value = object.value();
     const constructor = try core.function.nativeFunctionForGlobal(rt, global, "GeneratorFunction", 1);
-    const constructor_object = property_ops.expectObject(constructor) catch return error.TypeError;
+    const constructor_object = try property_ops.expectObject(constructor);
     try constructor_object.setFunctionRealmGlobalPtr(rt, global);
     if (functionConstructorFromGlobal(rt, global)) |function_constructor| try constructor_object.setPrototype(rt, function_constructor);
-    try constructor_object.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(object_value, false, false, false));
-    try object.defineOwnProperty(rt, core.atom.ids.constructor, core.Descriptor.data(constructor_object.value(), false, false, true));
+    try constructor_object.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(object_value, .none));
+    try object.defineOwnProperty(rt, core.atom.ids.constructor, core.Descriptor.data(constructor_object.value(), .{ .configurable = true }));
     try storeRealmValue(rt, global, .generator_function_constructor, constructor_object.value());
     const generator_prototype = try generatorPrototypeFromGlobal(rt, global);
-    try object.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(generator_prototype.value(), false, false, true));
-    try generator_prototype.defineOwnProperty(rt, core.atom.ids.constructor, core.Descriptor.data(object_value, false, false, true));
+    try object.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(generator_prototype.value(), .{ .configurable = true }));
+    try generator_prototype.defineOwnProperty(rt, core.atom.ids.constructor, core.Descriptor.data(object_value, .{ .configurable = true }));
     try defineToStringTag(rt, object, "GeneratorFunction");
     try storeRealmValue(rt, global, .generator_function_prototype, object_value);
     return object;
 }
 
-// qjs js_closure_global_var (quickjs.c:17228-17260): the capture waterfall for a
+// qjs js_closure_global_var: the capture waterfall for a
 // global reference is [global_var_obj lexical VARREF] -> [global_obj VARREF
 // property] -> [shared uninitialized_vars side-table cell], REGARDLESS of the
 // closure var's own lexical bit — a plain reference captures a pre-existing
@@ -403,7 +403,7 @@ inline fn resolveNestedClosureCell(
     cv: bytecode.function_bytecode.BytecodeClosureVar,
 ) !*core.VarRef {
     return switch (cv.closureType()) {
-        // qjs js_closure2 LOCAL/ARG/REF/GLOBAL_REF (quickjs.c:17313-17325):
+        // qjs js_closure2 LOCAL/ARG/REF/GLOBAL_REF:
         // direct `get_var_ref` / `cur_var_refs[idx]` with `ref_count++`. No
         // production bounds return — finalize sized the windows.
         .local => try frame.captureLocal(ctx.runtime, cv.var_idx),
@@ -481,7 +481,7 @@ fn createBytecodeFunctionObjectInternal(
     defer root_frame.deactivate(ctx.runtime);
 
     const fb = functionBytecodeFromValue(rooted_value) orelse return error.InvalidBytecode;
-    // qjs `js_closure` (quickjs.c:17369-17417) does not re-validate the
+    // qjs `js_closure` does not re-validate the
     // finalized bytecode or Realm identity: `JS_VALUE_GET_PTR` +
     // `JS_NewObjectClass(func_kind_to_class_id[b->func_kind])`. Finalize
     // already published the extension and bound the Realm; Debug/Safe still
@@ -492,7 +492,7 @@ fn createBytecodeFunctionObjectInternal(
     const class_id = bytecodeFunctionClassId(fb);
     const function_prototype = try bytecodeFunctionPrototypeForRealm(ctx, realm, class_id, fb.functionKind());
     // length + name (+ lazy prototype later). qjs NewObjectClass then
-    // js_function_set_properties (quickjs.c:17378 / 5853-5861).
+    // js_function_set_properties.
     const object = try core.Object.createWithOwnPropertyCapacity(ctx.runtime, class_id, function_prototype, 3);
     errdefer core.Object.destroyFromHeader(ctx.runtime, object.gcHeader());
     // Pool.get/fclosure hands this constructor an owned FunctionBytecode
@@ -515,7 +515,7 @@ fn createBytecodeFunctionObjectInternal(
     return object.value();
 }
 
-/// qjs `js_function_set_properties` (quickjs.c:5853-5861):
+/// qjs `js_function_set_properties`:
 /// `JS_DefinePropertyValue(length, NewInt32, CONFIGURABLE)` then
 /// `JS_DefinePropertyValue(name, JS_AtomToString, CONFIGURABLE)`.
 /// Fresh bytecode function — CreateProperty miss → add_property, no
@@ -526,7 +526,7 @@ fn jsFunctionSetProperties(
     name_atom: core.Atom,
     length: i32,
 ) HostError!void {
-    const configurable = comptime core.property.Flags.data(false, false, true);
+    const configurable = comptime core.property.Flags.data(.{ .configurable = true });
     try object.defineOwnDataValueAssumingNew(
         rt,
         core.atom.ids.length,
@@ -569,7 +569,7 @@ fn installOrdinaryFunctionPrototype(
         try object.defineFunctionPrototypeAutoInit(
             ctx.runtime,
             ctx,
-            comptime core.property.Flags.data(true, false, false),
+            comptime core.property.Flags.data(.{ .writable = true }),
         );
         return;
     }
@@ -585,7 +585,7 @@ fn installOrdinaryFunctionPrototype(
     errdefer if (prototype_raw_owned) core.Object.destroyFromHeader(ctx.runtime, prototype.gcHeader());
     const prototype_value = prototype.value();
     prototype_raw_owned = false;
-    try object.defineOwnProperty(ctx.runtime, core.atom.ids.prototype, core.Descriptor.data(prototype_value, true, false, false));
+    try object.defineOwnProperty(ctx.runtime, core.atom.ids.prototype, core.Descriptor.data(prototype_value, .{ .writable = true }));
 }
 
 pub fn createBytecodeFunctionObject(
@@ -713,11 +713,11 @@ pub fn aggregateErrorConstructWithPrototype(
     const instance_value = instance.value();
 
     // No own `name` property: it lives on the per-class prototype only
-    // (qjs js_error_constructor quickjs.c:41441 defines message/cause/errors).
+    // (qjs js_error_constructor quickjs.c defines message/cause/errors).
 
     if (rooted_args.len >= 2 and !rooted_args[1].is(.undefined_value)) {
         const message = try toStringForAnnexB(ctx, output, global, rooted_args[1], caller_function, caller_frame);
-        try defineDataPropertyByAtom(rt, instance, core.atom.ids.message, message, true, false, true);
+        try instance.defineOwnProperty(rt, core.atom.ids.message, core.Descriptor.data(message, .method));
     }
 
     if (rooted_args.len >= 3 and rooted_args[2].is(.object)) {
@@ -725,7 +725,7 @@ pub fn aggregateErrorConstructWithPrototype(
         const options = try property_ops.expectObject(rooted_args[2]);
         if (try hasValueProperty(ctx, output, global, rooted_args[2], options, cause_key, caller_function, caller_frame)) {
             cause_val = try getValueProperty(ctx, output, global, rooted_args[2], cause_key, caller_function, caller_frame);
-            try defineDataPropertyByAtom(rt, instance, core.atom.ids.cause, cause_val, true, false, true);
+            try instance.defineOwnProperty(rt, core.atom.ids.cause, core.Descriptor.data(cause_val, .method));
             cause_val = core.JSValue.undefinedValue();
         }
     }
@@ -733,7 +733,7 @@ pub fn aggregateErrorConstructWithPrototype(
     const errors_value = if (rooted_args.len >= 1) rooted_args[0] else core.JSValue.undefinedValue();
     const errors_array = try aggregateErrorsIterableToArray(ctx, output, global, errors_value, caller_function, caller_frame);
     const errors_array_value = errors_array.value();
-    try defineDataPropertyByAtom(rt, instance, core.atom.ids.errors, errors_array_value, true, false, true);
+    try instance.defineOwnProperty(rt, core.atom.ids.errors, core.Descriptor.data(errors_array_value, .method));
 
     try captureErrorStack(ctx, global, instance);
 
@@ -754,10 +754,10 @@ test "aggregateErrorConstructWithPrototype preserves direct symbol errors and ca
     const error_atom = error_value.asSymbolAtom().?;
     const cause_value = try rt.newSymbolValue("gc-aggregate-error-cause-symbol");
     const cause_atom = cause_value.asSymbolAtom().?;
-    try errors_source.defineOwnProperty(rt, core.Atom.taggedInt(0), core.Descriptor.data(error_value, true, true, true));
+    try errors_source.defineOwnProperty(rt, core.Atom.taggedInt(0), core.Descriptor.data(error_value, .all));
     errors_source.setArrayLength(1);
-    try errors_source.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(1), true, false, false));
-    try defineDataPropertyByAtom(rt, options, core.atom.ids.cause, cause_value, true, false, true);
+    try errors_source.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(1), .{ .writable = true }));
+    try options.defineOwnProperty(rt, core.atom.ids.cause, core.Descriptor.data(cause_value, .method));
 
     const args = [_]core.JSValue{
         errors_source.value(),
@@ -819,14 +819,14 @@ pub fn suppressedErrorConstructWithPrototype(
 
     if (rooted_args.len >= 3 and !rooted_args[2].is(.undefined_value)) {
         const message = try toStringForAnnexB(ctx, output, global, rooted_args[2], caller_function, caller_frame);
-        try defineDataPropertyByAtom(rt, instance, core.atom.ids.message, message, true, false, true);
+        try instance.defineOwnProperty(rt, core.atom.ids.message, core.Descriptor.data(message, .method));
     }
 
     const error_value = if (rooted_args.len >= 1) rooted_args[0] else core.JSValue.undefinedValue();
-    try defineDataPropertyByAtom(rt, instance, core.atom.ids.error_, error_value, true, false, true);
+    try instance.defineOwnProperty(rt, core.atom.ids.error_, core.Descriptor.data(error_value, .method));
 
     const suppressed_value = if (rooted_args.len >= 2) rooted_args[1] else core.JSValue.undefinedValue();
-    try defineDataPropertyByAtom(rt, instance, core.atom.ids.suppressed, suppressed_value, true, false, true);
+    try instance.defineOwnProperty(rt, core.atom.ids.suppressed, core.Descriptor.data(suppressed_value, .method));
 
     try captureErrorStack(ctx, global, instance);
 
@@ -919,12 +919,12 @@ pub fn errorConstructWithPrototype(
     // No own `name` property: it lives on the per-class prototype only, so
     // patching `X.prototype.name` reflects on existing instances and a
     // new.target-derived prototype supplies its own name (qjs
-    // js_error_constructor quickjs.c:41441 defines only message/cause).
+    // js_error_constructor quickjs.c defines only message/cause).
     _ = name;
 
     if (rooted_args.len >= 1 and !rooted_args[0].is(.undefined_value)) {
         const message = try toStringForAnnexB(ctx, output, global, rooted_args[0], caller_function, caller_frame);
-        try defineDataPropertyByAtom(rt, instance, core.atom.ids.message, message, true, false, true);
+        try instance.defineOwnProperty(rt, core.atom.ids.message, core.Descriptor.data(message, .method));
     }
 
     if (rooted_args.len >= 2 and rooted_args[1].is(.object)) {
@@ -932,7 +932,7 @@ pub fn errorConstructWithPrototype(
         const options = try property_ops.expectObject(rooted_args[1]);
         if (try hasValueProperty(ctx, output, global, rooted_args[1], options, cause_key, caller_function, caller_frame)) {
             cause_val = try getValueProperty(ctx, output, global, rooted_args[1], cause_key, caller_function, caller_frame);
-            try defineDataPropertyByAtom(rt, instance, core.atom.ids.cause, cause_val, true, false, true);
+            try instance.defineOwnProperty(rt, core.atom.ids.cause, core.Descriptor.data(cause_val, .method));
             cause_val = core.JSValue.undefinedValue();
         }
     }
@@ -953,7 +953,7 @@ test "errorConstructWithPrototype preserves direct symbol cause" {
 
     const cause_atom = try rt.atoms.newValueSymbol("gc-error-cause-symbol");
     const cause_value = try rt.takeSymbolValue(cause_atom);
-    try defineDataPropertyByAtom(rt, options, core.atom.ids.cause, cause_value, true, false, true);
+    try options.defineOwnProperty(rt, core.atom.ids.cause, core.Descriptor.data(cause_value, .method));
     const args = [_]core.JSValue{
         core.JSValue.undefinedValue(),
         options.value(),
@@ -1031,18 +1031,6 @@ pub fn callSitePrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !*
     prototype_raw_owned = false;
     try storeRealmValue(rt, global, .callsite_prototype, prototype_value);
     return prototype;
-}
-
-pub fn defineDataPropertyByAtom(
-    rt: *core.JSRuntime,
-    object: *core.Object,
-    key: core.Atom,
-    value: core.JSValue,
-    writable: bool,
-    enumerable: bool,
-    configurable: bool,
-) !void {
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(value, writable, enumerable, configurable));
 }
 
 pub fn regExpPrototypeMethodIsDefault(_: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, expected_id: u32) bool {
@@ -1157,28 +1145,24 @@ pub fn datePrototypeMethod(
     output: ?*std.Io.Writer,
     global: *core.Object,
     this_value: core.JSValue,
-    method_id: u32,
+    method: core.host_function.builtin_method_ids.date.PrototypeMethod,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (method_id == 11) {
-        if (try date_ops.dateToJsonCall(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
+    switch (method) {
+        .to_json => if (try date_ops.dateToJsonCall(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value,
+        .set_year => if (try date_ops.dateSetYear(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value,
+        .set_time => if (try date_ops.dateSetTime(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value,
+        else => {},
     }
-    if (method_id == 23) {
-        if (try date_ops.dateSetYear(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
-    }
-    if (method_id == 24) {
-        if (try date_ops.dateSetTime(ctx, output, global, this_value, args, caller_function, caller_frame)) |value| return value;
-    }
-    if (try date_ops.dateCapturedSetterCall(ctx, output, global, this_value, method_id, args, caller_function, caller_frame)) |value| return value;
-    // Remaining (non-special-cased) prototype ids run the plain `methodCallArgs`
-    // body, which lives in `exec/date_ops.zig`. Route it through the record
-    // table's func-object-free arm (re-encoding the decoded id to its
-    // `PrototypeMethod` record id) so exec carries no compile-time Date body
-    // knowledge. The arm dispatches the body directly, so this does not re-enter
-    // the dispatcher.
-    const native_ref = core.function.NativeBuiltinRef{ .domain = .date, .id = core.host_function.builtin_method_id_lookup.date.encodePrototypeMethodId(method_id) orelse return throwTypeErrorMessage(ctx, global, "not a Date object") };
+    if (try date_ops.dateCapturedSetterCall(ctx, output, global, this_value, method, args, caller_function, caller_frame)) |value| return value;
+    // Remaining (non-special-cased) prototype methods run the plain
+    // `methodCallArgs` body, which lives in `exec/date_ops.zig`. Route it
+    // through the record table's func-object-free arm so exec carries no
+    // compile-time Date body knowledge. The arm dispatches the body directly,
+    // so this does not re-enter the dispatcher.
+    const native_ref = core.function.NativeBuiltinRef{ .domain = .date, .id = @intFromEnum(method) };
     const result = builtin_dispatch.callInternalRecord(ctx, output, null, &.{}, null, this_value, native_ref, args, caller_function, caller_frame) catch |err| switch (err) {
         error.TypeError => return throwTypeErrorMessage(ctx, global, "not a Date object"),
         error.RangeError => return throwRangeErrorMessage(ctx, global, "Date value is NaN"),
@@ -1187,14 +1171,14 @@ pub fn datePrototypeMethod(
     return result orelse throwTypeErrorMessage(ctx, global, "not a Date object");
 }
 
-pub fn defineFreshNonIndexDataProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, value: core.JSValue, writable: bool, enumerable: bool, configurable: bool) !void {
-    try object.defineOwnNonIndexPropertyAssumingNew(rt, atom_id, core.Descriptor.data(value, writable, enumerable, configurable));
+pub fn defineFreshNonIndexDataProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, value: core.JSValue, attrs: core.property.Attrs) !void {
+    try object.defineOwnNonIndexPropertyAssumingNew(rt, atom_id, core.Descriptor.data(value, attrs));
 }
 
 pub fn defineRegExpIndicesGroupsProperty(rt: *core.JSRuntime, global: *core.Object, out: *core.Object, found: *const RegExpMatch) !void {
     const groups_atom = (comptime core.atom.predefinedId("groups", .string)) orelse return error.TypeError;
     if (!found.has_named_captures) {
-        try defineFreshNonIndexDataProperty(rt, out, groups_atom, core.JSValue.undefinedValue(), true, true, true);
+        try defineFreshNonIndexDataProperty(rt, out, groups_atom, core.JSValue.undefinedValue(), .all);
         return;
     }
 
@@ -1221,11 +1205,11 @@ pub fn defineRegExpIndicesGroupsProperty(rt: *core.JSRuntime, global: *core.Obje
             core.JSValue.undefinedValue()
         else
             try createRegExpIndexPair(rt, global, capture.start, capture.start + capture.len);
-        try groups.defineOwnProperty(rt, atom, core.Descriptor.data(value, true, true, true));
+        try groups.defineOwnProperty(rt, atom, core.Descriptor.data(value, .all));
     }
     const groups_value = groups.value();
     groups_raw_owned = false;
-    try defineFreshNonIndexDataProperty(rt, out, groups_atom, groups_value, true, true, true);
+    try defineFreshNonIndexDataProperty(rt, out, groups_atom, groups_value, .all);
 }
 
 // The RegExp result already owns one value for every capture. Reuse those
@@ -1258,7 +1242,7 @@ pub noinline fn populateRegExpGroupsFromCaptureValues(
         // Duplicate named groups share one property; the participating
         // (matched) capture wins, an unset duplicate must not overwrite it.
         if (capture.undefined and groups.hasOwnProperty(atom)) continue;
-        try groups.defineOwnProperty(rt, atom, core.Descriptor.data(capture_values[capture_index + 1], true, true, true));
+        try groups.defineOwnProperty(rt, atom, core.Descriptor.data(capture_values[capture_index + 1], .all));
     }
 }
 
@@ -1500,7 +1484,7 @@ pub fn dataViewConstructWithPrototype(
 }
 
 pub fn defineClassFieldDataProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, value: core.JSValue) !void {
-    // NO-ALIGN(qjs): JS_DefinePrivateField (quickjs.c:8374) raw-adds private
+    // NO-ALIGN(qjs): JS_DefinePrivateField raw-adds private
     // fields with add_property and never consults extensibility, so qjs lands
     // private fields on preventExtensions'd/frozen instances. test262's
     // `nonextensible-applies-to-private` feature (PrivateFieldAdd step 1:
@@ -1508,7 +1492,7 @@ pub fn defineClassFieldDataProperty(rt: *core.JSRuntime, object: *core.Object, a
     // (language/statements/class/elements/private-class-field-on-nonextensible-
     // objects.js), so zjs keeps the NotExtensible -> TypeError behavior.
     if (rt.atoms.kind(atom_id) == .private and object.hasOwnProperty(atom_id)) return error.TypeError;
-    object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, true, true, true)) catch |err| switch (err) {
+    object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, .all)) catch |err| switch (err) {
         error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
         else => return err,
     };
@@ -1632,48 +1616,38 @@ pub fn dynamicFunctionNewTargetPrototype(
 /// `js_create_from_ctor(ctx, new_target, class_id)`. Native Error subclasses
 /// intentionally stay out of this table: QuickJS resolves those through the
 /// separate `native_error_proto[]` realm-state family.
+const constructor_class_names = std.StaticStringMap(core.ClassId).initComptime(.{
+    .{ "Object", core.class.ids.object },
+    .{ "Function", core.class.ids.bytecode_function },
+    .{ "Array", core.class.ids.array },
+    .{ "String", core.class.ids.string },
+    .{ "Number", core.class.ids.number },
+    .{ "Boolean", core.class.ids.boolean },
+    .{ "Symbol", core.class.ids.symbol },
+    .{ "BigInt", core.class.ids.big_int },
+    .{ "Date", core.class.ids.date },
+    .{ "RegExp", core.class.ids.regexp },
+    .{ "Error", core.class.ids.error_ },
+    .{ "DOMException", core.class.ids.dom_exception },
+    .{ "DisposableStack", core.class.ids.disposable_stack },
+    .{ "AsyncDisposableStack", core.class.ids.async_disposable_stack },
+    .{ "Promise", core.class.ids.promise },
+    .{ "Map", core.class.ids.map },
+    .{ "Set", core.class.ids.set },
+    .{ "WeakMap", core.class.ids.weakmap },
+    .{ "WeakSet", core.class.ids.weakset },
+    .{ "WeakRef", core.class.ids.weak_ref },
+    .{ "FinalizationRegistry", core.class.ids.finalization_registry },
+    .{ "ArrayBuffer", core.class.ids.array_buffer },
+    .{ "SharedArrayBuffer", core.class.ids.shared_array_buffer },
+    .{ "DataView", core.class.ids.dataview },
+    .{ "Iterator", core.class.ids.iterator },
+});
+
 pub fn constructorClassPrototypeId(name: []const u8) ?core.ClassId {
-    if (std.mem.eql(u8, name, "Object")) return core.class.ids.object;
-    if (std.mem.eql(u8, name, "Function")) return core.class.ids.bytecode_function;
-    if (std.mem.eql(u8, name, "Array")) return core.class.ids.array;
-    if (std.mem.eql(u8, name, "String")) return core.class.ids.string;
-    if (std.mem.eql(u8, name, "Number")) return core.class.ids.number;
-    if (std.mem.eql(u8, name, "Boolean")) return core.class.ids.boolean;
-    if (std.mem.eql(u8, name, "Symbol")) return core.class.ids.symbol;
-    if (std.mem.eql(u8, name, "BigInt")) return core.class.ids.big_int;
-    if (std.mem.eql(u8, name, "Date")) return core.class.ids.date;
-    if (std.mem.eql(u8, name, "RegExp")) return core.class.ids.regexp;
-    if (std.mem.eql(u8, name, "Error")) return core.class.ids.error_;
-    if (std.mem.eql(u8, name, "DOMException")) return core.class.ids.dom_exception;
-    if (std.mem.eql(u8, name, "DisposableStack")) return core.class.ids.disposable_stack;
-    if (std.mem.eql(u8, name, "AsyncDisposableStack")) return core.class.ids.async_disposable_stack;
-    if (std.mem.eql(u8, name, "Promise")) return core.class.ids.promise;
-    if (std.mem.eql(u8, name, "Map")) return core.class.ids.map;
-    if (std.mem.eql(u8, name, "Set")) return core.class.ids.set;
-    if (std.mem.eql(u8, name, "WeakMap")) return core.class.ids.weakmap;
-    if (std.mem.eql(u8, name, "WeakSet")) return core.class.ids.weakset;
-    if (std.mem.eql(u8, name, "WeakRef")) return core.class.ids.weak_ref;
-    if (std.mem.eql(u8, name, "FinalizationRegistry")) return core.class.ids.finalization_registry;
-    if (std.mem.eql(u8, name, "ArrayBuffer")) return core.class.ids.array_buffer;
-    if (std.mem.eql(u8, name, "SharedArrayBuffer")) return core.class.ids.shared_array_buffer;
-    if (std.mem.eql(u8, name, "DataView")) return core.class.ids.dataview;
-    if (std.mem.eql(u8, name, "Iterator")) return core.class.ids.iterator;
+    if (constructor_class_names.get(name)) |class_id| return class_id;
     if (construct_mod.typedArrayElement(name)) |element| {
-        return switch (element.kind) {
-            1 => core.class.ids.int8_array,
-            2 => core.class.ids.uint8_array,
-            3 => core.class.ids.uint8c_array,
-            4 => core.class.ids.int16_array,
-            5 => core.class.ids.uint16_array,
-            6 => core.class.ids.int32_array,
-            7 => core.class.ids.uint32_array,
-            8 => core.class.ids.float16_array,
-            9 => core.class.ids.float32_array,
-            10 => core.class.ids.float64_array,
-            11 => core.class.ids.big_int64_array,
-            12 => core.class.ids.big_uint64_array,
-            else => null,
-        };
+        return core.typed_array.typedArrayClassIdForKind(element.kind);
     }
     return null;
 }
@@ -1712,7 +1686,7 @@ pub fn objectRealmGlobal(object: *core.Object) ?*core.Object {
     if (object.bytecodeFunctionRealmGlobalPtr()) |realm_global| return realm_global;
     if (object.nativeFunctionRealmGlobalPtr()) |realm_global| return realm_global;
     const realm_value = object.functionRealmGlobal() orelse return null;
-    return property_ops.expectObject(realm_value) catch null;
+    return core.value_semantics.objectFromValue(realm_value);
 }
 
 pub fn propertyIndexFromLengthKey(rt: *core.JSRuntime, atom_id: core.Atom) ?usize {
@@ -1842,7 +1816,7 @@ pub fn destructuringObjectRest(
         const desc = try objectRestOwnPropertyDescriptor(ctx, output, global, source, key) orelse continue;
         if (desc.enumerable != true) continue;
         value = getValueProperty(ctx, output, global, args[0], key, null, null) catch |err| return err;
-        try out.defineOwnProperty(ctx.runtime, key, core.Descriptor.data(value, true, true, true));
+        try out.defineOwnProperty(ctx.runtime, key, core.Descriptor.data(value, .all));
         value = core.JSValue.undefinedValue();
     }
     return out_value;
@@ -1859,7 +1833,7 @@ test "destructuringObjectRest roots direct symbol values while creating rest obj
     const key = try rt.internAtom("kept");
     const symbol_atom = try rt.atoms.newValueSymbol("gc-destructuring-object-rest-symbol");
     const symbol_value = try rt.takeSymbolValue(symbol_atom);
-    try source.defineOwnProperty(rt, key, core.Descriptor.data(symbol_value, true, true, true));
+    try source.defineOwnProperty(rt, key, core.Descriptor.data(symbol_value, .all));
 
     const args = [_]core.JSValue{source.value()};
     const old_threshold = rt.gcThreshold();
@@ -1917,8 +1891,7 @@ pub fn objectRestOwnKeys(
     defer out_roots.deactivate(ctx.runtime);
     const length_value = try getValueProperty(ctx, output, global, trap_result, core.atom.ids.length, null, null);
     const length = try toLengthIndex(ctx, output, global, length_value);
-    var index: usize = 0;
-    while (index < length) : (index += 1) {
+    for (0..length) |index| {
         const index_key = try propertyAtomFromLengthIndex(ctx.runtime, index);
         defer index_key.deinit(ctx.runtime);
         key_value = try getValueProperty(ctx, output, global, trap_result, index_key.atom, null, null);
@@ -1965,7 +1938,7 @@ pub fn importMetaObject(
     const object = try core.Object.create(ctx.runtime, core.class.ids.object, null);
     errdefer core.Object.destroyFromHeader(ctx.runtime, object.gcHeader());
     // import.meta is a real null-prototype object (JS_GetImportMeta:
-    // JS_NewObjectProto(ctx, JS_NULL), quickjs.c:30900); without the flag,
+    // JS_NewObjectProto(ctx, JS_NULL), quickjs.c); without the flag,
     // ToPrimitive fell through to %Object.prototype%.toString and
     // import(import.meta) stringified instead of rejecting with TypeError.
     const url = try importMetaUrlValue(ctx.runtime, record);
@@ -2051,25 +2024,17 @@ pub fn createGeneratorObject(
         const original_arg_count = frame_mod.originalArgCount(input_args.len, need_original_args);
         const var_ref_count = frame_mod.frameVarRefStorageCount(nested, input_var_refs);
         const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(nested);
-        const frame_slots = try frame_mod.FrameSlab.requiredStorageSlots(
-            frame_arg_count,
-            original_arg_count,
-            nested.var_count,
-            0,
-            var_ref_count,
-            open_var_ref_count,
-        );
+        const layout: frame_mod.SlabLayout = .{
+            .args = frame_arg_count,
+            .original_args = original_arg_count,
+            .locals = nested.var_count,
+            .var_refs = var_ref_count,
+            .open_var_refs = open_var_ref_count,
+        };
+        const frame_slots = try layout.totalSlots();
         try object.initGeneratorExecutionWithStorage(ctx.runtime, stack_slots, frame_slots);
         prepared_frame = .{
-            .slab = frame_mod.FrameSlab.partitionStorage(
-                object.generatorCombinedFrameStorage(),
-                frame_arg_count,
-                original_arg_count,
-                nested.var_count,
-                0,
-                var_ref_count,
-                open_var_ref_count,
-            ),
+            .slab = frame_mod.FrameSlab.partition(object.generatorCombinedFrameStorage(), layout),
             .need_original_args = need_original_args,
         };
         prepared_frame_ptr = &prepared_frame;
@@ -2079,7 +2044,7 @@ pub fn createGeneratorObject(
     // normal calls save the closure object, while internal calls save the raw
     // FunctionBytecode. Both own the FB that owns its RealmContext.
     const saved_current = if (rooted_current.is(.object) or rooted_current.is(.function_bytecode)) rooted_current else rooted_func;
-    object.setGeneratorCurrentFunction(ctx.runtime, saved_current);
+    object.setGeneratorCurrentFunction(saved_current);
     const fb_runtime_strict = fb.isStrictMode() or fb.runtimeStrictMode();
     const effective_this = if (!fb_runtime_strict) blk: {
         if (rooted_this.is(.undefined_value) or rooted_this.is(.null_value)) break :blk global.value();
@@ -2089,7 +2054,7 @@ pub fn createGeneratorObject(
         }
         break :blk rooted_this;
     } else rooted_this;
-    object.setGeneratorThis(ctx.runtime, effective_this);
+    object.setGeneratorThis(effective_this);
     // Every generator gets one resident frame at creation. Canonical bytecode
     // parks at OP_initial_yield; markerless internal fixtures park at pc 0.
     // qjs's async_func_init likewise has no separate deferred args/captures
@@ -2124,7 +2089,7 @@ pub fn createGeneratorObject(
 
 pub fn generatorObjectPrototype(rt: *core.JSRuntime, global: *core.Object, function_value: core.JSValue, is_async: bool) !OwnedPrototype {
     const fallback = if (is_async) try asyncGeneratorPrototypeFromGlobal(rt, global) else try generatorPrototypeFromGlobal(rt, global);
-    const function_object = property_ops.expectObject(function_value) catch return OwnedPrototype.fromObject(fallback);
+    const function_object = core.value_semantics.objectFromValue(function_value) orelse return OwnedPrototype.fromObject(fallback);
     if (function_object.getOwnDataObjectBorrowed(core.atom.ids.prototype)) |prototype| return OwnedPrototype.fromObject(prototype);
     const prototype_value = try function_object.getProperty(core.atom.ids.prototype);
     if (prototype_value.is(.object)) return .{ .value = prototype_value };
@@ -2138,7 +2103,7 @@ pub fn iteratorPrototypeAccessor(ctx: *core.JSContext, global: *core.Object, rec
             if (!receiver.is(.object)) return throwTypeErrorMessage(ctx, global, "not an object");
         }
     } else if (id == @intFromEnum(method_ids.iterator.AccessorMethod.to_string_tag_setter)) {
-        const receiver_object = property_ops.expectObject(receiver) catch return throwTypeErrorMessage(ctx, global, "not an object");
+        const receiver_object = core.value_semantics.objectFromValue(receiver) orelse return throwTypeErrorMessage(ctx, global, "not an object");
         if (iteratorPrototypeFromGlobal(ctx.runtime, global)) |home| {
             if (receiver_object == home) return throwTypeErrorMessage(ctx, global, "Cannot assign to read only property");
         }
@@ -2151,7 +2116,7 @@ pub fn iteratorPrototypeAccessorSet(ctx: *core.JSContext, global: *core.Object, 
         if (!value.is(.object)) return throwTypeErrorMessage(ctx, global, "not an object");
         if (!receiver.is(.object)) return throwTypeErrorMessage(ctx, global, "not an object");
     } else if (atom_id == ((comptime core.atom.predefinedId("Symbol.toStringTag", .symbol)) orelse return error.TypeError)) {
-        const receiver_object = property_ops.expectObject(receiver) catch return throwTypeErrorMessage(ctx, global, "not an object");
+        const receiver_object = core.value_semantics.objectFromValue(receiver) orelse return throwTypeErrorMessage(ctx, global, "not an object");
         if (iteratorPrototypeFromGlobal(ctx.runtime, global)) |home| {
             if (receiver_object == home) return throwTypeErrorMessage(ctx, global, "Cannot assign to read only property");
         }
@@ -2237,7 +2202,7 @@ fn argumentsPropertyTemplate(rt: *core.JSRuntime, global: *core.Object, comptime
     return (if (mapped) ctx.mapped_arguments_shape else ctx.arguments_shape) orelse return error.TypeError;
 }
 
-/// qjs js_build_mapped_arguments (quickjs.c:16215-16266):
+/// qjs js_build_mapped_arguments:
 /// `JS_NewObjectFromShape(ctx->mapped_arguments_shape, props)` then one
 /// var-ref table (`get_var_ref` for formals, `js_create_var_ref` for extra
 /// actuals). Kept as its own noinline so the unmapped thrower/accessor
@@ -2289,7 +2254,7 @@ noinline fn createMappedArgumentsObject(
 
 fn argumentsIteratorValueOwned(ctx: *core.JSContext, global: *core.Object) !core.JSValue {
     // qjs js_build_(mapped_)arguments reads the realm cache with a single
-    // `JS_DupValue(ctx, ctx->array_proto_values)` (quickjs.c:16162/16226).
+    // `JS_DupValue(ctx, ctx->array_proto_values)`.
     // createArgumentsObject already holds the frame's realm (`ctx = b->realm`,
     // the same context whose shapes argumentsPropertyTemplate serves), so read
     // the slot directly instead of arrayPrototypeValuesFromGlobal's
@@ -2305,11 +2270,11 @@ fn argumentsIteratorValueOwned(ctx: *core.JSContext, global: *core.Object) !core
 }
 
 // `noinline`: qjs OP_special_object reaches js_build_(mapped_)arguments as an
-// out-of-line call (quickjs.c:17971-17983); keeping the builder's construction
+// out-of-line call; keeping the builder's construction
 // locals out of the dispatch arm's frame mirrors that call boundary.
 pub noinline fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object, frame: *frame_mod.Frame, mapped_override: ?bool) !core.JSValue {
     // zjs-side adaptation (R2): qjs finalizes the mapped/unmapped decision at
-    // emit time (quickjs.c:34864 gates OP_special_object MAPPED_ARGUMENTS on
+    // emit time (quickjs.c gates OP_special_object MAPPED_ARGUMENTS on
     // `!(js_mode & JS_MODE_STRICT) && has_simple_parameter_list`). zjs's
     // The compile policy can make a sloppy-parsed function runtime-strict
     // while its prologue still emits the subtype-1 (mapped) special_object,
@@ -2333,7 +2298,7 @@ pub noinline fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object
     }
     const object = blk: {
         const initial_shape = try argumentsPropertyTemplate(ctx.runtime, global, false);
-        // qjs js_build_arguments prop fill (quickjs.c:16161-16164): the callee
+        // qjs js_build_arguments prop fill: the callee
         // getset cell owns TWO throw_type_error refs, which
         // fromBorrowedValues' double retain provides; the accessor then
         // transfers into the object (destroyed by the shape's accessor flags
@@ -2362,8 +2327,8 @@ pub noinline fn createArgumentsObject(ctx: *core.JSContext, global: *core.Object
 pub fn installFunctionPrototypeThrowTypeErrorAccessors(rt: *core.JSRuntime, global: *core.Object, thrower: core.JSValue) !void {
     const function_prototype = functionPrototypeFromGlobal(rt, global) orelse return;
     const arguments_key = core.atom.ids.arguments;
-    try function_prototype.defineOwnProperty(rt, arguments_key, core.Descriptor.accessor(thrower, thrower, false, true));
-    try function_prototype.defineOwnProperty(rt, core.atom.ids.caller, core.Descriptor.accessor(thrower, thrower, false, true));
+    try function_prototype.defineOwnProperty(rt, arguments_key, core.Descriptor.accessor(thrower, thrower, .{ .configurable = true }));
+    try function_prototype.defineOwnProperty(rt, core.atom.ids.caller, core.Descriptor.accessor(thrower, thrower, .{ .configurable = true }));
 }
 
 pub fn isThrowTypeErrorIntrinsicObject(object: *core.Object) bool {
@@ -2390,7 +2355,7 @@ pub fn functionObjectFromValue(value: core.JSValue) ?*core.Object {
 
 /// Inline-call resolution twin of `functionObjectFromValue` with qjs's exact
 /// discrimination: JS_CallInternal admits only `p->class_id ==
-/// JS_CLASS_BYTECODE_FUNCTION` with a single compare (quickjs.c:17816) —
+/// JS_CLASS_BYTECODE_FUNCTION` with a single compare —
 /// generator/async classes take the class_array call slow path there. zjs's
 /// four-class set test (`isBytecodeFunctionClass`) compiles to a 1<<id
 /// shift+mask chain (8 insn); on the inline-call path the three non-normal
@@ -2538,7 +2503,7 @@ pub fn getValueProperty(
             }
         }
         // QuickJS's fixed `JS_ATOM_Symbol_hasInstance` lookup goes straight
-        // into the ordinary shape walk (quickjs.c:8139, 8268). Keep zjs's
+        // into the ordinary shape walk. Keep zjs's
         // receiver-aware legacy compatibility helper ahead of that walk only
         // for its two actual keys; unrelated function properties must not pay
         // an outlined `caller`/`arguments` miss.
@@ -2551,13 +2516,13 @@ pub fn getValueProperty(
         }
         // QuickJS resolves an ordinary property with one shape/prototype walk:
         // find_own_property comes before every class/exotic check at every
-        // prototype depth (quickjs.c:8268-8330). Class-specific numeric,
+        // prototype depth. Class-specific numeric,
         // proxy, module and legacy-function behavior is handled by that same
         // walk only after a shape miss.
         if (try getPropertyValueFromObjectChain(ctx, output, global, value, object, atom_id, caller_function, caller_frame)) |property_value| {
             return property_value;
         }
-        // qjs JS_GetPropertyInternal (quickjs.c:8355-8363): after the proto
+        // qjs JS_GetPropertyInternal: after the proto
         // walk, return JS_UNDEFINED. No class-name fallback, no DataView
         // own-leg, no String-index miss synthesis.
         return core.JSValue.undefinedValue();
@@ -2567,7 +2532,7 @@ pub fn getValueProperty(
 
 /// QJS `JS_GetPropertyInternal` starts a named-atom read with the ordinary
 /// `find_own_property` shape walk and enters class/exotic handling only after a
-/// miss (quickjs.c:8268-8330). Internal algorithms already carry an atom, so
+/// miss. Internal algorithms already carry an atom, so
 /// they can use the same data-only prefix without paying the VM computed-key
 /// conversion or the general resolver's representation-specific index cases.
 ///
@@ -2593,7 +2558,7 @@ pub inline fn probeNamedDataProperty(
 /// Object-unpacked twin for internal algorithms that carry a known public,
 /// non-index atom. JS_IsInstanceOf has already required an Object RHS before
 /// requesting the predefined public Symbol.hasInstance key, exactly as QJS
-/// does before JS_GetProperty (quickjs.c:8136-8139).
+/// does before JS_GetProperty.
 pub inline fn probePublicNamedDataPropertyFromObject(
     initial_object: *core.Object,
     atom_id: core.Atom,
@@ -2762,7 +2727,7 @@ pub fn ownDataOrAutoInitPropertyValue(object: *core.Object, atom_id: core.Atom) 
 }
 
 /// `[[Get]]` with an explicit receiver (`super.x`, `Reflect.get(t, k, r)`):
-/// qjs `JS_GetPropertyInternal(ctx, obj, prop, this_obj, ...)` (quickjs.c:8268)
+/// qjs `JS_GetPropertyInternal(ctx, obj, prop, this_obj,...)`
 /// threads `this_obj` through ONE shape/prototype walk, so an accessor found at
 /// any depth is invoked on the receiver rather than on the holder.
 ///
@@ -2828,7 +2793,7 @@ pub fn primitiveObjectForAccess(rt: *core.JSRuntime, global: *core.Object, primi
         while (index < string_value.len()) : (index += 1) {
             try defineStringWrapperIndexProperty(rt, object, index, string_value.codeUnitAt(index));
         }
-        try object.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(@intCast(string_value.len())), false, false, false));
+        try object.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(@intCast(string_value.len())), .none));
         return object.value();
     }
     const class_id: core.class.ClassId = if (rooted_primitive.isNumber())
@@ -2859,13 +2824,13 @@ test "primitiveObjectForAccess roots direct symbol while creating wrapper" {
     try symbol_constructor.defineOwnProperty(
         rt,
         core.atom.ids.prototype,
-        core.Descriptor.data(symbol_prototype.value(), true, true, true),
+        core.Descriptor.data(symbol_prototype.value(), .all),
     );
     const symbol_ctor_atom = try rt.internAtom("Symbol");
     try global.defineOwnProperty(
         rt,
         symbol_ctor_atom,
-        core.Descriptor.data(symbol_constructor.value(), true, true, true),
+        core.Descriptor.data(symbol_constructor.value(), .all),
     );
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-primitive-wrapper-symbol");
@@ -2973,7 +2938,7 @@ pub fn setValuePropertyWithThrow(
         }
     }
     // Single merged own probe (qjs JS_SetPropertyInternal runs ONE
-    // find_own_property, quickjs.c:9707): the old back-to-back
+    // find_own_property, quickjs.c): the old back-to-back
     // setOwnWritableDataProperty + defineNewOwnDataPropertyForSimpleSet pair
     // re-probed the same shape twice — once to classify the hit, once to
     // prove absence before the add.
@@ -3057,7 +3022,7 @@ pub fn setWithOwnDescriptor(
                 };
                 return true;
             }
-            const create_desc = core.Descriptor.data(value, true, true, true);
+            const create_desc = core.Descriptor.data(value, .all);
             if (receiver.proxyTarget() != null) return try proxyDefineOwnProperty(ctx, output, global, receiver, atom_id, create_desc, caller_function, caller_frame);
             receiver.defineOwnProperty(ctx.runtime, atom_id, create_desc) catch |err| switch (err) {
                 error.ReadOnly, error.NotExtensible, error.IncompatibleDescriptor => return false,
@@ -3087,11 +3052,11 @@ pub fn definePropertyWithKind(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (args.len < 1) return error.TypeError;
-    const object = property_ops.expectObject(args[0]) catch return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "not an object"));
+    const object = core.value_semantics.objectFromValue(args[0]) orelse return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "not an object"));
     if (args.len < 2) return error.TypeError;
     const atom_id = try toPropertyKeyAtom(ctx, output, global, args[1], caller_function, caller_frame);
     if (args.len < 3) return error.TypeError;
-    const desc_object = property_ops.expectObject(args[2]) catch return error.TypeError;
+    const desc_object = try property_ops.expectObject(args[2]);
     const desc = try descriptorFromObject(ctx, output, global, args[2], desc_object, object, atom_id, caller_function, caller_frame);
     const defined = if (object.proxyTarget() != null)
         proxyDefineOwnProperty(ctx, output, global, object, atom_id, desc, caller_function, caller_frame) catch |err| switch (err) {
@@ -3423,13 +3388,8 @@ test "descriptorObjectFromDescriptor roots direct function bytecode value while 
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
 
-    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
-    var fb_published = false;
-    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-descriptor-object-value-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
-    fb.publishFixtureNoFail(rt);
-    fb_published = true;
+    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
 
     const desc_value = core.JSValue.functionBytecode(&fb.header);
 
@@ -3440,7 +3400,7 @@ test "descriptorObjectFromDescriptor roots direct function bytecode value while 
     const descriptor_value = try descriptorObjectFromDescriptor(
         rt,
         global,
-        core.Descriptor.data(desc_value, true, true, true),
+        core.Descriptor.data(desc_value, .all),
     );
     const descriptor = objectFromValue(descriptor_value) orelse return error.TypeError;
 
@@ -3613,7 +3573,7 @@ noinline fn getSlowPropertyValueFromObject(
         return try getProxyProperty(ctx, output, global, receiver, object, atom_id, caller_function, caller_frame);
     }
     // qjs JS_GetPropertyInternal after find_own miss: `is_exotic && fast_array`
-    // (quickjs.c:8296-8316). TypedArray elements never occupy a shape slot, so
+    //. TypedArray elements never occupy a shape slot, so
     // this arm is independent of whether `object` is the original receiver —
     // a proto-chain TypedArray must still answer canonical numeric indices
     // (in-range load, OOB / non-canonical numeric → undefined) before the
@@ -3658,7 +3618,7 @@ pub fn getSuperPropertyValue(
             }
         }
         // Same GetInternal exotic arm as `getSlowPropertyValueFromObject`
-        // (quickjs.c:8296-8316): super starts the walk at the home proto, so
+        //: super starts the walk at the home proto, so
         // a TypedArray on that chain must still supply canonical indices.
         if (core.object.isTypedArrayObject(object)) {
             if (try typedArrayCanonicalGet(ctx.runtime, object, atom_id)) |indexed| return indexed;
@@ -3859,7 +3819,7 @@ pub fn deleteValueProperty(
     const key_value = try proxyTrapKeyValue(ctx.runtime, atom_id);
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value }, caller_function, caller_frame);
     if (!valueTruthy(result)) return false;
-    // js_proxy_delete_property (quickjs.c:51157): the target desc is read via
+    // js_proxy_delete_property: the target desc is read via
     // JS_GetOwnPropertyInternal (exotic — a nested-proxy target fires its own
     // gopd trap); a non-configurable desc throws, then extensibility is
     // consulted via JS_IsExtensible (exotic — the target's isExtensible trap
@@ -3872,13 +3832,13 @@ pub fn deleteValueProperty(
 }
 
 pub fn defineValueProperty(rt: *core.JSRuntime, object: *core.Object, key: core.Atom, value: core.JSValue) !void {
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(value, true, true, true));
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(value, .all));
 }
 
 pub fn defineFunctionNameProperty(rt: *core.JSRuntime, object: *core.Object, value: core.JSValue) !void {
     if (try objectHasNonEmptyName(rt, object)) return;
     const key = core.atom.ids.name;
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(value, false, false, true));
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(value, .{ .configurable = true }));
 }
 
 pub fn objectHasNonEmptyName(rt: *core.JSRuntime, object: *core.Object) !bool {
@@ -3934,7 +3894,7 @@ pub noinline fn getSuper(
 ) !void {
     const source_from_stack = stack.len() != 0;
     const source = if (source_from_stack) try stack.pop() else frame.current_function;
-    const function_object = property_ops.expectObject(source) catch {
+    const function_object = core.value_semantics.objectFromValue(source) orelse {
         try stack.pushOwned(core.JSValue.undefinedValue());
         return;
     };
@@ -4091,11 +4051,11 @@ pub fn addBrand(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     if (rooted_obj.is(.object)) {
         const object = try property_ops.expectObject(rooted_obj);
         if (object.hasOwnProperty(brand_atom)) return error.TypeError;
-        // NO-ALIGN(qjs): JS_AddBrand (quickjs.c:8464) raw-adds the instance
+        // NO-ALIGN(qjs): JS_AddBrand raw-adds the instance
         // brand ignoring extensibility; test262's
         // `nonextensible-applies-to-private` feature mandates the TypeError,
         // so zjs keeps the NotExtensible -> TypeError behavior.
-        object.defineOwnProperty(ctx.runtime, brand_atom, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true)) catch |err| switch (err) {
+        object.defineOwnProperty(ctx.runtime, brand_atom, core.Descriptor.data(core.JSValue.undefinedValue(), .all)) catch |err| switch (err) {
             error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
             else => return err,
         };
@@ -4250,8 +4210,8 @@ pub noinline fn defineClass(
     }
     const proto = try core.Object.create(ctx.runtime, core.class.ids.object, proto_parent);
     proto_value = proto.value();
-    try proto.defineOwnProperty(ctx.runtime, core.atom.ids.constructor, core.Descriptor.data(ctor_object.value(), true, false, true));
-    try ctor_object.defineOwnProperty(ctx.runtime, core.atom.ids.prototype, core.Descriptor.data(proto_value, false, false, false));
+    try proto.defineOwnProperty(ctx.runtime, core.atom.ids.constructor, core.Descriptor.data(ctor_object.value(), .method));
+    try ctor_object.defineOwnProperty(ctx.runtime, core.atom.ids.prototype, core.Descriptor.data(proto_value, .none));
     try ctor_object.setFunctionHomeObject(ctx.runtime, proto);
     if (owes_placeholder_class_binding) {
         try stack.push(core.JSValue.undefinedValue());
@@ -4313,7 +4273,7 @@ fn defineObjectMethod(
 ) !void {
     if (stack.len() < 2) {
         const maybe_object = stack.peek() orelse return error.StackUnderflow;
-        _ = property_ops.expectObject(maybe_object) catch return error.StackUnderflow;
+        _ = core.value_semantics.objectFromValue(maybe_object) orelse return error.StackUnderflow;
         return;
     }
     const value = try stack.pop();
@@ -4366,9 +4326,9 @@ fn defineObjectMethodValue(
             }
         }
         const desc = if ((flags & 3) == 1)
-            core.Descriptor.accessor(rooted_value, setter, enumerable, true)
+            core.Descriptor.accessor(rooted_value, setter, .{ .enumerable = enumerable, .configurable = true })
         else
-            core.Descriptor.accessor(getter, rooted_value, enumerable, true);
+            core.Descriptor.accessor(getter, rooted_value, .{ .enumerable = enumerable, .configurable = true });
         object.defineOwnProperty(rt, atom_id, desc) catch |err| switch (err) {
             error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
             else => return err,
@@ -4377,7 +4337,7 @@ fn defineObjectMethodValue(
         setter = core.JSValue.undefinedValue();
         return;
     }
-    object.defineOwnProperty(rt, atom_id, core.Descriptor.data(rooted_value, true, enumerable, true)) catch |err| switch (err) {
+    object.defineOwnProperty(rt, atom_id, core.Descriptor.data(rooted_value, .{ .writable = true, .enumerable = enumerable, .configurable = true })) catch |err| switch (err) {
         error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
         else => return err,
     };
@@ -4398,7 +4358,7 @@ fn ensureHomeObjectBrand(rt: *core.JSRuntime, home: *core.Object) !core.Atom {
     if (!home.isExtensible()) return error.NotExtensible;
     const brand_atom = try rt.atoms.newSymbol(name, .private);
     const brand_value = try rt.symbolValue(brand_atom);
-    try home.defineOwnProperty(rt, core.atom.ids.Private_brand, core.Descriptor.data(brand_value, true, true, true));
+    try home.defineOwnProperty(rt, core.atom.ids.Private_brand, core.Descriptor.data(brand_value, .all));
     return brand_atom;
 }
 
@@ -4520,12 +4480,12 @@ fn proxyCreateDataPropertyOrThrow(
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     const target_value = proxy.proxyTarget() orelse return error.TypeError;
-    const target = property_ops.expectObject(target_value) catch return error.TypeError;
+    const target = try property_ops.expectObject(target_value);
     const handler_value = proxy.proxyHandler() orelse return error.TypeError;
     const trap_atom = core.atom.ids.defineProperty;
     const trap = try getValueProperty(ctx, output, global, handler_value, trap_atom, caller_function, caller_frame);
     if (trap.is(.undefined_value) or trap.is(.null_value)) {
-        target.defineOwnProperty(ctx.runtime, atom_id, core.Descriptor.data(value, true, true, true)) catch |err| switch (err) {
+        target.defineOwnProperty(ctx.runtime, atom_id, core.Descriptor.data(value, .all)) catch |err| switch (err) {
             error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
             else => return err,
         };
@@ -4554,12 +4514,12 @@ pub fn validateProxyOwnKeysResult(
 ) HostError!void {
     const rt = ctx.runtime;
     const target = try property_ops.expectObject(target_value);
-    // js_proxy_get_own_property_names (quickjs.c:51219) invariant walk:
+    // js_proxy_get_own_property_names invariant walk:
     // JS_IsExtensible on the target FIRST (exotic — a nested-proxy target
     // fires its isExtensible trap), then a revoked re-check (the ownKeys trap
-    // may have revoked its own proxy, quickjs.c:51285), then the target's own
+    // may have revoked its own proxy, quickjs.c), then the target's own
     // keys via JS_GetOwnPropertyNamesInternal (exotic ownKeys) and a per-key
-    // revoked re-check (quickjs.c:51293) + JS_GetOwnPropertyInternal (exotic
+    // revoked re-check + JS_GetOwnPropertyInternal (exotic
     // gopd — inner invariant violations surface as TypeErrors here).
     const target_extensible = try proxyAwareIsExtensible(ctx, output, global, target, null, null);
     if (source.proxyHandler() == null) return error.TypeError; // revoked proxy
@@ -4622,7 +4582,7 @@ pub fn proxyAwareOwnPropertyDescriptor(
         }
         return null;
     }
-    const desc_object = property_ops.expectObject(desc_value) catch return error.TypeError;
+    const desc_object = try property_ops.expectObject(desc_value);
     const result_desc = try descriptorFromObject(ctx, output, global, desc_value, desc_object, target, key, caller_function, caller_frame);
     const complete_desc = try completeProxyDescriptor(result_desc);
     if (!try isCompatibleProxyDescriptor(target_extensible, target_desc, complete_desc)) return error.TypeError;
@@ -4639,14 +4599,13 @@ pub fn proxyAwareOwnPropertyDescriptor(
 
 /// Existence-only sibling of `proxyAwareOwnPropertyDescriptor`. For a
 /// NON-proxy source it mirrors qjs `JS_GetOwnPropertyInternal(ctx, NULL, ...)`
-/// (quickjs.c:8854 desc==NULL mode): typed-array canonical-index existence
+/// (quickjs.c desc==NULL mode): typed-array canonical-index existence
 /// (no element materialization), the module-namespace TDZ throw, then the
 /// complete kind-cascade probe -- all with NO descriptor allocation and NO
 /// `JS_DupValue`. For a Proxy it MUST keep the full descriptor path so the
 /// `getOwnPropertyDescriptor` trap fires (spec / qjs `js_proxy_get_own_property`);
 /// it then reports presence as `desc != null`. This is the
 /// `JS_GetOwnPropertyInternal(NULL)` used by `js_object_hasOwnProperty`
-/// (quickjs.c:40536).
 pub fn proxyAwareExistsOwnProperty(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -4784,18 +4743,8 @@ pub fn proxyAwareSetPrototypeOf(
 
 fn completeProxyDescriptor(desc: core.Descriptor) !core.Descriptor {
     return switch (desc.kind) {
-        .generic, .data => core.Descriptor.data(
-            if (desc.value_present) desc.value else core.JSValue.undefinedValue(),
-            desc.writable orelse false,
-            desc.enumerable orelse false,
-            desc.configurable orelse false,
-        ),
-        .accessor => core.Descriptor.accessor(
-            if (desc.getter_present) desc.getter else core.JSValue.undefinedValue(),
-            if (desc.setter_present) desc.setter else core.JSValue.undefinedValue(),
-            desc.enumerable orelse false,
-            desc.configurable orelse false,
-        ),
+        .generic, .data => core.Descriptor.data(if (desc.value_present) desc.value else core.JSValue.undefinedValue(), .{ .writable = desc.writable orelse false, .enumerable = desc.enumerable orelse false, .configurable = desc.configurable orelse false }),
+        .accessor => core.Descriptor.accessor(if (desc.getter_present) desc.getter else core.JSValue.undefinedValue(), if (desc.setter_present) desc.setter else core.JSValue.undefinedValue(), .{ .enumerable = desc.enumerable orelse false, .configurable = desc.configurable orelse false }),
     };
 }
 
@@ -5060,7 +5009,7 @@ pub fn proxyDefineValueForReflectSet(
     const define = try getValueProperty(ctx, output, global, handler_value, define_atom, caller_function, caller_frame);
     if (define.is(.undefined_value) or define.is(.null_value)) {
         const target = try property_ops.expectObject(target_value);
-        target.defineOwnProperty(ctx.runtime, atom_id, core.Descriptor.data(rooted_value, true, true, true)) catch |err| switch (err) {
+        target.defineOwnProperty(ctx.runtime, atom_id, core.Descriptor.data(rooted_value, .all)) catch |err| switch (err) {
             error.InvalidLength => return error.RangeError,
             error.ReadOnly, error.NotExtensible, error.IncompatibleDescriptor => return error.TypeError,
             else => return err,
@@ -5097,7 +5046,7 @@ pub fn proxyDefineOwnProperty(
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
     const target_value = proxy.proxyTarget() orelse return error.TypeError;
-    const target = property_ops.expectObject(target_value) catch return error.TypeError;
+    const target = try property_ops.expectObject(target_value);
     const handler_value = proxy.proxyHandler() orelse return error.TypeError;
     const trap_atom = core.atom.ids.defineProperty;
     const trap = try getValueProperty(ctx, output, global, handler_value, trap_atom, caller_function, caller_frame);
@@ -5116,7 +5065,7 @@ pub fn proxyDefineOwnProperty(
     const result = try callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, key_value, desc_value }, caller_function, caller_frame);
     if (!valueTruthy(result)) return false;
     const target_desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, target, atom_id, caller_function, caller_frame);
-    // js_proxy_define_own_property (quickjs.c:51060) reads the raw
+    // js_proxy_define_own_property reads the raw
     // p->extensible flag of the target (no JS_IsExtensible call — a
     // nested-proxy target does NOT fire its isExtensible trap here).
     const target_extensible = target.isExtensible();
@@ -5146,7 +5095,7 @@ pub fn validateProxyHasResult(
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
     if (result) return true;
-    // js_proxy_has (quickjs.c:50765): the target desc is read via
+    // js_proxy_has: the target desc is read via
     // JS_GetOwnPropertyInternal (exotic-dispatching — a nested-proxy target
     // fires its own getOwnPropertyDescriptor trap and its invariant checks),
     // while extensibility is the raw p->extensible flag (NOT JS_IsExtensible:

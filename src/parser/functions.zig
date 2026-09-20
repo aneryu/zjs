@@ -170,7 +170,7 @@ pub const FunctionEntry = struct {
 };
 
 /// Parse function declaration
-/// Mirrors `js_parse_function_decl` in quickjs.c:36388
+/// Mirrors `js_parse_function_decl` in quickjs.c
 pub fn parseFunctionDecl(s: *State, func_kind: ParseFunctionKind, source_start: FunctionSourceStart) Error!void {
     const saved_parameter_properties = s.current_parameter_properties;
     if (func_kind.isConstructor()) {
@@ -203,7 +203,7 @@ pub fn parseFunctionDecl(s: *State, func_kind: ParseFunctionKind, source_start: 
         return s.failUnexpectedToken();
     }
     // qjs js_parse_function_decl2 retains the identifier before
-    // next_token releases the token (quickjs.c:36551-36556).
+    // next_token releases the token.
     const name_atom = identifiers.identifierLikeAtom(s);
     s.setLastDeclaredAtom(name_atom);
     if (s.lex.is_module and s.atProgramBodyScope() and identifiers.hasKnownBinding(s, name_atom)) {
@@ -245,7 +245,7 @@ pub fn parseFunctionExpr(s: *State, func_kind: ParseFunctionKind, source_start: 
         (s.peekKind() == .kw_yield and !(s.is_strict or s.curFunc().is_strict_mode));
     if (has_name) {
         // qjs js_parse_function_decl2 retains a named-expression atom
-        // across next_token (quickjs.c:36551-36556).
+        // across next_token.
         const name_atom = identifiers.identifierLikeAtom(s);
         owned_name = name_atom;
         if (is_generator and identifiers.atomNameEquals(s, name_atom, "yield")) return s.failUnexpectedToken();
@@ -718,7 +718,7 @@ fn createChildFunction(s: *State, parent_fd: *function_def_mod.FunctionDef, func
             // qjs js_parse_function_decl2 records only is_func_expr +
             // func_name here; the self-binding var is added lazily by
             // resolve_scope_var / add_eval_variables when a reference
-            // actually falls through (add_func_var quickjs.c:24208,
+            // actually falls through (add_func_var quickjs.c,
             // call sites 32977 / 33153 / 33650 / 33698). child_fd
             // carries the name already: FunctionDef.init received
             // `child_name == entry.name` above.
@@ -731,7 +731,7 @@ fn createChildFunction(s: *State, parent_fd: *function_def_mod.FunctionDef, func
 /// Decide where a function declaration's binding lives and how its
 /// closure is stored: hoisted var, global declaration, lexical block
 /// binding, or an Annex B copy (qjs js_parse_function_decl2 +
-/// define_var, quickjs.c:23716-23732 / 24099). Defines the parent-side
+/// define_var, quickjs.c). Defines the parent-side
 /// VarDefs now; the cpool index is patched in by `finishChildFunction`.
 fn planFunctionDeclaration(s: *State, parent_fd: *function_def_mod.FunctionDef, func_kind: ParseFunctionKind, entry: FunctionEntry) Error!FunctionDeclPlan {
     const name = if (entry.export_default)
@@ -753,7 +753,7 @@ fn planFunctionDeclaration(s: *State, parent_fd: *function_def_mod.FunctionDef, 
     } else {
         // Early-error: check for duplicate lexical declaration in the
         // same scope.  Mirrors QuickJS `define_var` JS_VAR_DEF_FUNCTION_DECL
-        // path (`quickjs.c:23716-23732`): duplicate LexicallyDeclaredNames
+        // path: duplicate LexicallyDeclaredNames
         // in a Block are a SyntaxError, except Annex B.3.3.4 allows
         // redefining a function declaration with another function declaration
         // in non-strict mode.
@@ -769,7 +769,7 @@ fn planFunctionDeclaration(s: *State, parent_fd: *function_def_mod.FunctionDef, 
             }
         }
 
-        // qjs find_lexical_decl (quickjs.c:24099): in global script/eval
+        // qjs find_lexical_decl: in global script/eval
         // code a top-level let/const lives in global_vars
         // (JS_CLOSURE_GLOBAL_DECL), not in fd->vars; find_lexical_global_var
         // consults it so Annex B B.3.3 block functions skip hoisting when a
@@ -996,7 +996,7 @@ fn parseFunctionBody(s: *State, func_kind: ParseFunctionKind, entry: FunctionEnt
         try identifiers.rejectInvalidStrictParameterName(s, parameters.invalid_strict_name_position);
     }
     // Mirrors the duplicate-argument gate in js_parse_function_check_names
-    // (quickjs.c:36443-36448): strict mode, a non-simple parameter list,
+    //: strict mode, a non-simple parameter list,
     // methods (incl. getters/setters/class elements) and arrows reject
     // duplicates; plain sloppy function/generator/async declarations and
     // expressions with a simple list keep them legal.
@@ -1011,22 +1011,22 @@ fn parseFunctionBody(s: *State, func_kind: ParseFunctionKind, entry: FunctionEnt
     if (capture_child) try emitFallthroughReturn(s, func_kind);
 }
 
-/// qjs js_parse_function_decl2 tail (quickjs.c:36946): js_is_live_code
+/// qjs js_parse_function_decl2 tail: js_is_live_code
 /// alone decides whether the body needs a terminating return; every
 /// construct epilogue bound its merge labels at the end, which
 /// invalidated last_opcode_pos exactly like qjs OP_label.
 fn emitFallthroughReturn(s: *State, func_kind: ParseFunctionKind) Error!void {
     if (!emitter.isLiveCode(s)) return;
     if (func_kind.isAsync() or func_kind.isGenerator()) {
-        // emit_return(FALSE) (quickjs.c:28396-28400): undefined then return_async.
+        // emit_return(FALSE): undefined then return_async.
         try Emitter.op(s, opcode.op.undefined);
         try Emitter.op(s, opcode.op.return_async);
     } else if (func_kind == .derived_class_constructor) {
-        // quickjs.c:28466-28473: checked this then OP_return.
+        // quickjs.c: checked this then OP_return.
         try s.emitScopeGetVarCheckThis(atom_this);
         try Emitter.op(s, opcode.op.@"return");
     } else {
-        // quickjs.c:28476-28477: OP_return_undef. The expression-statement
+        // quickjs.c: OP_return_undef. The expression-statement
         // drop stays before it; final bytecode rules decide whether that
         // drop can disappear.
         try Emitter.op(s, opcode.op.return_undef);
@@ -1271,9 +1271,9 @@ pub fn parseArrowFunction(s: *State, func_kind: ParseFunctionKind, source_start:
         // `for (x => 0 in 1;;)` is a SyntaxError, test262
         // staging/sm/statements/arrow-function-in-for-statement-head.js);
         // qjs parses arrow bodies with `js_parse_assign_expr`
-        // (PF_IN_ACCEPTED, quickjs.c:31829) and accepts it.
+        // (PF_IN_ACCEPTED, quickjs.c) and accepts it.
         try expressions.parseAssignExpr2(s, .{ .in_accepted = body_flags.in_accepted });
-        // qjs arrow expression body (quickjs.c:31831-31834): terminate with return_async or return.
+        // qjs arrow expression body: terminate with return_async or return.
         try Emitter.op(s, if (is_async) opcode.op.return_async else opcode.op.@"return");
     }
     s.leaveControlBoundary(&control_boundary);
@@ -1607,7 +1607,7 @@ fn popPatternIteratorBlock(s: *State, block: *BlockEnv) void {
 pub fn emitStackTopCatchMarkerDropsToDepth(s: *State, current_depth: *u32, target_depth: u32) Error!void {
     if (current_depth.* < target_depth) return Error.ParserInvariant;
     while (current_depth.* > target_depth) {
-        // qjs emit_return (quickjs.c:28415-28419): preserve TOS while removing a catch record.
+        // qjs emit_return: preserve TOS while removing a catch record.
         try Emitter.op(s, opcode.op.nip_catch);
         try emitter.emitUsingDisposesForCatchMarkerDepth(s, current_depth.*);
         current_depth.* -= 1;
@@ -1642,17 +1642,17 @@ pub fn emitBlockEnvReturnCleanupUntil(
         if (is_finally_body) {
             // Preserve the return completion while discarding this
             // finalizer's completion and gosub return-PC slots.
-            // qjs emit_return finally walk (quickjs.c:28408-28419): preserve the injected return completion during cleanup.
+            // qjs emit_return finally walk: preserve the injected return completion during cleanup.
             try Emitter.op(s, opcode.op.nip);
             try Emitter.op(s, opcode.op.nip);
             continue;
         }
         if (current.has_iterator) {
             try emitStackTopCatchMarkerDropsToDepth(s, catch_marker_depth, current.catch_marker_depth);
-            // qjs emit_return iterator cleanup (quickjs.c:28415-28421): remove the iterator catch record under TOS.
+            // qjs emit_return iterator cleanup: remove the iterator catch record under TOS.
             try Emitter.op(s, opcode.op.nip_catch);
             if (async_generator) {
-                // QuickJS emit_return (quickjs.c:28422-28440): discard the
+                // QuickJS emit_return: discard the
                 // cached next method, call iterator.return(), require an
                 // Object result, await it, then restore the injected return
                 // value for the next enclosing cleanup / OP_return_async.
@@ -1673,7 +1673,7 @@ pub fn emitBlockEnvReturnCleanupUntil(
                 try Emitter.bind(s, closed);
                 try Emitter.op(s, opcode.op.drop);
             } else {
-                // qjs emit_return iterator cleanup (quickjs.c:28441-28444): rotate value, add dummy catch offset, close.
+                // qjs emit_return iterator cleanup: rotate value, add dummy catch offset, close.
                 try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.rot3r);
                 try Emitter.op(s, opcode.op.undefined);
                 try Emitter.op(s, opcode.op.iterator_close);
@@ -1942,7 +1942,7 @@ fn enterParameterExpressionScope(s: *State) Error!i32 {
     // qjs forces the parameter environment to have no parent, then uses
     // the ordinary push_scope path.  Its OP_enter_scope is what lowers
     // every parameter binding to an initially-uninitialized lexical slot
-    // before any default initializer runs (quickjs.c:36699-36706).
+    // before any default initializer runs.
     try s.emitEnterScope();
     return scope;
 }
@@ -2106,8 +2106,7 @@ fn trailingClassNamePatch(
 /// or a named-expression self binding.
 pub fn setObjectName(s: *State, atom_id: Atom) Error!void {
     const builder = s.activeBuilder();
-    if (builder.last_opcode_pos < 0) return;
-    const opcode_pos: u32 = @intCast(builder.last_opcode_pos);
+    const opcode_pos = builder.last_opcode_pos orelse return;
     const opcode_index: usize = @intCast(opcode_pos);
     if (opcode_index >= @as(usize, @intCast(builder.code_len))) return Error.ParserInvariant;
 
@@ -2147,8 +2146,7 @@ pub fn setObjectName(s: *State, atom_id: Atom) Error!void {
 /// initializer runs.
 pub fn setObjectNameComputed(s: *State) Error!void {
     const builder = s.activeBuilder();
-    if (builder.last_opcode_pos < 0) return;
-    const opcode_pos: u32 = @intCast(builder.last_opcode_pos);
+    const opcode_pos = builder.last_opcode_pos orelse return;
     const opcode_index: usize = @intCast(opcode_pos);
     if (opcode_index >= @as(usize, @intCast(builder.code_len))) return Error.ParserInvariant;
 

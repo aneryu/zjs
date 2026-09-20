@@ -660,7 +660,7 @@ test "compiler.s2g1: conditional expression" {
     try std.testing.expectEqual(@as(u32, 2), b.label_len);
     try expectLabel(b, 0, 1, 12);
     try expectLabel(b, 1, 1, 13);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, null), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -685,7 +685,7 @@ test "compiler.s2g1: logical or" {
     try std.testing.expectEqual(@as(u32, 9), b.code_len);
     try std.testing.expectEqual(@as(u32, 1), b.label_len);
     try expectLabel(b, 0, 1, 9);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, null), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -717,7 +717,7 @@ test "compiler.s2g1: logical and chain" {
     try std.testing.expectEqual(@as(u32, 1), b.label_slots[0].first_reloc);
     try std.testing.expectEqual(@as(u32, 0), b.relocs[1].next);
     try std.testing.expectEqual(labels.no_reloc, b.relocs[0].next);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, null), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -743,7 +743,7 @@ test "compiler.s2g1: coalesce" {
     try std.testing.expectEqual(@as(u32, 10), b.code_len);
     try std.testing.expectEqual(@as(u32, 1), b.label_len);
     try expectLabel(b, 0, 1, 10);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, null), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -777,7 +777,7 @@ test "compiler.s2g1: coalesce chain" {
     try std.testing.expectEqual(@as(u32, 1), b.label_slots[0].first_reloc);
     try std.testing.expectEqual(@as(u32, 0), b.relocs[1].next);
     try std.testing.expectEqual(labels.no_reloc, b.relocs[0].next);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, null), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -812,7 +812,7 @@ test "compiler.s2g1: optional chain field" {
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(field_atom, b.atom_operands[0]);
     try std.testing.expectEqual(qop.get_field_opt_chain, b.code[15]);
-    try std.testing.expectEqual(@as(i64, 15), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 15), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{1});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -843,7 +843,7 @@ test "compiler.s2g1: optional chain element" {
     try expectLabel(b, 0, 1, 17);
     try expectLabel(b, 1, 1, 15);
     try std.testing.expectEqual(qop.get_array_el_opt_chain, b.code[16]);
-    try std.testing.expectEqual(@as(i64, 16), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 16), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{16});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -869,7 +869,7 @@ test "compiler.s2g1: if else empty" {
     try std.testing.expectEqual(@as(u32, 2), b.label_len);
     try expectLabel(b, 0, 1, 14);
     try expectLabel(b, 1, 1, 14);
-    try std.testing.expectEqual(@as(i64, 14), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 14), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -899,7 +899,7 @@ test "compiler.s2g1: if else expression bodies" {
     try std.testing.expectEqual(@as(u32, 2), b.label_len);
     try expectLabel(b, 0, 1, 16);
     try expectLabel(b, 1, 1, 18);
-    try std.testing.expectEqual(@as(i64, 18), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 18), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{ 9, 16 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -923,7 +923,7 @@ test "compiler.s2g1: if without else" {
     try std.testing.expectEqual(@as(u32, 12), b.code_len);
     try std.testing.expectEqual(@as(u32, 1), b.label_len);
     try expectLabel(b, 0, 1, 9);
-    try std.testing.expectEqual(@as(i64, 9), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 9), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -950,7 +950,7 @@ test "compiler.s2g1: labeled break" {
     try std.testing.expectEqual(@as(u32, 2), b.label_len);
     try expectLabel(b, 0, 1, 20);
     try expectLabel(b, 1, 1, 17);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, null), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -970,7 +970,7 @@ test "compiler.s2g1: labeled statement without break" {
     try std.testing.expectEqual(@as(u32, 1), b.label_len);
     try expectLabel(b, 0, 0, 0);
     try std.testing.expectEqual(labels.no_reloc, b.label_slots[0].first_reloc);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, null), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1015,7 +1015,7 @@ test "compiler.s2g2: while" {
     try expectLabel(b, 2, 0, 6);
     try expectLabel(b, 3, 0, 11);
     try std.testing.expect(b.label_slots[0].flags.backward_target);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, null), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1043,7 +1043,7 @@ test "compiler.s2g2: while continue" {
     try expectLabel(b, 2, 1, 11);
     try expectLabel(b, 3, 0, 16);
     try std.testing.expect(b.label_slots[0].flags.backward_target);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, null), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1073,7 +1073,7 @@ test "compiler.s2g2: labeled while continue" {
     try expectLabel(b, 4, 1, 11);
     try expectLabel(b, 5, 0, 16);
     try std.testing.expect(b.label_slots[0].flags.backward_target);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, null), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1098,7 +1098,7 @@ test "compiler.s2g2: do while" {
     try expectLabel(b, 1, 0, 0);
     try expectLabel(b, 2, 0, 6);
     try std.testing.expect(b.label_slots[0].flags.backward_target);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, null), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1128,7 +1128,7 @@ test "compiler.s2g2: classic for empty head" {
     try expectLabel(b, 2, 0, 12);
     try expectLabel(b, 3, 0, 17);
     try std.testing.expect(b.label_slots[0].flags.backward_target);
-    try std.testing.expectEqual(@as(i64, 17), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 17), b.last_opcode_pos);
     // The classic-for test-entry marker and the synthetic true literal both
     // precede the first opcode; Stage 3 deduplicates them only when their
     // line/column points are identical.
@@ -1162,7 +1162,7 @@ test "compiler.s2g2: classic for test break" {
     try expectLabel(b, 2, 0, 17);
     try expectLabel(b, 3, 1, 22);
     try std.testing.expect(b.label_slots[0].flags.backward_target);
-    try std.testing.expectEqual(@as(i64, 22), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 22), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1203,7 +1203,7 @@ test "compiler.s2g2: for in" {
     try expectLabel(b, 5, 0, 41);
     try std.testing.expect(b.label_slots[1].flags.backward_target);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
-    try std.testing.expectEqual(@as(i64, 41), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 41), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1247,7 +1247,7 @@ test "compiler.s2g2: for in break cleanup" {
     try expectLabel(b, 5, 1, 50);
     try std.testing.expect(b.label_slots[1].flags.backward_target);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
-    try std.testing.expectEqual(@as(i64, 50), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 50), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1289,7 +1289,7 @@ test "compiler.s2g2: for of" {
     try std.testing.expect(b.label_slots[1].flags.backward_target);
     try std.testing.expectEqual(@as(u8, 0), b.code[34]);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
-    try std.testing.expectEqual(@as(i64, 42), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 42), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1334,7 +1334,7 @@ test "compiler.s2g2: for of break cleanup" {
     try std.testing.expect(b.label_slots[1].flags.backward_target);
     try std.testing.expectEqual(@as(u8, 0), b.code[27]);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
-    try std.testing.expectEqual(@as(i64, 51), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 51), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1365,7 +1365,7 @@ test "compiler.s2g2: switch single case" {
     try std.testing.expectEqual(@as(u32, 2), b.label_len);
     try expectLabel(b, 0, 0, 14);
     try expectLabel(b, 1, 1, 14);
-    try std.testing.expectEqual(@as(i64, 15), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 15), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{12});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1400,7 +1400,7 @@ test "compiler.s2g2: switch break default" {
     try expectLabel(b, 2, 1, 17);
     // The retargeted no-match identity keeps no reference and aliases the
     // default body it merged into.
-    try std.testing.expectEqual(@as(i64, 20), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 20), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{17});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1440,7 +1440,7 @@ test "compiler.s2g2: switch case fallthrough" {
     try expectLabel(b, 1, 1, 19);
     try expectLabel(b, 2, 1, 27);
     try expectLabel(b, 3, 1, 29);
-    try std.testing.expectEqual(@as(i64, 30), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 30), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{ 12, 27 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1469,7 +1469,7 @@ test "compiler.s2g2: switch default only" {
     try expectLabel(b, 0, 0, 11);
     try expectLabel(b, 1, 0, 9);
     try expectLabel(b, 2, 1, 9);
-    try std.testing.expectEqual(@as(i64, 12), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 12), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{9});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1504,7 +1504,7 @@ test "compiler.s2g2: switch break suppresses fallthrough" {
     try expectLabel(b, 0, 1, 25);
     try expectLabel(b, 1, 1, 17);
     try expectLabel(b, 2, 1, 25);
-    try std.testing.expectEqual(@as(i64, 26), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 26), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1543,7 +1543,7 @@ test "compiler.s2g3: try finally live tail" {
     try expectLabel(b, 0, 1, 26);
     try expectLabel(b, 1, 2, 32);
     try expectLabel(b, 2, 1, 41);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, null), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{ 8, 35 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1594,7 +1594,7 @@ test "compiler.s2g3: try catch optional binding live tails" {
     try expectLabel(b, 1, 3, 71);
     try expectLabel(b, 2, 2, 72);
     try expectLabel(b, 3, 1, 65);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, null), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{ 8, 41 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1642,7 +1642,7 @@ test "compiler.s2g3: try catch binding after throw" {
     try expectLabel(b, 2, 2, 70);
     try expectLabel(b, 3, 1, 63);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, null), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{9});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1685,7 +1685,7 @@ test "compiler.s2g3: return through finally" {
     try expectLabel(b, 0, 1, 32);
     try expectLabel(b, 1, 3, 38);
     try expectLabel(b, 2, 1, 47);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, null), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{ 8, 41 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1739,7 +1739,7 @@ test "compiler.s2g3: break through finally inside loop" {
     try expectLabel(b, 5, 3, 58);
     try expectLabel(b, 6, 1, 67);
     try std.testing.expect(b.label_slots[0].flags.backward_target);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, null), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{61});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1762,7 +1762,7 @@ test "compiler.s2g3: epilogue after plain statement" {
     });
     try std.testing.expectEqual(@as(u32, 3), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
-    try std.testing.expectEqual(@as(i64, 2), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 2), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1784,7 +1784,7 @@ test "compiler.s2g3: epilogue after terminal" {
     });
     try std.testing.expectEqual(@as(u32, 2), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
-    try std.testing.expectEqual(@as(i64, 1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 1), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{1});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1813,7 +1813,7 @@ test "compiler.s2g3: epilogue after loop merge" {
     try expectLabel(b, 2, 0, 6);
     try expectLabel(b, 3, 0, 11);
     try std.testing.expect(b.label_slots[0].flags.backward_target);
-    try std.testing.expectEqual(@as(i64, 11), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 11), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1838,7 +1838,7 @@ test "compiler.s2g3: plain return dead epilogue" {
     });
     try std.testing.expectEqual(@as(u32, 1), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
-    try std.testing.expectEqual(@as(i64, 0), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 0), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1861,7 +1861,7 @@ test "compiler.s2g3: return with value" {
     });
     try std.testing.expectEqual(@as(u32, 2), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
-    try std.testing.expectEqual(@as(i64, 1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 1), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{1});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -1895,7 +1895,7 @@ test "compiler.s2g4: classic for splices update after body" {
     // continue label binds BEFORE the spliced update block.
     try std.testing.expect(b.label_slots[0].flags.backward_target);
     try std.testing.expectEqual(@as(u32, 0), b.atom_len);
-    try std.testing.expectEqual(@as(i64, 19), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 19), b.last_opcode_pos);
     // Legacy moves only the update's code/atoms; its detached source slots at
     // 6 and 7 are intentionally absent from the final parser ledger.
     try expectSourceOffsets(b, &.{});
@@ -1938,7 +1938,7 @@ test "compiler.s2g4: classic for shifts detached conditional labels" {
     // continue label binds BEFORE the spliced conditional update block.
     try std.testing.expect(b.label_slots[0].flags.backward_target);
     try std.testing.expectEqual(@as(u32, 0), b.atom_len);
-    try std.testing.expectEqual(@as(i64, 31), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 31), b.last_opcode_pos);
     // Every marker inside the detached conditional update is discarded by
     // the legacy truncate+splice contract; the loop-edge marker remains.
     try expectSourceOffsets(b, &.{});
@@ -1974,7 +1974,7 @@ test "compiler.s2g4: classic for splices update after break" {
     try expectLabel(b, 3, 1, 24);
     try std.testing.expect(b.label_slots[0].flags.backward_target);
     try std.testing.expectEqual(@as(u32, 0), b.atom_len);
-    try std.testing.expectEqual(@as(i64, 24), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 24), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -2004,7 +2004,7 @@ test "compiler.s2g4: plain field assignment rewinds getter" {
     // The getter's retained atom is transferred into the setter ledger entry.
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(field_atom, b.atom_operands[0]);
-    try std.testing.expectEqual(@as(i64, 9), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 9), b.last_opcode_pos);
     // The rewind drops the removed getter's source marker; null reuses offset 1.
     try expectSourceOffsets(b, &.{ 0, 1 });
     try expectRelocIntegrity(b);
@@ -2038,7 +2038,7 @@ test "compiler.s2g4: compound field assignment reemits getter" {
     try std.testing.expectEqual(@as(u32, 2), b.atom_len);
     try std.testing.expectEqual(field_atom, b.atom_operands[0]);
     try std.testing.expectEqual(field_atom, b.atom_operands[1]);
-    try std.testing.expectEqual(@as(i64, 16), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 16), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{ 0, 1, 8 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -2065,7 +2065,7 @@ test "compiler.s2g4: plain array element assignment rewinds getter" {
     try std.testing.expectEqual(@as(u32, 6), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 0), b.atom_len);
-    try std.testing.expectEqual(@as(i64, 5), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 5), b.last_opcode_pos);
     // The removed getter marker is replaced by the RHS marker at offset 2.
     try expectSourceOffsets(b, &.{ 0, 2 });
     try expectRelocIntegrity(b);
@@ -2097,7 +2097,7 @@ test "compiler.s2g4: postfix field update preserves old value" {
     try std.testing.expectEqual(@as(u32, 2), b.atom_len);
     try std.testing.expectEqual(field_atom, b.atom_operands[0]);
     try std.testing.expectEqual(field_atom, b.atom_operands[1]);
-    try std.testing.expectEqual(@as(i64, 15), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 15), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{ 0, 1, 7 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -2125,7 +2125,7 @@ test "compiler.s2g4: prefix array element update preserves new value" {
     try std.testing.expectEqual(@as(u32, 7), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 0), b.atom_len);
-    try std.testing.expectEqual(@as(i64, 6), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 6), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{ 0, 2, 3 });
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -2165,7 +2165,7 @@ test "compiler.s2g4: minimal class expression and default constructor" {
     try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[11..15], .little));
     try std.testing.expectEqual(@as(u8, 0), b.code[20]);
     try std.testing.expectEqual(@as(u32, 18), std.mem.readInt(u32, b.code[33..37], .little));
-    try std.testing.expectEqual(@as(i64, 37), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 37), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -2192,7 +2192,7 @@ test "compiler.s2g4: minimal class expression and default constructor" {
     try std.testing.expectEqual(@as(u32, 1), ctor.atom_len);
     try std.testing.expectEqual(fields_atom, ctor.atom_operands[0]);
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, ctor.code[22..24], .little));
-    try std.testing.expectEqual(@as(i64, 26), ctor.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 26), ctor.last_opcode_pos);
     try expectRelocIntegrity(ctor);
     try expectSourceOrder(ctor);
 }
@@ -2236,7 +2236,7 @@ test "compiler.s2g4: class declaration stores local binding" {
     try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[11..15], .little));
     try std.testing.expectEqual(@as(u8, 0), b.code[20]);
     try std.testing.expectEqual(@as(u16, 2), std.mem.readInt(u16, b.code[39..41], .little));
-    try std.testing.expectEqual(@as(i64, 41), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 41), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -2261,7 +2261,7 @@ test "compiler.s2g4: class declaration stores local binding" {
     try expectLabel(ctor, 0, 1, 25);
     try std.testing.expectEqual(@as(u32, 1), ctor.atom_len);
     try std.testing.expectEqual(fields_atom, ctor.atom_operands[0]);
-    try std.testing.expectEqual(@as(i64, 26), ctor.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 26), ctor.last_opcode_pos);
     try expectRelocIntegrity(ctor);
     try expectSourceOrder(ctor);
 }
@@ -2306,7 +2306,7 @@ test "compiler.s2g4: named class method splices runtime definition" {
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[11..15], .little));
     try std.testing.expectEqual(@as(u8, 0), b.code[20]);
     try std.testing.expectEqual(@as(u8, 0), b.code[40]);
-    try std.testing.expectEqual(@as(i64, 53), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 53), b.last_opcode_pos);
     // Runtime method markers at 19/21 belong to the detached class segment;
     // legacy moves the instructions and atoms but not those source slots.
     try expectSourceOffsets(b, &.{0});
@@ -2325,7 +2325,7 @@ test "compiler.s2g4: named class method splices runtime definition" {
     try std.testing.expectEqual(@as(u32, 6), method.code_len);
     try std.testing.expectEqual(@as(u32, 0), method.label_len);
     try std.testing.expectEqual(@as(u32, 0), method.atom_len);
-    try std.testing.expectEqual(@as(i64, 5), method.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 5), method.last_opcode_pos);
     try expectRelocIntegrity(method);
     try expectSourceOrder(method);
 
@@ -2348,7 +2348,7 @@ test "compiler.s2g4: named class method splices runtime definition" {
     try expectLabel(ctor, 0, 1, 25);
     try std.testing.expectEqual(@as(u32, 1), ctor.atom_len);
     try std.testing.expectEqual(fields_atom, ctor.atom_operands[0]);
-    try std.testing.expectEqual(@as(i64, 26), ctor.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 26), ctor.last_opcode_pos);
     try expectRelocIntegrity(ctor);
     try expectSourceOrder(ctor);
 }
@@ -2384,7 +2384,7 @@ test "compiler.s2g4: explicit constructor rolls back parent closure" {
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
     try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[11..15], .little));
-    try std.testing.expectEqual(@as(i64, 37), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 37), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -2411,7 +2411,7 @@ test "compiler.s2g4: explicit constructor rolls back parent closure" {
     try expectLabel(ctor, 0, 1, 26);
     try std.testing.expectEqual(@as(u32, 2), ctor.atom_len);
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, ctor.code[23..25], .little));
-    try std.testing.expectEqual(@as(i64, 32), ctor.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 32), ctor.last_opcode_pos);
     try expectRelocIntegrity(ctor);
     try expectSourceOrder(ctor);
 }
@@ -2449,7 +2449,7 @@ test "compiler.s2g4: derived default constructor returns checked this" {
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
     try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[11..15], .little));
     try std.testing.expectEqual(@as(u8, 1), b.code[20]);
-    try std.testing.expectEqual(@as(i64, 37), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 37), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -2476,7 +2476,7 @@ test "compiler.s2g4: derived default constructor returns checked this" {
     try std.testing.expectEqual(@as(u32, 1), ctor.atom_len);
     try std.testing.expectEqual(fields_atom, ctor.atom_operands[0]);
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, ctor.code[25..27], .little));
-    try std.testing.expectEqual(@as(i64, 32), ctor.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 32), ctor.last_opcode_pos);
     try expectRelocIntegrity(ctor);
     try expectSourceOrder(ctor);
 }
@@ -2517,7 +2517,7 @@ test "compiler.s2g4: instance field uses dormant brand prologue" {
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[11..15], .little));
     try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[22..26], .little));
-    try std.testing.expectEqual(@as(i64, 42), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 42), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -2545,7 +2545,7 @@ test "compiler.s2g4: instance field uses dormant brand prologue" {
     try std.testing.expectEqual(@as(u32, 2), fields.atom_len);
     try std.testing.expectEqual(home_atom, fields.atom_operands[0]);
     try std.testing.expectEqual(field_atom, fields.atom_operands[1]);
-    try std.testing.expectEqual(@as(i64, 23), fields.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 23), fields.last_opcode_pos);
     try expectRelocIntegrity(fields);
     try expectSourceOrder(fields);
 }
@@ -2604,7 +2604,7 @@ test "compiler.s2g4: private method patches instance brand prologue" {
     try std.testing.expectEqual(@as(u32, 2), std.mem.readInt(u32, b.code[11..15], .little));
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[22..26], .little));
     try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[35..39], .little));
-    try std.testing.expectEqual(@as(i64, 69), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 69), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -2619,7 +2619,7 @@ test "compiler.s2g4: private method patches instance brand prologue" {
     try std.testing.expectEqual(@as(u32, 4), method.code_len);
     try std.testing.expectEqual(@as(u32, 0), method.label_len);
     try std.testing.expectEqual(@as(u32, 0), method.atom_len);
-    try std.testing.expectEqual(@as(i64, 3), method.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 3), method.last_opcode_pos);
     try expectRelocIntegrity(method);
     try expectSourceOrder(method);
 
@@ -2641,7 +2641,7 @@ test "compiler.s2g4: private method patches instance brand prologue" {
     try expectLabel(fields, 0, 1, 15);
     try std.testing.expectEqual(@as(u32, 1), fields.atom_len);
     try std.testing.expectEqual(home_atom, fields.atom_operands[0]);
-    try std.testing.expectEqual(@as(i64, 15), fields.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 15), fields.last_opcode_pos);
     try expectRelocIntegrity(fields);
     try expectSourceOrder(fields);
 }
@@ -2685,7 +2685,7 @@ test "compiler.s2g4: static block nests closure in static initializer" {
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[11..15], .little));
     try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[28..32], .little));
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, b.code[34..36], .little));
-    try std.testing.expectEqual(@as(i64, 49), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 49), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -2710,7 +2710,7 @@ test "compiler.s2g4: static block nests closure in static initializer" {
     try std.testing.expectEqual(core.atom.null_atom, static_init.atom_operands[0]);
     try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, static_init.code[1..5], .little));
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, static_init.code[19..21], .little));
-    try std.testing.expectEqual(@as(i64, 23), static_init.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 23), static_init.last_opcode_pos);
     try expectRelocIntegrity(static_init);
     try expectSourceOrder(static_init);
 
@@ -2726,7 +2726,7 @@ test "compiler.s2g4: static block nests closure in static initializer" {
     try std.testing.expectEqual(@as(u32, 6), block.code_len);
     try std.testing.expectEqual(@as(u32, 0), block.label_len);
     try std.testing.expectEqual(@as(u32, 0), block.atom_len);
-    try std.testing.expectEqual(@as(i64, 5), block.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 5), block.last_opcode_pos);
     try expectRelocIntegrity(block);
     try expectSourceOrder(block);
 }
@@ -2771,7 +2771,7 @@ test "compiler.s2g4: static field emits through static initializer" {
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[11..15], .little));
     try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[28..32], .little));
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, b.code[34..36], .little));
-    try std.testing.expectEqual(@as(i64, 49), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 49), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -2792,7 +2792,7 @@ test "compiler.s2g4: static field emits through static initializer" {
     try std.testing.expectEqual(@as(u32, 0), static_init.label_len);
     try std.testing.expectEqual(@as(u32, 2), static_init.atom_len);
     try std.testing.expectEqual(field_atom, static_init.atom_operands[1]);
-    try std.testing.expectEqual(@as(i64, 14), static_init.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 14), static_init.last_opcode_pos);
     try expectRelocIntegrity(static_init);
     try expectSourceOrder(static_init);
 }
@@ -2836,7 +2836,7 @@ test "compiler.s2g4: computed method splices key and closure" {
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[11..15], .little));
     try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[28..32], .little));
     try std.testing.expectEqual(@as(u8, 0), b.code[38]);
-    try std.testing.expectEqual(@as(i64, 51), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 51), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -2852,7 +2852,7 @@ test "compiler.s2g4: computed method splices key and closure" {
     try std.testing.expectEqual(@as(u32, 4), method.code_len);
     try std.testing.expectEqual(@as(u32, 0), method.label_len);
     try std.testing.expectEqual(@as(u32, 0), method.atom_len);
-    try std.testing.expectEqual(@as(i64, 3), method.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 3), method.last_opcode_pos);
     try expectRelocIntegrity(method);
     try expectSourceOrder(method);
 }
@@ -2896,7 +2896,7 @@ test "compiler.s2g4: getter child keeps return terminal" {
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[11..15], .little));
     try std.testing.expectEqual(@as(u8, 0), b.code[20]);
     try std.testing.expectEqual(@as(u8, 1), b.code[40]);
-    try std.testing.expectEqual(@as(i64, 53), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 53), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -2913,7 +2913,7 @@ test "compiler.s2g4: getter child keeps return terminal" {
     try std.testing.expectEqual(@as(u32, 5), getter.code_len);
     try std.testing.expectEqual(@as(u32, 0), getter.label_len);
     try std.testing.expectEqual(@as(u32, 0), getter.atom_len);
-    try std.testing.expectEqual(@as(i64, 4), getter.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 4), getter.last_opcode_pos);
     try expectRelocIntegrity(getter);
     try expectSourceOrder(getter);
 }

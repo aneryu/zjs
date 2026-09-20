@@ -4,8 +4,7 @@
 //! releases argument, local, stack, VarRef, and `new.target` cells only as their
 //! recorded dispositions require. Open VarRefs retain their frame backing until
 //! closure or generator transfer completes. The layout follows QuickJS frame
-//! allocation at quickjs.c:17834-17866 and VarRef closure at
-//! quickjs.c:17297-17331.
+//! allocation at quickjs.c and VarRef closure at
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -28,62 +27,39 @@ pub const FrameSlab = struct {
     /// from the JSValue slab tail alongside `open_var_refs` — same
     /// bytesAsSlice reinterpretation, half the pre-typed 16B/slot footprint
     /// (VARREFS-SLOT-TYPING-BLUEPRINT phase D, qjs alloca partition
-    /// quickjs.c:17834-17866).
+    /// quickjs.c).
     var_refs: []*core.VarRef = &.{},
     open_var_refs: []?*core.VarRef = &.{},
 
-    pub fn requiredStorageSlots(
-        arg_count: usize,
-        original_arg_count: usize,
-        local_count: usize,
-        stack_count: usize,
-        var_ref_count: usize,
-        open_var_ref_count: usize,
-    ) !usize {
-        const count_1 = try std.math.add(usize, arg_count, original_arg_count);
-        const count_2 = try std.math.add(usize, count_1, local_count);
-        const value_count = try std.math.add(usize, count_2, stack_count);
-        const var_ref_bytes = try std.math.mul(usize, @sizeOf(*core.VarRef), var_ref_count);
-        const open_bytes = try std.math.mul(usize, @sizeOf(?*core.VarRef), open_var_ref_count);
-        const ptr_bytes = try std.math.add(usize, var_ref_bytes, open_bytes);
-        const ptr_value_slots = try std.math.divCeil(usize, ptr_bytes, @sizeOf(JSValue));
-        return try std.math.add(usize, value_count, ptr_value_slots);
-    }
-
     /// Partition caller-owned backing into the same typed windows as
     /// `allocHeap`. The caller retains the allocation itself; Frame teardown
-    /// releases only the values/cells stored in the windows.
-    pub fn partitionStorage(
-        storage: []JSValue,
-        arg_count: usize,
-        original_arg_count: usize,
-        local_count: usize,
-        stack_count: usize,
-        var_ref_count: usize,
-        open_var_ref_count: usize,
-    ) FrameSlab {
-        const value_count = arg_count + original_arg_count + local_count + stack_count;
-        const var_ref_bytes = @sizeOf(*core.VarRef) * var_ref_count;
-        const open_bytes = @sizeOf(?*core.VarRef) * open_var_ref_count;
+    /// releases only the values/cells stored in the windows. `storage.len`
+    /// must equal `layout.totalSlots()`.
+    pub fn partition(storage: []JSValue, layout: SlabLayout) FrameSlab {
+        const var_ref_bytes = @sizeOf(*core.VarRef) * layout.var_refs;
+        const open_bytes = @sizeOf(?*core.VarRef) * layout.open_var_refs;
         const ptr_value_slots = std.math.divCeil(usize, var_ref_bytes + open_bytes, @sizeOf(JSValue)) catch unreachable;
-        std.debug.assert(storage.len == value_count + ptr_value_slots);
+        std.debug.assert(storage.len == layout.valueSlots() + ptr_value_slots);
 
         var cursor: usize = 0;
-        const args = storage[cursor .. cursor + arg_count];
-        cursor += arg_count;
-        const original_args = storage[cursor .. cursor + original_arg_count];
-        cursor += original_arg_count;
-        const locals = storage[cursor .. cursor + local_count];
-        cursor += local_count;
-        const stack = storage[cursor .. cursor + stack_count];
-        cursor += stack_count;
+        const args = storage[cursor .. cursor + layout.args];
+        cursor += layout.args;
+        const original_args = storage[cursor .. cursor + layout.original_args];
+        cursor += layout.original_args;
+        const locals = storage[cursor .. cursor + layout.locals];
+        cursor += layout.locals;
+        const stack = storage[cursor .. cursor + layout.stack];
+        cursor += layout.stack;
 
         const ptr_region = std.mem.sliceAsBytes(storage[cursor .. cursor + ptr_value_slots]);
-        const var_refs: []*core.VarRef = if (var_ref_count == 0)
+        const var_refs: []*core.VarRef = if (layout.var_refs == 0)
             &.{}
         else
             std.mem.bytesAsSlice(*core.VarRef, ptr_region[0..var_ref_bytes]);
-        const open_var_refs: []?*core.VarRef = if (open_var_ref_count == 0)
+        // The open window starts at var_ref_bytes (a multiple of 8) inside the
+        // 16-aligned region; the runtime offset erases the comptime alignment,
+        // so re-assert the pointer alignment explicitly.
+        const open_var_refs: []?*core.VarRef = if (layout.open_var_refs == 0)
             &.{}
         else
             @alignCast(std.mem.bytesAsSlice(?*core.VarRef, ptr_region[var_ref_bytes..][0..open_bytes]));
@@ -100,74 +76,50 @@ pub const FrameSlab = struct {
         };
     }
 
-    pub fn carve(
-        account: *memory.MemoryAccount,
-        arena: *runtime.VmStackArena,
-        arg_count: usize,
-        original_arg_count: usize,
-        local_count: usize,
-        stack_count: usize,
-        var_ref_count: usize,
-        open_var_ref_count: usize,
-    ) ?FrameSlab {
-        const count_1 = std.math.add(usize, arg_count, original_arg_count) catch return null;
-        const count_2 = std.math.add(usize, count_1, local_count) catch return null;
-        const value_count = std.math.add(usize, count_2, stack_count) catch return null;
-        const var_ref_bytes = std.math.mul(usize, @sizeOf(*core.VarRef), var_ref_count) catch return null;
-        const open_bytes = std.math.mul(usize, @sizeOf(?*core.VarRef), open_var_ref_count) catch return null;
-        const ptr_bytes = std.math.add(usize, var_ref_bytes, open_bytes) catch return null;
-        const ptr_value_slots = std.math.divCeil(usize, ptr_bytes, @sizeOf(JSValue)) catch return null;
-        const slab_values = arena.carve(account, value_count + ptr_value_slots) orelse return null;
-
-        var cursor: usize = 0;
-        const args = slab_values[cursor .. cursor + arg_count];
-        cursor += arg_count;
-        const original_args = slab_values[cursor .. cursor + original_arg_count];
-        cursor += original_arg_count;
-        const locals = slab_values[cursor .. cursor + local_count];
-        cursor += local_count;
-        const stack = slab_values[cursor .. cursor + stack_count];
-        cursor += stack_count;
-
-        const ptr_region = std.mem.sliceAsBytes(slab_values[cursor .. cursor + ptr_value_slots]);
-        const var_refs: []*core.VarRef = if (var_ref_count == 0)
-            &.{}
-        else
-            std.mem.bytesAsSlice(*core.VarRef, ptr_region[0..var_ref_bytes]);
-        // The open window starts at var_ref_bytes (a multiple of 8) inside the
-        // 16-aligned region; the runtime offset erases the comptime alignment,
-        // so re-assert the pointer alignment explicitly.
-        const open_var_refs: []?*core.VarRef = if (open_var_ref_count == 0)
-            &.{}
-        else
-            @alignCast(std.mem.bytesAsSlice(?*core.VarRef, ptr_region[var_ref_bytes..][0..open_bytes]));
-        if (open_var_refs.len != 0) @memset(open_var_refs, null);
-
-        return .{
-            .storage = slab_values,
-            .args = args,
-            .original_args = original_args,
-            .locals = locals,
-            .stack = stack,
-            .var_refs = var_refs,
-            .open_var_refs = open_var_refs,
-        };
+    /// Carve one slab from the VM stack arena; null when the layout overflows
+    /// or the arena is exhausted (the caller then falls back to `allocHeap`).
+    pub fn carve(account: *memory.MemoryAccount, arena: *runtime.VmStackArena, layout: SlabLayout) ?FrameSlab {
+        const total = layout.totalSlots() catch return null;
+        const slab_values = arena.carve(account, total) orelse return null;
+        return partition(slab_values, layout);
     }
 
-    pub fn allocHeap(
-        account: *memory.MemoryAccount,
-        arg_count: usize,
-        original_arg_count: usize,
-        local_count: usize,
-        stack_count: usize,
-        var_ref_count: usize,
-        open_var_ref_count: usize,
-    ) !FrameSlab {
-        const total_value_slots = try requiredStorageSlots(arg_count, original_arg_count, local_count, stack_count, var_ref_count, open_var_ref_count);
+    pub fn allocHeap(account: *memory.MemoryAccount, layout: SlabLayout) !FrameSlab {
+        const total_value_slots = try layout.totalSlots();
         if (total_value_slots == 0) return .{};
         const storage = try account.alloc(JSValue, total_value_slots);
         errdefer account.free(JSValue, storage);
-        return partitionStorage(storage, arg_count, original_arg_count, local_count, stack_count, var_ref_count, open_var_ref_count);
+        return partition(storage, layout);
+    }
+};
+
+/// Window sizes of one frame slab, in the order `FrameSlab.partition` lays
+/// them out: the four JSValue windows first, then the two pointer windows
+/// packed into JSValue slots at the tail (qjs alloca partition
+/// quickjs.c).
+pub const SlabLayout = struct {
+    args: usize = 0,
+    original_args: usize = 0,
+    locals: usize = 0,
+    stack: usize = 0,
+    var_refs: usize = 0,
+    open_var_refs: usize = 0,
+
+    fn valueSlots(self: SlabLayout) usize {
+        return self.args + self.original_args + self.locals + self.stack;
+    }
+
+    /// Total JSValue slots the slab needs, with every step overflow-checked.
+    pub fn totalSlots(self: SlabLayout) error{Overflow}!usize {
+        const count_1 = try std.math.add(usize, self.args, self.original_args);
+        const count_2 = try std.math.add(usize, count_1, self.locals);
+        const value_count = try std.math.add(usize, count_2, self.stack);
+        const var_ref_bytes = try std.math.mul(usize, @sizeOf(*core.VarRef), self.var_refs);
+        const open_bytes = try std.math.mul(usize, @sizeOf(?*core.VarRef), self.open_var_refs);
+        const ptr_bytes = try std.math.add(usize, var_ref_bytes, open_bytes);
+        // Unsigned divCeil can only fail on a zero divisor; @sizeOf(JSValue) is not.
+        const ptr_value_slots = std.math.divCeil(usize, ptr_bytes, @sizeOf(JSValue)) catch unreachable;
+        return try std.math.add(usize, value_count, ptr_value_slots);
     }
 };
 
@@ -186,7 +138,7 @@ pub const Ownership = enum(u1) {
 
 /// How a frame reaches its `new.target`. qjs never stores one: it is a
 /// JS_CallInternal parameter that only `OP_special_object NEW_TARGET` reads
-/// (quickjs.c:17984), and JSStackFrame has no field for it (quickjs.c:405-417).
+///, and JSStackFrame has no field for it.
 /// Direct construction therefore needs no per-frame storage at all — the
 /// operand IS `current_function` — which `aliases_function` records without
 /// allocating the cold box. Only a differing target (constructor spread,
@@ -265,9 +217,9 @@ pub const Frame = struct {
     locals: []JSValue = &.{},
     args: []JSValue = &.{},
     /// Slot-typed var-ref array — qjs `JSVarRef **var_refs` (JS_CallInternal
-    /// prologue `var_refs = p->u.func.var_refs`, quickjs.c:17844). Every
+    /// prologue `var_refs = p->u.func.var_refs`, quickjs.c). Every
     /// element is a live cell by construction (js_closure2 fills every slot
-    /// with a real JSVarRef*, quickjs.c:17297-17331); the pre-typed per-read
+    /// with a real JSVarRef*, quickjs.c); the pre-typed per-read
     /// "is this slot a cell" discrimination is gone with the type
     /// (VARREFS-SLOT-TYPING-BLUEPRINT phase D).
     var_refs: []*core.VarRef = &.{},
@@ -314,7 +266,7 @@ pub const Frame = struct {
     // ---- Cold-field read accessors (return the default when `cold == null`) ----
     /// BORROWED, exactly like `current_function`: every reader either tests it
     /// or hands it to a callee that dups what it keeps (qjs's
-    /// `OP_special_object NEW_TARGET` dups at the push, quickjs.c:17984).
+    /// `OP_special_object NEW_TARGET` dups at the push, quickjs.c).
     pub inline fn newTargetValue(self: *const Frame) JSValue {
         if (self.ownership.new_target == .aliases_function) return self.current_function;
         return if (self.cold) |c| c.new_target else JSValue.undefinedValue();
@@ -555,7 +507,7 @@ pub const Frame = struct {
         table.closeAll(rt);
     }
 
-    /// qjs `get_var_ref` (quickjs.c:16997-17039): `assert(vd->is_captured)`,
+    /// qjs `get_var_ref`: `assert(vd->is_captured)`,
     /// `assert(var_ref_idx < b->var_ref_count)`, then reuse `sf->var_refs[i]`
     /// or `js_malloc` a new open cell. Production qjs (NDEBUG) has no bounds
     /// returns; keep the same contract so fclosure fill is not a three-check
@@ -713,7 +665,7 @@ pub fn ensureVarRefsCapacity(ctx: *core.JSContext, frame: *Frame, idx: usize) !v
     const next: []*core.VarRef = std.mem.bytesAsSlice(*core.VarRef, std.mem.sliceAsBytes(next_storage)[0..ptr_bytes]);
     // Backfill slots are fresh closed cells holding undefined, never raw
     // slots: the slot contract is "every slot is a live JSVarRef*" (qjs
-    // js_closure2 fills every slot with a real cell, quickjs.c:17297-17331).
+    // js_closure2 fills every slot with a real cell, quickjs.c).
     // Legacy/synthetic bytecode may still request a sparse index; normal parser
     // output sizes var_refs once during frame construction like qjs.
     const old_len = frame.var_refs.len;

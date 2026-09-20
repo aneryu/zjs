@@ -5,8 +5,8 @@
 //! The matching engine remains in `libs/regexp.zig`; VM/string observable
 //! integration stays behind `regexp_fastpath.zig` and `string_ops.zig` rather
 //! than being folded into these builtin bodies. QuickJS mappings include the
-//! constructor at quickjs.c:47728, flags access at quickjs.c:47943, and
-//! compilation/error handling at quickjs.c:47633-48000.
+//! constructor at quickjs.c, flags access at quickjs.c, and
+//! compilation/error handling at quickjs.c.
 
 const core = @import("../core/root.zig");
 const regexp_adapter = @import("regexp_adapter.zig");
@@ -117,14 +117,14 @@ pub const internal_entries = regexpEntries: {
         // Flag/source accessor getters.
         regexpGetterEntry("get source", @intFromEnum(AccessorMethod.source), &regexpSourceAccessorCall),
         regexpGetterEntry("get flags", @intFromEnum(AccessorMethod.flags), &regexpFlagsAccessorCall),
-        regexpFlagGetterEntry("get global", @intFromEnum(AccessorMethod.global), regexp_adapter.flag_bits.global),
-        regexpFlagGetterEntry("get ignoreCase", @intFromEnum(AccessorMethod.ignore_case), regexp_adapter.flag_bits.ignore_case),
-        regexpFlagGetterEntry("get multiline", @intFromEnum(AccessorMethod.multiline), regexp_adapter.flag_bits.multiline),
-        regexpFlagGetterEntry("get dotAll", @intFromEnum(AccessorMethod.dot_all), regexp_adapter.flag_bits.dot_all),
-        regexpFlagGetterEntry("get unicode", @intFromEnum(AccessorMethod.unicode), regexp_adapter.flag_bits.unicode),
-        regexpFlagGetterEntry("get sticky", @intFromEnum(AccessorMethod.sticky), regexp_adapter.flag_bits.sticky),
-        regexpFlagGetterEntry("get hasIndices", @intFromEnum(AccessorMethod.has_indices), regexp_adapter.flag_bits.indices),
-        regexpFlagGetterEntry("get unicodeSets", @intFromEnum(AccessorMethod.unicode_sets), regexp_adapter.flag_bits.unicode_sets),
+        regexpFlagGetterEntry("get global", @intFromEnum(AccessorMethod.global), .{ .global = true }),
+        regexpFlagGetterEntry("get ignoreCase", @intFromEnum(AccessorMethod.ignore_case), .{ .ignore_case = true }),
+        regexpFlagGetterEntry("get multiline", @intFromEnum(AccessorMethod.multiline), .{ .multiline = true }),
+        regexpFlagGetterEntry("get dotAll", @intFromEnum(AccessorMethod.dot_all), .{ .dot_all = true }),
+        regexpFlagGetterEntry("get unicode", @intFromEnum(AccessorMethod.unicode), .{ .unicode = true }),
+        regexpFlagGetterEntry("get sticky", @intFromEnum(AccessorMethod.sticky), .{ .sticky = true }),
+        regexpFlagGetterEntry("get hasIndices", @intFromEnum(AccessorMethod.has_indices), .{ .indices = true }),
+        regexpFlagGetterEntry("get unicodeSets", @intFromEnum(AccessorMethod.unicode_sets), .{ .unicode_sets = true }),
         // Legacy static RegExp accessors (input/$_, lastMatch, capture groups).
         regexpEntry("get input", 0, @intFromEnum(LegacyAccessorMethod.get_input)),
         regexpEntry("set input", 1, @intFromEnum(LegacyAccessorMethod.set_input)),
@@ -190,12 +190,12 @@ fn regexpGetterEntry(
     };
 }
 
-fn regexpFlagGetterEntry(comptime name: []const u8, comptime id: u32, comptime mask: u16) core.host_function.InternalEntry {
+fn regexpFlagGetterEntry(comptime name: []const u8, comptime id: u32, comptime flag: regexp_adapter.Flags) core.host_function.InternalEntry {
     return .{
         .name = name,
         .length = 0,
         .id = id,
-        .magic = mask,
+        .magic = flag.bits(),
         .cproto = .getter_magic,
         .native_function = .{ .getter_magic = &regexpFlagAccessorCall },
     };
@@ -301,7 +301,7 @@ fn regexpFlagsAccessorCall(
     const active_global = realm.global;
     if (!native_this.is(.object)) return exception_ops.throwTypeErrorMessage(native_ctx, active_global, "not an object");
 
-    // js_regexp_get_flags (quickjs.c:47943): generic receiver; observe the
+    // js_regexp_get_flags: generic receiver; observe the
     // eight flag properties through ordinary [[Get]] in canonical order.
     const flag_atoms = comptime [_]core.Atom{
         core.atom.predefinedId("hasIndices", .string).?,
@@ -347,7 +347,7 @@ fn regexpSourceAccessorCall(
 
     const header = native_this.refHeader() orelse return error.TypeError;
     const receiver = core.Object.fromHeader(header);
-    if (receiver.class_id == core.class.ids.regexp and (regexpFlagBits(receiver) catch null) != null) {
+    if (receiver.class_id == core.class.ids.regexp and (regexpFlags(receiver) catch null) != null) {
         return accessor(native_ctx.runtime, native_this, "source") catch |err| switch (err) {
             error.TypeError => error.TypeError,
             else => err,
@@ -377,9 +377,9 @@ fn regexpFlagAccessorCall(
     const header = native_this.refHeader() orelse return error.TypeError;
     const receiver = core.Object.fromHeader(header);
     if (receiver.class_id == core.class.ids.regexp) {
-        if (regexpFlagBits(receiver) catch null) |bits| {
+        if (regexpFlags(receiver) catch null) |flags| {
             const mask: u16 = @intCast(native_magic);
-            return core.JSValue.boolean((bits & mask) != 0);
+            return core.JSValue.boolean((flags.bits() & mask) != 0);
         }
     }
     if (object_ops.regExpPrototypeFromGlobal(native_ctx.runtime, active_global)) |resolved| {
@@ -500,21 +500,12 @@ fn regExpStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     return try createStringValue(rt, bytes.items);
 }
 
-fn lreCheckStackOverflow(opaque_ptr: ?*anyopaque, alloca_size: usize) bool {
-    // qjs:quickjs.c:48000 lre_check_stack_overflow -> js_check_stack_overflow(ctx->rt, alloca_size)
-    const rt: *core.JSRuntime = @ptrCast(@alignCast(opaque_ptr orelse return false));
-    return rt.checkNativeStackOverflow(alloca_size);
-}
-
 fn regexpCompileOptions(rt: *core.JSRuntime) regexp_lib.CompileOptions {
-    return .{
-        .@"opaque" = rt,
-        .check_stack_overflow = lreCheckStackOverflow,
-    };
+    return .{ .host = regexp_adapter.runtimeHost(rt) };
 }
 
 fn throwRegExpStackOverflow(rt: *core.JSRuntime, global: ?*core.Object) !void {
-    // qjs:quickjs.c:47633-47635 JS_ThrowSyntaxError(ctx, "%s", error_msg) with
+    // qjs:quickjs.c JS_ThrowSyntaxError(ctx, "%s", error_msg) with
     // re_parse_error(s, "stack overflow"). Must not reuse error.StackOverflow,
     // which materializes InternalError.
     if (global) |g| {
@@ -542,7 +533,7 @@ fn compileSourceAndFlags(rt: *core.JSRuntime, global: ?*core.Object, source: cor
     // passes `cesu8 = !unicode` to JS_ToCStringLen2. Besides preserving its
     // exception/allocation order, this keeps non-Unicode patterns expressed
     // in UTF-16 code units rather than merging surrogate pairs prematurely.
-    const flag_bits = regexp_lib.parseFlagBits(flag_bytes.slice()) catch |err| switch (err) {
+    const re_flags = regexp_lib.Flags.parse(flag_bytes.slice()) catch |err| switch (err) {
         error.InvalidPattern, error.Unsupported => return error.SyntaxError,
         error.StackOverflow => {
             try throwRegExpStackOverflow(rt, global);
@@ -550,11 +541,11 @@ fn compileSourceAndFlags(rt: *core.JSRuntime, global: ?*core.Object, source: cor
         },
         else => |other| return other,
     };
-    const cesu8 = (flag_bits & (regexp_lib.flags.unicode | regexp_lib.flags.unicode_sets)) == 0;
+    const cesu8 = !re_flags.fullUnicode();
     var source_bytes = try core.JSValue.String.Utf8.fromValueCesu8(rt.memory.allocator, source, cesu8);
     defer source_bytes.deinit();
 
-    return regexp_lib.compilePatternWithFlagBitsAndOptions(rt.memory.allocator, source_bytes.slice(), flag_bits, regexpCompileOptions(rt)) catch |err| switch (err) {
+    return regexp_lib.compilePatternWithFlagsAndOptions(rt.memory.allocator, source_bytes.slice(), re_flags, regexpCompileOptions(rt)) catch |err| switch (err) {
         error.InvalidPattern, error.Unsupported => return error.SyntaxError,
         error.StackOverflow => {
             try throwRegExpStackOverflow(rt, global);
@@ -635,13 +626,13 @@ pub fn accessor(rt: *core.JSRuntime, object_value: core.JSValue, name: []const u
         const source = try getInternalSource(object);
         return escapedSource(rt, source);
     }
-    const flag_bits = try regexpFlagBits(object);
-    if (std.mem.eql(u8, name, "flags")) return canonicalFlagsValue(rt, flag_bits);
+    const flags = try regexpFlags(object);
+    if (std.mem.eql(u8, name, "flags")) return canonicalFlagsValue(rt, flags);
 
-    const present = if (regexpFlagBit(name)) |bit|
-        (flag_bits & bit) != 0
-    else
-        false;
+    const present = if (flag_by_accessor_name.get(name)) |field| switch (field) {
+        ._reserved => false,
+        inline else => |f| @field(flags, @tagName(f)),
+    } else false;
     return core.JSValue.boolean(present);
 }
 
@@ -691,8 +682,7 @@ fn regexpSourceCanReturnRaw(source: core.JSValue) bool {
     const string_value = source.asStringBody() orelse return false;
     if (string_value.len() == 0) return false;
     var in_class = false;
-    var index: usize = 0;
-    while (index < string_value.len()) : (index += 1) {
+    for (0..string_value.len()) |index| {
         const unit = string_value.codeUnitAt(index);
         switch (unit) {
             '[' => in_class = true,
@@ -743,28 +733,24 @@ pub fn escape(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
 
 fn toString(rt: *core.JSRuntime, object: *core.Object) !core.JSValue {
     const source = try getInternalSource(object);
-    const flag_bits = try regexpFlagBits(object);
+    const flags = try regexpFlags(object);
 
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(rt.memory.allocator);
     try buffer.append(rt.memory.allocator, '/');
     try appendValueString(rt, &buffer, source);
     try buffer.append(rt.memory.allocator, '/');
-    try appendCanonicalRegExpFlags(rt, &buffer, flag_bits);
+    try regexp_adapter.appendCanonicalFlags(rt.memory.allocator, &buffer, flags);
 
     const str = try core.string.String.createUtf8(rt, buffer.items);
     return str.value();
 }
 
-fn canonicalFlagsValue(rt: *core.JSRuntime, flag_bits: u16) !core.JSValue {
+fn canonicalFlagsValue(rt: *core.JSRuntime, flags: regexp_adapter.Flags) !core.JSValue {
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(rt.memory.allocator);
-    try appendCanonicalRegExpFlags(rt, &buffer, flag_bits);
+    try regexp_adapter.appendCanonicalFlags(rt.memory.allocator, &buffer, flags);
     return createStringValue(rt, buffer.items);
-}
-
-fn appendCanonicalRegExpFlags(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), flag_bits: u16) !void {
-    try regexp_adapter.appendCanonicalFlagsFromBits(rt.memory.allocator, buffer, flag_bits);
 }
 
 fn expectRegExpObject(value: core.JSValue) !*core.Object {
@@ -791,23 +777,23 @@ fn getInternalFlags(rt: *core.JSRuntime, object: *core.Object) !core.JSValue {
     return regexp_adapter.flagsStringValueFromBytecode(rt, object.regexpCompiledBytecode());
 }
 
-fn regexpFlagBits(object: *core.Object) !u16 {
+fn regexpFlags(object: *core.Object) !regexp_adapter.Flags {
     const bytecode = object.regexpCompiledBytecode();
     if (bytecode.len == 0) return error.TypeError;
-    return regexp_adapter.flagBitsFromBytecode(bytecode);
+    return regexp_adapter.flagsFromBytecode(bytecode);
 }
 
-fn regexpFlagBit(name: []const u8) ?u16 {
-    if (std.mem.eql(u8, name, "global")) return regexp_adapter.flag_bits.global;
-    if (std.mem.eql(u8, name, "ignoreCase")) return regexp_adapter.flag_bits.ignore_case;
-    if (std.mem.eql(u8, name, "multiline")) return regexp_adapter.flag_bits.multiline;
-    if (std.mem.eql(u8, name, "dotAll")) return regexp_adapter.flag_bits.dot_all;
-    if (std.mem.eql(u8, name, "unicode")) return regexp_adapter.flag_bits.unicode;
-    if (std.mem.eql(u8, name, "sticky")) return regexp_adapter.flag_bits.sticky;
-    if (std.mem.eql(u8, name, "hasIndices")) return regexp_adapter.flag_bits.indices;
-    if (std.mem.eql(u8, name, "unicodeSets")) return regexp_adapter.flag_bits.unicode_sets;
-    return null;
-}
+/// Accessor name -> flag field, for the name-dispatched accessor path.
+const flag_by_accessor_name = std.StaticStringMap(std.meta.FieldEnum(regexp_adapter.Flags)).initComptime(.{
+    .{ "global", .global },
+    .{ "ignoreCase", .ignore_case },
+    .{ "multiline", .multiline },
+    .{ "dotAll", .dot_all },
+    .{ "unicode", .unicode },
+    .{ "sticky", .sticky },
+    .{ "hasIndices", .indices },
+    .{ "unicodeSets", .unicode_sets },
+});
 
 fn appendEscapedCodeUnit(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), unit: u16, is_first: bool) !void {
     if (unit <= 0x7f) {

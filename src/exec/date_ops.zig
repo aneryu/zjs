@@ -4,9 +4,9 @@
 //! owned locally, and constructed/returned JSValues transfer one owned
 //! reference. VM-observable coercion stays on the explicit call environment;
 //! record bodies receive only already-resolved inputs where possible. QuickJS
-//! mappings include `set_date_field` at quickjs.c:55253, Date construction at
-//! quickjs.c:55403-55480, parsing at quickjs.c:55907, and
-//! `Symbol.toPrimitive` at quickjs.c:55964.
+//! mappings include `set_date_field` at quickjs.c, Date construction at
+//! quickjs.c, parsing at quickjs.c, and
+//! `Symbol.toPrimitive` at quickjs.c.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -48,42 +48,34 @@ fn constructDateRecord(
     return (try builtin_dispatch.callConstructRecord(ctx, null, null, &.{}, null, date_construct_ref, prototype, args, null, null)) orelse error.TypeError;
 }
 
-const date_method_ids = core.host_function.builtin_method_id_lookup.date;
-const DatePrototypeMethod = core.host_function.builtin_method_ids.date.PrototypeMethod;
-
-/// Route a Date prototype-method *body* through the record table's
-/// func-object-free arm. `decoded_method_id` is the legacy 1..34 selector the
-/// builtin date bodies switch on; it is re-encoded to its `PrototypeMethod`
-/// record id so the dispatch lands on `exec/date_ops.zig` `dateCall` (which runs
-/// the pure `methodCallArgs` body for it). `args` must already be coerced. This
-/// replaces the former direct builtins-layer calls while preserving the record
-/// dispatch shape.
+/// Route a Date.prototype method *body* through the record table's
+/// func-object-free arm so the dispatch lands on `dateCall`, which runs the
+/// pure `methodCallArgs` body. `args` must already be coerced.
 pub fn callDateBody(
     ctx: *core.JSContext,
     this_value: core.JSValue,
-    decoded_method_id: u32,
+    method: PrototypeMethod,
     args: []const core.JSValue,
 ) !core.JSValue {
-    const native_ref = core.function.NativeBuiltinRef{ .domain = .date, .id = date_method_ids.encodePrototypeMethodId(decoded_method_id).? };
+    const native_ref = core.function.NativeBuiltinRef{ .domain = .date, .id = @intFromEnum(method) };
     return (try builtin_dispatch.callInternalRecord(ctx, null, null, &.{}, null, this_value, native_ref, args, null, null)) orelse error.TypeError;
 }
 
 /// Route a Date static-method body (`Date.UTC`/`Date.parse`/`Date.now`) through
-/// the table. `static_method_id` is the `StaticMethod` enum value (1/2/3), which
-/// doubles as the `staticCall` selector; `args` must already be coerced.
+/// the table; `args` must already be coerced.
 pub fn callDateStaticBody(
     ctx: *core.JSContext,
-    static_method_id: u32,
+    method: StaticMethod,
     args: []const core.JSValue,
 ) !core.JSValue {
-    const native_ref = core.function.NativeBuiltinRef{ .domain = .date, .id = static_method_id };
+    const native_ref = core.function.NativeBuiltinRef{ .domain = .date, .id = @intFromEnum(method) };
     return (try builtin_dispatch.callInternalRecord(ctx, null, null, &.{}, null, core.JSValue.undefinedValue(), native_ref, args, null, null)) orelse error.TypeError;
 }
 
 /// Capture a Date instance's `[[DateValue]]` as an f64 by routing the `getTime`
 /// body through the table (the spec captures `t` before coercing setter args).
 fn captureDateValueMs(ctx: *core.JSContext, this_value: core.JSValue) !f64 {
-    const captured_value = try callDateBody(ctx, this_value, 1, &.{});
+    const captured_value = try callDateBody(ctx, this_value, .get_time, &.{});
     return value_ops.numberValue(captured_value) orelse std.math.nan(f64);
 }
 
@@ -96,26 +88,26 @@ fn callDateSetYearWithCapturedMs(
     captured_ms: f64,
     year_number: f64,
 ) !core.JSValue {
-    const native_ref = core.function.NativeBuiltinRef{ .domain = .date, .id = @intFromEnum(DatePrototypeMethod.set_year_with_captured_ms) };
+    const native_ref = core.function.NativeBuiltinRef{ .domain = .date, .id = @intFromEnum(PrototypeMethod.set_year_with_captured_ms) };
     const packed_args = [_]core.JSValue{ core.JSValue.float64(captured_ms), core.JSValue.float64(year_number) };
     return (try builtin_dispatch.callInternalRecord(ctx, null, null, &.{}, null, this_value, native_ref, &packed_args, null, null)) orelse error.TypeError;
 }
 
-/// Route a date-parts setter (decoded ids 25..31) with a pre-captured
-/// `[[DateValue]]` and coerced field args through the table's captured-setter arm
+/// Route a date-parts setter with a pre-captured `[[DateValue]]` and coerced
+/// field args through the table's captured-setter arm
 /// (`methodCallArgsWithCapturedMs` body). Layout: args[0]=captured ms,
-/// args[1]=int32 decoded setter id, args[2..]=coerced field args.
+/// args[1]=int32 setter `PrototypeMethod` id, args[2..]=coerced field args.
 fn callDateSetPartsWithCapturedMs(
     ctx: *core.JSContext,
     this_value: core.JSValue,
-    decoded_method_id: u32,
+    method: PrototypeMethod,
     captured_ms: f64,
     args: []const core.JSValue,
 ) !core.JSValue {
-    const native_ref = core.function.NativeBuiltinRef{ .domain = .date, .id = @intFromEnum(DatePrototypeMethod.set_parts_with_captured_ms) };
+    const native_ref = core.function.NativeBuiltinRef{ .domain = .date, .id = @intFromEnum(PrototypeMethod.set_parts_with_captured_ms) };
     var packed_args: [6]core.JSValue = undefined;
     packed_args[0] = core.JSValue.float64(captured_ms);
-    packed_args[1] = core.JSValue.int32(@intCast(decoded_method_id));
+    packed_args[1] = core.JSValue.int32(@intCast(@intFromEnum(method)));
     const count = @min(args.len, packed_args.len - 2);
     @memcpy(packed_args[2 .. 2 + count], args[0..count]);
     return (try builtin_dispatch.callInternalRecord(ctx, null, null, &.{}, null, this_value, native_ref, packed_args[0 .. 2 + count], null, null)) orelse error.TypeError;
@@ -157,7 +149,7 @@ pub fn dateSetTime(
     if (object.class_id != core.class.ids.date) return null;
     const time_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const time_value = try coercion_ops.toNumberForDateMethod(ctx, output, global, time_input, caller_function, caller_frame);
-    return try callDateBody(ctx, this_value, 24, &.{time_value});
+    return try callDateBody(ctx, this_value, .set_time, &.{time_value});
 }
 
 pub fn dateStaticCall(
@@ -165,19 +157,19 @@ pub fn dateStaticCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     this_value: core.JSValue,
-    method_id: u32,
+    method: StaticMethod,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     _ = this_value;
-    if (method_id != 1) return null;
+    if (method != .utc) return null;
     var coerced_args: [7]core.JSValue = undefined;
     var coerced_len: usize = 0;
     while (coerced_len < args.len and coerced_len < coerced_args.len) : (coerced_len += 1) {
         coerced_args[coerced_len] = try coercion_ops.toNumberForDateMethod(ctx, output, global, args[coerced_len], caller_function, caller_frame);
     }
-    return try callDateStaticBody(ctx, method_id, coerced_args[0..coerced_len]);
+    return try callDateStaticBody(ctx, method, coerced_args[0..coerced_len]);
 }
 
 pub fn dateCapturedSetterCall(
@@ -185,37 +177,36 @@ pub fn dateCapturedSetterCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     this_value: core.JSValue,
-    method_id: u32,
+    method: PrototypeMethod,
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    if (method_id < 25 or method_id > 31) return null;
+    // qjs set_date_field coerces exactly `min_int(argc, end_field -
+    // first_field)` arguments; extra arguments are not
+    // coerced (their valueOf must not run).
+    const field_count: usize = switch (method) {
+        .set_milliseconds => 1,
+        .set_seconds => 2,
+        .set_minutes => 3,
+        .set_hours => 4,
+        .set_date => 1,
+        .set_month => 2,
+        .set_full_year => 3,
+        else => return null,
+    };
     const object = object_ops.objectFromValue(this_value) orelse return null;
     if (object.class_id != core.class.ids.date) return null;
 
     const captured_ms = try captureDateValueMs(ctx, this_value);
 
-    // qjs set_date_field coerces exactly `min_int(argc, end_field -
-    // first_field)` arguments (quickjs.c:55265); extra arguments are not
-    // coerced (their valueOf must not run).
-    const field_count: usize = switch (method_id) {
-        25 => 1, // setMilliseconds 0x671
-        26 => 2, // setSeconds 0x571
-        27 => 3, // setMinutes 0x471
-        28 => 4, // setHours 0x371
-        29 => 1, // setDate 0x211
-        30 => 2, // setMonth 0x121
-        31 => 3, // setFullYear 0x011
-        else => unreachable,
-    };
     var coerced_args: [4]core.JSValue = undefined;
     var coerced_len: usize = 0;
     while (coerced_len < args.len and coerced_len < field_count) : (coerced_len += 1) {
         coerced_args[coerced_len] = try coercion_ops.toNumberForDateMethod(ctx, output, global, args[coerced_len], caller_function, caller_frame);
     }
 
-    return try callDateSetPartsWithCapturedMs(ctx, this_value, method_id, captured_ms, coerced_args[0..coerced_len]);
+    return try callDateSetPartsWithCapturedMs(ctx, this_value, method, captured_ms, coerced_args[0..coerced_len]);
 }
 
 pub fn dateToJsonCall(
@@ -254,7 +245,7 @@ pub fn dateConstructWithPrototype(
     if (args.len == 1) {
         if (object_ops.objectFromValue(args[0])) |object| {
             if (object.class_id == core.class.ids.date) {
-                const time_value = try callDateBody(ctx, args[0], 1, &.{});
+                const time_value = try callDateBody(ctx, args[0], .get_time, &.{});
                 return constructDateRecord(ctx, prototype, &.{time_value});
             }
 
@@ -304,7 +295,7 @@ pub fn dateToPrimitiveCall(
 fn dateToPrimitiveHint(value: core.JSValue) ?DateToPrimitiveHint {
     if (!value.isString()) return null;
     if (string_ops.stringValueUnitsEqualBytes(value, "string") or string_ops.stringValueUnitsEqualBytes(value, "default")) return .string;
-    // qjs js_date_Symbol_toPrimitive (quickjs.c:55964) maps JS_ATOM_integer to
+    // qjs js_date_Symbol_toPrimitive maps JS_ATOM_integer to
     // HINT_NUMBER alongside JS_ATOM_number (nonstandard qjs extension;
     // test262 does not exercise the 'integer' hint).
     if (string_ops.stringValueUnitsEqualBytes(value, "number") or string_ops.stringValueUnitsEqualBytes(value, "integer")) return .number;
@@ -344,26 +335,6 @@ pub const ConstructorMethod = core.host_function.builtin_method_ids.date.Constru
 // importing this operation Module; re-exported here so the dispatch/install side keeps the
 // original name.
 pub const PrototypeMethod = core.host_function.builtin_method_ids.date.PrototypeMethod;
-
-/// Date-domain record ids that exist only on the builtins side (they continue
-/// the `PrototypeMethod` id space above without touching engine core): the
-/// UTC/local method split (QuickJS gives every name its own
-/// JS_CFUNC_MAGIC_DEF entry with an `is_local` magic bit, quickjs.c
-/// js_date_proto_funcs) and the qjs fmt=3 `toLocale*` shapes. Only date.zig
-/// produces and decodes these ids; the exec glue never sees them.
-pub const ExtendedPrototypeMethod = enum(u32) {
-    get_utc_day = 138,
-    set_utc_milliseconds = 139,
-    set_utc_seconds = 140,
-    set_utc_minutes = 141,
-    set_utc_hours = 142,
-    set_utc_date = 143,
-    set_utc_month = 144,
-    set_utc_full_year = 145,
-    to_locale_string = 146,
-    to_locale_date_string = 147,
-    to_locale_time_string = 148,
-};
 
 /// Declaration + dispatch table for the `.date` native-builtin domain
 /// (QuickJS js_date_funcs analogue). One shared record handler `dateCall`
@@ -423,17 +394,17 @@ pub const internal_entries = dateEntries: {
         dateEntry("", 0, @intFromEnum(PrototypeMethod.set_parts_with_captured_ms)),
         // Local/UTC method split + qjs fmt=3 locale shapes (see
         // `ExtendedPrototypeMethod`); handled entirely inside `dateCall`.
-        dateEntry("getUTCDay", 0, @intFromEnum(ExtendedPrototypeMethod.get_utc_day)),
-        dateEntry("setUTCMilliseconds", 1, @intFromEnum(ExtendedPrototypeMethod.set_utc_milliseconds)),
-        dateEntry("setUTCSeconds", 2, @intFromEnum(ExtendedPrototypeMethod.set_utc_seconds)),
-        dateEntry("setUTCMinutes", 3, @intFromEnum(ExtendedPrototypeMethod.set_utc_minutes)),
-        dateEntry("setUTCHours", 4, @intFromEnum(ExtendedPrototypeMethod.set_utc_hours)),
-        dateEntry("setUTCDate", 1, @intFromEnum(ExtendedPrototypeMethod.set_utc_date)),
-        dateEntry("setUTCMonth", 2, @intFromEnum(ExtendedPrototypeMethod.set_utc_month)),
-        dateEntry("setUTCFullYear", 3, @intFromEnum(ExtendedPrototypeMethod.set_utc_full_year)),
-        dateEntry("toLocaleString", 0, @intFromEnum(ExtendedPrototypeMethod.to_locale_string)),
-        dateEntry("toLocaleDateString", 0, @intFromEnum(ExtendedPrototypeMethod.to_locale_date_string)),
-        dateEntry("toLocaleTimeString", 0, @intFromEnum(ExtendedPrototypeMethod.to_locale_time_string)),
+        dateEntry("getUTCDay", 0, @intFromEnum(PrototypeMethod.get_utc_day)),
+        dateEntry("setUTCMilliseconds", 1, @intFromEnum(PrototypeMethod.set_utc_milliseconds)),
+        dateEntry("setUTCSeconds", 2, @intFromEnum(PrototypeMethod.set_utc_seconds)),
+        dateEntry("setUTCMinutes", 3, @intFromEnum(PrototypeMethod.set_utc_minutes)),
+        dateEntry("setUTCHours", 4, @intFromEnum(PrototypeMethod.set_utc_hours)),
+        dateEntry("setUTCDate", 1, @intFromEnum(PrototypeMethod.set_utc_date)),
+        dateEntry("setUTCMonth", 2, @intFromEnum(PrototypeMethod.set_utc_month)),
+        dateEntry("setUTCFullYear", 3, @intFromEnum(PrototypeMethod.set_utc_full_year)),
+        dateEntry("toLocaleString", 0, @intFromEnum(PrototypeMethod.to_locale_string)),
+        dateEntry("toLocaleDateString", 0, @intFromEnum(PrototypeMethod.to_locale_date_string)),
+        dateEntry("toLocaleTimeString", 0, @intFromEnum(PrototypeMethod.to_locale_time_string)),
     };
 };
 
@@ -523,13 +494,13 @@ fn dateCall(
         while (coerced_len < args.len and coerced_len < coerced_args.len) : (coerced_len += 1) {
             coerced_args[coerced_len] = try coercion_ops.toNumberForDateMethod(ctx, output, active_global, args[coerced_len], null, null);
         }
-        return staticCall(ctx.runtime, id, coerced_args[0..coerced_len]) catch |err| switch (err) {
+        return staticCall(ctx.runtime, .utc, coerced_args[0..coerced_len]) catch |err| switch (err) {
             error.TypeError => error.TypeError,
             else => err,
         };
     }
     if (id == @intFromEnum(StaticMethod.parse)) {
-        // js_Date_parse (quickjs.c:55907) ToString-coerces its argument (never
+        // js_Date_parse ToString-coerces its argument (never
         // a TypeError arity/type gate); the coercion runs in VM context so a
         // user `toString`/`Symbol.toPrimitive` executes with the caller frame.
         const active_global = callable_global orelse return error.TypeError;
@@ -537,20 +508,46 @@ fn dateCall(
         const string_value = try string_ops.toStringForAnnexB(ctx, output, active_global, input, caller_function, caller_frame);
         return core.JSValue.float64(try parseDateString(string_value));
     }
-    if (decodeExtendedPrototypeMethodId(id)) |method_id| {
+    if (std.enums.fromInt(PrototypeMethod, id)) |method| {
         const active_global = callable_global orelse return error.TypeError;
-        return dateExtendedPrototypeCall(ctx, output, active_global, host_call.this_value, method_id, args);
-    }
-    if (decodePrototypeMethodId(id)) |method_id| {
-        const active_global = callable_global orelse return error.TypeError;
-        return object_ops.datePrototypeMethod(ctx, output, active_global, host_call.this_value, method_id, args, caller_function, caller_frame) catch |err| switch (err) {
+        switch (method) {
+            // Only reachable through the engine-internal arm above.
+            .set_year_with_captured_ms, .set_parts_with_captured_ms => return error.TypeError,
+            else => {},
+        }
+        if (isBuiltinsLocalMethod(method)) {
+            return dateExtendedPrototypeCall(ctx, output, active_global, host_call.this_value, method, args);
+        }
+        return object_ops.datePrototypeMethod(ctx, output, active_global, host_call.this_value, method, args, caller_function, caller_frame) catch |err| switch (err) {
             error.TypeError => error.TypeError,
             else => err,
         };
     }
-    return staticCall(ctx.runtime, id, args) catch |err| switch (err) {
+    const static_method = std.enums.fromInt(StaticMethod, id) orelse return error.TypeError;
+    return staticCall(ctx.runtime, static_method, args) catch |err| switch (err) {
         error.TypeError => error.TypeError,
         else => err,
+    };
+}
+
+/// The UTC/local twins and `toLocale*` shapes are coerced by
+/// `dateExtendedPrototypeCall` here; every other prototype method goes
+/// through the exec dispatcher (`object_ops.datePrototypeMethod`).
+fn isBuiltinsLocalMethod(method: PrototypeMethod) bool {
+    return switch (method) {
+        .get_utc_day,
+        .set_utc_milliseconds,
+        .set_utc_seconds,
+        .set_utc_minutes,
+        .set_utc_hours,
+        .set_utc_date,
+        .set_utc_month,
+        .set_utc_full_year,
+        .to_locale_string,
+        .to_locale_date_string,
+        .to_locale_time_string,
+        => true,
+        else => false,
     };
 }
 
@@ -559,36 +556,33 @@ fn dateCall(
 /// from `dateCall`'s `func_obj == null` arm. `id` is a `.date` record id:
 /// `StaticMethod.{utc,parse,now}` run the static body on the pre-coerced args;
 /// the captured-setter selectors unpack the captured `[[DateValue]]` (and, for
-/// the parts variant, the decoded setter id) the exec glue threaded through
-/// `args`; every other prototype id runs the plain `methodCallArgs` body on the
-/// decoded id.
+/// the parts variant, the setter method id) the exec glue threaded through
+/// `args`; every other prototype method runs the plain `methodCallArgs` body.
 fn dateInternalBodyCall(rt: *core.JSRuntime, id: u32, this_value: core.JSValue, args: []const core.JSValue) HostError!core.JSValue {
     const result = blk: {
-        if (id == @intFromEnum(PrototypeMethod.set_year_with_captured_ms)) {
-            const captured_ms = args[0].asNumber() orelse std.math.nan(f64);
-            const year_number = args[1].asNumber() orelse std.math.nan(f64);
-            break :blk setYearNumber(this_value, captured_ms, year_number);
-        }
-        if (id == @intFromEnum(PrototypeMethod.set_parts_with_captured_ms)) {
-            const captured_ms = args[0].asNumber() orelse std.math.nan(f64);
-            const setter_id: u32 = @intFromFloat(args[1].asNumber() orelse 0);
-            break :blk methodCallArgsWithCapturedMs(this_value, setter_id, captured_ms, args[2..]);
-        }
-        if (decodeExtendedPrototypeMethodId(id)) |method_id| {
-            break :blk methodCallArgs(rt, this_value, method_id, args);
-        }
-        if (decodePrototypeMethodId(id)) |method_id| {
-            break :blk methodCallArgs(rt, this_value, method_id, args);
-        }
-        // `StaticMethod.{utc,parse,now}`: the enum values (1/2/3) are the
-        // `staticCall` method selectors; the glue pre-coerced any args.
-        break :blk staticCall(rt, id, args);
+        if (std.enums.fromInt(PrototypeMethod, id)) |method| switch (method) {
+            .set_year_with_captured_ms => {
+                const captured_ms = args[0].asNumber() orelse std.math.nan(f64);
+                const year_number = args[1].asNumber() orelse std.math.nan(f64);
+                break :blk setYearNumber(this_value, captured_ms, year_number);
+            },
+            .set_parts_with_captured_ms => {
+                const captured_ms = args[0].asNumber() orelse std.math.nan(f64);
+                const setter_id: u32 = @intFromFloat(args[1].asNumber() orelse 0);
+                const setter = std.enums.fromInt(PrototypeMethod, setter_id) orelse break :blk error.TypeError;
+                break :blk methodCallArgsWithCapturedMs(this_value, setter, captured_ms, args[2..]);
+            },
+            else => break :blk methodCallArgs(rt, this_value, method, args),
+        };
+        // `StaticMethod.{utc,parse,now}`: the glue pre-coerced any args.
+        const static_method = std.enums.fromInt(StaticMethod, id) orelse break :blk error.TypeError;
+        break :blk staticCall(rt, static_method, args);
     };
     return result catch |err| return @as(HostError, @errorCast(err));
 }
 
 /// Coercing arm for the extended (builtins-local) prototype record ids.
-/// Mirrors QuickJS: `set_date_field` (quickjs.c:55253) checks `this` and reads
+/// Mirrors QuickJS: `set_date_field` checks `this` and reads
 /// the time value *before* coercing arguments, then coerces exactly
 /// `min(argc, end_field - first_field)` arguments; `get_date_field` /
 /// `get_date_string` bodies take no arguments.
@@ -597,24 +591,24 @@ fn dateExtendedPrototypeCall(
     output: ?*std.Io.Writer,
     global: *core.Object,
     this_value: core.JSValue,
-    method_id: u32,
+    method: PrototypeMethod,
     args: []const core.JSValue,
 ) HostError!core.JSValue {
     const rt = ctx.runtime;
-    if (setterSpan(method_id)) |span| {
+    if (setterSpan(method)) |span| {
         const object = expectDateObject(this_value) catch
             return exception_ops.throwTypeErrorMessage(ctx, global, "not a Date object");
         const captured_ms = dateValue(object) catch
             return exception_ops.throwTypeErrorMessage(ctx, global, "not a Date object");
         var coerced_args: [4]core.JSValue = undefined;
         var coerced_len: usize = 0;
-        const coerce_count = @min(args.len, span.end - span.first);
+        const coerce_count = @min(args.len, span.count());
         while (coerced_len < coerce_count) : (coerced_len += 1) {
             coerced_args[coerced_len] = try coercion_ops.toNumberForDateMethod(ctx, output, global, args[coerced_len], null, null);
         }
         return setDateFieldBody(object, captured_ms, coerced_args[0..coerced_len], args.len, span);
     }
-    return methodCallArgs(rt, this_value, method_id, args) catch |err| switch (err) {
+    return methodCallArgs(rt, this_value, method, args) catch |err| switch (err) {
         error.TypeError => return exception_ops.throwTypeErrorMessage(ctx, global, "not a Date object"),
         else => err,
     };
@@ -623,80 +617,59 @@ fn dateExtendedPrototypeCall(
 // Pure name->id mapping relocated to engine core (`core/host_function.zig`,
 // next to `builtin_method_ids.date`) in Phase 6b-3c; re-exported here so the
 // dispatch/install side keeps the original name.
-pub const staticMethodId = core.host_function.builtin_method_id_lookup.date.staticMethodId;
+pub const staticMethod = core.host_function.builtin_method_id_lookup.date.staticMethod;
+
+const prototype_method_names = std.StaticStringMap(PrototypeMethod).initComptime(.{
+    .{ "getTime", .get_time },
+    .{ "valueOf", .value_of },
+    .{ "getFullYear", .get_full_year },
+    .{ "getTimezoneOffset", .get_timezone_offset },
+    .{ "getMonth", .get_month },
+    .{ "getDate", .get_date },
+    .{ "getHours", .get_hours },
+    .{ "getMinutes", .get_minutes },
+    .{ "getSeconds", .get_seconds },
+    .{ "getMilliseconds", .get_milliseconds },
+    .{ "toISOString", .to_iso_string },
+    .{ "toJSON", .to_json },
+    .{ "getUTCFullYear", .get_utc_full_year },
+    .{ "getUTCMonth", .get_utc_month },
+    .{ "getUTCDate", .get_utc_date },
+    .{ "getUTCHours", .get_utc_hours },
+    .{ "getUTCMinutes", .get_utc_minutes },
+    .{ "getUTCSeconds", .get_utc_seconds },
+    .{ "getUTCMilliseconds", .get_utc_milliseconds },
+    .{ "getUTCDay", .get_utc_day },
+    .{ "getDay", .get_day },
+    .{ "toString", .to_string },
+    .{ "toLocaleString", .to_locale_string },
+    .{ "toUTCString", .to_utc_string },
+    .{ "toGMTString", .to_utc_string },
+    .{ "toDateString", .to_date_string },
+    .{ "toLocaleDateString", .to_locale_date_string },
+    .{ "toTimeString", .to_time_string },
+    .{ "toLocaleTimeString", .to_locale_time_string },
+    .{ "getYear", .get_year },
+    .{ "setYear", .set_year },
+    .{ "setTime", .set_time },
+    .{ "setMilliseconds", .set_milliseconds },
+    .{ "setUTCMilliseconds", .set_utc_milliseconds },
+    .{ "setSeconds", .set_seconds },
+    .{ "setUTCSeconds", .set_utc_seconds },
+    .{ "setMinutes", .set_minutes },
+    .{ "setUTCMinutes", .set_utc_minutes },
+    .{ "setHours", .set_hours },
+    .{ "setUTCHours", .set_utc_hours },
+    .{ "setDate", .set_date },
+    .{ "setUTCDate", .set_utc_date },
+    .{ "setMonth", .set_month },
+    .{ "setUTCMonth", .set_utc_month },
+    .{ "setFullYear", .set_full_year },
+    .{ "setUTCFullYear", .set_utc_full_year },
+});
 
 pub fn prototypeMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "getTime")) return @intFromEnum(PrototypeMethod.get_time);
-    if (std.mem.eql(u8, name, "valueOf")) return @intFromEnum(PrototypeMethod.value_of);
-    if (std.mem.eql(u8, name, "getFullYear")) return @intFromEnum(PrototypeMethod.get_full_year);
-    if (std.mem.eql(u8, name, "getTimezoneOffset")) return @intFromEnum(PrototypeMethod.get_timezone_offset);
-    if (std.mem.eql(u8, name, "getMonth")) return @intFromEnum(PrototypeMethod.get_month);
-    if (std.mem.eql(u8, name, "getDate")) return @intFromEnum(PrototypeMethod.get_date);
-    if (std.mem.eql(u8, name, "getHours")) return @intFromEnum(PrototypeMethod.get_hours);
-    if (std.mem.eql(u8, name, "getMinutes")) return @intFromEnum(PrototypeMethod.get_minutes);
-    if (std.mem.eql(u8, name, "getSeconds")) return @intFromEnum(PrototypeMethod.get_seconds);
-    if (std.mem.eql(u8, name, "getMilliseconds")) return @intFromEnum(PrototypeMethod.get_milliseconds);
-    if (std.mem.eql(u8, name, "toISOString")) return @intFromEnum(PrototypeMethod.to_iso_string);
-    if (std.mem.eql(u8, name, "toJSON")) return @intFromEnum(PrototypeMethod.to_json);
-    if (std.mem.eql(u8, name, "getUTCFullYear")) return @intFromEnum(PrototypeMethod.get_utc_full_year);
-    if (std.mem.eql(u8, name, "getUTCMonth")) return @intFromEnum(PrototypeMethod.get_utc_month);
-    if (std.mem.eql(u8, name, "getUTCDate")) return @intFromEnum(PrototypeMethod.get_utc_date);
-    if (std.mem.eql(u8, name, "getUTCHours")) return @intFromEnum(PrototypeMethod.get_utc_hours);
-    if (std.mem.eql(u8, name, "getUTCMinutes")) return @intFromEnum(PrototypeMethod.get_utc_minutes);
-    if (std.mem.eql(u8, name, "getUTCSeconds")) return @intFromEnum(PrototypeMethod.get_utc_seconds);
-    if (std.mem.eql(u8, name, "getUTCMilliseconds")) return @intFromEnum(PrototypeMethod.get_utc_milliseconds);
-    if (std.mem.eql(u8, name, "getUTCDay")) return @intFromEnum(ExtendedPrototypeMethod.get_utc_day);
-    if (std.mem.eql(u8, name, "getDay")) return @intFromEnum(PrototypeMethod.get_day);
-    if (std.mem.eql(u8, name, "toString")) return @intFromEnum(PrototypeMethod.to_string);
-    if (std.mem.eql(u8, name, "toLocaleString")) return @intFromEnum(ExtendedPrototypeMethod.to_locale_string);
-    if (std.mem.eql(u8, name, "toUTCString") or std.mem.eql(u8, name, "toGMTString")) return @intFromEnum(PrototypeMethod.to_utc_string);
-    if (std.mem.eql(u8, name, "toDateString")) return @intFromEnum(PrototypeMethod.to_date_string);
-    if (std.mem.eql(u8, name, "toLocaleDateString")) return @intFromEnum(ExtendedPrototypeMethod.to_locale_date_string);
-    if (std.mem.eql(u8, name, "toTimeString")) return @intFromEnum(PrototypeMethod.to_time_string);
-    if (std.mem.eql(u8, name, "toLocaleTimeString")) return @intFromEnum(ExtendedPrototypeMethod.to_locale_time_string);
-    if (std.mem.eql(u8, name, "getYear")) return @intFromEnum(PrototypeMethod.get_year);
-    if (std.mem.eql(u8, name, "setYear")) return @intFromEnum(PrototypeMethod.set_year);
-    if (std.mem.eql(u8, name, "setTime")) return @intFromEnum(PrototypeMethod.set_time);
-    if (std.mem.eql(u8, name, "setMilliseconds")) return @intFromEnum(PrototypeMethod.set_milliseconds);
-    if (std.mem.eql(u8, name, "setUTCMilliseconds")) return @intFromEnum(ExtendedPrototypeMethod.set_utc_milliseconds);
-    if (std.mem.eql(u8, name, "setSeconds")) return @intFromEnum(PrototypeMethod.set_seconds);
-    if (std.mem.eql(u8, name, "setUTCSeconds")) return @intFromEnum(ExtendedPrototypeMethod.set_utc_seconds);
-    if (std.mem.eql(u8, name, "setMinutes")) return @intFromEnum(PrototypeMethod.set_minutes);
-    if (std.mem.eql(u8, name, "setUTCMinutes")) return @intFromEnum(ExtendedPrototypeMethod.set_utc_minutes);
-    if (std.mem.eql(u8, name, "setHours")) return @intFromEnum(PrototypeMethod.set_hours);
-    if (std.mem.eql(u8, name, "setUTCHours")) return @intFromEnum(ExtendedPrototypeMethod.set_utc_hours);
-    if (std.mem.eql(u8, name, "setDate")) return @intFromEnum(PrototypeMethod.set_date);
-    if (std.mem.eql(u8, name, "setUTCDate")) return @intFromEnum(ExtendedPrototypeMethod.set_utc_date);
-    if (std.mem.eql(u8, name, "setMonth")) return @intFromEnum(PrototypeMethod.set_month);
-    if (std.mem.eql(u8, name, "setUTCMonth")) return @intFromEnum(ExtendedPrototypeMethod.set_utc_month);
-    if (std.mem.eql(u8, name, "setFullYear")) return @intFromEnum(PrototypeMethod.set_full_year);
-    if (std.mem.eql(u8, name, "setUTCFullYear")) return @intFromEnum(ExtendedPrototypeMethod.set_utc_full_year);
-    return null;
-}
-
-// Pure id<->id mappings relocated to engine core (`core/host_function.zig`,
-// `builtin_method_id_lookup.date`) in Phase 6b-3 STEP 5; re-exported here so the
-// dispatch side keeps the original names.
-pub const decodePrototypeMethodId = core.host_function.builtin_method_id_lookup.date.decodePrototypeMethodId;
-pub const encodePrototypeMethodId = core.host_function.builtin_method_id_lookup.date.encodePrototypeMethodId;
-
-/// Extended record id -> legacy body selector (continues the 1..34 space the
-/// core decode covers): 35 getUTCDay, 36..42 setUTC*, 43..45 toLocale*.
-fn decodeExtendedPrototypeMethodId(id: u32) ?u32 {
-    return switch (id) {
-        @intFromEnum(ExtendedPrototypeMethod.get_utc_day) => 35,
-        @intFromEnum(ExtendedPrototypeMethod.set_utc_milliseconds) => 36,
-        @intFromEnum(ExtendedPrototypeMethod.set_utc_seconds) => 37,
-        @intFromEnum(ExtendedPrototypeMethod.set_utc_minutes) => 38,
-        @intFromEnum(ExtendedPrototypeMethod.set_utc_hours) => 39,
-        @intFromEnum(ExtendedPrototypeMethod.set_utc_date) => 40,
-        @intFromEnum(ExtendedPrototypeMethod.set_utc_month) => 41,
-        @intFromEnum(ExtendedPrototypeMethod.set_utc_full_year) => 42,
-        @intFromEnum(ExtendedPrototypeMethod.to_locale_string) => 43,
-        @intFromEnum(ExtendedPrototypeMethod.to_locale_date_string) => 44,
-        @intFromEnum(ExtendedPrototypeMethod.to_locale_time_string) => 45,
-        else => null,
-    };
+    return @intFromEnum(prototype_method_names.get(name) orelse return null);
 }
 
 /// QuickJS source map: Date as a function. `js_date_constructor` with
@@ -735,22 +708,21 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, args: []const core.JSValue, p
 }
 
 /// QuickJS source map: Date.UTC / Date.parse / Date.now.
-pub fn staticCall(rt: *core.JSRuntime, method: u32, args: []const core.JSValue) !core.JSValue {
+pub fn staticCall(rt: *core.JSRuntime, method: StaticMethod, args: []const core.JSValue) !core.JSValue {
     return switch (method) {
-        1 => utc(args),
-        2 => try parse(rt, args),
-        3 => core.JSValue.float64(currentTimeMs()),
-        else => error.TypeError,
+        .utc => utc(args),
+        .parse => try parse(rt, args),
+        .now => core.JSValue.float64(currentTimeMs()),
     };
 }
 
 /// QuickJS source map: selected Date.prototype methods used by current smoke
 /// and targeted regression coverage.
-pub fn methodCall(rt: *core.JSRuntime, object_value: core.JSValue, method: u32) !core.JSValue {
+pub fn methodCall(rt: *core.JSRuntime, object_value: core.JSValue, method: PrototypeMethod) !core.JSValue {
     return methodCallArgs(rt, object_value, method, &.{});
 }
 
-pub fn methodCallArgs(rt: *core.JSRuntime, object_value: core.JSValue, method: u32, args: []const core.JSValue) !core.JSValue {
+pub fn methodCallArgs(rt: *core.JSRuntime, object_value: core.JSValue, method: PrototypeMethod, args: []const core.JSValue) !core.JSValue {
     const object = try expectDateObject(object_value);
     const ms = try dateValue(object);
     if (setterSpan(method)) |span| {
@@ -759,88 +731,118 @@ pub fn methodCallArgs(rt: *core.JSRuntime, object_value: core.JSValue, method: u
         return setDateFieldBody(object, ms, args, args.len, span);
     }
     return switch (method) {
-        1, 2 => numberResult(ms),
-        24 => try setTime(object, args),
-        // get_date_field (quickjs.c:55225): local getters n=0..6, getDay n=7.
-        3...9 => getDateFieldValue(ms, @intCast(method - 3), true, false),
-        19 => getDateFieldValue(ms, 7, true, false),
-        // getUTC* n=0..6, getUTCDay n=7.
-        12...18 => getDateFieldValue(ms, @intCast(method - 12), false, false),
-        35 => getDateFieldValue(ms, 7, false, false),
-        // getYear: magic 0x101 (local, fields[0] - 1900).
-        22 => getDateFieldValue(ms, 0, true, true),
+        .get_time, .value_of => numberResult(ms),
+        .set_time => try setTime(object, args),
+        .get_full_year => getDateFieldValue(ms, .year, .local),
+        .get_month => getDateFieldValue(ms, .month, .local),
+        .get_date => getDateFieldValue(ms, .day, .local),
+        .get_hours => getDateFieldValue(ms, .hours, .local),
+        .get_minutes => getDateFieldValue(ms, .minutes, .local),
+        .get_seconds => getDateFieldValue(ms, .seconds, .local),
+        .get_milliseconds => getDateFieldValue(ms, .milliseconds, .local),
+        .get_day => getDateFieldValue(ms, .weekday, .local),
+        .get_utc_full_year => getDateFieldValue(ms, .year, .utc),
+        .get_utc_month => getDateFieldValue(ms, .month, .utc),
+        .get_utc_date => getDateFieldValue(ms, .day, .utc),
+        .get_utc_hours => getDateFieldValue(ms, .hours, .utc),
+        .get_utc_minutes => getDateFieldValue(ms, .minutes, .utc),
+        .get_utc_seconds => getDateFieldValue(ms, .seconds, .utc),
+        .get_utc_milliseconds => getDateFieldValue(ms, .milliseconds, .utc),
+        .get_utc_day => getDateFieldValue(ms, .weekday, .utc),
+        .get_year => getYearValue(ms),
         // get_date_string magics (quickjs.c js_date_proto_funcs).
-        10 => try getDateStringValue(rt, ms, 0x23),
-        11 => if (std.math.isNan(ms)) core.JSValue.nullValue() else try getDateStringValue(rt, ms, 0x23),
-        20 => try getDateStringValue(rt, ms, 0x13),
-        21 => try getDateStringValue(rt, ms, 0x03),
-        33 => try getDateStringValue(rt, ms, 0x11),
-        34 => try getDateStringValue(rt, ms, 0x12),
-        43 => try getDateStringValue(rt, ms, 0x33),
-        44 => try getDateStringValue(rt, ms, 0x31),
-        45 => try getDateStringValue(rt, ms, 0x32),
-        23 => try setYear(object, ms, args),
-        // js_date_getTimezoneOffset (quickjs.c:55996).
-        32 => if (std.math.isNan(ms))
+        .to_iso_string => try getDateStringValue(rt, ms, 0x23),
+        .to_json => if (std.math.isNan(ms)) core.JSValue.nullValue() else try getDateStringValue(rt, ms, 0x23),
+        .to_string => try getDateStringValue(rt, ms, 0x13),
+        .to_utc_string => try getDateStringValue(rt, ms, 0x03),
+        .to_date_string => try getDateStringValue(rt, ms, 0x11),
+        .to_time_string => try getDateStringValue(rt, ms, 0x12),
+        .to_locale_string => try getDateStringValue(rt, ms, 0x33),
+        .to_locale_date_string => try getDateStringValue(rt, ms, 0x31),
+        .to_locale_time_string => try getDateStringValue(rt, ms, 0x32),
+        .set_year => try setYear(object, ms, args),
+        // js_date_getTimezoneOffset.
+        .get_timezone_offset => if (std.math.isNan(ms))
             core.JSValue.float64(std.math.nan(f64))
         else
             numberResult(@floatFromInt(getTimezoneOffsetForTime(@intFromFloat(@trunc(ms))))),
-        else => error.TypeError,
+        .to_primitive, .set_year_with_captured_ms, .set_parts_with_captured_ms => error.TypeError,
+        // Setters were handled by `setterSpan` above.
+        .set_milliseconds, .set_seconds, .set_minutes, .set_hours, .set_date, .set_month, .set_full_year, .set_utc_milliseconds, .set_utc_seconds, .set_utc_minutes, .set_utc_hours, .set_utc_date, .set_utc_month, .set_utc_full_year => unreachable,
     };
 }
 
-pub fn methodCallArgsWithCapturedMs(object_value: core.JSValue, method: u32, captured_ms: f64, args: []const core.JSValue) !core.JSValue {
+pub fn methodCallArgsWithCapturedMs(object_value: core.JSValue, method: PrototypeMethod, captured_ms: f64, args: []const core.JSValue) !core.JSValue {
     const object = try expectDateObject(object_value);
     const span = setterSpan(method) orelse return error.TypeError;
     return setDateFieldBody(object, captured_ms, args, args.len, span);
 }
 
-/// set_date_field magic decode (quickjs.c js_date_proto_funcs): selector ->
-/// (first_field, end_field, is_local). 25..31 are the local setters, 36..42
-/// the setUTC* twins.
-const SetterSpan = struct { first: usize, end: usize, is_local: bool };
+/// set_date_field field window (quickjs.c js_date_proto_funcs magic):
+/// (first_field, end_field, is_local) for the local setters and their
+/// setUTC* twins; null for every other method.
+/// A setter writes its arguments into the run of fields starting at
+/// `first` and stopping before `end` (setHours takes hours..milliseconds,
+/// setFullYear takes year..day).
+const SetterSpan = struct {
+    first: DateField,
+    end: DateField,
+    zone: TimeZone,
 
-fn setterSpan(method: u32) ?SetterSpan {
+    /// How many arguments the setter consumes.
+    fn count(self: SetterSpan) usize {
+        return @intFromEnum(self.end) - @intFromEnum(self.first);
+    }
+};
+
+fn setterSpan(method: PrototypeMethod) ?SetterSpan {
     return switch (method) {
-        25 => .{ .first = 6, .end = 7, .is_local = true }, // setMilliseconds 0x671
-        26 => .{ .first = 5, .end = 7, .is_local = true }, // setSeconds 0x571
-        27 => .{ .first = 4, .end = 7, .is_local = true }, // setMinutes 0x471
-        28 => .{ .first = 3, .end = 7, .is_local = true }, // setHours 0x371
-        29 => .{ .first = 2, .end = 3, .is_local = true }, // setDate 0x211
-        30 => .{ .first = 1, .end = 3, .is_local = true }, // setMonth 0x121
-        31 => .{ .first = 0, .end = 3, .is_local = true }, // setFullYear 0x011
-        36 => .{ .first = 6, .end = 7, .is_local = false }, // setUTCMilliseconds 0x670
-        37 => .{ .first = 5, .end = 7, .is_local = false }, // setUTCSeconds 0x570
-        38 => .{ .first = 4, .end = 7, .is_local = false }, // setUTCMinutes 0x470
-        39 => .{ .first = 3, .end = 7, .is_local = false }, // setUTCHours 0x370
-        40 => .{ .first = 2, .end = 3, .is_local = false }, // setUTCDate 0x210
-        41 => .{ .first = 1, .end = 3, .is_local = false }, // setUTCMonth 0x120
-        42 => .{ .first = 0, .end = 3, .is_local = false }, // setUTCFullYear 0x010
+        .set_milliseconds => .{ .first = .milliseconds, .end = .weekday, .zone = .local },
+        .set_seconds => .{ .first = .seconds, .end = .weekday, .zone = .local },
+        .set_minutes => .{ .first = .minutes, .end = .weekday, .zone = .local },
+        .set_hours => .{ .first = .hours, .end = .weekday, .zone = .local },
+        .set_date => .{ .first = .day, .end = .hours, .zone = .local },
+        .set_month => .{ .first = .month, .end = .hours, .zone = .local },
+        .set_full_year => .{ .first = .year, .end = .hours, .zone = .local },
+        .set_utc_milliseconds => .{ .first = .milliseconds, .end = .weekday, .zone = .utc },
+        .set_utc_seconds => .{ .first = .seconds, .end = .weekday, .zone = .utc },
+        .set_utc_minutes => .{ .first = .minutes, .end = .weekday, .zone = .utc },
+        .set_utc_hours => .{ .first = .hours, .end = .weekday, .zone = .utc },
+        .set_utc_date => .{ .first = .day, .end = .hours, .zone = .utc },
+        .set_utc_month => .{ .first = .month, .end = .hours, .zone = .utc },
+        .set_utc_full_year => .{ .first = .year, .end = .hours, .zone = .utc },
         else => null,
     };
 }
 
-/// Mirrors qjs set_date_field (quickjs.c:55253) given the captured time value
+/// Mirrors qjs set_date_field given the captured time value
 /// and (pre-coerced or raw-primitive) args. `argc` is the caller's argument
 /// count: `argc == 0` sets the date to NaN even without field writes.
 fn setDateFieldBody(object: *core.Object, captured_ms: f64, args: []const core.JSValue, argc: usize, span: SetterSpan) !core.JSValue {
-    var fields: [9]f64 = undefined;
-    var res = getDateFields(captured_ms, &fields, span.is_local, span.first == 0);
-    const res1 = res;
+    // A NaN time value still decomposes (from the epoch, +0000) when the
+    // year is being set: setFullYear on an invalid date yields a date.
+    const decomposed: ?DateFieldValues = if (getDateFields(captured_ms, span.zone)) |live|
+        live
+    else if (span.first == .year)
+        getDateFields(0, .utc)
+    else
+        null;
+    var fields = decomposed orelse undefined;
+    var res = decomposed != null;
 
     // Argument coercion is observable and must be done unconditionally.
-    const n = @min(args.len, span.end - span.first);
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
+    const first = @intFromEnum(span.first);
+    const n = @min(args.len, span.count());
+    for (0..n) |i| {
         const a = toNumber(args[i]) orelse return error.TypeError;
         if (!std.math.isFinite(a)) res = false;
-        fields[span.first + i] = @trunc(a);
+        fields.values[first + i] = @trunc(a);
     }
 
-    if (!res1) return core.JSValue.float64(std.math.nan(f64)); // thisTimeValue is NaN
+    if (decomposed == null) return core.JSValue.float64(std.math.nan(f64)); // thisTimeValue is NaN
 
     var d: f64 = std.math.nan(f64);
-    if (res and argc > 0) d = setDateFields(fields[0..7], span.is_local);
+    if (res and argc > 0) d = setDateFields(&fields, span.zone);
 
     setDateValue(object, d);
     return numberResult(d);
@@ -856,7 +858,7 @@ pub fn setYearNumber(object_value: core.JSValue, captured_ms: f64, year_number: 
     return setYearNumberOnObject(object, captured_ms, year_number);
 }
 
-/// Mirrors qjs js_date_setYear (quickjs.c:56030): map finite years 0..99 to
+/// Mirrors qjs js_date_setYear: map finite years 0..99 to
 /// 1900..1999, then run set_date_field with magic 0x011 (first=0, end=1,
 /// local).
 fn setYearNumberOnObject(object: *core.Object, ms: f64, year_number: f64) !core.JSValue {
@@ -866,7 +868,7 @@ fn setYearNumberOnObject(object: *core.Object, ms: f64, year_number: f64) !core.
         if (y >= 0 and y < 100) y += 1900;
     }
     const year_args = [1]core.JSValue{core.JSValue.float64(y)};
-    return setDateFieldBody(object, ms, &year_args, 1, .{ .first = 0, .end = 1, .is_local = true });
+    return setDateFieldBody(object, ms, &year_args, 1, .{ .first = .year, .end = .month, .zone = .local });
 }
 
 fn setTime(object: *core.Object, args: []const core.JSValue) !core.JSValue {
@@ -876,42 +878,46 @@ fn setTime(object: *core.Object, args: []const core.JSValue) !core.JSValue {
     return numberResult(next_ms);
 }
 
-/// Mirrors qjs get_date_field (quickjs.c:55225): n selects the field,
-/// `is_get_year` applies the getYear 0x100 bias.
-fn getDateFieldValue(ms: f64, n: usize, is_local: bool, is_get_year: bool) core.JSValue {
-    var fields: [9]f64 = undefined;
-    if (!getDateFields(ms, &fields, is_local, false)) return core.JSValue.float64(std.math.nan(f64));
-    var field_value = fields[n];
-    if (is_get_year) field_value -= 1900;
-    return numberResult(field_value);
+/// Mirrors qjs get_date_field.
+fn getDateFieldValue(ms: f64, field: DateField, zone: TimeZone) core.JSValue {
+    const fields = getDateFields(ms, zone) orelse return core.JSValue.float64(std.math.nan(f64));
+    return numberResult(fields.get(field));
+}
+
+/// Annex B getYear: the local year biased by 1900.
+fn getYearValue(ms: f64) core.JSValue {
+    const fields = getDateFields(ms, .local) orelse return core.JSValue.float64(std.math.nan(f64));
+    return numberResult(fields.get(.year) - 1900);
 }
 
 fn utc(args: []const core.JSValue) !core.JSValue {
-    // js_Date_UTC (quickjs.c:55480).
+    // js_Date_UTC.
     if (args.len == 0) return core.JSValue.float64(std.math.nan(f64));
-    var fields = [7]f64{ 0, 0, 1, 0, 0, 0, 0 };
-    const n = @min(args.len, 7);
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        fields[i] = toNumber(args[i]) orelse return error.TypeError;
-    }
-    return numberResult(setDateFieldsChecked(&fields, false));
+    var fields = try dateFieldsFromArgs(args);
+    return numberResult(setDateFieldsChecked(&fields, .utc));
 }
 
 fn constructDateFromParts(args: []const core.JSValue) !f64 {
-    // js_date_constructor n >= 2 branch (quickjs.c:55442): coerce up to 7
+    // js_date_constructor n >= 2 branch: coerce up to 7
     // fields, then set_date_fields_checked(fields, 1) — LOCAL time.
-    var fields = [7]f64{ 0, 0, 1, 0, 0, 0, 0 };
-    const n = @min(args.len, 7);
-    var i: usize = 0;
-    while (i < n) : (i += 1) {
-        fields[i] = toNumber(args[i]) orelse return error.TypeError;
+    var fields = try dateFieldsFromArgs(args);
+    return setDateFieldsChecked(&fields, .local);
+}
+
+/// Up to seven positional arguments (year .. milliseconds) over the
+/// `1 January` defaults, coerced in order.
+fn dateFieldsFromArgs(args: []const core.JSValue) !DateFieldValues {
+    var fields = DateFieldValues.initFill(0);
+    fields.set(.day, 1);
+    const n = @min(args.len, settable_field_count);
+    for (fields.values[0..n], args[0..n]) |*slot, arg| {
+        slot.* = toNumber(arg) orelse return error.TypeError;
     }
-    return setDateFieldsChecked(&fields, true);
+    return fields;
 }
 
 fn parse(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
-    // js_Date_parse (quickjs.c:55907) ToString-coerces its argument. This pure
+    // js_Date_parse ToString-coerces its argument. This pure
     // body only sees pre-coerced args (the record arm in `dateCall` runs the
     // VM ToString for objects); primitives are converted without VM re-entry.
     const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -993,25 +999,25 @@ const month_days = [12]i64{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
 const month_names = "JanFebMarAprMayJunJulAugSepOctNovDec";
 const day_names = "SunMonTueWedThuFriSat";
 
-/// floor_div (quickjs.c:55020): integer division rounding toward -Infinity.
+/// floor_div: integer division rounding toward -Infinity.
 fn floorDiv(a: i64, b: i64) i64 {
     return @divFloor(a, b);
 }
 
-/// days_from_year (quickjs.c:55053).
+/// days_from_year.
 fn daysFromYear(y: i64) i64 {
     return 365 * (y - 1970) + floorDiv(y - 1969, 4) -
         floorDiv(y - 1901, 100) + floorDiv(y - 1601, 400);
 }
 
-/// days_in_year (quickjs.c:55059).
+/// days_in_year.
 fn daysInYear(y: i64) i64 {
     return 365 + @as(i64, @intFromBool(@rem(y, 4) == 0)) -
         @as(i64, @intFromBool(@rem(y, 100) == 0)) +
         @as(i64, @intFromBool(@rem(y, 400) == 0));
 }
 
-/// year_from_days (quickjs.c:55064): return the year, update days.
+/// year_from_days: return the year, update days.
 fn yearFromDays(days: *i64) i64 {
     const d = days.*;
     var y = floorDiv(d * 10000, 3652425) + 1970;
@@ -1035,22 +1041,25 @@ fn yearFromDays(days: *i64) i64 {
     return y;
 }
 
-/// Mirrors qjs get_date_fields (quickjs.c:55090). Returns false for a NaN time
-/// value when `force` is unset; with `force` the fields decompose from 0.
-/// fields: [y, mon(0-based), d, h, m, s, ms, wd, tz].
-fn getDateFields(dval: f64, fields: *[9]f64, is_local: bool, force: bool) bool {
-    var tz: i64 = 0;
-    var d: i64 = undefined;
+/// The calendar decomposition qjs keeps in `double fields[9]`, by name.
+/// The setters and the argument coercions still address a contiguous run
+/// of the first seven by position (`values[...]`), which is why this is an
+/// EnumArray rather than a struct.
+const DateField = enum(u8) { year, month, day, hours, minutes, seconds, milliseconds, weekday, tz_minutes };
+const DateFieldValues = std.EnumArray(DateField, f64);
+/// year .. milliseconds: the fields a constructor / setter argument can set.
+const settable_field_count = @intFromEnum(DateField.weekday);
 
-    if (std.math.isNan(dval)) {
-        if (!force) return false; // NaN
-        d = 0; // initialize all fields to 0
-    } else {
-        d = @intFromFloat(dval); // assuming -8.64e15 <= dval <= 8.64e15
-        if (is_local) {
-            tz = -@as(i64, getTimezoneOffsetForTime(d));
-            d += tz * 60000;
-        }
+const TimeZone = enum { utc, local };
+
+/// Mirrors qjs get_date_fields; null for a NaN time value.
+fn getDateFields(dval: f64, zone: TimeZone) ?DateFieldValues {
+    if (std.math.isNan(dval)) return null;
+    var tz: i64 = 0;
+    var d: i64 = @intFromFloat(dval); // assuming -8.64e15 <= dval <= 8.64e15
+    if (zone == .local) {
+        tz = -@as(i64, getTimezoneOffsetForTime(d));
+        d += tz * 60000;
     }
 
     // result is >= 0, we can use plain remainders below
@@ -1072,32 +1081,33 @@ fn getDateFields(dval: f64, fields: *[9]f64, is_local: bool, force: bool) bool {
         if (days < md) break;
         days -= md;
     }
-    fields[0] = @floatFromInt(y);
-    fields[1] = @floatFromInt(i);
-    fields[2] = @floatFromInt(days + 1);
-    fields[3] = @floatFromInt(h);
-    fields[4] = @floatFromInt(m);
-    fields[5] = @floatFromInt(s);
-    fields[6] = @floatFromInt(msec);
-    fields[7] = @floatFromInt(wd);
-    fields[8] = @floatFromInt(tz);
-    return true;
+    return DateFieldValues.init(.{
+        .year = @floatFromInt(y),
+        .month = @floatFromInt(i),
+        .day = @floatFromInt(days + 1),
+        .hours = @floatFromInt(h),
+        .minutes = @floatFromInt(m),
+        .seconds = @floatFromInt(s),
+        .milliseconds = @floatFromInt(msec),
+        .weekday = @floatFromInt(wd),
+        .tz_minutes = @floatFromInt(tz),
+    });
 }
 
-/// time_clip (quickjs.c:55214).
+/// time_clip.
 fn timeClip(value: f64) f64 {
     if (value >= -8.64e15 and value <= 8.64e15) return @trunc(value) + 0.0; // convert -0 to +0
     return std.math.nan(f64);
 }
 
-/// Mirrors qjs set_date_fields (quickjs.c:55153): the spec mandates `double`
+/// Mirrors qjs set_date_fields: the spec mandates `double`
 /// evaluation order (volatile intermediary as in qjs, see the
 /// fp-evaluation-order test262 note there).
-fn setDateFields(fields: *const [7]f64, is_local: bool) f64 {
+fn setDateFields(fields: *const DateFieldValues, zone: TimeZone) f64 {
     // emulate 21.4.1.15 MakeDay ( year, month, date )
-    const y = fields[0];
-    const m = fields[1];
-    const dt = fields[2];
+    const y = fields.get(.year);
+    const m = fields.get(.month);
+    const dt = fields.get(.day);
     const ym = y + @floor(m / 12);
     var mn = @rem(m, 12);
     if (mn < 0) mn += 12;
@@ -1117,12 +1127,12 @@ fn setDateFields(fields: *const [7]f64, is_local: bool) f64 {
     // the evaluation order / prevents FMA, as in qjs.
     var temp_storage: f64 = undefined;
     const temp: *volatile f64 = &temp_storage;
-    var time: f64 = fields[3] * 3600000;
-    temp.* = fields[4] * 60000;
+    var time: f64 = fields.get(.hours) * 3600000;
+    temp.* = fields.get(.minutes) * 60000;
     time += temp.*;
-    temp.* = fields[5] * 1000;
+    temp.* = fields.get(.seconds) * 1000;
     time += temp.*;
-    time += fields[6];
+    time += fields.get(.milliseconds);
 
     // emulate 21.4.1.16 MakeDate ( day, time )
     temp.* = day * 86400000;
@@ -1130,7 +1140,7 @@ fn setDateFields(fields: *const [7]f64, is_local: bool) f64 {
     if (!std.math.isFinite(tv)) return std.math.nan(f64);
 
     // adjust for local time and clip
-    if (is_local) {
+    if (zone == .local) {
         const ti: i64 = if (tv < -0x1p63)
             std.math.minInt(i64)
         else if (tv >= 0x1p63)
@@ -1142,16 +1152,16 @@ fn setDateFields(fields: *const [7]f64, is_local: bool) f64 {
     return timeClip(tv);
 }
 
-/// Mirrors qjs set_date_fields_checked (quickjs.c:55206).
-fn setDateFieldsChecked(fields: *[7]f64, is_local: bool) f64 {
-    var i: usize = 0;
-    while (i < 7) : (i += 1) {
-        const a = fields[i];
-        if (!std.math.isFinite(a)) return std.math.nan(f64);
-        fields[i] = @trunc(a);
-        if (i == 0 and fields[0] >= 0 and fields[0] < 100) fields[0] += 1900;
+/// Mirrors qjs set_date_fields_checked.
+fn setDateFieldsChecked(fields: *DateFieldValues, zone: TimeZone) f64 {
+    for (fields.values[0..settable_field_count]) |*slot| {
+        if (!std.math.isFinite(slot.*)) return std.math.nan(f64);
+        slot.* = @trunc(slot.*);
     }
-    return setDateFields(fields, is_local);
+    // Two-digit years mean 19xx (21.4.2.1 step 4 / MakeFullYear).
+    const year = fields.get(.year);
+    if (year >= 0 and year < 100) fields.set(.year, year + 1900);
+    return setDateFields(fields, zone);
 }
 
 // --- Date -> string (mirrors quickjs.c get_date_string:55290) ---------------
@@ -1175,7 +1185,7 @@ fn writeYearPadded4(w: *std.Io.Writer, y: i64) !void {
     }
 }
 
-/// Mirrors qjs get_date_string (quickjs.c:55290).
+/// Mirrors qjs get_date_string.
 /// fmt: 0 toUTCString / 1 toString / 2 toISOString / 3 toLocaleString.
 /// part: 1 = date, 2 = time, 3 = both. NaN: fmt 2 raises RangeError, others
 /// produce "Invalid Date".
@@ -1183,24 +1193,24 @@ fn getDateStringValue(rt: *core.JSRuntime, ms: f64, magic: u32) !core.JSValue {
     const fmt = (magic >> 4) & 0x0F;
     const part = magic & 0x0F;
 
-    var fields: [9]f64 = undefined;
-    if (!getDateFields(ms, &fields, (fmt & 1) == 1, false)) {
+    const zone: TimeZone = if ((fmt & 1) == 1) .local else .utc;
+    const fields = getDateFields(ms, zone) orelse {
         if (fmt == 2) return error.RangeError; // "Date value is NaN"
         const str = try core.string.String.createUtf8(rt, "Invalid Date");
         return str.value();
-    }
+    };
 
     // Non-negative print operands are unsigned (Zig 0.16 std.fmt zero-fill
     // prints an explicit '+' for signed integers).
-    const y: i64 = @intFromFloat(fields[0]);
-    const mon: usize = @intFromFloat(fields[1]);
-    const d: u32 = @intFromFloat(fields[2]);
-    const h: u32 = @intFromFloat(fields[3]);
-    const m: u32 = @intFromFloat(fields[4]);
-    const s: u32 = @intFromFloat(fields[5]);
-    const msec: u32 = @intFromFloat(fields[6]);
-    const wd: usize = @intFromFloat(fields[7]);
-    const tz: i64 = @intFromFloat(fields[8]);
+    const y: i64 = @intFromFloat(fields.get(.year));
+    const mon: usize = @intFromFloat(fields.get(.month));
+    const d: u32 = @intFromFloat(fields.get(.day));
+    const h: u32 = @intFromFloat(fields.get(.hours));
+    const m: u32 = @intFromFloat(fields.get(.minutes));
+    const s: u32 = @intFromFloat(fields.get(.seconds));
+    const msec: u32 = @intFromFloat(fields.get(.milliseconds));
+    const wd: usize = @intFromFloat(fields.get(.weekday));
+    const tz: i64 = @intFromFloat(fields.get(.tz_minutes));
 
     var buffer: [64]u8 = undefined;
     var w = std.Io.Writer.fixed(&buffer);
@@ -1283,7 +1293,7 @@ fn writeDateString(
 
 // --- Date string parsing (mirrors quickjs.c js_Date_parse:55907) ------------
 
-/// js_Date_parse string -> byte-array conversion (quickjs.c:55926): 127-byte
+/// js_Date_parse string -> byte-array conversion: 127-byte
 /// truncation, U+2212 -> '-', any other unit > 255 -> 'x'.
 fn parseDateString(value: core.JSValue) !f64 {
     const string_value = value.asStringBody() orelse return std.math.nan(f64);
@@ -1309,177 +1319,197 @@ fn parseDateString(value: core.JSValue) !f64 {
 }
 
 fn dateParseBytes(sp: [:0]const u8) f64 {
-    var fields: [9]i32 = undefined;
-    var is_local: bool = undefined;
-    if (jsDateParseIsostring(sp, &fields, &is_local) or
-        jsDateParseOtherstring(sp, &fields, &is_local))
-    {
-        const field_max = [6]i32{ 0, 11, 31, 24, 59, 59 };
-        var valid = true;
-        // check field maximum values
-        var i: usize = 1;
-        while (i < 6) : (i += 1) {
-            if (fields[i] > field_max[i]) valid = false;
-        }
-        // special case 24:00:00.000
-        if (fields[3] == 24 and (fields[4] | fields[5] | fields[6]) != 0) valid = false;
-        if (valid) {
-            var fields1: [7]f64 = undefined;
-            for (0..7) |j| fields1[j] = @floatFromInt(fields[j]);
-            return setDateFields(&fields1, is_local) - @as(f64, @floatFromInt(fields[8])) * 60000;
-        }
-    }
-    return std.math.nan(f64);
+    const parsed = parseIsoDateString(sp) orelse parseLenientDateString(sp) orelse return std.math.nan(f64);
+    const f = parsed.fields;
+    // check field maximum values
+    var valid = f.month <= 11 and f.day <= 31 and f.hour <= 24 and f.minute <= 59 and f.second <= 59;
+    // special case 24:00:00.000
+    if (f.hour == 24 and (f.minute | f.second | f.millisecond) != 0) valid = false;
+    if (!valid) return std.math.nan(f64);
+    const fields = DateFieldValues.init(.{
+        .year = @floatFromInt(f.year),
+        .month = @floatFromInt(f.month),
+        .day = @floatFromInt(f.day),
+        .hours = @floatFromInt(f.hour),
+        .minutes = @floatFromInt(f.minute),
+        .seconds = @floatFromInt(f.second),
+        .milliseconds = @floatFromInt(f.millisecond),
+        .weekday = 0,
+        .tz_minutes = 0,
+    });
+    const zone: TimeZone = if (parsed.is_local) .local else .utc;
+    return setDateFields(&fields, zone) - @as(f64, @floatFromInt(f.tz_offset_minutes)) * 60000;
 }
 
-/// string_skip_char (quickjs.c:55495).
-fn stringSkipChar(sp: [:0]const u8, pp: *usize, c: u8) bool {
-    if (sp[pp.*] == c) {
-        pp.* += 1;
+/// Calendar fields as `js_Date_parse` assembles them (month is 0-based once
+/// a parser returns), plus the explicit UTC offset when the text carried one.
+const DateFields = struct {
+    year: i32,
+    month: i32,
+    day: i32,
+    hour: i32 = 0,
+    minute: i32 = 0,
+    second: i32 = 0,
+    millisecond: i32 = 0,
+    tz_offset_minutes: i32 = 0,
+};
+
+const ParsedDate = struct {
+    fields: DateFields,
+    /// The text named no zone, so the fields are local time.
+    is_local: bool,
+};
+
+/// Read position over a NUL-terminated date string. Readers that can fail
+/// leave `pos` where it was.
+const Cursor = struct {
+    text: [:0]const u8,
+    pos: usize = 0,
+
+    fn peek(self: Cursor) u8 {
+        return self.text[self.pos];
+    }
+
+    fn atEnd(self: Cursor) bool {
+        return self.peek() == 0;
+    }
+
+    fn skipChar(self: *Cursor, c: u8) bool {
+        if (self.peek() != c) return false;
+        self.pos += 1;
         return true;
     }
-    return false;
-}
 
-/// string_skip_spaces (quickjs.c:55505): skip spaces, return next char.
-fn stringSkipSpaces(sp: [:0]const u8, pp: *usize) u8 {
-    var c = sp[pp.*];
-    while (c == ' ') {
-        pp.* += 1;
-        c = sp[pp.*];
+    /// Skip spaces; returns the next character.
+    fn skipSpaces(self: *Cursor) u8 {
+        while (self.peek() == ' ') self.pos += 1;
+        return self.peek();
     }
-    return c;
-}
 
-/// string_skip_separators (quickjs.c:55513): skip dashes, slashes, dots and
-/// commas.
-fn stringSkipSeparators(sp: [:0]const u8, pp: *usize) u8 {
-    var c = sp[pp.*];
-    while (c == '-' or c == '/' or c == '.' or c == ',') {
-        pp.* += 1;
-        c = sp[pp.*];
+    /// Skip dashes, slashes, dots and commas.
+    fn skipSeparators(self: *Cursor) void {
+        while (true) {
+            switch (self.peek()) {
+                '-', '/', '.', ',' => self.pos += 1,
+                else => return,
+            }
+        }
     }
-    return c;
-}
 
-/// string_skip_until (quickjs.c:55521): skip a word, stop on chars in
-/// `stoplist` (C strchr also matches the NUL terminator, hence the c == 0
-/// stop).
-fn stringSkipUntil(sp: [:0]const u8, pp: *usize, stoplist: []const u8) u8 {
-    var c = sp[pp.*];
-    while (c != 0 and std.mem.indexOfScalar(u8, stoplist, c) == null) {
-        pp.* += 1;
-        c = sp[pp.*];
+    /// Skip a word, stopping at NUL or any character in `stoplist`.
+    fn skipUntil(self: *Cursor, stoplist: []const u8) void {
+        while (!self.atEnd() and std.mem.indexOfScalar(u8, stoplist, self.peek()) == null) self.pos += 1;
     }
-    return c;
-}
 
-/// string_get_digits (quickjs.c:55529): parse a numeric field
-/// (max_digits == 0 -> no maximum, arbitrary limit of 9 digits).
-fn stringGetDigits(sp: [:0]const u8, pp: *usize, pval: *i32, min_digits: usize, max_digits: usize) bool {
-    var v: i32 = 0;
-    var p = pp.*;
-    const p_start = p;
-    while (true) {
-        const c = sp[p];
-        if (c < '0' or c > '9') break;
-        // arbitrary limit to 9 digits
-        if (v >= 100000000) return false;
-        v = v * 10 + @as(i32, c - '0');
-        p += 1;
-        if (p - p_start == max_digits) break;
+    /// A run of `min_digits..max_digits` decimal digits (`max_digits == 0`:
+    /// no maximum, but at most nine digits are accepted).
+    fn digits(self: *Cursor, min_digits: usize, max_digits: usize) ?i32 {
+        var value: i32 = 0;
+        var p = self.pos;
+        while (true) {
+            const c = self.text[p];
+            if (c < '0' or c > '9') break;
+            if (value >= 100000000) return null; // arbitrary limit to 9 digits
+            value = value * 10 + @as(i32, c - '0');
+            p += 1;
+            if (p - self.pos == max_digits) break;
+        }
+        if (p - self.pos < min_digits) return null;
+        self.pos = p;
+        return value;
     }
-    if (p - p_start < min_digits) return false;
-    pval.* = v;
-    pp.* = p;
-    return true;
-}
 
-/// string_get_milliseconds (quickjs.c:55552): parse an optional fractional
-/// part as milliseconds and truncate.
-fn stringGetMilliseconds(sp: [:0]const u8, pp: *usize, pval: *i32) bool {
-    var mul: i32 = 100;
-    var msec: i32 = 0;
-    var p = pp.*;
-    const c = sp[p];
-    if (c == '.' or c == ',') {
-        p += 1;
-        const p_start = p;
-        while (sp[p] >= '0' and sp[p] <= '9') {
-            msec += @as(i32, sp[p] - '0') * mul;
+    /// An optional `.` / `,` fraction, truncated to milliseconds; the
+    /// separator is consumed only when digits follow it.
+    fn milliseconds(self: *Cursor) ?i32 {
+        const c = self.peek();
+        if (c != '.' and c != ',') return null;
+        var p = self.pos + 1;
+        const digits_start = p;
+        var mul: i32 = 100;
+        var msec: i32 = 0;
+        while (self.text[p] >= '0' and self.text[p] <= '9') {
+            msec += @as(i32, self.text[p] - '0') * mul;
             mul = @divTrunc(mul, 10);
             p += 1;
-            if (p - p_start == 9) break;
+            if (p - digits_start == 9) break;
         }
-        if (p > p_start) {
-            // only consume the separator if digits are present
-            pval.* = msec;
-            pp.* = p;
-        }
+        if (p == digits_start) return null;
+        self.pos = p;
+        return msec;
     }
-    return true;
-}
 
-/// upper_ascii (quickjs.c:55577).
+    /// `Z`, or `[+-]HH`, `[+-]HHmm`, `[+-]HH:mm` (longer digit runs are
+    /// truncated from the right); strict mode rejects bare `[+-]HH`.
+    fn tzOffset(self: *Cursor, strict: bool) ?i32 {
+        var c = self.*;
+        const sgn = c.peek();
+        c.pos += 1;
+        var tz: i32 = 0;
+        if (sgn == '+' or sgn == '-') {
+            const digits_start = c.pos;
+            var hh = c.digits(1, 0) orelse return null;
+            var n = c.pos - digits_start;
+            if (strict and n != 2 and n != 4) return null;
+            while (n > 4) {
+                n -= 2;
+                hh = @divTrunc(hh, 100);
+            }
+            var mm: i32 = 0;
+            if (n > 2) {
+                mm = @rem(hh, 100);
+                hh = @divTrunc(hh, 100);
+            } else if (c.skipChar(':')) {
+                // optional separator
+                mm = c.digits(2, 2) orelse return null;
+            } else if (strict) {
+                return null; // [+-]HH is not accepted in strict mode
+            }
+            if (hh > 23 or mm > 59) return null;
+            tz = hh * 60 + mm;
+            if (sgn != '+') tz = -tz;
+        } else if (sgn != 'Z') {
+            return null;
+        }
+        self.* = c;
+        return tz;
+    }
+
+    /// Case-insensitive keyword match.
+    fn matchLiteral(self: *Cursor, keyword: []const u8) bool {
+        var p = self.pos;
+        for (keyword) |ch| {
+            if (upperAscii(self.text[p]) != upperAscii(ch)) return false;
+            p += 1;
+        }
+        self.pos = p;
+        return true;
+    }
+
+    /// Three-letter month abbreviation, 1-based.
+    fn month(self: *Cursor) ?i32 {
+        const n = findAbbrev(self.text, self.pos, month_names, 12) orelse return null;
+        self.pos += 3;
+        return @intCast(n + 1);
+    }
+
+    /// A time-zone abbreviation from `js_tzabbr`, as minutes east of UTC.
+    fn tzAbbr(self: *Cursor) ?i32 {
+        for (js_tzabbr) |abbr| {
+            if (self.matchLiteral(abbr.name)) return abbr.offset;
+        }
+        return null;
+    }
+};
+
+/// upper_ascii.
 fn upperAscii(c: u8) u8 {
     return if (c >= 'a' and c <= 'z') c - 'a' + 'A' else c;
 }
 
-/// string_get_tzoffset (quickjs.c:55581).
-fn stringGetTzOffset(sp: [:0]const u8, pp: *usize, tzp: *i32, strict: bool) bool {
-    var p = pp.*;
-    const sgn = sp[p];
-    p += 1;
-    var tz: i32 = 0;
-    if (sgn == '+' or sgn == '-') {
-        var hh: i32 = undefined;
-        const digits_start = p;
-        if (!stringGetDigits(sp, &p, &hh, 1, 0)) return false;
-        var n = p - digits_start;
-        if (strict and n != 2 and n != 4) return false;
-        while (n > 4) {
-            n -= 2;
-            hh = @divTrunc(hh, 100);
-        }
-        var mm: i32 = 0;
-        if (n > 2) {
-            mm = @rem(hh, 100);
-            hh = @divTrunc(hh, 100);
-        } else {
-            mm = 0;
-            if (stringSkipChar(sp, &p, ':')) {
-                // optional separator
-                if (!stringGetDigits(sp, &p, &mm, 2, 2)) return false;
-            } else {
-                if (strict) return false; // [+-]HH is not accepted in strict mode
-            }
-        }
-        if (hh > 23 or mm > 59) return false;
-        tz = hh * 60 + mm;
-        if (sgn != '+') tz = -tz;
-    } else if (sgn != 'Z') {
-        return false;
-    }
-    pp.* = p;
-    tzp.* = tz;
-    return true;
-}
-
-/// string_match (quickjs.c:55622): case-insensitive keyword match.
-fn matchLiteral(sp: [:0]const u8, pp: *usize, s: []const u8) bool {
-    var p = pp.*;
-    for (s) |ch| {
-        if (upperAscii(sp[p]) != upperAscii(ch)) return false;
-        p += 1;
-    }
-    pp.* = p;
-    return true;
-}
-
-/// find_abbrev (quickjs.c:55635): 3-letter abbreviation lookup.
+/// find_abbrev: 3-letter abbreviation lookup.
 fn findAbbrev(sp: [:0]const u8, p: usize, list: []const u8, count: usize) ?usize {
-    var n: usize = 0;
-    while (n < count) : (n += 1) {
+    for (0..count) |n| {
         var i: usize = 0;
         while (true) : (i += 1) {
             if (upperAscii(sp[p + i]) != upperAscii(list[n * 3 + i])) break;
@@ -1489,69 +1519,69 @@ fn findAbbrev(sp: [:0]const u8, p: usize, list: []const u8, count: usize) ?usize
     return null;
 }
 
-/// string_get_month (quickjs.c:55649).
-fn stringGetMonth(sp: [:0]const u8, pp: *usize, pval: *i32) bool {
-    const n = findAbbrev(sp, pp.*, month_names, 12) orelse return false;
-    pval.* = @intCast(n + 1);
-    pp.* += 3;
-    return true;
-}
-
-/// js_date_parse_isostring (quickjs.c:55662): parse the toISOString format.
-/// A date-time without a timezone offset is LOCAL time (is_local = true at the
+/// js_date_parse_isostring: parse the toISOString format.
+/// A date-time without a timezone offset is LOCAL time (is_local at the
 /// 'T'; an explicit offset/Z clears it); a date-only form stays UTC.
-fn jsDateParseIsostring(sp: [:0]const u8, fields: *[9]i32, is_local: *bool) bool {
-    var p: usize = 0;
-
+fn parseIsoDateString(sp: [:0]const u8) ?ParsedDate {
+    var c = Cursor{ .text = sp };
     // initialize fields to the beginning of the Epoch
-    for (0..9) |i| fields[i] = @intFromBool(i == 2);
-    is_local.* = false;
+    var f = DateFields{ .year = 0, .month = 0, .day = 1 };
+    var is_local = false;
 
     // year is either yyyy digits or [+-]yyyyyy
-    const sgn = sp[p];
+    const sgn = c.peek();
     if (sgn == '-' or sgn == '+') {
-        p += 1;
-        if (!stringGetDigits(sp, &p, &fields[0], 6, 6)) return false;
+        c.pos += 1;
+        f.year = c.digits(6, 6) orelse return null;
         if (sgn == '-') {
-            if (fields[0] == 0) return false; // reject -000000
-            fields[0] = -fields[0];
+            if (f.year == 0) return null; // reject -000000
+            f.year = -f.year;
         }
     } else {
-        if (!stringGetDigits(sp, &p, &fields[0], 4, 4)) return false;
+        f.year = c.digits(4, 4) orelse return null;
     }
-    if (stringSkipChar(sp, &p, '-')) {
-        if (!stringGetDigits(sp, &p, &fields[1], 2, 2)) return false; // month
-        if (fields[1] < 1) return false;
-        fields[1] -= 1;
-        if (stringSkipChar(sp, &p, '-')) {
-            if (!stringGetDigits(sp, &p, &fields[2], 2, 2)) return false; // day
-            if (fields[2] < 1) return false;
+    if (c.skipChar('-')) {
+        f.month = c.digits(2, 2) orelse return null;
+        if (f.month < 1) return null;
+        f.month -= 1;
+        if (c.skipChar('-')) {
+            f.day = c.digits(2, 2) orelse return null;
+            if (f.day < 1) return null;
         }
     }
-    if (stringSkipChar(sp, &p, 'T')) {
-        is_local.* = true;
-        if (!stringGetDigits(sp, &p, &fields[3], 2, 2) // hour
-        or !stringSkipChar(sp, &p, ':') or
-            !stringGetDigits(sp, &p, &fields[4], 2, 2)) // minute
-        {
-            fields[3] = 100; // reject unconditionally
-            return true;
+    if (c.skipChar('T')) {
+        is_local = true;
+        const time = blk: {
+            const hour = c.digits(2, 2) orelse break :blk null;
+            if (!c.skipChar(':')) break :blk null;
+            const minute = c.digits(2, 2) orelse break :blk null;
+            break :blk .{ hour, minute };
+        };
+        if (time) |hm| {
+            f.hour, f.minute = hm;
+        } else {
+            // A malformed time still claims the string for this format:
+            // an out-of-range hour makes the caller's range check fail
+            // instead of letting the lenient parser try again.
+            f.hour = 100;
+            return .{ .fields = f, .is_local = is_local };
         }
-        if (stringSkipChar(sp, &p, ':')) {
-            if (!stringGetDigits(sp, &p, &fields[5], 2, 2)) return false; // second
-            _ = stringGetMilliseconds(sp, &p, &fields[6]);
+        if (c.skipChar(':')) {
+            f.second = c.digits(2, 2) orelse return null;
+            f.millisecond = c.milliseconds() orelse 0;
         }
     }
     // parse the time zone offset if present: [+-]HH:mm or [+-]HHmm
-    if (sp[p] != 0) {
-        is_local.* = false;
-        if (!stringGetTzOffset(sp, &p, &fields[8], true)) return false;
+    if (!c.atEnd()) {
+        is_local = false;
+        f.tz_offset_minutes = c.tzOffset(true) orelse return null;
     }
     // error if extraneous characters
-    return sp[p] == 0;
+    if (!c.atEnd()) return null;
+    return .{ .fields = f, .is_local = is_local };
 }
 
-/// js_tzabbr (quickjs.c:55722).
+/// js_tzabbr.
 const TzAbbr = struct { name: []const u8, offset: i32 };
 const js_tzabbr = [_]TzAbbr{
     .{ .name = "GMT", .offset = 0 }, // Greenwich Mean Time
@@ -1574,149 +1604,139 @@ const js_tzabbr = [_]TzAbbr{
     .{ .name = "EEST", .offset = 3 * 60 }, // Eastern European Summer Time
 };
 
-/// string_get_tzabbr (quickjs.c:55747).
-fn stringGetTzAbbr(sp: [:0]const u8, pp: *usize, offset: *i32) bool {
-    for (js_tzabbr) |abbr| {
-        if (matchLiteral(sp, pp, abbr.name)) {
-            offset.* = abbr.offset;
-            return true;
-        }
-    }
-    return false;
-}
-
 fn adjustTwoDigitYear(v: i32) i32 {
     return v + @as(i32, if (v < 100) 1900 else 0) + @as(i32, if (v < 50) 100 else 0);
 }
 
-/// js_date_parse_otherstring (quickjs.c:55758): parse toString, toUTCString
+/// js_date_parse_otherstring: parse toString, toUTCString
 /// and other lenient formats (month names, slash dates, tz abbreviations,
 /// AM/PM, parenthesized phrases, skipped words).
-fn jsDateParseOtherstring(sp: [:0]const u8, fields: *[9]i32, is_local: *bool) bool {
-    var p: usize = 0;
-    var val: i32 = 0;
+fn parseLenientDateString(sp: [:0]const u8) ?ParsedDate {
+    var c = Cursor{ .text = sp };
     var num: [3]i32 = undefined;
     var has_year = false;
     var has_mon = false;
     var has_time = false;
     var num_index: usize = 0;
 
-    // initialize fields to the beginning of 2001-01-01
-    fields[0] = 2001;
-    fields[1] = 1;
-    fields[2] = 1;
-    for (3..9) |i| fields[i] = 0;
-    is_local.* = true;
+    // initialize fields to the beginning of 2001-01-01 (month 1-based until
+    // the end)
+    var f = DateFields{ .year = 2001, .month = 1, .day = 1 };
+    var is_local = true;
 
-    while (stringSkipSpaces(sp, &p) != 0) {
-        const p_start = p;
-        var c = sp[p];
-        if (c == '+' or c == '-') {
-            if (has_time and stringGetTzOffset(sp, &p, &fields[8], false)) {
-                is_local.* = false;
-            } else {
-                p += 1;
-                if (stringGetDigits(sp, &p, &val, 1, 0)) {
-                    if (c == '-') {
-                        if (val == 0) return false;
-                        val = -val;
-                    }
-                    fields[0] = val;
-                    has_year = true;
+    while (c.skipSpaces() != 0) {
+        const word_start = c.pos;
+        const ch = c.peek();
+        if (ch == '+' or ch == '-') {
+            if (has_time) if (c.tzOffset(false)) |tz| {
+                f.tz_offset_minutes = tz;
+                is_local = false;
+                c.skipSeparators();
+                continue;
+            };
+            c.pos += 1;
+            if (c.digits(1, 0)) |digits| {
+                var val = digits;
+                if (ch == '-') {
+                    if (val == 0) return null;
+                    val = -val;
                 }
+                f.year = val;
+                has_year = true;
             }
-        } else if (stringGetDigits(sp, &p, &val, 1, 0)) {
-            if (stringSkipChar(sp, &p, ':')) {
+        } else if (c.digits(1, 0)) |val| {
+            if (c.skipChar(':')) {
                 // time part
-                fields[3] = val;
-                if (!stringGetDigits(sp, &p, &fields[4], 1, 2)) return false;
-                if (stringSkipChar(sp, &p, ':')) {
-                    if (!stringGetDigits(sp, &p, &fields[5], 1, 2)) return false;
-                    _ = stringGetMilliseconds(sp, &p, &fields[6]);
+                f.hour = val;
+                f.minute = c.digits(1, 2) orelse return null;
+                if (c.skipChar(':')) {
+                    f.second = c.digits(1, 2) orelse return null;
+                    f.millisecond = c.milliseconds() orelse 0;
                 }
                 has_time = true;
-                if ((sp[p] == '+' or sp[p] == '-') and
-                    stringGetTzOffset(sp, &p, &fields[8], false))
-                {
-                    is_local.* = false;
+                if (c.peek() == '+' or c.peek() == '-') {
+                    if (c.tzOffset(false)) |tz| {
+                        f.tz_offset_minutes = tz;
+                        is_local = false;
+                    }
                 }
+            } else if (c.pos - word_start > 2 and !has_year) {
+                f.year = val;
+                has_year = true;
+            } else if ((val < 1 or val > 31) and !has_year) {
+                f.year = adjustTwoDigitYear(val);
+                has_year = true;
             } else {
-                if (p - p_start > 2 and !has_year) {
-                    fields[0] = val;
-                    has_year = true;
-                } else if ((val < 1 or val > 31) and !has_year) {
-                    fields[0] = adjustTwoDigitYear(val);
-                    has_year = true;
-                } else {
-                    if (num_index == 3) return false;
-                    num[num_index] = val;
-                    num_index += 1;
-                }
+                if (num_index == 3) return null;
+                num[num_index] = val;
+                num_index += 1;
             }
-        } else if (stringGetMonth(sp, &p, &fields[1])) {
+        } else if (c.month()) |month| {
+            f.month = month;
             has_mon = true;
-            _ = stringSkipUntil(sp, &p, "0123456789 -/(");
-        } else if (has_time and matchLiteral(sp, &p, "PM")) {
-            if (fields[3] < 12) fields[3] += 12;
+            c.skipUntil("0123456789 -/(");
+        } else if (has_time and c.matchLiteral("PM")) {
+            if (f.hour < 12) f.hour += 12;
             continue;
-        } else if (has_time and matchLiteral(sp, &p, "AM")) {
-            if (fields[3] == 12) fields[3] -= 12;
+        } else if (has_time and c.matchLiteral("AM")) {
+            if (f.hour == 12) f.hour -= 12;
             continue;
-        } else if (stringGetTzAbbr(sp, &p, &fields[8])) {
-            is_local.* = false;
+        } else if (c.tzAbbr()) |tz| {
+            f.tz_offset_minutes = tz;
+            is_local = false;
             continue;
-        } else if (c == '(') { // skip parenthesized phrase
+        } else if (ch == '(') { // skip parenthesized phrase
             var level: i32 = 0;
-            while (sp[p] != 0) {
-                c = sp[p];
-                p += 1;
-                level += @intFromBool(c == '(');
-                level -= @intFromBool(c == ')');
+            while (!c.atEnd()) {
+                const inner = c.peek();
+                c.pos += 1;
+                level += @intFromBool(inner == '(');
+                level -= @intFromBool(inner == ')');
                 if (level == 0) break;
             }
-            if (level > 0) return false;
-        } else if (c == ')') {
-            return false;
+            if (level > 0) return null;
+        } else if (ch == ')') {
+            return null;
         } else {
-            if (has_year or has_mon or has_time or num_index > 0) return false;
+            if (has_year or has_mon or has_time or num_index > 0) return null;
             // skip a word
-            _ = stringSkipUntil(sp, &p, " -/(");
+            c.skipUntil(" -/(");
         }
-        _ = stringSkipSeparators(sp, &p);
+        c.skipSeparators();
     }
-    if (num_index + @as(usize, @intFromBool(has_year)) + @as(usize, @intFromBool(has_mon)) > 3) return false;
+    if (num_index + @as(usize, @intFromBool(has_year)) + @as(usize, @intFromBool(has_mon)) > 3) return null;
 
     switch (num_index) {
-        0 => if (!has_year) return false,
+        0 => if (!has_year) return null,
         1 => {
             if (has_mon) {
-                fields[2] = num[0];
+                f.day = num[0];
             } else {
-                fields[1] = num[0];
+                f.month = num[0];
             }
         },
         2 => {
             if (has_year) {
-                fields[1] = num[0];
-                fields[2] = num[1];
+                f.month = num[0];
+                f.day = num[1];
             } else if (has_mon) {
-                fields[0] = adjustTwoDigitYear(num[1]);
-                fields[2] = num[0];
+                f.year = adjustTwoDigitYear(num[1]);
+                f.day = num[0];
             } else {
-                fields[1] = num[0];
-                fields[2] = num[1];
+                f.month = num[0];
+                f.day = num[1];
             }
         },
         3 => {
-            fields[0] = adjustTwoDigitYear(num[2]);
-            fields[1] = num[0];
-            fields[2] = num[1];
+            f.year = adjustTwoDigitYear(num[2]);
+            f.month = num[0];
+            f.day = num[1];
         },
-        else => return false,
+        else => return null,
     }
-    if (fields[1] < 1 or fields[2] < 1) return false;
-    fields[1] -= 1;
-    return true;
+    if (f.month < 1 or f.day < 1) return null;
+    f.month -= 1;
+    return .{ .fields = f, .is_local = is_local };
 }
 
 // --- Object plumbing ---------------------------------------------------------
@@ -1734,7 +1754,7 @@ fn setDateValue(object: *core.Object, ms: f64) void {
 }
 
 /// CLI print inspector hook (qjs js_print_object JS_CLASS_DATE arm,
-/// quickjs.c:14153: `get_date_string(..., 0x23)`): the toISOString text of a
+/// quickjs.c: `get_date_string(..., 0x23)`): the toISOString text of a
 /// Date object with no side effect, or null when the time value is NaN (qjs
 /// then falls back to the generic object dump).
 pub fn isoStringForInspector(rt: *core.JSRuntime, object: *const core.Object) !?core.JSValue {
@@ -1806,4 +1826,97 @@ fn currentTimeMs() f64 {
         return @as(f64, @floatFromInt(tv.sec)) * 1000.0 + @as(f64, @floatFromInt(@divTrunc(tv.usec, 1000)));
     }
     return 0;
+}
+
+/// Golden parses captured from the pre-Cursor port of qjs `js_Date_parse`
+/// (2026-09-20); the two parsers must keep producing exactly these fields.
+const date_parse_cases = [_]struct { []const u8, ?ParsedDate }{
+    .{ "2024-03-05", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 0, .minute = 0, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = false } },
+    .{ "2024-03", .{ .fields = .{ .year = 2024, .month = 2, .day = 1, .hour = 0, .minute = 0, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = false } },
+    .{ "2024", .{ .fields = .{ .year = 2024, .month = 0, .day = 1, .hour = 0, .minute = 0, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = false } },
+    .{ "+002024-03-05", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 0, .minute = 0, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = false } },
+    .{ "-000001-01-01", .{ .fields = .{ .year = -1, .month = 0, .day = 1, .hour = 0, .minute = 0, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = false } },
+    .{ "-000000-01-01", null },
+    .{ "2024-03-05T10:20", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 10, .minute = 20, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "2024-03-05T10:20:30", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 10, .minute = 20, .second = 30, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "2024-03-05T10:20:30.123", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 10, .minute = 20, .second = 30, .millisecond = 123, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "2024-03-05T10:20:30,5", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 10, .minute = 20, .second = 30, .millisecond = 500, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "2024-03-05T10:20:30Z", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 10, .minute = 20, .second = 30, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = false } },
+    .{ "2024-03-05T10:20:30+02:00", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 10, .minute = 20, .second = 30, .millisecond = 0, .tz_offset_minutes = 120 }, .is_local = false } },
+    .{ "2024-03-05T10:20:30-0530", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 10, .minute = 20, .second = 30, .millisecond = 0, .tz_offset_minutes = -330 }, .is_local = false } },
+    .{ "2024-03-05T10:20:30+02", null },
+    .{ "2024-03-05T10", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 100, .minute = 0, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "2024-03-05T24:00:00", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 24, .minute = 0, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "2024-03-05T24:00:01", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 24, .minute = 0, .second = 1, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "2024-13-05", .{ .fields = .{ .year = 2024, .month = 12, .day = 5, .hour = 0, .minute = 0, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = false } },
+    .{ "2024-00-05", null },
+    .{ "2024-03-00", null },
+    .{ "2024-03-05x", null },
+    .{ "Tue Mar 05 2024 10:20:30 GMT+0200 (Eastern European Standard Time)", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 10, .minute = 20, .second = 30, .millisecond = 0, .tz_offset_minutes = 120 }, .is_local = false } },
+    .{ "Tue, 05 Mar 2024 10:20:30 GMT", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 10, .minute = 20, .second = 30, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = false } },
+    .{ "Mar 5, 2024", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 0, .minute = 0, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "March 5, 2024 10:20 PM", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 22, .minute = 20, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "5 Mar 2024 12:00 AM", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 0, .minute = 0, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "3/5/2024", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 0, .minute = 0, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "3/5/24", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 0, .minute = 0, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "3/5/49", .{ .fields = .{ .year = 2049, .month = 2, .day = 5, .hour = 0, .minute = 0, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "3/5/50", .{ .fields = .{ .year = 1950, .month = 2, .day = 5, .hour = 0, .minute = 0, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "Mar 5 2024 10:20:30 EST", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 10, .minute = 20, .second = 30, .millisecond = 0, .tz_offset_minutes = -300 }, .is_local = false } },
+    .{ "Mar 5 2024 10:20:30 PST", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 10, .minute = 20, .second = 30, .millisecond = 0, .tz_offset_minutes = -480 }, .is_local = false } },
+    .{ "Mar 5 2024 10:20:30 CEST", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 10, .minute = 20, .second = 30, .millisecond = 0, .tz_offset_minutes = 120 }, .is_local = false } },
+    .{ "Mar 5 2024 10:20:30 UTC", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 10, .minute = 20, .second = 30, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = false } },
+    .{ "Mar 5 2024 10:20:30 Z", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 10, .minute = 20, .second = 30, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = false } },
+    .{ "Mar 5 2024 10:20:30 +0530", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 10, .minute = 20, .second = 30, .millisecond = 0, .tz_offset_minutes = 330 }, .is_local = false } },
+    .{ "Mar 5 2024 10:20:30 -05", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 10, .minute = 20, .second = 30, .millisecond = 0, .tz_offset_minutes = -300 }, .is_local = false } },
+    .{ "Mar 5 2024 10:20:30.25", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 10, .minute = 20, .second = 30, .millisecond = 250, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "Mar 5, 2024 (comment (nested)) 10:20", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 10, .minute = 20, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "Mar 5, 2024 (unclosed", null },
+    .{ "Mar 5, 2024 )", null },
+    .{ "Mar 5 2024 10:20:30 PM", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 22, .minute = 20, .second = 30, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "Mar 5 2024 12:20:30 AM", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 0, .minute = 20, .second = 30, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "Mar 5 2024 13:20:30 PM", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 13, .minute = 20, .second = 30, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "2024 Mar 5", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 0, .minute = 0, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "5 2024 Mar", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 0, .minute = 0, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "Mar 5", .{ .fields = .{ .year = 2001, .month = 2, .day = 5, .hour = 0, .minute = 0, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "Mar", null },
+    .{ "foo Mar 5 2024", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 0, .minute = 0, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "Mar 5 2024 foo", null },
+    .{ "12 Mar 2024", .{ .fields = .{ .year = 2024, .month = 2, .day = 12, .hour = 0, .minute = 0, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "32 Mar 2024", .{ .fields = .{ .year = 2032, .month = 2, .day = 2024, .hour = 0, .minute = 0, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "Mar 32 2024", .{ .fields = .{ .year = 2032, .month = 2, .day = 2024, .hour = 0, .minute = 0, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "1 2 3 4", null },
+    .{ "Mar 5 2024 10:20:30 GMT+1", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 10, .minute = 20, .second = 30, .millisecond = 0, .tz_offset_minutes = 60 }, .is_local = false } },
+    .{ "Mar 5 2024 10:20:30 GMT+12345", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 10, .minute = 20, .second = 30, .millisecond = 0, .tz_offset_minutes = 83 }, .is_local = false } },
+    .{ "Mar 5 2024 10:20:30 GMT+123456", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 10, .minute = 20, .second = 30, .millisecond = 0, .tz_offset_minutes = 754 }, .is_local = false } },
+    .{ "2024-03-05 10:20:30", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 10, .minute = 20, .second = 30, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "20240305", .{ .fields = .{ .year = 20240305, .month = 0, .day = 1, .hour = 0, .minute = 0, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "2024-3-5", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 0, .minute = 0, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "", null },
+    .{ "   ", null },
+    .{ "Mar 5 2024 10:20:30+02:00", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 10, .minute = 20, .second = 30, .millisecond = 0, .tz_offset_minutes = 120 }, .is_local = false } },
+    .{ "Mar 5 2024 10:20:30 +02:00", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 10, .minute = 20, .second = 30, .millisecond = 0, .tz_offset_minutes = 120 }, .is_local = false } },
+    .{ "+2024", .{ .fields = .{ .year = 2024, .month = 0, .day = 1, .hour = 0, .minute = 0, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "-2024", .{ .fields = .{ .year = -2024, .month = 0, .day = 1, .hour = 0, .minute = 0, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "-0", null },
+    .{ "Tue Mar 05 2024", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 0, .minute = 0, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "Tuesday, March 5, 2024", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 0, .minute = 0, .second = 0, .millisecond = 0, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "Mar 5 2024 10:20:30.1234567890", null },
+    .{ "2024-03-05T10:20:30.123456789", .{ .fields = .{ .year = 2024, .month = 2, .day = 5, .hour = 10, .minute = 20, .second = 30, .millisecond = 123, .tz_offset_minutes = 0 }, .is_local = true } },
+    .{ "2024-03-05T10:20:30.", null },
+    .{ "2024-03-05T10:20:30Zx", null },
+    .{ "2024-03-05T10:20:30+02:0", null },
+    .{ "2024-03-05T10:20:30+2:00", null },
+    .{ "1e3", null },
+};
+
+test "Date.parse: ISO and lenient parsers reproduce the golden fields" {
+    for (date_parse_cases) |case| {
+        const text, const expected = case;
+        var buf: [128:0]u8 = undefined;
+        @memcpy(buf[0..text.len], text);
+        buf[text.len] = 0;
+        const sp: [:0]const u8 = buf[0..text.len :0];
+        const actual = parseIsoDateString(sp) orelse parseLenientDateString(sp);
+        try std.testing.expectEqualDeep(expected, actual);
+    }
 }

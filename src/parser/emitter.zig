@@ -251,7 +251,6 @@ pub const Emitter = struct {
         try builderRecordU32Control(s, op_id);
     }
     /// QuickJS emits the signed literal payload directly after OP_push_i32
-    /// (quickjs.c:26847-26853).
     pub fn opI32(s: *State, op_id: u8, val: i32) Error!void {
         try builderEmitOpI32(s, op_id, val);
     }
@@ -277,14 +276,14 @@ pub const Emitter = struct {
     }
     /// Publish the placeholder instruction first, then append the value and
     /// patch its cpool index: QuickJS emit_push_const ordering
-    /// (quickjs.c:23974-24004), and a Builder rollback removes the
+    ///, and a Builder rollback removes the
     /// instruction if the cpool grow fails.
     pub noinline fn pushConst(s: *State, value: JSValue) Error!void {
         const v2b = s.activeBuilder();
         const snapshot = v2b.snapshot();
         errdefer v2b.rollback(snapshot);
         try opU32(s, opcode.op.push_const, 0);
-        const opcode_pos: usize = @intCast(v2b.last_opcode_pos);
+        const opcode_pos: usize = v2b.last_opcode_pos.?;
         const idx = if (s.emit_to_function_def or s.root_mode == .canonical)
             try s.curFunc().appendCpool(value)
         else
@@ -408,7 +407,7 @@ fn emitCrossFrameCleanup(s: *State, cleanup_drops: u8) Error!void {
 fn emitCatchMarkerDropsFromDepth(s: *State, current_depth: *u32, target_depth: u32) Error!void {
     if (current_depth.* < target_depth) return Error.ParserInvariant;
     while (current_depth.* > target_depth) {
-        // qjs abrupt cleanup (quickjs.c:28371-28377): drop each crossed catch-marker slot without a source marker.
+        // qjs abrupt cleanup: drop each crossed catch-marker slot without a source marker.
         try Emitter.opNoSource(s, opcode.op.drop);
         try emitUsingDisposesForCatchMarkerDepth(s, current_depth.*);
         current_depth.* -= 1;
@@ -449,7 +448,7 @@ pub fn leaveSwitchContinueCleanup(s: *State) void {
     }
 }
 
-/// qjs js_is_live_code (quickjs.c:23816) over the temp stream:
+/// qjs js_is_live_code over the temp stream:
 /// get_prev_opcode is
 /// Builder.last_opcode_pos (every emitterBindLabel invalidated it, so any merge
 /// bound at the current end already answers live, exactly like qjs OP_label
@@ -462,8 +461,8 @@ pub fn leaveSwitchContinueCleanup(s: *State) void {
 pub fn isLiveCode(s: *State) bool {
     const v2b = s.activeBuilder();
     const live = blk: {
-        if (v2b.last_opcode_pos < 0) break :blk true;
-        break :blk switch (v2b.code[@intCast(v2b.last_opcode_pos)]) {
+        const last_pos = v2b.last_opcode_pos orelse break :blk true;
+        break :blk switch (v2b.code[last_pos]) {
             opcode.op.goto,
             opcode.op.@"return",
             opcode.op.return_undef,
@@ -545,7 +544,7 @@ pub fn emitStringLiteralValue(s: *State, bytes: []const u8) Error!void {
         }
     }
     // qjs emit_push_const(as_atom=true) emits OP_push_atom_value with
-    // one owned atom operand (quickjs.c:23974-24004).
+    // one owned atom operand.
     try Emitter.opAtom(s, opcode.op.push_atom_value, atom_id);
 }
 
@@ -692,7 +691,7 @@ pub fn parseSharedFinallyBlock(s: *State) Error!void {
 /// all active finalizers share the same gosub target.
 pub fn emitReturnValue(s: *State, await_before_unwind: bool) Error!void {
     if (await_before_unwind) {
-        // qjs emit_return (quickjs.c:28401-28405): await an async-generator value before unwinding.
+        // qjs emit_return: await an async-generator value before unwinding.
         try Emitter.op(s, opcode.op.await);
     }
 
@@ -704,7 +703,7 @@ pub fn emitReturnValue(s: *State, await_before_unwind: bool) Error!void {
         const frame = s.return_finally_frames.items[frame_index];
         try functions.emitBlockEnvReturnCleanupUntil(s, &block_cursor, frame.block_boundary, &catch_marker_depth);
         try functions.emitStackTopCatchMarkerDropsToDepth(s, &catch_marker_depth, frame.catch_marker_depth);
-        // qjs emit_return (quickjs.c:28447-28449): execute each crossed finally via gosub.
+        // qjs emit_return: execute each crossed finally via gosub.
         try Emitter.jumpNoSource(s, opcode.op.gosub, frame.finally_label);
     }
     try functions.emitBlockEnvReturnCleanupUntil(s, &block_cursor, null, &catch_marker_depth);
@@ -741,8 +740,7 @@ pub fn reattributeReturnTailCallSource(s: *State, has_expr: bool, source: Source
     // v2 marker is already out of band, so update that exact marker
     // before emitting the terminal return with the same source.
     const builder = s.activeBuilder();
-    if (builder.last_opcode_pos < 0) return null;
-    const pc: u32 = @intCast(builder.last_opcode_pos);
+    const pc = builder.last_opcode_pos orelse return null;
     if (pc >= builder.code_len) return Error.ParserInvariant;
     const op_id = builder.code[pc];
     if (op_id != opcode.op.call and op_id != opcode.op.call_method) return null;
@@ -759,7 +757,7 @@ pub fn reattributeReturnTailCallSource(s: *State, has_expr: bool, source: Source
         }
     }
     // QuickJS's bare-template concat path emits OP_call_method with no
-    // preceding source event (`js_parse_template`, quickjs.c:24573), then
+    // preceding source event (`js_parse_template`, quickjs.c), then
     // emits the return-keyword OP_line_num after the call. The compact
     // ledger has no in-stream OP_line_num to move, so add the equivalent
     // event directly at the call offset.
@@ -786,7 +784,7 @@ pub fn emitParsedReturn(s: *State, has_expr: bool) Error!void {
         return;
     }
     if (!has_expr) {
-        // qjs emit_return (quickjs.c:28411-28414): materialize the missing return value before cleanup.
+        // qjs emit_return: materialize the missing return value before cleanup.
         try Emitter.op(s, opcode.op.undefined);
     }
     try emitReturnValue(s, has_expr and s.ctx.in_async and s.ctx.in_generator);
@@ -795,14 +793,14 @@ pub fn emitParsedReturn(s: *State, has_expr: bool) Error!void {
 fn emitFunctionReturn(s: *State, has_value: bool) Error!void {
     var value_on_stack = has_value;
     if (!value_on_stack and (s.ctx.in_async or s.ctx.in_generator)) {
-        // qjs emit_return (quickjs.c:28396-28400): synthesize undefined for async/generator returns.
+        // qjs emit_return: synthesize undefined for async/generator returns.
         try Emitter.op(s, opcode.op.undefined);
         value_on_stack = true;
     }
 
     if (s.ctx.in_constructor and s.class.has_extends) {
         if (value_on_stack) {
-            // qjs emit_return derived constructor (quickjs.c:28453-28472): if_false skips this substitution.
+            // qjs emit_return derived constructor: if_false skips this substitution.
             try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.check_ctor_return);
             const return_value = try Emitter.newLabel(s);
             try Emitter.jump(s, opcode.op.if_false, return_value);
@@ -812,13 +810,13 @@ fn emitFunctionReturn(s: *State, has_value: bool) Error!void {
         } else {
             try s.emitScopeGetVarCheckThis(atom_this);
         }
-        // qjs emit_return derived constructor terminal (quickjs.c:28472-28473): OP_return.
+        // qjs emit_return derived constructor terminal: OP_return.
         try Emitter.op(s, opcode.op.@"return");
     } else if (s.ctx.in_async or s.ctx.in_generator) {
-        // qjs emit_return (quickjs.c:28474-28475): non-normal functions use OP_return_async.
+        // qjs emit_return: non-normal functions use OP_return_async.
         try Emitter.op(s, opcode.op.return_async);
     } else {
-        // qjs emit_return (quickjs.c:28476-28477): select value return versus return_undef.
+        // qjs emit_return: select value return versus return_undef.
         try Emitter.op(s, if (value_on_stack) opcode.op.@"return" else opcode.op.return_undef);
     }
 }
@@ -991,10 +989,10 @@ pub fn emitControlThroughFinally(s: *State, target: FinallyControlTarget) Error!
         try s.closeScopes(scope_cursor, return_frame.scope_level);
         scope_cursor = return_frame.scope_level;
         try emitCatchMarkerDropsFromDepth(s, &catch_marker_depth, return_frame.catch_marker_depth);
-        // qjs emit_break/emit_return (quickjs.c:28373-28377/28447-28449): keep stack depth across a crossed finally.
+        // qjs emit_break/emit_return: keep stack depth across a crossed finally.
         try Emitter.opNoSource(s, opcode.op.undefined);
         try Emitter.jumpNoSource(s, opcode.op.gosub, return_frame.finally_label);
-        // qjs emit_break (quickjs.c:28376-28377): discard the crossed finalizer completion.
+        // qjs emit_break: discard the crossed finalizer completion.
         try Emitter.opNoSource(s, opcode.op.drop);
     }
 

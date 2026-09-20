@@ -669,12 +669,10 @@ fn finishClassInitFunction(s: *State, child_index: usize) Error!void {
     // qjs js_is_live_code shape over the child's temp stream: get_prev_opcode
     // is Builder.last_opcode_pos (an invalidated merge answers live).
     const v2b = init_fd.builder orelse return Error.ParserInvariant;
-    const needs_return = if (v2b.last_opcode_pos < 0)
-        true
-    else switch (v2b.code[@intCast(v2b.last_opcode_pos)]) {
+    const needs_return = if (v2b.last_opcode_pos) |last_pos| switch (v2b.code[last_pos]) {
         opcode.op.@"return", opcode.op.return_undef, opcode.op.return_async, opcode.op.throw => false,
         else => true,
-    };
+    } else true;
     if (needs_return) {
         try v2b.emitOp(opcode.op.return_undef);
         try v2b.recordControl(.terminal);
@@ -856,13 +854,13 @@ fn parseClassStaticBlock(s: *State) Error!void {
 
     try functions.parseFunctionParamsAndBody(s, .class_static_block, null, .{});
     try s.emitScopeGetVar(atom_this);
-    // qjs js_parse_class (quickjs.c:25394): call the static-block
+    // qjs js_parse_class: call the static-block
     // closure with the class constructor as receiver.
     try Emitter.op(s, opcode.op.swap);
-    // qjs js_parse_class (quickjs.c:25394): the static block takes no
+    // qjs js_parse_class: the static block takes no
     // explicit arguments.
     try Emitter.callOp(s, opcode.op.call_method, 0);
-    // qjs js_parse_class (quickjs.c:25394): discard the static block's
+    // qjs js_parse_class: discard the static block's
     // completion value.
     try Emitter.op(s, opcode.op.drop);
 
@@ -981,8 +979,8 @@ fn emitClassStaticInitCall(s: *State, class_static_init_child_index: ?u16) Error
 
     // The class constructor is the sole stack value here. Duplicate it as
     // the call receiver/home object, then invoke the lexical static
-    // initializer immediately. Mirrors quickjs.c:25735-25744.
-    // qjs js_parse_class (quickjs.c:25735-25744): invoke the static
+    // initializer immediately. Mirrors quickjs.c.
+    // qjs js_parse_class: invoke the static
     // initializer with the constructor as home object and receiver.
     try Emitter.op(s, opcode.op.dup);
     try s.emitFClosure(@intCast(cpool_idx));
@@ -1024,7 +1022,7 @@ fn emitClassDefineOperands(s: *State, cpool_idx: u16) Error!void {
 }
 
 /// Parse class declaration or expression
-/// Mirrors `js_parse_class` in quickjs.c:24667
+/// Mirrors `js_parse_class` in quickjs.c
 /// Class declarations return their name as an owned atom; expressions
 /// return null. The caller frees a returned name.
 pub fn parseClass(s: *State, is_decl: bool) Error!?Atom {
@@ -1097,11 +1095,11 @@ fn parseClassTail(s: *State, is_decl: bool, class_name: ?Atom, class_source_star
     s.is_strict = true;
     // The whole ClassTail — heritage, computed keys, method/getter/setter
     // bodies, and field initializers — is strict code for the LEXER as
-    // well: legacy octal literals (08, 0777) and octal/\8 string escapes
-    // are SyntaxErrors. Mirrors js_parse_class quickjs.c:25289-25291
+    // well: legacy octal literals (08) and octal/\8 string escapes
+    // are SyntaxErrors. Mirrors js_parse_class quickjs.c
     // ("classes are parsed and executed in strict mode",
     // fd->js_mode |= JS_MODE_STRICT) gating the tokenizer octal checks
-    // (quickjs.c:23021 number literals, 22530-22536 string escapes).
+    // (quickjs.c number literals, 22530-22536 string escapes).
     s.lex.is_strict_mode = true;
     // QuickJS creates the class-name scope even for an anonymous class.
     // The binding itself is appended only after heritage parsing, but the
@@ -1137,7 +1135,7 @@ fn parseClassTail(s: *State, is_decl: bool, class_name: ?Atom, class_source_star
     try finishClassStaticInitFunction(s);
     var runtime_seg: compiler.builder.DetachedSegment = .{};
     errdefer s.activeBuilder().discardSegment(&runtime_seg);
-    // qjs js_parse_class (quickjs.c:25274): the body's runtime bytecode is
+    // qjs js_parse_class: the body's runtime bytecode is
     // deferred and re-emitted after define_class; v2 detaches the builder
     // tail — LabelIds are function-global, so no operand rebase exists.
     runtime_seg = try Emitter.detachTail(s, class_mark);
@@ -1207,7 +1205,7 @@ fn emitClassDeclaration(s: *State, class_name: Atom, parsed: *ParsedClass) Error
     // with its heritage flag and retained name atom.
     try Emitter.opAtomU8(s, opcode.op.define_class, class_name, if (parsed.has_extends) 1 else 0);
     try emitClassPrivateBrands(s, .{ .instance = parsed.instance_private_brand_needed, .static_ = parsed.static_private_brand_needed });
-    // qjs js_parse_class (quickjs.c:25274): the deferred runtime
+    // qjs js_parse_class: the deferred runtime
     // block is spliced after define_class.
     try Emitter.spliceSegment(s, &parsed.runtime_seg);
     // ClassElement computed names run while the inner class binding is
@@ -1269,7 +1267,7 @@ fn emitClassExpression(s: *State, class_name: ?Atom, parsed: *ParsedClass) Error
     try Emitter.opAtomU8(s, opcode.op.define_class, expr_name_atom, if (parsed.has_extends) 1 else 0);
     try emitClassFieldsInitLocalInitFromClassStack(s, parsed.fields_init_local_idx, parsed.fields_init_child_index);
     try emitClassPrivateBrands(s, .{ .instance = parsed.instance_private_brand_needed, .static_ = parsed.static_private_brand_needed });
-    // qjs js_parse_class (quickjs.c:25274): splice the expression's
+    // qjs js_parse_class: splice the expression's
     // deferred runtime block after define_class.
     try Emitter.spliceSegment(s, &parsed.runtime_seg);
     // Same TDZ as the declaration path: computed names in the spliced
@@ -1305,11 +1303,11 @@ fn appendClassFieldInitCallToFunctionDef(
     fd: *function_def_mod.FunctionDef,
     this_idx: u16,
 ) Error!void {
-    // qjs emit_class_field_init (quickjs.c:25184-25207) reads `this`
+    // qjs emit_class_field_init reads `this`
     // through a phase-1 scope_get_var; resolve_scope_var lowers that to
     // get_loc_check only when the binding is lexical, which add_var_this
-    // (quickjs.c:32834-32845) grants exclusively to derived-class
-    // constructors (lowering arm quickjs.c:33068-33087). The base default
+    // grants exclusively to derived-class
+    // constructors (lowering arm quickjs.c). The base default
     // constructor's `this` is a plain var, so qjs reads it with get_loc
     // and resolve_labels shortens that to get_loc0. Emit the long form
     // here (short-slot ids live in the phase-1 temp overlap range) with a
@@ -1321,7 +1319,7 @@ fn appendClassFieldInitCallToFunctionDef(
         opcode.op.get_loc_check
     else
         opcode.op.get_loc;
-    // qjs emit_class_field_init (quickjs.c:25184-25207): the skip target is a
+    // qjs emit_class_field_init: the skip target is a
     // LabelId bound at the shared drop (legacy absolute base+20). The only
     // callers run after `ensureBuilderForFd`, so the builder always exists.
     const v2b = fd.builder orelse return Error.ParserInvariant;
@@ -1365,7 +1363,7 @@ fn appendDefaultClassConstructor(s: *State, name_atom: Atom) Error!u16 {
     // performs the new.target gate while initializing derived state.
     const v2b = child_fd.builder.?;
     if (!s.class.has_extends) {
-        // qjs js_parse_class_default_ctor (quickjs.c:25109): a base
+        // qjs js_parse_class_default_ctor: a base
         // default constructor first verifies construct invocation.
         try v2b.emitOp(opcode.op.check_ctor);
     }
@@ -1374,16 +1372,16 @@ fn appendDefaultClassConstructor(s: *State, name_atom: Atom) Error!u16 {
     try v2b.emitOpU16(opcode.op.enter_scope, @intCast(body_scope));
     const this_idx = try child_fd.ensureThisBinding();
     if (s.class.has_extends) {
-        // qjs js_parse_class_default_ctor (quickjs.c:25109): initialize
+        // qjs js_parse_class_default_ctor: initialize
         // derived-constructor state and its checked this binding.
         try v2b.emitOp(opcode.op.init_ctor);
         try v2b.emitOpU16(opcode.op.put_loc_check_init, this_idx);
         try appendClassFieldInitCallToFunctionDef(child_fd, this_idx);
         // qjs js_parse_class_default_ctor ends with emit_return(s, FALSE)
-        // (quickjs.c:25152); the derived arm (quickjs.c:28455-28472)
+        //; the derived arm
         // reads `this` with scope_get_var_checkthis so an uninitialized
         // ReferenceError is raised in the caller context, lowered to
-        // get_loc_checkthis (quickjs.c:33073-33077).
+        // get_loc_checkthis.
         // qjs js_parse_class_default_ctor: return the initialized
         // derived this value after running instance field setup.
         try v2b.emitOpU16(opcode.op.get_loc_checkthis, this_idx);

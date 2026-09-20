@@ -8,7 +8,6 @@
 //! promise/job payloads must be duplicated. Keep the measured
 //! `ctx`/`output`/`global`/caller-function/caller-frame ABI explicit, and never
 //! share benchmark-hot arms with cold paths. Promise behavior follows
-//! quickjs.c:53415-54663.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -87,7 +86,6 @@ const defineToStringTag = iterator_ops.defineToStringTag;
 const runNextAtomicsHostCompletion = atomics_ops.runNextAtomicsHostCompletion;
 const runNextOsRwHandler = call_runtime.runNextOsRwHandler;
 const runNextOsTimer = call_runtime.runNextOsTimer;
-const setGeneratorResumeCompletionType = call_runtime.setGeneratorResumeCompletionType;
 const storeRealmValue = builtin_glue.storeRealmValue;
 const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
 const valueTruthy = coercion_ops.valueTruthy;
@@ -139,11 +137,11 @@ pub fn asyncFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Objec
     const prototype = try core.Object.create(rt, core.class.ids.object, functionPrototypeFromGlobal(rt, global));
     const prototype_value = prototype.value();
     const constructor = try core.function.nativeFunctionForGlobal(rt, global, "AsyncFunction", 1);
-    const constructor_object = property_ops.expectObject(constructor) catch return error.TypeError;
+    const constructor_object = try property_ops.expectObject(constructor);
     try constructor_object.setFunctionRealmGlobalPtr(rt, global);
     if (functionConstructorFromGlobal(rt, global)) |function_constructor| try constructor_object.setPrototype(rt, function_constructor);
-    try constructor_object.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(prototype_value, false, false, false));
-    try prototype.defineOwnProperty(rt, core.atom.ids.constructor, core.Descriptor.data(constructor_object.value(), false, false, true));
+    try constructor_object.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(prototype_value, .none));
+    try prototype.defineOwnProperty(rt, core.atom.ids.constructor, core.Descriptor.data(constructor_object.value(), .{ .configurable = true }));
     try defineToStringTag(rt, prototype, "AsyncFunction");
 
     const constructor_value = constructor_object.value();
@@ -159,12 +157,12 @@ pub fn asyncIteratorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Objec
     errdefer if (object_raw_owned) core.Object.destroyFromHeader(rt, object.gcHeader());
     const method = try core.function.nativeFunctionForGlobal(rt, global, "[Symbol.asyncIterator]", 0);
     const async_iterator_atom = core.atom.predefinedId("Symbol.asyncIterator", .symbol) orelse return error.TypeError;
-    try object.defineOwnProperty(rt, async_iterator_atom, core.Descriptor.data(method, true, false, true));
+    try object.defineOwnProperty(rt, async_iterator_atom, core.Descriptor.data(method, .method));
     if (core.atom.predefinedId("Symbol.asyncDispose", .symbol)) |async_dispose_atom| {
         const dispose = try core.function.nativeFunctionForGlobal(rt, global, "[Symbol.asyncDispose]", 0);
         const dispose_object = objectFromValue(dispose) orelse return error.TypeError;
         if (!try dispose_object.addAsyncIteratorAsyncDisposeFunction(rt)) return error.TypeError;
-        try object.defineOwnProperty(rt, async_dispose_atom, core.Descriptor.data(dispose, true, false, true));
+        try object.defineOwnProperty(rt, async_dispose_atom, core.Descriptor.data(dispose, .method));
     }
     const value = object.value();
     object_raw_owned = false;
@@ -192,7 +190,7 @@ pub fn installAsyncGeneratorPrototypeProperties(rt: *core.JSRuntime, global: *co
 
     const tag_atom = core.atom.predefinedId("Symbol.toStringTag", .symbol) orelse return error.TypeError;
     const tag = try value_ops.createStringValue(rt, "AsyncGenerator");
-    try object.defineOwnProperty(rt, tag_atom, core.Descriptor.data(tag, false, false, true));
+    try object.defineOwnProperty(rt, tag_atom, core.Descriptor.data(tag, .{ .configurable = true }));
 }
 
 pub inline fn defineAsyncGeneratorDataMethod(rt: *core.JSRuntime, global: *core.Object, object: *core.Object, atom_id: core.Atom, length: i32) !void {
@@ -204,15 +202,15 @@ pub fn asyncGeneratorFunctionPrototypeFromGlobal(rt: *core.JSRuntime, global: *c
     const object = try core.Object.create(rt, core.class.ids.object, functionPrototypeFromGlobal(rt, global));
     const object_value = object.value();
     const constructor = try core.function.nativeFunctionForGlobal(rt, global, "AsyncGeneratorFunction", 1);
-    const constructor_object = property_ops.expectObject(constructor) catch return error.TypeError;
+    const constructor_object = try property_ops.expectObject(constructor);
     try constructor_object.setFunctionRealmGlobalPtr(rt, global);
     if (functionConstructorFromGlobal(rt, global)) |function_constructor| try constructor_object.setPrototype(rt, function_constructor);
-    try constructor_object.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(object_value, false, false, false));
-    try object.defineOwnProperty(rt, core.atom.ids.constructor, core.Descriptor.data(constructor_object.value(), false, false, true));
+    try constructor_object.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(object_value, .none));
+    try object.defineOwnProperty(rt, core.atom.ids.constructor, core.Descriptor.data(constructor_object.value(), .{ .configurable = true }));
     try storeRealmValue(rt, global, .async_generator_function_constructor, constructor_object.value());
     const async_generator_prototype = try asyncGeneratorPrototypeFromGlobal(rt, global);
-    try object.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(async_generator_prototype.value(), false, false, true));
-    try async_generator_prototype.defineOwnProperty(rt, core.atom.ids.constructor, core.Descriptor.data(object_value, false, false, true));
+    try object.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(async_generator_prototype.value(), .{ .configurable = true }));
+    try async_generator_prototype.defineOwnProperty(rt, core.atom.ids.constructor, core.Descriptor.data(object_value, .{ .configurable = true }));
     try defineToStringTag(rt, object, "AsyncGeneratorFunction");
     try storeRealmValue(rt, global, .async_generator_function_prototype, object_value);
     return object;
@@ -367,7 +365,7 @@ test "createPromiseResolvingFunction roots promise and state while allocating fu
     const state_symbol = try rt.atoms.newValueSymbol("gc-qjs-promise-resolving-state-symbol");
     {
         const state_marker_value = try rt.takeSymbolValue(state_symbol);
-        try state.defineOwnProperty(rt, marker_key, core.Descriptor.data(state_marker_value, true, true, true));
+        try state.defineOwnProperty(rt, marker_key, core.Descriptor.data(state_marker_value, .all));
     }
 
     const promise_symbol = try rt.atoms.newValueSymbol("gc-qjs-promise-resolving-target-symbol");
@@ -414,7 +412,7 @@ test "createPromiseResolvingFunction roots promise and state while allocating fu
 }
 
 /// qjs `list_add_tail(&rd->link, &s->promise_reactions[is_reject])`
-/// (quickjs.c:54221-54222) links the reaction record onto the pending promise
+/// links the reaction record onto the pending promise
 /// in O(1) with no allocation of its own. The array adaptation keeps a
 /// capacity alongside the live prefix and grows by doubling, so subscribing N
 /// handlers to one pending promise costs O(N) rather than the O(N^2) that an
@@ -536,7 +534,7 @@ test "promiseReactionJob roots reaction and value while allocating job" {
     const reaction_symbol = try rt.atoms.newValueSymbol("gc-qjs-promise-reaction-record-symbol");
     {
         const reaction_marker_value = try rt.takeSymbolValue(reaction_symbol);
-        try reaction.defineOwnProperty(rt, marker_key, core.Descriptor.data(reaction_marker_value, true, true, true));
+        try reaction.defineOwnProperty(rt, marker_key, core.Descriptor.data(reaction_marker_value, .all));
     }
 
     const value_symbol = try rt.atoms.newValueSymbol("gc-qjs-promise-reaction-value-symbol");
@@ -966,7 +964,7 @@ fn resolvePromiseWithState(
     }
 
     if (!reject and value.sameValue(target_value)) {
-        // qjs js_promise_resolve_function_call (quickjs.c:53608):
+        // qjs js_promise_resolve_function_call:
         // JS_ThrowTypeError(ctx, "promise self resolution").
         const error_global = if (resolving_function) |function_object|
             objectRealmGlobal(function_object) orelse global
@@ -985,7 +983,7 @@ fn resolvePromiseWithState(
     if (!reject and value.is(.object)) {
         if (objectFromValue(value) != null) {
             // No native-promise special case: qjs js_promise_resolve_function_call
-            // (quickjs.c:53600-53630) treats every object resolution uniformly —
+            // treats every object resolution uniformly —
             // Get(resolution, "then") once, and if callable enqueue the thenable
             // job (a settled/pending native promise is adopted via its `then`,
             // costing the same 2 ticks and observing patched `then`).
@@ -1005,7 +1003,7 @@ fn resolvePromiseWithState(
                 return core.JSValue.undefinedValue();
             };
             if (isCallableValue(then_value)) {
-                // Mirrors js_promise_resolve_function_call (quickjs.c:53626):
+                // Mirrors js_promise_resolve_function_call:
                 // resolving with a callable-then object ALWAYS enqueues a
                 // js_promise_resolve_thenable_job — never stored lazily, never
                 // run synchronously; then is invoked exactly once, as a job.
@@ -1296,7 +1294,7 @@ test "Promise resolving OOM keeps FIFO owner after then getter and resolver coll
     try thenable.defineOwnProperty(
         rt,
         then_key,
-        core.Descriptor.accessor(getter, core.JSValue.undefinedValue(), true, true),
+        core.Descriptor.accessor(getter, core.JSValue.undefinedValue(), .{ .enumerable = true, .configurable = true }),
     );
 
     _ = (try promiseResolvingFunctionCall(ctx, null, global, resolve_object, &.{thenable.value()}, null, null)).?;
@@ -1337,7 +1335,7 @@ test "Promise resolving getter throw plus settle OOM rejects once after resolver
     try thenable.defineOwnProperty(
         rt,
         then_key,
-        core.Descriptor.accessor(getter, core.JSValue.undefinedValue(), true, true),
+        core.Descriptor.accessor(getter, core.JSValue.undefinedValue(), .{ .enumerable = true, .configurable = true }),
     );
 
     _ = (try promiseResolvingFunctionCall(ctx, null, global, resolve_object, &.{thenable.value()}, null, null)).?;
@@ -1403,16 +1401,11 @@ test "Job.initPromiseThenable roots direct function bytecode then callback while
     const target = try core.Object.create(rt, core.class.ids.promise, null);
     const thenable = try core.Object.create(rt, core.class.ids.object, null);
 
-    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-thenable-job-bytecode-symbol");
+    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{
         .flags = .{ .func_kind = .generator },
         .cpool_count = 1,
-    });
-    var fb_published = false;
-    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-thenable-job-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
-    fb.publishFixtureNoFail(rt);
-    fb_published = true;
+    }, &.{try rt.takeSymbolValue(symbol_atom)});
 
     const then_callback = core.JSValue.functionBytecode(&fb.header);
 
@@ -1565,9 +1558,9 @@ pub fn promiseReactionJobCall(
         // point, and preserve its construction realm for self-resolution errors.
         try exception_ops.pollInterrupt(ctx, global);
         const rejected = payload.phase == .reject;
-        const target = objectFromValue(capability.target) orelse unreachable;
+        const target = objectFromValue(capability.target).?;
         const resolve_global = if (!rejected and payload.value.sameValue(capability.target))
-            objectFromValue(capability.self_error_global) orelse unreachable
+            objectFromValue(capability.self_error_global).?
         else
             global;
         _ = try resolvePromiseWithState(ctx, output, resolve_global, target, null, payload.value, rejected, null, caller_function, caller_frame);
@@ -1581,7 +1574,7 @@ pub fn promiseReactionJobCall(
         .resolve => resolve_value,
         .reject => reject_value,
     };
-    // qjs promise_reaction_job (quickjs.c:53415-53421): "as an extension,
+    // qjs promise_reaction_job: "as an extension,
     // we support undefined as value to avoid creating a dummy promise in the
     // 'await' implementation of async functions" — an undefined resolving
     // function is skipped and the value dropped.
@@ -1678,7 +1671,7 @@ fn thenCapability(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.O
     if (!legacy_wait_async) {
         if (global.cachedRealmValue(ctx.runtime, .promise_constructor)) |intrinsic| {
             if (constructor.sameValue(intrinsic)) {
-                const object = objectFromValue(intrinsic) orelse unreachable;
+                const object = objectFromValue(intrinsic).?;
                 if (object.getOwnDataObjectBorrowed(core.atom.ids.prototype)) |prototype| {
                     if (comptime builtin.is_test) ThenCapabilityTestStorage.metrics.intrinsic_prepare += 1;
                     const promise = try core.promise.constructWithPrototype(ctx, prototype);
@@ -1989,13 +1982,8 @@ test "promiseCombinatorState roots direct function bytecode resolve while creati
 
     const values = try core.Object.create(rt, core.class.ids.array, null);
 
-    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
-    var fb_published = false;
-    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-qjs-promise-combinator-state-resolve-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
-    fb.publishFixtureNoFail(rt);
-    fb_published = true;
+    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
 
     const resolve_value = core.JSValue.functionBytecode(&fb.header);
 
@@ -2127,8 +2115,8 @@ fn promiseConstructorDataValueForFastPath(promise: *core.Object) ?core.JSValue {
 
 pub fn promiseDefaultConstructor(ctx: *core.JSContext, global: *core.Object) !core.JSValue {
     // qjs uses the cached intrinsic ctx->promise_ctor (js_async_function_resume
-    // quickjs.c:21268, js_new_promise_capability quickjs.c:53745; set at
-    // JS_AddIntrinsicPromise quickjs.c:54663) — never a globalThis.Promise
+    // quickjs.c, js_new_promise_capability quickjs.c; set at
+    // JS_AddIntrinsicPromise quickjs.c) — never a globalThis.Promise
     // lookup, so deleting/replacing the global binding cannot break await or
     // the default species. The realm slot is populated at install time
     // (installPromiseExtras); the global read remains only as a fallback for
@@ -2214,7 +2202,7 @@ pub fn promiseCombinatorCall(
     // The combinator result array (Promise.all/allSettled) and the Promise.any
     // errors array (reuses this `values`) must carry %Array.prototype% so
     // `result instanceof Array` holds — qjs js_promise_all uses JS_NewArray
-    // (quickjs.c:54012), not a null-proto object.
+    //, not a null-proto object.
     const values = if (mode != .race) try core.Object.createArray(ctx.runtime, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global)) else null;
     const state = if (values) |array| try promiseCombinatorState(ctx.runtime, capability.resolve, capability.reject, array) else null;
 
@@ -2639,7 +2627,7 @@ pub fn asyncFunctionRunState(
     defer continuation.finalizeGeneratorExecutionCompletion(ctx.runtime);
     defer nested_stack.deinit(ctx.runtime);
 
-    try setGeneratorResumeCompletionType(ctx.runtime, continuation, if (resume_rejected) 2 else 0);
+    call_runtime.setGeneratorResumeCompletion(continuation, if (resume_rejected) .throw else .next);
     continuation.generatorExecutingSlot().* = true;
     defer continuation.generatorExecutingSlot().* = false;
 
@@ -2757,7 +2745,7 @@ pub fn asyncFunctionAwait(
     on_fulfilled = try asyncFunctionResumeCallback(ctx.runtime, global, continuation, false);
     on_rejected = try asyncFunctionResumeCallback(ctx.runtime, global, continuation, true);
 
-    // qjs js_async_function_resume (quickjs.c:21268-21290): the resume
+    // qjs js_async_function_resume: the resume
     // callbacks attach through the INTERNAL perform_promise_then with
     // undefined resolving funcs — a (patched) Promise.prototype.then property
     // is never read for a native-promise await.
@@ -2833,7 +2821,7 @@ fn asyncResumeJobCall(
     // Keep the former internal callback's outer call-entry poll. The existing
     // resume path below retains its stack guard, inner poll and function realm.
     try exception_ops.pollInterrupt(ctx, global);
-    const continuation = objectFromValue(payload.continuation) orelse unreachable;
+    const continuation = objectFromValue(payload.continuation).?;
     try asyncFunctionRunAndSettle(ctx, output, global, continuation, payload.value, false);
 }
 
@@ -2871,7 +2859,7 @@ test "async resume callbacks keep only internal state and trace their continuati
         roots.activate(rt);
         defer roots.deactivate(rt);
         const marker = try rt.atoms.newValueSymbol("async-resume-continuation-root");
-        try continuation.?.defineOwnProperty(rt, marker_key, core.Descriptor.data(try rt.takeSymbolValue(marker), true, true, true));
+        try continuation.?.defineOwnProperty(rt, marker_key, core.Descriptor.data(try rt.takeSymbolValue(marker), .all));
         const old_threshold = rt.gcThreshold();
         rt.setGCThreshold(0);
         defer rt.setGCThreshold(old_threshold);
@@ -2913,7 +2901,7 @@ test "async resume callback allocation failure preserves its continuation" {
     roots.activate(rt);
     defer roots.deactivate(rt);
     const marker_key = try rt.internAtom("continuation-marker");
-    try continuation.?.defineOwnProperty(rt, marker_key, core.Descriptor.data(core.JSValue.int32(42), true, true, true));
+    try continuation.?.defineOwnProperty(rt, marker_key, core.Descriptor.data(core.JSValue.int32(42), .all));
     // The object boundary may collect unrelated bootstrap garbage first;
     // zero keeps the allocation forbidden even after that reclamation.
     rt.setMemoryLimit(0);
@@ -3024,7 +3012,7 @@ test "asyncFunctionSettle roots continuation target and result through interrupt
     var setup_active = true;
     defer if (setup_active) setup_roots.deactivate(rt);
     promise_value = try core.promise.constructWithPrototype(ctx, promisePrototypeFromGlobal(rt, global));
-    const target = objectFromValue(promise_value) orelse unreachable;
+    const target = objectFromValue(promise_value).?;
     const continuation = try core.Object.create(rt, core.class.ids.generator, null);
     continuation_value = continuation.value();
     try continuation.setOptionalValueSlot(rt, continuation.generatorAsyncPromiseSlot(), promise_value);
@@ -3078,7 +3066,7 @@ test "asyncFunctionSettle needs no allocation for scalar completion" {
         // its own coverage and must not release memory to hide an allocation.
         ctx.interrupt_counter = core.JSContext.interrupt_counter_reset;
         try asyncFunctionSettle(ctx, null, global, continuation, core.JSValue.int32(42), rejected, null, null);
-        const target = objectFromValue(promise_value) orelse unreachable;
+        const target = objectFromValue(promise_value).?;
         try std.testing.expectEqual(@as(?i32, 42), target.promiseResult().?.as(.int));
         try std.testing.expectEqual(rejected, target.promiseIsRejected());
         try std.testing.expectEqual(allocated, rt.memory.allocated_bytes);
@@ -3108,7 +3096,7 @@ test "asyncFunctionSettle fits the allocation budget of its shared state" {
     rt.setMemoryLimit(allocated + 1024);
     defer rt.setMemoryLimit(null);
     try asyncFunctionSettle(ctx, null, global, continuation, core.JSValue.int32(42), false, null, null);
-    const target = objectFromValue(promise) orelse unreachable;
+    const target = objectFromValue(promise).?;
     try std.testing.expectEqual(@as(?i32, 42), target.promiseResult().?.as(.int));
     try std.testing.expect(!target.promiseIsRejected());
 }
@@ -3137,7 +3125,7 @@ test "asyncFunctionSettle transfers getter OOM completion to FIFO exactly once" 
     thenable_value = thenable.value();
     var probe = PromiseJobOomProbe{ .fail = false };
     const getter = try promiseJobOomProbeFunction(ctx, &probe, "asyncThenGetterOomProbe");
-    try thenable.defineOwnProperty(rt, core.atom.ids.then, core.Descriptor.accessor(getter, core.JSValue.undefinedValue(), true, true));
+    try thenable.defineOwnProperty(rt, core.atom.ids.then, core.Descriptor.accessor(getter, core.JSValue.undefinedValue(), .{ .enumerable = true, .configurable = true }));
 
     try asyncFunctionSettle(ctx, null, global, continuation, thenable_value, false, null, null);
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
@@ -3230,7 +3218,7 @@ pub fn asyncFromSyncIteratorMethodCall(
 }
 
 /// Mirrors the GEN_MAGIC_THROW arm of js_async_from_sync_iterator_next
-/// (quickjs.c:54503-54520): `.throw` is re-read per call; absent throw closes
+///: `.throw` is re-read per call; absent throw closes
 /// the sync iterator and rejects TypeError "throw is not a method".
 pub fn asyncFromSyncIteratorThrow(
     ctx: *core.JSContext,
@@ -3250,7 +3238,6 @@ pub fn asyncFromSyncIteratorThrow(
     if (throw_method.is(.undefined_value) or throw_method.is(.null_value)) {
         // IteratorClose(sync_iter) with no pending exception; a close failure
         // rejects with that error, otherwise reject the TypeError
-        // (quickjs.c:54515-54519).
         iterator_ops.iteratorCloseValue(ctx, output, global, sync_iterator, caller_function, caller_frame) catch |err| {
             return rejectedPromiseForRuntimeError(ctx, global, err, promisePrototypeFromGlobal(ctx.runtime, global));
         };
@@ -3272,7 +3259,7 @@ pub fn asyncFromSyncIteratorThrow(
 }
 
 /// The onRejected close-wrap reaction (js_async_from_sync_iterator_close_wrap,
-/// quickjs.c:54468-54476): re-throw the reason, close the sync iterator with
+/// quickjs.c): re-throw the reason, close the sync iterator with
 /// the exception pending (close errors swallowed), and propagate the rejection.
 pub fn asyncFromSyncIteratorCloseWrap(
     rt: *core.JSRuntime,
@@ -3392,7 +3379,7 @@ pub fn asyncFromSyncIteratorContinuation(
     const promise_constructor = try promiseDefaultConstructor(ctx, global);
     const value_wrapper_promise = promiseStaticCall(ctx, output, global, promise_constructor, &.{value}, .resolve, caller_function, caller_frame) catch |err| {
         // PromiseResolve threw: close the sync iterator with the exception
-        // pending, then reject (quickjs.c:54544-54549).
+        // pending, then reject.
         if (close_on_rejection and !done) {
             iterator_ops.iteratorCloseValue(ctx, output, global, sync_iterator, caller_function, caller_frame) catch {
                 if (ctx.hasException()) ctx.clearException();
@@ -3405,7 +3392,6 @@ pub fn asyncFromSyncIteratorContinuation(
     const unwrap = try asyncFromSyncIteratorUnwrap(ctx.runtime, global, done);
 
     // onRejected close-wrap only when `!done && magic != GEN_MAGIC_RETURN`
-    // (quickjs.c:54570-54579).
     const close_wrap: core.JSValue = if (close_on_rejection and !done)
         try asyncFromSyncIteratorCloseWrap(ctx.runtime, global, sync_iterator)
     else
@@ -3723,14 +3709,14 @@ pub fn promiseThen(
     if (is_finally) return try promiseFinally(ctx, output, global, receiver, args, caller_function, caller_frame);
     // Promise.prototype.catch is ALWAYS Invoke(this, "then", [undefined, arg])
     // (qjs js_promise_catch = JS_Invoke(this_val, JS_ATOM_then, ...),
-    // quickjs.c:54275-54282) — it observes a user-overridden/patched `then`
+    // quickjs.c) — it observes a user-overridden/patched `then`
     // and never takes the builtin then-capability fast path, so route every
     // catch (incl. on a genuine promise) through the generic this.then path.
     if (is_catch) return try promiseCatchGeneric(ctx, output, global, receiver, args);
     if (!receiver.is(.object)) {
         return error.TypeError;
     }
-    const object = property_ops.expectObject(receiver) catch {
+    const object = core.value_semantics.objectFromValue(receiver) orelse {
         if (is_catch) return try promiseCatchGeneric(ctx, output, global, receiver, args);
         return error.TypeError;
     };
@@ -3860,17 +3846,12 @@ test "settlePendingPromiseReaction roots callback and arg after clearing promise
         rt.destroy();
     }
 
-    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+    const callback_symbol = try rt.atoms.newValueSymbol("gc-promise-reaction-callback-symbol");
+    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{
         .realm = ctx,
         .flags = .{ .func_kind = .generator },
         .cpool_count = 1,
-    });
-    var fb_published = false;
-    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
-    const callback_symbol = try rt.atoms.newValueSymbol("gc-promise-reaction-callback-symbol");
-    fb.cpoolSlice()[0] = try rt.takeSymbolValue(callback_symbol);
-    fb.publishFixtureNoFail(rt);
-    fb_published = true;
+    }, &.{try rt.takeSymbolValue(callback_symbol)});
 
     const callback = core.JSValue.functionBytecode(&fb.header);
     const arg_symbol = try rt.atoms.newValueSymbol("gc-promise-reaction-arg-symbol");
@@ -3972,7 +3953,7 @@ pub fn drainOnePendingJob(
     active_job_root.activate(ctx.runtime, &entry);
     defer active_job_root.deactivate(ctx.runtime);
     defer ctx.runtime.clearWeakRefKeptAlive();
-    const job_ctx = entry.realm.borrow() orelse unreachable;
+    const job_ctx = entry.realm.borrow().?;
     const job_global = job_ctx.global orelse return error.InvalidBuiltinRegistry;
     var result: ?core.JSValue = null;
     switch (entry.payload) {

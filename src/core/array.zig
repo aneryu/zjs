@@ -3,8 +3,8 @@
 //! Index helpers are pure. Literal constructors either duplicate borrowed
 //! values or explicitly consume already-owned operand values, as their names
 //! and comments specify; temporary root slices cover allocating borrowed paths.
-//! QuickJS map: `JS_AtomIsArrayIndex` at quickjs.c:3634 and `OP_array_from`
-//! near quickjs.c:18239. Exec owns Array builtins, while this lower-layer seam
+//! QuickJS map: `JS_AtomIsArrayIndex` at quickjs.c and `OP_array_from`
+//! near quickjs.c. Exec owns Array builtins, while this lower-layer seam
 //! may import core/libs only and never parser/exec/runtime/binding.
 
 const atom = @import("atom.zig");
@@ -24,7 +24,7 @@ pub fn isArrayIndexName(bytes: []const u8) bool {
 }
 
 pub fn arrayIndexFromAtom(atoms: anytype, atom_id: atom.Atom) ?u32 {
-    // Mirrors QuickJS JS_AtomIsArrayIndex (quickjs.c:3634): tagged integer
+    // Mirrors QuickJS JS_AtomIsArrayIndex: tagged integer
     // atoms are array indexes directly. zjs internString tags every
     // array-index-form decimal string <= atom.max_int_atom, so a non-tagged
     // atom shorter than the 10-digit high-index window cannot be an array index.
@@ -61,7 +61,7 @@ const expectObject = value_semantics.expectObject;
 /// native record surface that re-exports it.
 pub fn isArrayValue(value: JSValue) !bool {
     // Iterative proxy-chain walk with a depth cap, mirroring QuickJS
-    // `js_resolve_proxy` (quickjs.c:51412-51434): a chain deeper than 1000 is a
+    // `js_resolve_proxy`: a chain deeper than 1000 is a
     // stack overflow (InternalError), not a native recursion crash. A revoked
     // proxy (null handler) is a TypeError.
     var object = objectFromValue(value) orelse return false;
@@ -107,7 +107,7 @@ pub fn expectArray(value: JSValue) !*Object {
 /// linked-list push as refcounted ones.
 /// Hot-path array-literal constructor — the direct mirror of qjs
 /// `OP_array_from`'s `js_create_array_free(ctx, argc, sp - argc)`
-/// (quickjs.c:18239 -> 9625): allocate the array from the realm's prepared
+///: allocate the array from the realm's prepared
 /// initial Shape (`ctx->array_shape`) and MOVE the already-evaluated element
 /// values into its dense storage — no per-element retain/release pair and no
 /// root registration. qjs roots nothing here either: the elements sit on the
@@ -169,7 +169,7 @@ pub fn constructLiteralWithPrototype(rt: *JSRuntime, values: []const JSValue, pr
     for (values, 0..) |value, index| {
         const atom_id = atom.Atom.taggedInt(@intCast(index));
         if (try object.appendDenseArrayLiteralIndex(rt, @intCast(index), value)) continue;
-        try object.defineOwnProperty(rt, atom_id, Descriptor.data(value, true, true, true));
+        try object.defineOwnProperty(rt, atom_id, Descriptor.data(value, .all));
     }
     return object.value();
 }

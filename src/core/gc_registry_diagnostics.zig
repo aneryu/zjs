@@ -12,6 +12,7 @@
 //! `rt.gc.verifyX()` call site is unchanged.
 
 const std = @import("std");
+const JSRuntime = @import("runtime.zig").JSRuntime;
 
 const gc = @import("gc.zig");
 const gc_audit_print = @import("gc_audit_print.zig");
@@ -39,7 +40,6 @@ const pause_sample_capacity = gc.pause_sample_capacity;
 const heapByteSizeFromHeader = Registry.heapByteSizeFromHeader;
 const verifyCircularHeaderList = registry_lists.verifyCircularHeaderList;
 const verifyMetadataSemantics = gc.verifyMetadataSemantics;
-const listEmpty = registry_lists.listEmpty;
 const isCycleCandidate = Registry.isCycleCandidate;
 const construction_pin_count = gc.construction_pin_count;
 const trace_remembered_mask = gc.trace_remembered_mask;
@@ -96,7 +96,7 @@ pub const HeapSpaceSnapshot = struct {
 /// ledger: live containers, condemned buckets, and explicit in-finalizer
 /// lifecycle slots are the accounting authority, and each header's real
 /// allocation size is classified against the current immutable policy.
-fn deriveHeapSpaceSnapshot(self: *const Registry, rt: anytype) HeapSpaceSnapshot {
+fn deriveHeapSpaceSnapshot(self: *const Registry, rt: *const JSRuntime) HeapSpaceSnapshot {
     var derived: HeapSpaceSnapshot = .{};
     var iterator = self.heapAccountingIterator();
     while (iterator.next()) |header| {
@@ -113,7 +113,7 @@ fn deriveHeapSpaceSnapshot(self: *const Registry, rt: anytype) HeapSpaceSnapshot
     return derived;
 }
 
-pub fn statsSnapshot(self: *const Registry, rt: anytype) Stats {
+pub fn statsSnapshot(self: *const Registry, rt: *const JSRuntime) Stats {
     const snapshot = self.*;
     // Walk the Registry's accounting containers, not the by-value
     // snapshot: nodes' links point at live sentinels, not copied headers.
@@ -150,11 +150,11 @@ pub fn statsSnapshot(self: *const Registry, rt: anytype) Stats {
         .failed_collections = snapshot.stats.failed_collections,
         .last_failure = snapshot.stats.last_failure,
         .freed_objects = snapshot.stats.freed_objects,
-        .pinned_cell_count = snapshot.pins.entries.len,
+        .pinned_cell_count = snapshot.pins.count(),
         .gc_request_count = snapshot.stats.gc_request_count,
-        .pending_major = snapshot.scheduler.major_request.pending,
-        .pending_request_reason = if (snapshot.scheduler.major_request.pending) snapshot.scheduler.major_request.reason else null,
-        .pending_request_urgency = if (snapshot.scheduler.major_request.pending) snapshot.scheduler.major_request.urgency else null,
+        .pending_major = snapshot.scheduler.major_request != null,
+        .pending_request_reason = if (snapshot.scheduler.major_request) |request| request.reason else null,
+        .pending_request_urgency = if (snapshot.scheduler.major_request) |request| request.urgency else null,
         .last_request_reason = snapshot.stats.last_request_reason,
     };
 }
@@ -177,7 +177,7 @@ fn ownerCondemned(header: *const Header) bool {
     return headerCondemned(header);
 }
 
-pub fn verifyObjectPropertyStorageLayouts(self: *const Registry, rt: anytype) InvariantError!void {
+pub fn verifyObjectPropertyStorageLayouts(self: *const Registry, rt: *JSRuntime) InvariantError!void {
     var iterator = self.objectIterator(.all);
     while (iterator.next()) |header| {
         if (header.metaConst().flags.kind != .object) continue;
@@ -439,7 +439,7 @@ fn verifyAuxiliaryIntrusiveLists(self: *Registry) InvariantError!void {
     var cursor_found = self.morgue.cursor == null;
     for (&self.morgue.by_kind, 0..) |*head, kind_index| {
         const kind: GcKind = @enumFromInt(kind_index);
-        if (kind == .object and !listEmpty(head))
+        if (kind == .object and !head.isEmpty())
             return error.CorruptNonBlockObjectAuthority;
         doomed_nodes += try verifyCircularHeaderList(head, kind, false);
         if (!cursor_found) {
@@ -487,12 +487,12 @@ fn verifyAuxiliaryIntrusiveLists(self: *Registry) InvariantError!void {
 /// initialized, or wrong-class header as the BlockHeap publication
 /// exception.
 pub fn verifyConstructionRoots(self: *const Registry) InvariantError!void {
-    for (self.pins.entries) |entry| {
-        if (entry.count != construction_pin_count) continue;
-        if (!self.pins.isConstructionRoot(entry.header)) {
+    for (self.pins.headers(), self.pins.pinCounts()) |header, pin_count| {
+        if (pin_count != construction_pin_count) continue;
+        if (!self.pins.isConstructionRoot(header)) {
             return error.ConstructionRootStateMismatch;
         }
-        try verifyMetadataSemantics(entry.header.metaConst(), .object, .construction_block_object);
+        try verifyMetadataSemantics(header.metaConst(), .object, .construction_block_object);
     }
 }
 
@@ -658,7 +658,7 @@ pub fn verifyMajorRetirementCommit(self: *Registry) InvariantError!void {
     }
 }
 
-pub fn verifyHeapAccounting(self: *const Registry, rt: anytype) InvariantError!void {
+pub fn verifyHeapAccounting(self: *const Registry, rt: *JSRuntime) InvariantError!void {
     if (comptime carrier.extent_identity_enabled) {
         self.memory.gc_extent_identity.verify() catch return error.CarrierOldNewMismatch;
     }
@@ -694,9 +694,6 @@ pub fn verifyHeapAccounting(self: *const Registry, rt: anytype) InvariantError!v
     var iterator = self.heapAccountingIterator();
     while (iterator.next()) |header| {
         if (!header.metaConst().alloc_info.heap_accounted) return error.MissingHeapAllocation;
-        if (self.headerIsPinned(header) and self.pins.indexOf(header) == null) {
-            return error.PinnedHeaderMissingEntry;
-        }
         const bytes = heapByteSizeFromHeader(rt, header);
         if (bytes == 0) return error.MissingHeapAllocation;
         const is_large = self.isLargeAllocation(bytes);
@@ -716,7 +713,7 @@ pub fn verifyHeapAccounting(self: *const Registry, rt: anytype) InvariantError!v
                 const resolved = self.resolveExact(
                     handle,
                     header.metaConst().flags.kind,
-                    CarrierStateMask.publishedOnly(),
+                    gc.carrier_state_masks.published_only,
                 ) catch return error.CarrierOldNewMismatch;
                 if (resolved.tracing != header) return error.CarrierOldNewMismatch;
                 if (raw.generation != handle.generation) return error.CarrierGenerationMismatch;
@@ -724,23 +721,19 @@ pub fn verifyHeapAccounting(self: *const Registry, rt: anytype) InvariantError!v
         }
     }
 
-    for (self.pins.entries, 0..) |entry, index| {
-        if (entry.count == 0) return error.EmptyPinEntry;
-        if (entry.count == construction_pin_count) {
-            if (!self.pins.isConstructionRoot(entry.header)) {
+    for (self.pins.headers(), self.pins.pinCounts()) |header, pin_count| {
+        if (pin_count == 0) return error.EmptyPinEntry;
+        if (pin_count == construction_pin_count) {
+            if (!self.pins.isConstructionRoot(header)) {
                 return error.ConstructionRootStateMismatch;
             }
-        } else if (!self.containsHeader(entry.header)) return error.PinEntryNotLive;
-        if (!self.headerIsPinned(entry.header)) return error.PinnedHeaderFlagMismatch;
-        for (self.pins.entries[0..index]) |previous| {
-            if (previous.header == entry.header) return error.DuplicatePinEntry;
-        }
+        } else if (!self.containsHeader(header)) return error.PinEntryNotLive;
     }
 
     var external_token_bytes: usize = 0;
-    for (self.external.entries, 0..) |entry, index| {
+    for (self.external.entries.items, 0..) |entry, index| {
         if (entry.id == 0 or entry.bytes == 0) return error.EmptyExternalMemoryToken;
-        for (self.external.entries[0..index]) |previous| {
+        for (self.external.entries.items[0..index]) |previous| {
             if (previous.id == entry.id) return error.DuplicateExternalMemoryToken;
         }
         external_token_bytes = std.math.add(usize, external_token_bytes, entry.bytes) catch std.math.maxInt(usize);
@@ -766,7 +759,7 @@ pub fn verifyHeapAccounting(self: *const Registry, rt: anytype) InvariantError!v
                     _ = self.resolveExact(
                         handle,
                         null,
-                        CarrierStateMask.publishedOnly(),
+                        gc.carrier_state_masks.published_only,
                     ) catch return error.CarrierOldNewMismatch;
                 }
             }

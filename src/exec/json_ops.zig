@@ -37,7 +37,7 @@ const SimpleJsonError = std.mem.Allocator.Error || error{
     ReadOnly,
     UnsupportedSimpleJson,
     // Native recursion guard: QuickJS surfaces deep JSON.parse nesting as a
-    // catchable SyntaxError (json parser js_parse_error, quickjs.c:23483).
+    // catchable SyntaxError (json parser js_parse_error, quickjs.c).
     SyntaxError,
     StringTooLong,
 };
@@ -212,7 +212,7 @@ pub const JsonParseWithRecord = struct {
 
 /// Parse `value` and build the parallel parse-record tree in lockstep, mirroring
 /// qjs js_json_parse's reviver branch which calls JS_ParseJSON3 with a live
-/// `pr` (quickjs.c:49834). Unlike `parse`, this never takes the record-less
+/// `pr`. Unlike `parse`, this never takes the record-less
 /// simple fast path: the reviver needs the full record for `context.source`.
 /// Caller owns both the returned value and record (record.deinit frees the
 /// tree; the value must be freed separately).
@@ -266,12 +266,12 @@ fn jsonParseFullFromBytes(rt: *core.JSRuntime, global: ?*core.Object, bytes: []c
 }
 
 /// Faithful port of the qjs JSON parser (js_json_parse -> json_next_token /
-/// json_parse_value, quickjs.c:23440): recursive descent over the source
+/// json_parse_value, quickjs.c): recursive descent over the source
 /// string's CODE UNITS (WTF-16; lone surrogates in string literals are legal
 /// JSON and round-trip, unlike the retired std.json backend), JSON whitespace
 /// only, strict number grammar, last-duplicate-key-wins, own "__proto__"
 /// property (no prototype mutation). Depth is bounded by the native stack
-/// guard (json_next_token js_check_stack_overflow, quickjs.c:23483).
+/// guard (json_next_token js_check_stack_overflow, quickjs.c).
 fn jsonParseFull(comptime T: type, rt: *core.JSRuntime, global: ?*core.Object, units: []const T) !core.JSValue {
     var parser = JsonUnitParser(T){ .rt = rt, .global = global, .units = units };
     parser.skipWhitespace();
@@ -294,20 +294,20 @@ const JsonParseError = std.mem.Allocator.Error || error{
 };
 
 /// Parallel parse-record tree, mirroring qjs's `JSONParseRecord`
-/// (quickjs.c:49336). Built during parse *only* when a reviver is present, so
+///. Built during parse *only* when a reviver is present, so
 /// `internalize_json_property` can attach `context.source` for primitives and
-/// perform the `js_same_value(pr->value, val)` guard (quickjs.c:49740). Each
+/// perform the `js_same_value(pr->value, val)` guard. Each
 /// node caches the value produced at parse time (`value`, dup'd so it survives
 /// reviver mutations that would otherwise free the original) and, for
 /// primitives, the raw source-text span. Object entries are stored in document
 /// order and `findObjectEntry` returns the FIRST entry for a key (qjs
-/// json_parse_record_find, quickjs.c:49430): under duplicate keys the recorded
+/// json_parse_record_find, quickjs.c): under duplicate keys the recorded
 /// value therefore differs from the last-wins property value, so the same-value
 /// guard drops the source, matching qjs.
 const JsonParseRecord = union(enum) {
     /// Non-object leaf (string / number / boolean / null). `source` holds the
     /// WTF-8 bytes of the original source span (qjs stores source_pos/source_len
-    /// into text_str; quickjs.c:49786).
+    /// into text_str; quickjs.c).
     primitive: struct { value: core.JSValue, source: []u8 },
     array: struct { value: core.JSValue, elements: []JsonParseRecord },
     object: struct { value: core.JSValue, entries: []JsonParseRecordEntry },
@@ -321,7 +321,7 @@ const JsonParseRecord = union(enum) {
     }
 
     /// Locate the child record for `atom` under an object record. Mirrors
-    /// json_parse_record_find: FIRST match wins (quickjs.c:49430).
+    /// json_parse_record_find: FIRST match wins.
     fn findObjectEntry(self: *const JsonParseRecord, atom: core.Atom) ?*const JsonParseRecord {
         switch (self.*) {
             .object => |o| {
@@ -346,7 +346,7 @@ const JsonParseRecord = union(enum) {
 
     /// Recursively free the record tree's native memory: the primitive source
     /// bytes and the element/entry arrays. Mirrors json_free_parse_record
-    /// (quickjs.c:49459). The cached `value` and the entry atoms are NOT freed
+    ///. The cached `value` and the entry atoms are NOT freed
     /// here — under tracing GC they are reported as roots by `JsonRecordRoots`
     /// / `JsonPendingRecordRoots` and reclaimed by the collector.
     fn deinit(self: *JsonParseRecord, rt: *core.JSRuntime) void {
@@ -536,7 +536,7 @@ fn JsonUnitParser(comptime T: type) type {
             return self.parseValueRecord(null);
         }
 
-        /// Faithful port of qjs json_parse_value(s, pr) (quickjs.c:49484). When
+        /// Faithful port of qjs json_parse_value(s, pr). When
         /// `record` is non-null, the parse also fills the parallel parse-record
         /// (value + primitive source span) so the reviver walk can attach
         /// `context.source` and run the same-value guard.
@@ -565,7 +565,7 @@ fn JsonUnitParser(comptime T: type) type {
                 else => return error.SyntaxError,
             };
             // Primitive leaf: record the value plus its raw source span
-            // (json_parse_record_init_primitive, quickjs.c:49373). The span is
+            // (json_parse_record_init_primitive, quickjs.c). The span is
             // the code units [start, index); for strings this includes the
             // enclosing quotes, matching qjs's s->token.ptr..s->buf_ptr.
             if (record) |slot| {
@@ -602,7 +602,7 @@ fn JsonUnitParser(comptime T: type) type {
             errdefer {
                 object_value = core.JSValue.undefinedValue();
             }
-            // json_parse_record_init_obj (quickjs.c:49508): the object record
+            // json_parse_record_init_obj: the object record
             // caches the object value plus one entry per key OCCURRENCE (dup keys
             // add separate entries, document order).
             var entries = std.ArrayList(JsonParseRecordEntry).empty;
@@ -643,7 +643,7 @@ fn JsonUnitParser(comptime T: type) type {
                 // Append the record entry BEFORE defineOwnProperty so any later
                 // failure is covered by the `entries` errdefer (no orphaned
                 // child_slot_storage). A dup key adds a separate entry
-                // (json_parse_record_add, quickjs.c:49405).
+                // (json_parse_record_add, quickjs.c).
                 if (child_slot) |slot| {
                     pending_frame.pending = slot;
                     array_list_erased.append(&entries, self.rt.memory.allocator, .{ .atom = key_atom, .record = slot.* }) catch |err| {
@@ -674,7 +674,7 @@ fn JsonUnitParser(comptime T: type) type {
             var root_frame = core.runtime.ValueRootFrame{ .values = &root_values };
             root_frame.activate(self.rt);
             defer root_frame.deactivate(self.rt);
-            // json_parse_record_init_array (quickjs.c:49571): one element record
+            // json_parse_record_init_array: one element record
             // per array slot, in order.
             var elements = std.ArrayList(JsonParseRecord).empty;
             errdefer if (record != null) {
@@ -715,7 +715,7 @@ fn JsonUnitParser(comptime T: type) type {
                     // The parser owns this fresh array, so this fallback cannot
                     // encounter an AUTOINIT property whose builder widens the
                     // generic define error set.
-                    object.defineOwnProperty(self.rt, core.Atom.taggedInt(index), core.Descriptor.data(child, true, true, true)) catch |err| return @errorCast(err);
+                    object.defineOwnProperty(self.rt, core.Atom.taggedInt(index), core.Descriptor.data(child, .all)) catch |err| return @errorCast(err);
                 }
                 index += 1;
                 self.skipWhitespace();
@@ -1173,7 +1173,7 @@ const SimpleJsonParser = struct {
                 // The parser owns this fresh array, so this fallback cannot
                 // encounter an AUTOINIT property whose builder widens the
                 // generic define error set.
-                object.defineOwnProperty(self.rt, core.Atom.taggedInt(index), core.Descriptor.data(item_value, true, true, true)) catch |err| return @errorCast(err);
+                object.defineOwnProperty(self.rt, core.Atom.taggedInt(index), core.Descriptor.data(item_value, .all)) catch |err| return @errorCast(err);
             }
             index += 1;
             self.skipWhitespace();
@@ -1488,7 +1488,7 @@ fn defineData(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, val
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(rooted_value, false, enumerable, false));
+    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(rooted_value, .{ .enumerable = enumerable }));
 }
 
 fn appendJsonInputString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
@@ -1593,7 +1593,7 @@ pub fn jsonParseCall(
     // Reviver present: build the parallel parse-record tree in lockstep so
     // internalize can attach context.source and run the same-value guard,
     // mirroring qjs js_json_parse (JS_ParseJSON3 with a live pr,
-    // quickjs.c:49834).
+    // quickjs.c).
     // Root every cached record value AND every recorded key atom for the
     // duration of the walk (qjs keeps both alive via the ref-counted
     // JSONParseRecord fields; TGC S3 needs an explicit provider). Armed
@@ -1618,7 +1618,7 @@ pub fn jsonParseCall(
     const holder = try core.Object.create(ctx.runtime, core.class.ids.object, object_ops.objectPrototypeFromGlobal(ctx.runtime, global));
     holder_value = holder.value();
     const root_key = core.atom.ids.empty_string;
-    try holder.defineOwnProperty(ctx.runtime, root_key, core.Descriptor.data(parsed, true, true, true));
+    try holder.defineOwnProperty(ctx.runtime, root_key, core.Descriptor.data(parsed, .all));
     parsed = core.JSValue.undefinedValue();
 
     var reviver_call = CallSite.initInternal(
@@ -1641,13 +1641,8 @@ test "JSON.parse roots direct function bytecode input while coercing to string" 
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
 
-    const fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
-    var fb_published = false;
-    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-json-parse-input-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
-    fb.publishFixtureNoFail(rt);
-    fb_published = true;
+    const fb = try core.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
 
     const input = core.JSValue.functionBytecode(&fb.header);
     const args = [_]core.JSValue{input};
@@ -1663,7 +1658,7 @@ test "JSON.parse roots direct function bytecode input while coercing to string" 
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-/// Faithful port of internalize_json_property (quickjs.c:49708). `record` is the
+/// Faithful port of internalize_json_property. `record` is the
 /// parse record for `holder[key]` (already located by the caller; the root
 /// call passes the record for the whole parsed value, recursion passes the
 /// located child record), or null when there is no record / it was cleared by
@@ -1699,10 +1694,10 @@ pub fn jsonInternalizeProperty(
     defer root_frame.deactivate(ctx.runtime);
 
     // ONE [[Get]] per property (val = JS_GetProperty(holder, name),
-    // quickjs.c:49722).
+    // quickjs.c).
     value = try object_ops.getValueProperty(ctx, output, global, rooted_holder_value, key, caller_function, caller_frame);
 
-    // Same-value guard (quickjs.c:49740): if the current value no longer matches
+    // Same-value guard: if the current value no longer matches
     // the value recorded at parse time (mutation-during-walk, or a duplicate key
     // whose recorded first-occurrence value differs from the last-wins value),
     var active_record = record;
@@ -1714,8 +1709,7 @@ pub fn jsonInternalizeProperty(
         if (try core.array.isArrayValue(value)) {
             const length_value = try object_ops.getValueProperty(ctx, output, global, value, core.atom.ids.length, caller_function, caller_frame);
             const length = try coercion_ops.toLengthIndex(ctx, output, global, length_value);
-            var index: usize = 0;
-            while (index < length) : (index += 1) {
+            for (0..length) |index| {
                 const child_key = try object_ops.propertyAtomFromLengthIndex(ctx.runtime, index);
                 defer deinitLengthIndexAtom(ctx.runtime, child_key);
                 const child_record: ?*const JsonParseRecord = if (active_record) |rec| rec.arrayElement(index) else null;
@@ -1724,7 +1718,7 @@ pub fn jsonInternalizeProperty(
         } else {
             // qjs snapshots own enumerable STRING property names ONCE via
             // JS_GetOwnPropertyNamesInternal(JS_GPN_ENUM_ONLY | JS_GPN_STRING_MASK)
-            // (quickjs.c:49757), then iterates that fixed list unconditionally.
+            //, then iterates that fixed list unconditionally.
             // Enumerability and string-ness are captured at snapshot time; a
             // reviver that later deletes / redefines a property does NOT change
             // which names are visited (the recursion's single [[Get]] surfaces
@@ -1750,7 +1744,7 @@ pub fn jsonInternalizeProperty(
 
     key_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, key);
     // context.source only for primitives with a surviving record
-    // (quickjs.c:49784: the source branch is in the `else` of JS_IsObject(val)).
+    // (quickjs.c: the source branch is in the `else` of JS_IsObject(val)).
     const primitive_record: ?*const JsonParseRecord = if (object_ops.objectFromValue(value) == null) active_record else null;
     context_value = try jsonReviverContext(ctx.runtime, global, primitive_record);
     const result = try reviver_call.callWithThis(rooted_holder_value, &.{ key_value, value, context_value });
@@ -1758,7 +1752,7 @@ pub fn jsonInternalizeProperty(
 }
 
 /// Recurse into one child then define/delete the result (the loop body of
-/// internalize_json_property, quickjs.c:49762-49782). The recursion performs the
+/// internalize_json_property, quickjs.c). The recursion performs the
 /// single [[Get]] for this child; no prefetch Get is done here.
 pub fn jsonInternalizeChild(
     ctx: *core.JSContext,
@@ -1804,7 +1798,7 @@ fn jsonReviverContext(rt: *core.JSRuntime, global: *core.Object, record: ?*const
         switch (rec.*) {
             .primitive => |p| {
                 source_value = try value_ops.createStringValue(rt, p.source);
-                try object.defineOwnProperty(rt, core.atom.ids.source, core.Descriptor.data(source_value, true, true, true));
+                try object.defineOwnProperty(rt, core.atom.ids.source, core.Descriptor.data(source_value, .all));
             },
             else => {},
         }
@@ -1836,7 +1830,7 @@ pub fn jsonCreateDataProperty(
         };
         return;
     }
-    holder.defineOwnProperty(ctx.runtime, key, core.Descriptor.data(rooted_value, true, true, true)) catch |err| switch (err) {
+    holder.defineOwnProperty(ctx.runtime, key, core.Descriptor.data(rooted_value, .all)) catch |err| switch (err) {
         error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return,
         else => return err,
     };
@@ -1890,7 +1884,7 @@ pub fn jsonStringifyCall(
     const holder = try core.Object.create(ctx.runtime, core.class.ids.object, object_ops.objectPrototypeFromGlobal(ctx.runtime, global));
     holder_value = holder.value();
     const root_key = core.atom.ids.empty_string;
-    try holder.defineOwnProperty(ctx.runtime, root_key, core.Descriptor.data(value, true, true, true));
+    try holder.defineOwnProperty(ctx.runtime, root_key, core.Descriptor.data(value, .all));
 
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(ctx.runtime.memory.allocator);
@@ -1909,13 +1903,8 @@ test "JSON.stringify roots direct function bytecode value while creating holder"
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
 
-    const fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
-    var fb_published = false;
-    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-json-stringify-value-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
-    fb.publishFixtureNoFail(rt);
-    fb_published = true;
+    const fb = try core.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
 
     const value = core.JSValue.functionBytecode(&fb.header);
     const args = [_]core.JSValue{
@@ -1964,7 +1953,7 @@ fn jsonAppendSimpleValue(
     // Native recursion guard: the no-options fast path is the live JSON.stringify
     // route for plain values, so its per-value recursion is where deep nesting
     // must turn into a catchable InternalError "stack overflow" (QuickJS
-    // js_json_to_str, quickjs.c:50075) instead of a native crash.
+    // js_json_to_str, quickjs.c) instead of a native crash.
     if (rt.checkNativeStackOverflow(0)) return error.StackOverflow;
     if (value.is(.undefined_value) or value.is(.symbol)) {
         if (array_slot) {
@@ -2143,8 +2132,7 @@ pub fn jsonStringifyPropertyList(
     const length_value = try object_ops.getValueProperty(ctx, output, global, rooted_replacer, core.atom.ids.length, caller_function, caller_frame);
     const length = try coercion_ops.toLengthIndex(ctx, output, global, length_value);
 
-    var index: usize = 0;
-    while (index < length) : (index += 1) {
+    for (0..length) |index| {
         const index_key = try object_ops.propertyAtomFromLengthIndex(ctx.runtime, index);
         defer deinitLengthIndexAtom(ctx.runtime, index_key);
         item = try object_ops.getValueProperty(ctx, output, global, rooted_replacer, index_key.atom, caller_function, caller_frame);
@@ -2298,7 +2286,7 @@ pub fn jsonSerializeProperty(
 ) HostError!void {
     // Native recursion guard: deep JSON.stringify nesting is a catchable
     // InternalError "stack overflow" in QuickJS (js_json_to_str
-    // JS_ThrowStackOverflow, quickjs.c:50075). error.StackOverflow maps to that
+    // JS_ThrowStackOverflow, quickjs.c). error.StackOverflow maps to that
     // InternalError via runtimeErrorInfo.
     if (ctx.runtime.checkNativeStackOverflow(0)) return error.StackOverflow;
     var rooted_holder_value = holder_value;
@@ -2440,8 +2428,7 @@ pub fn jsonAppendArray(
     const length_value = try object_ops.getValueProperty(ctx, output, global, rooted_value, core.atom.ids.length, caller_function, caller_frame);
     const length = try coercion_ops.toLengthIndex(ctx, output, global, length_value);
     try buffer.append(ctx.runtime.memory.allocator, '[');
-    var index: usize = 0;
-    while (index < length) : (index += 1) {
+    for (0..length) |index| {
         if (index != 0) try buffer.append(ctx.runtime.memory.allocator, ',');
         if (options.gap.len != 0) {
             try buffer.append(ctx.runtime.memory.allocator, '\n');

@@ -322,8 +322,7 @@ pub const Job = struct {
             .generic => |*payload| {
                 const argc = payload.argc;
                 payload.argc = 0;
-                var index: usize = 0;
-                while (index < argc) : (index += 1) {
+                for (0..argc) |index| {
                     payload.argv[index] = core.JSValue.undefinedValue();
                 }
             },
@@ -371,7 +370,7 @@ pub const Job = struct {
 
     pub fn run(self: *Job) core.JSValue {
         const payload = &self.payload.generic;
-        return payload.func(self.realm.borrow() orelse unreachable, payload.argv[0..payload.argc]);
+        return payload.func(self.realm.borrow().?, payload.argv[0..payload.argc]);
     }
 
     pub fn traceRoots(self: *Job, visitor: anytype) !void {
@@ -427,7 +426,7 @@ pub const Queue = struct {
     capacity: usize = 0,
     /// Offset of `jobs.ptr` inside the backing block, i.e. the number of
     /// already-drained slots below the window. qjs unlinks the head cell of
-    /// `rt->job_list` in O(1) (`list_del`, quickjs.c:2318); the array
+    /// `rt->job_list` in O(1) (`list_del`, quickjs.c); the array
     /// adaptation advances this offset instead of memmoving the survivors.
     head: usize = 0,
     /// Slots promised to prepared transactions that have not committed yet.
@@ -678,7 +677,7 @@ pub const Queue = struct {
     /// caller. The caller must eventually invoke `Job.deinit`.
     pub fn takeFirst(self: *Queue) ?Job {
         if (self.jobs.len == 0) return null;
-        // qjs `list_del(&job->link)` (quickjs.c:2318) unlinks the head cell in
+        // qjs `list_del(&job->link)` unlinks the head cell in
         // O(1); the array adaptation advances the window by one slot instead
         // of memmoving every survivor down.
         const job = self.jobs[0];
@@ -704,8 +703,8 @@ pub const Queue = struct {
     /// Reinsert an active entry at the FIFO head after a retriable host
     /// completion failure. The active runner must have reserved this slot
     /// immediately after unlinking the entry, so the slot below the window is
-    /// still pinned and relinking stays O(1) (qjs `list_add`, quickjs.c:2318
-    /// removal site paired with quickjs.c:54221 insertion).
+    /// still pinned and relinking stays O(1) (qjs `list_add`, quickjs.c
+    /// removal site paired with quickjs.c insertion).
     pub fn prependReserved(self: *Queue, job: Job) void {
         std.debug.assert(self.unlinked_head_slots != 0);
         self.unlinked_head_slots -= 1;

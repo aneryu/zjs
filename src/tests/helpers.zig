@@ -100,7 +100,7 @@ pub fn objectFromValue(value: core.JSValue) *core.Object {
 
 pub fn expectActiveSetStrings(object: *core.Object, comptime expected: []const []const u8) !void {
     var active_index: usize = 0;
-    for (object.collectionEntriesSlot().*) |entry| {
+    for (object.collectionEntriesSlot().items) |entry| {
         if (!entry.active) continue;
         try std.testing.expect(active_index < expected.len);
         try expectStringValueBytes(entry.key, expected[active_index]);
@@ -451,7 +451,7 @@ pub const TestEngine = struct {
         const function_value = try self.createExternalHostFunctionValue(name, length, ptr, call, finalizer);
 
         const property_name = try self.runtime.internAtom(name);
-        try global_object.defineOwnProperty(self.runtime, property_name, core.Descriptor.data(function_value, true, false, true));
+        try global_object.defineOwnProperty(self.runtime, property_name, core.Descriptor.data(function_value, .method));
     }
 
     pub fn takeException(self: *TestEngine) core.JSValue {
@@ -808,19 +808,19 @@ pub fn appendWeakCollectionEntry(rt: *core.JSRuntime, collection: *core.Object, 
 /// collection stores an identity, not a pointer, so the object entry point is
 /// just this one with `key.value()` already applied.
 pub fn appendWeakCollectionEntryForValue(rt: *core.JSRuntime, collection: *core.Object, key: core.JSValue, value: core.JSValue) !void {
-    const key_identity = (try core.Object.weakIdentityFromValue(rt, key)) orelse unreachable;
+    const key_identity = (try core.Object.weakIdentityFromValue(rt, key)).?;
     rt.retainWeakIdentity(key_identity);
     errdefer rt.releaseWeakIdentity(key_identity);
     const entries_slot = collection.weakCollectionEntriesSlot();
-    const index = entries_slot.*.len;
+    const index = entries_slot.items.len;
     const inserted_holder = !rt.borrowedReferenceHolderRegistered(collection);
     try rt.registerBorrowedReferenceHolder(collection);
     errdefer if (inserted_holder) rt.unregisterBorrowedReferenceHolder(collection);
     try collection.ensureWeakCollectionEntryCapacity(rt, index + 1);
     const refreshed_entries = collection.weakCollectionEntriesSlot();
-    refreshed_entries.* = refreshed_entries.*.ptr[0 .. index + 1];
-    errdefer refreshed_entries.* = refreshed_entries.*[0..index];
-    refreshed_entries.*[index] = .{
+    refreshed_entries.items = refreshed_entries.items.ptr[0 .. index + 1];
+    errdefer refreshed_entries.items = refreshed_entries.items[0..index];
+    refreshed_entries.items[index] = .{
         .key_identity = key_identity,
         .value = value,
     };

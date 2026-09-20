@@ -154,7 +154,7 @@ fn createDirectEvalClosureSeed(
 /// cell itself (rc++). For a read-only closure var whose shared cell
 /// carries no const flag — a module import slot directly aliases the
 /// EXPORTING module's live cell (qjs js_inner_module_linking form,
-/// quickjs.c:30765-30777) and must not have importer-side const-ness stamped
+/// quickjs.c) and must not have importer-side const-ness stamped
 /// Direct eval shares the exact outer cell. Read-only semantics belong to the
 /// eval bytecode's ClosureVar descriptor (checked by execPutVarRef), not to a
 /// wrapper cell that would give one binding two runtime identities.
@@ -436,7 +436,7 @@ pub fn directEval(
     if (compiled.syntax_error) |*parse_error| {
         // qjs parse errors throw with the compile-error surface: own
         // fileName/lineNumber/columnNumber and a leading `at file:line:col`
-        // stack line (build_backtrace filename branch, quickjs.c:7553-7570).
+        // stack line (build_backtrace filename branch, quickjs.c).
         const parse_filename = ctx.runtime.atoms.name(parse_error.filename) orelse "<eval>";
         return error_stack_ops.throwParseSyntaxError(ctx, global, parse_filename, parse_error.position.line, parse_error.position.column, parse_error.message);
     }

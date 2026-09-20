@@ -21,14 +21,8 @@ const rules = binding_rules.surface;
 
 const audit_oracles = cfg.audit_oracles;
 
-pub const Error = error{
-    OutOfMemory,
-    InvalidBytecode,
-    BytecodeOverflow,
-    NoFunctionDef,
-    NoParentScope,
-    ClosureVarNotFound,
-};
+/// The binding-rules error set; the two passes share it.
+pub const Error = binding_rules.Error;
 
 /// Output of the exact-CFG resolve pass (qjs shape: a fresh growable output
 /// buffer, quickjs.c resolve_variables bc_out, plus the function's label
@@ -854,7 +848,7 @@ const Resolver = struct {
     }
 
     /// qjs instantiate_hoisted_definitions at the function-body scope
-    /// (quickjs.c:34398-34409). Keep every branch operand label-native; Stage
+    ///. Keep every branch operand label-native; Stage
     /// 4 alone converts the module-body LabelId into a relative displacement.
     fn emitBodyHoists(self: *Resolver) Error!void {
         const fd = self.ctx.function_def orelse return error.NoFunctionDef;
@@ -2482,7 +2476,7 @@ pub fn run(
         try cfg.auditInstructionOwnership(fd.memory, input, &graph);
     }
     // QuickJS marks captured scopes only when its resolve_variables walk
-    // reaches OP_eval / OP_apply_eval (quickjs.c:34247-34262). cfg.build has
+    // reaches OP_eval / OP_apply_eval. cfg.build has
     // already decoded every instruction, so use its opcode census rather than
     // rescanning streams that provably contain neither instruction. Do not use
     // fd.has_eval_call here: synthetic/internal Builder callers are allowed to
@@ -2621,7 +2615,7 @@ const TestInputSnapshot = struct {
     label_len: u32,
     reloc_len: u32,
     source_len: u32,
-    last_opcode_pos: i64,
+    last_opcode_pos: ?u32,
 
     fn init(input: *const builder.Builder) !TestInputSnapshot {
         const code = try std.testing.allocator.dupe(u8, input.code[0..input.code_len]);
@@ -2910,7 +2904,7 @@ test "compiler.resolve_variables: scope_make_ref after terminal owns nothing" {
 
     const local = try harness.rt.atoms.internString("qcp1-s3r-dead-make-ref");
     _ = try harness.fd.appendScope(-1);
-    _ = try harness.fd.addScopeVar(local, .normal, 0, false, false);
+    _ = try harness.fd.addScopeVar(local, .normal, 0, .{});
 
     const put_tail = try harness.input().newLabel();
     try harness.input().emitOp(op.return_undef);
@@ -3194,7 +3188,7 @@ test "compiler.resolve_variables: local scope_get_var matches the pinned QuickJS
 
     const x = try harness.rt.atoms.internString("qcp1-s3-local-x");
     _ = try harness.fd.appendScope(-1);
-    _ = try harness.fd.addScopeVar(x, .normal, 0, false, false);
+    _ = try harness.fd.addScopeVar(x, .normal, 0, .{});
     try harness.input().emitAtomOpU16Owned(op.scope_get_var, x, 0);
     try harness.input().emitOp(op.return_undef);
     var snapshot = try TestInputSnapshot.init(harness.input());
@@ -3242,7 +3236,7 @@ test "compiler.resolve_variables: lexical TDZ get and put match the pinned Quick
 
     const lexical = try harness.rt.atoms.internString("qcp1-s3-lexical-tdz");
     _ = try harness.fd.appendScope(-1);
-    _ = try harness.fd.addScopeVar(lexical, .normal, 0, true, false);
+    _ = try harness.fd.addScopeVar(lexical, .normal, 0, .{ .is_lexical = true });
     try harness.input().emitAtomOpU16Owned(
         op.scope_get_var,
         lexical,
@@ -3278,7 +3272,7 @@ test "compiler.resolve_variables: const scope_put_var throw matches the pinned Q
 
     const constant = try harness.rt.atoms.internString("qcp1-s3-const");
     _ = try harness.fd.appendScope(-1);
-    _ = try harness.fd.addScopeVar(constant, .normal, 0, true, true);
+    _ = try harness.fd.addScopeVar(constant, .normal, 0, .{ .is_lexical = true, .is_const = true });
     try harness.input().emitAtomOpU16Owned(
         op.scope_put_var,
         constant,
@@ -3312,7 +3306,7 @@ test "compiler.resolve_variables: lexical scope_put_var_init matches the pinned 
 
     const lexical = try harness.rt.atoms.internString("qcp1-s3-lexical-init");
     _ = try harness.fd.appendScope(-1);
-    _ = try harness.fd.addScopeVar(lexical, .normal, 0, true, false);
+    _ = try harness.fd.addScopeVar(lexical, .normal, 0, .{ .is_lexical = true });
     try harness.input().emitAtomOpU16Owned(
         op.scope_put_var_init,
         lexical,
@@ -3337,7 +3331,7 @@ test "compiler.resolve_variables: enter and leave scope match the pinned QuickJS
 
     const captured = try harness.rt.atoms.internString("qcp1-s3-captured-lexical");
     _ = try harness.fd.appendScope(-1);
-    const local_index = try harness.fd.addScopeVar(captured, .normal, 0, true, false);
+    const local_index = try harness.fd.addScopeVar(captured, .normal, 0, .{ .is_lexical = true });
     try harness.fd.captureLocal(@intCast(local_index));
     try harness.input().emitOpU16(op.enter_scope, 0);
     try harness.input().emitOpU16(op.leave_scope, 0);
@@ -3366,7 +3360,7 @@ test "compiler.resolve_variables: apply_eval scope head matches the pinned Quick
     const captured = try harness.rt.atoms.internString("qcp1-s3-eval-captured");
     _ = try harness.fd.appendScope(-1);
     for (0..255) |_| {
-        _ = try harness.fd.addScopeVar(captured, .normal, 0, false, false);
+        _ = try harness.fd.addScopeVar(captured, .normal, 0, .{});
     }
     try harness.input().emitOpU16(op.apply_eval, 0);
     try harness.input().emitOp(op.return_undef);
@@ -3392,7 +3386,7 @@ test "compiler.resolve_variables: later apply_eval capture closes an earlier sco
 
     const captured = try harness.rt.atoms.internString("qcp1-s3-eval-close-before-call");
     _ = try harness.fd.appendScope(-1);
-    const local_index = try harness.fd.addScopeVar(captured, .normal, 0, true, false);
+    const local_index = try harness.fd.addScopeVar(captured, .normal, 0, .{ .is_lexical = true });
     try harness.input().emitOpU16(op.leave_scope, 0);
     try harness.input().emitOpU16(op.apply_eval, 0);
     try harness.input().emitOp(op.return_undef);
@@ -3432,7 +3426,7 @@ test "compiler.resolve_variables: local scope_make_ref fold matches the pinned Q
 
     const local = try harness.rt.atoms.internString("qcp1-s3-make-ref-fold");
     _ = try harness.fd.appendScope(-1);
-    _ = try harness.fd.addScopeVar(local, .normal, 0, false, false);
+    _ = try harness.fd.addScopeVar(local, .normal, 0, .{});
     const tail = try harness.input().newLabel();
     try harness.input().emitScopeRefOpOwned(
         op.scope_make_ref,
@@ -3479,7 +3473,7 @@ test "compiler.resolve_variables: local scope_make_ref non-fold matches the pinn
 
     const local = try harness.rt.atoms.internString("qcp1-s3-make-ref-live");
     _ = try harness.fd.appendScope(-1);
-    _ = try harness.fd.addScopeVar(local, .normal, 0, false, false);
+    _ = try harness.fd.addScopeVar(local, .normal, 0, .{});
     const tail = try harness.input().newLabel();
     try harness.input().emitScopeRefOpOwned(
         op.scope_make_ref,
@@ -3517,8 +3511,7 @@ test "compiler.resolve_variables: dynamic environment probe uses product label" 
         core.atom.ids.var_object,
         .normal,
         0,
-        false,
-        false,
+        .{},
     ));
     try harness.input().emitAtomOpU16Owned(
         op.scope_get_var,
@@ -3598,7 +3591,7 @@ test "compiler.resolve_variables: private field resolution matches the pinned Qu
 
     const private_name = try harness.rt.atoms.internString("#qcp1-s3-private");
     _ = try harness.fd.appendScope(-1);
-    _ = try harness.fd.addScopeVar(private_name, .private_field, 0, true, false);
+    _ = try harness.fd.addScopeVar(private_name, .private_field, 0, .{ .is_lexical = true });
     try harness.input().emitAtomOpU16Owned(
         op.scope_get_private_field,
         private_name,

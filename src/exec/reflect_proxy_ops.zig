@@ -105,7 +105,7 @@ fn reflectCall(
         return reflect_ops.revokeProxy(ctx.runtime, function_object);
     }
     if (id == @intFromEnum(StaticMethod.proxy_revocable)) {
-        // qjs js_proxy_revocable (quickjs.c:51502) is a plain JS_CFUNC_DEF that
+        // qjs js_proxy_revocable is a plain JS_CFUNC_DEF that
         // never reads this_val: detached/rebound calls (`const {revocable} =
         // Proxy; revocable(t, h)`) work. No receiver validation.
         return reflect_ops.proxyRevocable(ctx.runtime, global, args);

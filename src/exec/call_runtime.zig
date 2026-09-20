@@ -8,9 +8,10 @@
 //! `global` is the call's realm authority, and publishing these scalars through
 //! shared VM/context state regresses the hot path. Hot dispatch arms therefore
 //! stay separate from cold catch and fallback bodies. Mirrors JS_CallInternal
-//! and constructor dispatch around quickjs.c:20817-20951.
+//! and constructor dispatch around quickjs.c.
 
 const std = @import("std");
+const iterator_slots = @import("iterator_slots.zig");
 const function_ops = @import("function_ops.zig");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
@@ -845,7 +846,7 @@ fn vmNativeCallableDispatch(function_object: *core.Object) VmNativeCallableDispa
             if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionId())) |native_ref| {
                 break :blk .{ .native_ref = native_ref };
             }
-            if (function_object.hostFunctionKind() != 0) break :blk .host_function;
+            if (function_object.hostFunctionKind() != null) break :blk .host_function;
             const tag = function_object.internalCallableTag();
             if (tag != .none) break :blk .{ .internal = tag };
             break :blk .name_dispatch;
@@ -854,7 +855,7 @@ fn vmNativeCallableDispatch(function_object: *core.Object) VmNativeCallableDispa
             if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionId())) |native_ref| {
                 break :blk .{ .native_ref = native_ref };
             }
-            if (function_object.hostFunctionKind() != 0) break :blk .host_function;
+            if (function_object.hostFunctionKind() != null) break :blk .host_function;
             const tag = function_object.internalCallableTag();
             if (tag != .none) break :blk .{ .internal = tag };
             break :blk .name_dispatch;
@@ -1226,13 +1227,13 @@ noinline fn callNativeCallableByName(
     if (std.mem.eql(u8, name, "fromCodePoint")) {
         return string_ops.stringFromCodePoint(ctx, output, global, args);
     }
-    if (core.host_function.builtin_method_id_lookup.date.staticMethodId(name)) |method_id| {
+    if (core.host_function.builtin_method_id_lookup.date.staticMethod(name)) |method| {
         if (object_ops.objectFromValue(this_value)) |receiver_object| {
             if (try constructorNameEqlLocal(ctx.runtime, receiver_object, "Date")) {
-                if (try date_ops.dateStaticCall(ctx, output, global, this_value, method_id, args, caller_function, caller_frame)) |value| return value;
+                if (try date_ops.dateStaticCall(ctx, output, global, this_value, method, args, caller_function, caller_frame)) |value| return value;
                 // parse/now fall-through (utc was handled above with VM
                 // coercion): route the static body through the record table.
-                return date_ops.callDateStaticBody(ctx, method_id, args) catch |err| switch (err) {
+                return date_ops.callDateStaticBody(ctx, method, args) catch |err| switch (err) {
                     error.TypeError => error.TypeError,
                     else => err,
                 };
@@ -1299,7 +1300,7 @@ noinline fn callNativeCallableByName(
     }
     if (std.mem.eql(u8, name, "eval")) {
         const eval_global = if (function_object.functionRealmGlobal()) |realm_value|
-            property_ops.expectObject(realm_value) catch global
+            core.value_semantics.objectFromValue(realm_value) orelse global
         else
             global;
         return indirectEval(ctx, output, eval_global, args);
@@ -1550,7 +1551,7 @@ pub fn ordinaryHasInstance(
     // Fast `.prototype` read: a class constructor (and any non-proxy callable)
     // carries `prototype` as an own data property, so read it directly without
     // building/destroying a Descriptor (qjs reads JS_ATOM_prototype once,
-    // quickjs.c:8078). A normal function's lazy-autoinit prototype, an
+    // quickjs.c). A normal function's lazy-autoinit prototype, an
     // inherited/accessor prototype, or a proxy returns null here and falls to
     // the generic getValueProperty (which materializes / traps correctly).
     const proto_value = blk: {
@@ -1565,7 +1566,7 @@ pub fn ordinaryHasInstance(
     // Walk the prototype chain. The non-proxy step IS object.getPrototype() (a
     // direct shape.proto deref); inline it and only call the trap-aware step for
     // proxies / the throw-type-error intrinsic, mirroring qjs's p->shape->proto
-    // walk (quickjs.c:8087-8125) that bypasses [[GetPrototypeOf]] for ordinary
+    // walk that bypasses [[GetPrototypeOf]] for ordinary
     // objects.
     var current: ?*core.Object = object;
     while (current) |candidate| {
@@ -1886,7 +1887,7 @@ fn constructDateBuiltinNativeInScope(
     if (args.len == 1) {
         if (object_ops.objectFromValue(args[0])) |object| {
             if (object.class_id == core.class.ids.date) {
-                coerced_storage[0] = try date_ops.callDateBody(ctx, args[0], 1, &.{});
+                coerced_storage[0] = try date_ops.callDateBody(ctx, args[0], .get_time, &.{});
             } else {
                 const primitive = try coercion_ops.toPrimitiveForAddition(ctx, output, global, args[0]);
                 if (primitive.isString()) {
@@ -1977,7 +1978,7 @@ pub const SameMachineConstructorTarget = struct {
     /// computes it while classifying the differing-new-target Realm — so the
     /// prepare path reads this bit instead of re-running the outline
     /// sameValue per `new` (qjs holds new_target in a JS_CallInternal
-    /// register and never re-compares it, quickjs.c:20839-20856).
+    /// register and never re-compares it, quickjs.c).
     new_target_is_func: bool,
 };
 
@@ -2001,7 +2002,7 @@ pub fn resolveSameMachineConstructor(
     // Direct `new F(...)` emits `dup`, so new_target and func are the same
     // object. Admission only needs identity. Generic SameValue (NaN/±0/string)
     // is an outline bl and was 4% of N0 — qjs never re-compares here
-    // (quickjs.c:20839-20856 holds new_target in a register).
+    // (quickjs.c holds new_target in a register).
     if (!new_target.same(func)) return null;
     const resolved = inline_calls.resolveInlineDirectConstructorFunction(global, func) orelse return null;
     if (!resolved.fb.hasPrototype()) return null;
@@ -2106,7 +2107,7 @@ pub fn prepareSameMachineConstructorAfterFirstPoll(
             caller_frame,
         );
     };
-    // E6: the CallConstructorInternal entry poll (quickjs.c:20817) is paid by
+    // E6: the CallConstructorInternal entry poll is paid by
     // the caller. A second poll here was the eliminated per-`new` tax.
     return .{ .instance = instance };
 }
@@ -2191,7 +2192,7 @@ fn constructValueOrBytecodeWithNewTargetAfterInterruptPoll(
             const next_new_target = if (func.sameValue(new_target)) target else new_target;
             return constructValueOrBytecodeWithNewTarget(ctx, output, global, target, combined, caller_function, caller_frame, next_new_target);
         }
-        if (function_object.typedArrayElementSize() != 0 and function_object.typedArrayKind() != 0) {
+        if (function_object.typedArrayElementSize() != 0 and function_object.typedArrayKind() != .none) {
             if (!new_target.sameValue(func)) {
                 const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
                 defer ctx.runtime.memory.allocator.free(name);
@@ -2250,7 +2251,7 @@ fn constructValueOrBytecodeWithNewTargetAfterInterruptPoll(
         const is_native_array_constructor = function_object.arrayBuiltinMarker() == .constructor;
         // Order matters, not just the predicate: this whole gate only fires for
         // subclass `super(...)` / `Reflect.construct` with a foreign new.target
-        // (qjs `js_create_from_ctor`, quickjs.c:8117, is likewise only consulted
+        // (qjs `js_create_from_ctor`, quickjs.c, is likewise only consulted
         // when new.target differs). `isBuiltinConstructorName` is a ~30-way
         // string cascade (including the error-name and typed-array-name sets),
         // and `and` short-circuits left to right, so testing it first made every
@@ -2367,11 +2368,11 @@ fn constructValueOrBytecodeWithNewTargetAfterInterruptPoll(
     if (func.is(.function_bytecode)) {
         const fb = functionBytecodeFromValue(func) orelse return error.TypeError;
         if (!isConstructibleFunctionBytecode(fb)) return error.TypeError;
-        // qjs JS_CallConstructorInternal (quickjs.c:20837): a DERIVED class ctor
+        // qjs JS_CallConstructorInternal: a DERIVED class ctor
         // allocates NO instance and does NO prototype lookup — `this` stays
         // uninitialized (TDZ) until super() builds the object via new.target and
         // binds it. Only base/ordinary ctors get the eager js_create_from_ctor
-        // instance (quickjs.c:20842).
+        // instance.
         if (fb.isDerivedClassConstructor()) {
             return try callFunctionBytecodeConstruct(ctx, func, func, core.JSValue.uninitialized(), args, &.{}, output, global, new_target, copy_argv);
         }
@@ -2455,16 +2456,11 @@ test "constructFinalizationRegistryWithPrototype roots function bytecode cleanup
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
-    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-finalization-cleanup-bytecode-symbol");
+    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{
         .flags = .{ .func_kind = .generator },
         .cpool_count = 1,
-    });
-    var fb_published = false;
-    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-finalization-cleanup-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
-    fb.publishFixtureNoFail(rt);
-    fb_published = true;
+    }, &.{try rt.takeSymbolValue(symbol_atom)});
 
     const cleanup_callback = core.JSValue.functionBytecode(&fb.header);
 
@@ -2742,7 +2738,7 @@ pub fn collectIteratorValues(
             try iterator_ops.iteratorCloseValue(ctx, output, global, iterator.value(), caller_function, caller_frame);
             return err;
         };
-        values.defineOwnProperty(ctx.runtime, core.Atom.taggedInt(index), core.Descriptor.data(item, true, true, true)) catch |err| {
+        values.defineOwnProperty(ctx.runtime, core.Atom.taggedInt(index), core.Descriptor.data(item, .all)) catch |err| {
             try iterator_ops.iteratorCloseValue(ctx, output, global, iterator.value(), caller_function, caller_frame);
             return err;
         };
@@ -2783,7 +2779,7 @@ pub fn appendIteratorValues(
     source_value: core.JSValue,
     start_index: i32,
 ) !i32 {
-    const source_object = property_ops.expectObject(source_value) catch null;
+    const source_object = core.value_semantics.objectFromValue(source_value);
     const iterator_value = if (source_object != null and
         (source_object.?.class_id == core.class.ids.generator or source_object.?.class_id == core.class.ids.async_generator))
         source_value
@@ -2809,7 +2805,7 @@ pub fn appendIteratorValues(
 }
 
 /// Spread / rest append (`[...src]`, `f(...src)`), faithful to qjs
-/// `js_append_enumerate` (quickjs.c:16814). Always resolves `src[@@iterator]`
+/// `js_append_enumerate`. Always resolves `src[@@iterator]`
 /// and constructs the iterator, then takes the dense bulk copy ONLY when the
 /// Array iterator protocol is un-tampered: the constructed iterator is a default
 /// Array Iterator of `value` kind whose `next` is the builtin
@@ -2842,7 +2838,7 @@ pub fn appendSpreadValuesEnumerate(
     roots.activate(rt);
     defer roots.deactivate(rt);
 
-    // iterator method = GetProperty(src, @@iterator)  (qjs quickjs.c:16834)
+    // iterator method = GetProperty(src, @@iterator) (qjs quickjs.c)
     // Even a generator can override @@iterator; class identity is not a
     // substitute for the observable GetIterator operation.
     iterator_method = try getIteratorMethod(ctx, output, global, rooted_source);
@@ -2851,11 +2847,11 @@ pub fn appendSpreadValuesEnumerate(
         return error.TypeError;
     }
 
-    // enumobj = src[@@iterator]()  (qjs GetIterator, quickjs.c:16843)
+    // enumobj = src[@@iterator] (qjs GetIterator, quickjs.c)
     iterator_value = try callValueOrBytecodeRoot(ctx, output, global, rooted_source, iterator_method, &.{}, null, null);
-    const iterator = property_ops.expectObject(iterator_value) catch return error.TypeError;
+    const iterator = try property_ops.expectObject(iterator_value);
 
-    // next = GetProperty(enumobj, "next")  (qjs quickjs.c:16846)
+    // next = GetProperty(enumobj, "next") (qjs quickjs.c)
     // GetIterator captures next once per acquisition, even if this iterator
     // was consumed previously or its next getter changes the property.
     next_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, core.atom.ids.next, null, null);
@@ -2863,13 +2859,13 @@ pub fn appendSpreadValuesEnumerate(
 
     var index = start_index;
 
-    // Fast path (qjs quickjs.c:16855-16866): default Array Iterator (value kind)
+    // Fast path (qjs quickjs.c): default Array Iterator (value kind)
     // + builtin `next` + hole-free fast-array target (`length == count`).
     fast: {
         const next_obj = object_ops.objectFromValue(next_method) orelse break :fast;
         if (!next_obj.isArrayIteratorNextFunction()) break :fast;
         if (iterator.class_id != core.class.ids.array_iterator) break :fast;
-        if (iterator.iteratorKindSlot().* != 2) break :fast; // 2 == ArrayIteratorKind.value
+        if (iterator_slots.arrayIteratorKind(iterator) != .value) break :fast;
         const target_value = (iterator.iteratorTargetSlot().*) orelse break :fast;
         const target_obj = object_ops.objectFromValue(target_value) orelse break :fast;
         if (!target_obj.isArray() or target_obj.hasExoticMethods() or target_obj.proxyTarget() != null) break :fast;
@@ -2910,7 +2906,7 @@ pub fn appendSpreadValuesEnumerate(
         return index;
     }
 
-    // General case (qjs quickjs.c:16868): step the constructed iterator.
+    // General case (qjs quickjs.c): step the constructed iterator.
     while (true) {
         const step = try iterator_ops.iteratorStepWithNext(ctx, output, global, iterator_value, next_method, null, null);
         if (step.done) {
@@ -3028,7 +3024,7 @@ fn globalUninitializedVarsEnv(ctx: *core.JSContext, global: *core.Object) !*core
     return env;
 }
 
-/// qjs js_global_object_get_uninitialized_var (quickjs.c:17069-17096): return
+/// qjs js_global_object_get_uninitialized_var: return
 /// the shared UNINITIALIZED cell for `atom_id`, creating and filing it in the
 /// side table when absent. The caller owns the returned ref; the table slot
 /// holds its own ref. The fresh cell's value carries the UNINITIALIZED
@@ -3043,11 +3039,11 @@ pub fn globalObjectGetUninitializedVar(ctx: *core.JSContext, global: *core.Objec
     // qjs JS_PROP_C_W_E | JS_PROP_VARREF (17088).
     // appendPreparedPropertyEntry consumes the cell slot on both success and
     // failure, so no caller-side errdefer may release it again.
-    try env.appendPreparedPropertyEntry(rt, atom_id, core.property.Flags.varRef(true, true, true), .{ .var_ref = cell });
+    try env.appendPreparedPropertyEntry(rt, atom_id, core.property.Flags.varRef(.all), .{ .var_ref = cell });
     return cell.valueRef();
 }
 
-/// qjs js_global_object_find_uninitialized_var (quickjs.c:17098-17123): if a
+/// qjs js_global_object_find_uninitialized_var: if a
 /// parked cell exists for `atom_id`, remove it from the side table and hand it
 /// to the new declaration so every earlier capture aliases the new binding
 /// (non-lexical reuse resets the value to undefined). Returns a fresh owned
@@ -3088,7 +3084,7 @@ pub fn ensureGlobalObjectVarRefCell(
 
         var next_flags = initial_flags.withKind(.var_ref);
         if (is_function and initial_flags.configurable) {
-            next_flags = core.property.Flags.varRef(true, true, configurable);
+            next_flags = core.property.Flags.varRef(.{ .writable = true, .enumerable = true, .configurable = configurable });
         }
         if (global.asVarRefAt(initial_index)) |cell| {
             if (next_flags.bits() != initial_flags.bits()) {
@@ -3104,14 +3100,14 @@ pub fn ensureGlobalObjectVarRefCell(
         // side table. Keep the table ref until the shape clone/slot replacement
         // succeeds; this makes OOM rollback automatic.
         const cell_value = try globalObjectGetUninitializedVar(ctx, global, atom_id);
-        const cell = core.VarRef.fromValue(cell_value) orelse unreachable;
+        const cell = core.VarRef.fromValue(cell_value).?;
         try global.replaceOwnPropertyWithVarRefCell(rt, atom_id, initial_index, next_flags, cell);
         const parked = global.globalUninitializedVars() orelse return error.InvalidBytecode;
         if (!parked.deleteProperty(rt, atom_id)) return error.InvalidBytecode;
         return cell_value;
     }
 
-    // qjs js_closure_define_global_var tail (quickjs.c:17186-17193): "if there
+    // qjs js_closure_define_global_var tail: "if there
     // is a corresponding uninitialized variable, use it" — a capture parked in
     // the side table before this declaration is reused (value reset to
     // undefined), so every earlier capture aliases the new property cell.
@@ -3119,12 +3115,12 @@ pub fn ensureGlobalObjectVarRefCell(
         const fresh = try core.VarRef.createClosed(rt, core.JSValue.undefinedValue());
         break :blk fresh.valueRef();
     };
-    const cell = core.VarRef.fromValue(cell_value) orelse unreachable;
+    const cell = core.VarRef.fromValue(cell_value).?;
     // appendPreparedPropertyEntry consumes cell_value on both paths.
     try global.appendPreparedPropertyEntry(
         rt,
         atom_id,
-        core.property.Flags.varRef(true, true, configurable),
+        core.property.Flags.varRef(.{ .writable = true, .enumerable = true, .configurable = configurable }),
         .{ .var_ref = cell },
     );
     cell.varRefIsDeletableSlot().* = configurable;
@@ -3171,7 +3167,7 @@ pub fn defineGlobalDeclVarCell(
 
 /// Create-or-fetch the VarRef cell for a top-level lexical in ctx.lexicals,
 /// stored as a JS_PROP_VARREF slot (qjs js_closure_define_global_var, lexical
-/// arm, quickjs.c:17134-17162). Returns a fresh ref the caller owns (for
+/// arm, quickjs.c). Returns a fresh ref the caller owns (for
 /// frame.var_refs[idx]). The slot holds its own ref; the cell starts
 /// uninitialized (TDZ) like qjs js_create_var_ref.
 pub fn ensureGlobalLexicalCell(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom, is_const: bool) !core.JSValue {
@@ -3180,7 +3176,7 @@ pub fn ensureGlobalLexicalCell(ctx: *core.JSContext, global: *core.Object, atom_
         if (env.asVarRefAt(index)) |cell| return cell.valueRef();
     }
     const rt = ctx.runtime;
-    // qjs quickjs.c:17148-17162: "if there is a corresponding global variable,
+    // qjs quickjs.c: "if there is a corresponding global variable,
     // reuse its reference and create a new one for the global variable" — the
     // definition-time cell surgery. The OLD property cell (which every earlier
     // capture aliases) becomes the lexical cell (value parked at UNINITIALIZED
@@ -3224,7 +3220,7 @@ pub fn ensureGlobalLexicalCell(ctx: *core.JSContext, global: *core.Object, atom_
             // add_var_ref (17210-17223): the old cell becomes the lexical cell.
             old_cell.is_lexical = true;
             old_cell.varRefIsConstSlot().* = is_const;
-            try env.appendPreparedPropertyEntry(rt, atom_id, core.property.Flags.varRef(!is_const, false, false), .{ .var_ref = old_cell });
+            try env.appendPreparedPropertyEntry(rt, atom_id, core.property.Flags.varRef(.{ .writable = !is_const }), .{ .var_ref = old_cell });
             rollback_cell_owned = false;
             return old_cell.valueRef();
         }
@@ -3235,11 +3231,11 @@ pub fn ensureGlobalLexicalCell(ctx: *core.JSContext, global: *core.Object, atom_
         const fresh = try core.VarRef.createClosed(rt, core.JSValue.uninitialized());
         break :blk fresh.valueRef();
     };
-    const cell = core.VarRef.fromValue(cell_value) orelse unreachable;
+    const cell = core.VarRef.fromValue(cell_value).?;
     cell.varRefIsConstSlot().* = is_const;
     cell.is_lexical = true;
     // appendPreparedPropertyEntry consumes cell_value on both paths.
-    try env.appendPreparedPropertyEntry(rt, atom_id, core.property.Flags.varRef(!is_const, false, false), .{ .var_ref = cell });
+    try env.appendPreparedPropertyEntry(rt, atom_id, core.property.Flags.varRef(.{ .writable = !is_const }), .{ .var_ref = cell });
     return cell.valueRef();
 }
 
@@ -3255,7 +3251,7 @@ pub fn defineGlobalLexicalValue(ctx: *core.JSContext, atom_id: core.Atom, value:
     const env = try globalLexicalEnv(ctx);
     if (!env.hasOwnProperty(atom_id)) {
         const rt = ctx.runtime;
-        try env.defineOwnPropertyAssumingNew(rt, atom_id, core.Descriptor.data(value, !is_const, false, false));
+        try env.defineOwnPropertyAssumingNew(rt, atom_id, core.Descriptor.data(value, .{ .writable = !is_const }));
     }
 }
 
@@ -3364,7 +3360,7 @@ pub fn indirectEval(
         if (compiled.syntax_error) |*parse_error| {
             // Compile-error surface: own fileName/lineNumber/columnNumber +
             // leading stack line (build_backtrace filename branch,
-            // quickjs.c:7553-7570).
+            // quickjs.c).
             const parse_filename = ctx.runtime.atoms.name(parse_error.filename) orelse "<eval>";
             _ = error_stack_ops.throwParseSyntaxError(ctx, eval_global, parse_filename, parse_error.position.line, parse_error.position.column, parse_error.message) catch |err| break :blk err;
             break :blk error.SyntaxError;
@@ -3466,14 +3462,14 @@ test "argsFromArrayLike roots initialized prefix while reading source" {
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-args-from-array-like-prefix-root");
     const symbol_value = try rt.takeSymbolValue(symbol_atom);
-    try source.defineOwnProperty(rt, core.Atom.taggedInt(0), core.Descriptor.data(symbol_value, true, true, true));
-    try source.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(2), true, false, true));
+    try source.defineOwnProperty(rt, core.Atom.taggedInt(0), core.Descriptor.data(symbol_value, .all));
+    try source.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(2), .method));
     try source.defineAutoInitPropertyWithRealm(
         rt,
         core.Atom.taggedInt(1),
         "lazyArgsFromArrayLikeValue",
         0,
-        core.property.Flags.data(true, true, true),
+        core.property.Flags.data(.all),
         global,
     );
 
@@ -3548,7 +3544,7 @@ pub fn callFunctionBytecodeConstruct(
             // `global` is already the final bytecode callee's realm, while
             // `ctx` is still JS_CallConstructorInternal's caller_ctx. QuickJS
             // materializes OP_get_loc_checkthis in that caller context before
-            // returning through the construct boundary (quickjs.c:18717-18728).
+            // returning through the construct boundary.
             const caller_global = ctx.global orelse return error.InvalidBuiltinRegistry;
             try throwRuntimeErrorForGlobal(ctx, caller_global, err);
         }
@@ -3715,7 +3711,7 @@ fn callFunctionBytecodeModeStateAfterInterruptPoll(
     // Async-generator bodies return their raw suspension/completion value to
     // the queue machine (exec/async_generator.zig execBody) — no promise
     // wrapping here (qjs async_func_resume returns the raw value/ret code,
-    // quickjs.c:20951).
+    // quickjs.c).
     return runWithCallEnvAfterInterruptPoll(.{
         .ctx = ctx,
         .stack = &nested_stack,
@@ -3812,14 +3808,13 @@ pub fn generatorNext(
     receiver: core.JSValue,
     args: []const core.JSValue,
 ) !?core.JSValue {
-    if (!receiver.is(.object)) return null;
-    const object = property_ops.expectObject(receiver) catch return null;
+    const object = core.value_semantics.objectFromValue(receiver) orelse return null;
     if (object.class_id != core.class.ids.generator and object.class_id != core.class.ids.async_generator) return null;
     if (object.class_id == core.class.ids.async_generator) {
         // Async generators enqueue a request and return its promise (mirrors
-        // js_async_generator_next GEN_MAGIC_NEXT, quickjs.c:21706); a call
+        // js_async_generator_next GEN_MAGIC_NEXT, quickjs.c); a call
         // arriving while EXECUTING only appends — never a TypeError.
-        return try async_generator.asyncGeneratorEnqueue(ctx, output, global, object, args, 0);
+        return try async_generator.asyncGeneratorEnqueue(ctx, output, global, object, args, .next);
     }
     const payload = object.generatorPayloadPtr();
     if (payload.executing) return error.TypeError;
@@ -3881,7 +3876,7 @@ inline fn generatorHasYieldStarResult(payload: *const core.object.GeneratorPaylo
 
 /// Resume a SYNC generator one step and return (value, done) WITHOUT allocating the
 /// iterator-result object, so a for-of consumer can skip it (qjs JS_IteratorNext2
-/// built-in fast path, quickjs.c:16548). Returns null if `receiver` is not a sync
+/// built-in fast path, quickjs.c). Returns null if `receiver` is not a sync
 /// generator (caller falls back to the generic protocol). This is a parallel impl of
 /// `generatorNext`'s sync path — kept separate so the hot, widely-used generatorNext
 /// (.next() / spread / destructuring / yield*) stays byte-for-byte untouched; BOTH paths
@@ -3895,8 +3890,7 @@ pub fn syncGeneratorStep(
     receiver: core.JSValue,
     args: []const core.JSValue,
 ) !?GeneratorValueDone {
-    if (!receiver.is(.object)) return null;
-    const object = property_ops.expectObject(receiver) catch return null;
+    const object = core.value_semantics.objectFromValue(receiver) orelse return null;
     if (object.class_id != core.class.ids.generator) return null; // sync generators only
     const payload = object.generatorPayloadPtr();
     if (payload.executing) return error.TypeError;
@@ -3950,14 +3944,8 @@ pub fn setGeneratorYieldStarSuspended(rt: *core.JSRuntime, object: *core.Object,
     object.generatorYieldStarSuspendedSlot().* = value;
 }
 
-pub fn generatorResumeCompletionType(rt: *core.JSRuntime, object: *core.Object) i32 {
-    _ = rt;
-    return object.generatorResumeCompletionType();
-}
-
-pub fn setGeneratorResumeCompletionType(rt: *core.JSRuntime, object: *core.Object, value: i32) !void {
-    _ = rt;
-    object.generatorResumeCompletionTypeSlot().* = value;
+pub fn setGeneratorResumeCompletion(object: *core.Object, completion: core.generator_state.ResumeCompletion) void {
+    object.generatorResumeCompletionSlot().* = completion;
 }
 
 pub fn resumeGeneratorYieldStarCompletion(
@@ -3967,11 +3955,11 @@ pub fn resumeGeneratorYieldStarCompletion(
     receiver: core.JSValue,
     object: *core.Object,
     resume_value: core.JSValue,
-    completion_type: i32,
+    completion: core.generator_state.ResumeCompletion,
 ) !core.JSValue {
     const function_value = object.generatorFunctionBytecode() orelse return error.TypeError;
     const current_function_value = object.generatorCurrentFunction() orelse receiver;
-    try setGeneratorResumeCompletionType(ctx.runtime, object, completion_type);
+    setGeneratorResumeCompletion(object, completion);
     object.generatorExecutingSlot().* = true;
     defer object.generatorExecutingSlot().* = false;
     const result = callFunctionBytecodeModeState(
@@ -4005,21 +3993,20 @@ pub fn generatorReturn(
     receiver: core.JSValue,
     args: []const core.JSValue,
 ) !?core.JSValue {
-    if (!receiver.is(.object)) return null;
-    const object = property_ops.expectObject(receiver) catch return null;
+    const object = core.value_semantics.objectFromValue(receiver) orelse return null;
     if (object.class_id != core.class.ids.generator and object.class_id != core.class.ids.async_generator) return null;
     if (object.class_id == core.class.ids.async_generator) {
-        // Mirrors js_async_generator_next GEN_MAGIC_RETURN (quickjs.c:21706):
+        // Mirrors js_async_generator_next GEN_MAGIC_RETURN:
         // enqueue and return the request promise; the compiled return leg
         // awaits the argument before finalizer cleanup and settlement.
-        return try async_generator.asyncGeneratorEnqueue(ctx, output, global, object, args, 1);
+        return try async_generator.asyncGeneratorEnqueue(ctx, output, global, object, args, .return_);
     }
     const payload = object.generatorPayloadPtr();
     if (payload.executing) return error.TypeError;
     const generator_global = object.generatorFunctionRealmGlobalPtr() orelse global;
     var return_value = if (args.len > 0) args[0] else core.JSValue.undefinedValue();
     if (generatorYieldStarSuspended(ctx.runtime, object)) {
-        return try resumeGeneratorYieldStarCompletion(ctx, output, generator_global, receiver, object, return_value, 1);
+        return try resumeGeneratorYieldStarCompletion(ctx, output, generator_global, receiver, object, return_value, .return_);
     }
     if (object.generatorYieldStarIterator() != null) {
         const step = generatorYieldStarReturnStep(ctx, output, generator_global, object, return_value) catch |err| {
@@ -4039,7 +4026,7 @@ pub fn generatorReturn(
         const execution = payload.execution orelse return error.TypeError;
         const function_value = generatorFunctionBytecodeFromExecution(object, execution) orelse return error.TypeError;
         const current_function_value = if (execution.current_function.is(.undefined_value)) receiver else execution.current_function;
-        payload.resume_completion_type = 1;
+        payload.resume_completion = .return_;
         payload.executing = true;
         defer payload.executing = false;
         const result = callFunctionBytecodeModeState(
@@ -4084,7 +4071,7 @@ pub fn resumeGeneratorCatchForRuntimeError(
     const function_value = object.generatorFunctionBytecode() orelse return null;
     const thrown = try exception_ops.runtimeErrorValueForGeneratorCatch(ctx, global, err);
     const current_function_value = object.generatorCurrentFunction() orelse receiver;
-    object.generatorResumeCompletionTypeSlot().* = 2;
+    object.generatorResumeCompletionSlot().* = .throw;
     object.generatorJustYieldedSlot().* = false;
     const result = callFunctionBytecodeModeState(
         ctx,
@@ -4132,13 +4119,13 @@ pub fn generatorYieldStarReturnStep(
     const return_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, return_key, null, null);
 
     if (return_method.is(.undefined_value) or return_method.is(.null_value)) {
-        generator.clearGeneratorYieldStarIterator(ctx.runtime);
+        generator.clearGeneratorYieldStarIterator();
         return .{ .complete = return_arg };
     }
     if (!isCallableValue(return_method)) return error.TypeError;
 
     const result_value = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, return_method, &.{return_arg}, null, null);
-    const result = property_ops.expectObject(result_value) catch return error.TypeError;
+    const result = try property_ops.expectObject(result_value);
 
     const done_key = core.atom.predefinedId("done", .string).?;
     const done_value = try object_ops.getValueProperty(ctx, output, global, result.value(), done_key, null, null);
@@ -4151,7 +4138,7 @@ pub fn generatorYieldStarReturnStep(
 
     const value_key = core.atom.predefinedId("value", .string).?;
     const value = try object_ops.getValueProperty(ctx, output, global, result.value(), value_key, null, null);
-    generator.clearGeneratorYieldStarIterator(ctx.runtime);
+    generator.clearGeneratorYieldStarIterator();
     return .{ .complete = value };
 }
 
@@ -4168,13 +4155,13 @@ pub fn generatorYieldStarThrowStep(
 
     if (throw_method.is(.undefined_value) or throw_method.is(.null_value)) {
         try generatorYieldStarCloseForMissingThrow(ctx, output, global, iterator_value);
-        generator.clearGeneratorYieldStarIterator(ctx.runtime);
+        generator.clearGeneratorYieldStarIterator();
         return error.TypeError;
     }
     if (!isCallableValue(throw_method)) return error.TypeError;
 
     const result_value = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, throw_method, &.{thrown}, null, null);
-    const result = property_ops.expectObject(result_value) catch return error.TypeError;
+    const result = try property_ops.expectObject(result_value);
 
     const done_key = core.atom.predefinedId("done", .string).?;
     const done_value = try object_ops.getValueProperty(ctx, output, global, result.value(), done_key, null, null);
@@ -4187,7 +4174,7 @@ pub fn generatorYieldStarThrowStep(
 
     const value_key = core.atom.predefinedId("value", .string).?;
     const value = try object_ops.getValueProperty(ctx, output, global, result.value(), value_key, null, null);
-    generator.clearGeneratorYieldStarIterator(ctx.runtime);
+    generator.clearGeneratorYieldStarIterator();
     return .{ .complete = value };
 }
 
@@ -4202,7 +4189,7 @@ pub fn generatorYieldStarCloseForMissingThrow(
     if (return_method.is(.undefined_value) or return_method.is(.null_value)) return;
     if (!isCallableValue(return_method)) return error.TypeError;
     const result = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, return_method, &.{}, null, null);
-    _ = property_ops.expectObject(result) catch return error.TypeError;
+    _ = try property_ops.expectObject(result);
 }
 
 pub fn generatorThrow(
@@ -4212,18 +4199,18 @@ pub fn generatorThrow(
     receiver: core.JSValue,
     args: []const core.JSValue,
 ) !?core.JSValue {
-    const object = property_ops.expectObject(receiver) catch return null;
+    const object = core.value_semantics.objectFromValue(receiver) orelse return null;
     if (object.class_id != core.class.ids.generator and object.class_id != core.class.ids.async_generator) return null;
     if (object.class_id == core.class.ids.async_generator) {
-        // Mirrors js_async_generator_next GEN_MAGIC_THROW (quickjs.c:21706).
-        return try async_generator.asyncGeneratorEnqueue(ctx, output, global, object, args, 2);
+        // Mirrors js_async_generator_next GEN_MAGIC_THROW.
+        return try async_generator.asyncGeneratorEnqueue(ctx, output, global, object, args, .throw);
     }
     const payload = object.generatorPayloadPtr();
     if (payload.executing) return error.TypeError;
     const generator_global = object.generatorFunctionRealmGlobalPtr() orelse global;
     const thrown = if (args.len > 0) args[0] else core.JSValue.undefinedValue();
     if (generatorYieldStarSuspended(ctx.runtime, object)) {
-        return try resumeGeneratorYieldStarCompletion(ctx, output, generator_global, receiver, object, thrown, 2);
+        return try resumeGeneratorYieldStarCompletion(ctx, output, generator_global, receiver, object, thrown, .throw);
     }
 
     if (object.generatorYieldStarIterator() != null) {
@@ -4268,7 +4255,7 @@ pub fn generatorThrow(
     if (object.generatorPc() != 0 and object.generatorStarted()) {
         const function_value = object.generatorFunctionBytecode() orelse return error.TypeError;
         const current_function_value = object.generatorCurrentFunction() orelse receiver;
-        object.generatorResumeCompletionTypeSlot().* = 2;
+        object.generatorResumeCompletionSlot().* = .throw;
         object.generatorJustYieldedSlot().* = false;
         const result = callFunctionBytecodeModeState(
             ctx,
@@ -4350,16 +4337,11 @@ test "wrapIteratorFromIterator roots direct function bytecode next method while 
     const prototype = try core.Object.create(rt, core.class.ids.object, null);
     try builtin_glue.storeRealmValue(rt, global, .wrap_for_valid_iterator_prototype, prototype.value());
 
-    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-wrap-iterator-next-bytecode-symbol");
+    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{
         .flags = .{ .func_kind = .generator },
         .cpool_count = 1,
-    });
-    var fb_published = false;
-    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-wrap-iterator-next-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
-    fb.publishFixtureNoFail(rt);
-    fb_published = true;
+    }, &.{try rt.takeSymbolValue(symbol_atom)});
 
     const next_method = core.JSValue.functionBytecode(&fb.header);
 
@@ -4414,13 +4396,8 @@ test "iterator_ops.createIteratorResult roots direct function bytecode value whi
     _ = try global.ensureGlobalPayload(rt);
     ctx.global = global;
 
-    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
-    var fb_published = false;
-    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-iterator-result-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
-    fb.publishFixtureNoFail(rt);
-    fb_published = true;
+    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
 
     const result_value = core.JSValue.functionBytecode(&fb.header);
 
@@ -4452,9 +4429,9 @@ pub fn throwTypeErrorIntrinsicForGlobal(rt: *core.JSRuntime, global: *core.Objec
         try thrower_object.setPrototype(rt, function_prototype);
     }
 
-    try thrower_object.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(0), false, false, false));
+    try thrower_object.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(0), .none));
     const empty_name = try value_ops.createStringValue(rt, "");
-    try thrower_object.defineOwnProperty(rt, core.atom.ids.name, core.Descriptor.data(empty_name, false, false, false));
+    try thrower_object.defineOwnProperty(rt, core.atom.ids.name, core.Descriptor.data(empty_name, .none));
     try thrower_object.addThrowTypeErrorIntrinsicFunction(rt);
     try thrower_object.freeze(rt);
 
@@ -4709,7 +4686,7 @@ pub fn ordinarySetWithReceiver(
     if (target.getPrototype()) |prototype| {
         return ordinarySetWithReceiver(ctx, output, global, prototype.value(), prototype, receiver_value, atom_id, value, caller_function, caller_frame);
     }
-    return object_ops.setWithOwnDescriptor(ctx, output, global, receiver_value, atom_id, value, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true), caller_function, caller_frame);
+    return object_ops.setWithOwnDescriptor(ctx, output, global, receiver_value, atom_id, value, core.Descriptor.data(core.JSValue.undefinedValue(), .all), caller_function, caller_frame);
 }
 
 pub fn definePropertiesCall(
@@ -4721,7 +4698,7 @@ pub fn definePropertiesCall(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     if (args.len < 2) return error.TypeError;
-    const target = property_ops.expectObject(args[0]) catch return @as(?core.JSValue, try exception_ops.throwTypeErrorMessage(ctx, global, "not an object"));
+    const target = core.value_semantics.objectFromValue(args[0]) orelse return @as(?core.JSValue, try exception_ops.throwTypeErrorMessage(ctx, global, "not an object"));
     try definePropertiesOnTarget(ctx, output, global, target, args[1], caller_function, caller_frame);
     return args[0];
 }
@@ -4875,7 +4852,7 @@ pub fn inOp(
 ) !void {
     const rhs = try stack.pop();
     const lhs = try stack.pop();
-    const object = property_ops.expectObject(rhs) catch {
+    const object = core.value_semantics.objectFromValue(rhs) orelse {
         _ = exception_ops.throwTypeErrorMessage(ctx, global, "invalid 'in' operand") catch |err| return err;
         return error.TypeError;
     };
@@ -4913,12 +4890,12 @@ pub fn instanceofValue(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
-    _ = property_ops.expectObject(rhs) catch {
+    _ = core.value_semantics.objectFromValue(rhs) orelse {
         _ = exception_ops.throwTypeErrorMessage(ctx, global, "invalid 'instanceof' right operand") catch |err| return err;
         return error.TypeError;
     };
     // qjs names this atom as the constant JS_ATOM_Symbol_hasInstance
-    // (quickjs.c:8139). Resolve it at comptime rather than hashing the spelling
+    //. Resolve it at comptime rather than hashing the spelling
     // through the predefined-symbol map on every `instanceof`.
     const has_instance = try instanceofMethod(ctx, output, global, rhs, caller_function, caller_frame);
     return instanceofValueWithMethod(ctx, output, global, lhs, rhs, has_instance, caller_function, caller_frame);

@@ -82,7 +82,7 @@ pub inline fn strictUnresolvedAssignmentNeedsReference(s: *State, atom_id: Atom,
 
 pub fn argumentsIdentifierIsForbidden(s: *State) bool {
     // QuickJS parses every field initializer in a synthetic method whose
-    // FunctionDef has arguments_allowed=false (quickjs.c:36472). Both
+    // FunctionDef has arguments_allowed=false. Both
     // instance and static initializers now use that real function
     // boundary, and arrows inherit its entry contract.
     return !s.curFunc().arguments_allowed;

@@ -48,12 +48,12 @@ test "raw tail call opcodes share the bounded tail-chain stack contract" {
     try global.defineOwnProperty(
         js.runtime,
         plain_key,
-        core.Descriptor.data(plain, true, true, true),
+        core.Descriptor.data(plain, .all),
     );
     try global.defineOwnProperty(
         js.runtime,
         method_key,
-        core.Descriptor.data(method, true, true, true),
+        core.Descriptor.data(method, .all),
     );
 
     const baseline_call_depth = js.runtime.hot.call_depth;

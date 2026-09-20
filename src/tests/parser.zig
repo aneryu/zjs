@@ -2033,7 +2033,7 @@ test "F4: unary +/-/~/! lower to plus/neg/not/lnot" {
 }
 
 // P7-61 pin: op.lnot has a dedicated hot dispatch handler, so the shapes that do
-// and do not reach it are load-bearing. zjs (like qjs, quickjs.c:27620) folds no
+// and do not reach it are load-bearing. zjs (like qjs, quickjs.c) folds no
 // negation into branch context: `if (!x)` really does execute one OP_lnot, while a
 // bare condition or a comparison executes none. A future peephole that changed
 // this would silently stop exercising that handler; this test fails first.
@@ -2283,7 +2283,7 @@ test "F4: collapsed multiline logical branches retain source progression" {
     }{
         // QuickJS does not attach source events to the synthetic logical
         // branches.  Each branch therefore inherits the identifier source
-        // event for a/b/c (quickjs.c:27969-28008).
+        // event for a/b/c.
         .{ .line_num = 1, .col_num = 5 },
         .{ .line_num = 2, .col_num = 5 },
         .{ .line_num = 3, .col_num = 5 },
@@ -2690,7 +2690,7 @@ test "M3.1 F4: for-await close keeps body statement source location" {
     try std.testing.expectEqual(@as(i32, 10), line_num);
     // QuickJS emits no source event for the synthetic iterator_close.  It
     // inherits the last body-expression event, the `value` identifier in
-    // `void value` (quickjs.c:28953).
+    // `void value`.
     try std.testing.expectEqual(@as(i32, 12), col_num);
 }
 
@@ -3685,7 +3685,7 @@ test "F4: empty-head template `${b}` skips middle/tail empty strings" {
     //   get_var b            (5)
     //   call_method 1        (3)
     // Middle/tail empty strings with depth>0 are skipped (mirrors
-    // `quickjs.c:23952` `else { JS_FreeValue ; }` branch).
+    // `quickjs.c` `else { JS_FreeValue; }` branch).
     var fn_bc = try parseExpr(&env, "`${b}`");
     defer fn_bc.deinit(env.rt);
 
@@ -5277,8 +5277,8 @@ test "F7: static field initializer is a synthetic child called with the class re
     var fn_bc = try parseStatementWithTopLevelChildren(&env, "class C { static x = 1; }");
     defer fn_bc.deinit(env.rt);
 
-    // Pinned QuickJS 2026-06-04 (`quickjs.c:25223-25271`,
-    // `quickjs.c:25735-25744`) emits the field definition in a synthetic
+    // Pinned QuickJS 2026-06-04 (`quickjs.c`,
+    // `quickjs.c`) emits the field definition in a synthetic
     // method, then invokes it from the class tail as:
     //   dup ; fclosure ; set_home_object ; call_method 0 ; drop
     // The enclosing function must not carry inline static-field bytecode.
@@ -5365,7 +5365,7 @@ test "F7: computed static fields and blocks share one ordered synthetic initiali
     );
     defer fn_bc.deinit(env.rt);
 
-    // QuickJS (`quickjs.c:25386-25410`, `25533-25580`) appends static
+    // QuickJS appends static
     // fields and nested static-block closures to one method-like initializer
     // in source order. The nested block captures that initializer's lexical
     // `this` and `home_object`; neither operation is emitted in the class tail.
@@ -7547,8 +7547,7 @@ test "parser declaration index rebuilds after bypassed linked and function-var w
         linked_collision,
         .normal,
         state.scope_level,
-        true,
-        true,
+        .{ .is_lexical = true, .is_const = true },
     );
     try std.testing.expectError(
         error.UnexpectedToken,
@@ -8768,7 +8767,7 @@ test "QuickJS direct eval capture prefix follows lexical scope order" {
 
     // qjs rebuilds scope_next before add_eval_variables. The inner block's x
     // must precede the later-declared outer x even though its VarDef index is
-    // smaller (quickjs.c:36034-36059, 33699-33729).
+    // smaller.
     try std.testing.expect(inner.closureVar().len >= 2);
     for (inner.closureVar()[0..2]) |cv| {
         try std.testing.expectEqualStrings("x", rt.atoms.name(cv.var_name) orelse "");
@@ -8804,7 +8803,7 @@ test "QuickJS eval prefix is stable before descendant capture demand" {
 
     // add_eval_variables constructs this fixed prefix before any child is
     // finalized. The inner function's first use of `b` therefore cannot move
-    // that row ahead of `a` (quickjs.c:33610-33776, 36064-36079).
+    // that row ahead of `a`.
     const expected = [_][]const u8{ "a", "b", "eval" };
     try std.testing.expectEqual(expected.len, middle.closureVar().len);
     for (middle.closureVar(), expected) |cv, expected_name| {
@@ -9160,7 +9159,7 @@ test "QuickJS parent module declarations exist before child direct-eval seeding"
     // js_create_function constructs the parent's MODULE_DECL rows before it
     // recursively creates children. add_eval_variables in the child therefore
     // seeds both live module cells, in parent-table order, before resolving the
-    // explicit `eval` lookup (quickjs.c:33610-33776, 35954-36079).
+    // explicit `eval` lookup.
     try std.testing.expect(child.closureVar().len >= 3);
     const expected_names = [_][]const u8{ "moduleDirectEvalBinding", "readModuleBindingByEval", "eval" };
     const expected_types = [_]function_def.ClosureType{ .ref, .ref, .global_ref };
@@ -12810,7 +12809,7 @@ test "QuickJS direct eval destructuring declares through the variable object" {
 
     // qjs define_var(JS_VAR_DEF_VAR) records the declaration as a
     // JSGlobalVar. It does not manufacture a same-name VarDef beside the
-    // captured <var> object (quickjs.c:24395-24415).
+    // captured <var> object.
     for (parsed.varDefs()) |vd| {
         try std.testing.expect(vd.var_name != binding_atom);
     }
@@ -13042,7 +13041,7 @@ test "FunctionDef builder emit and deinit releases it" {
     try std.testing.expectEqual(@as(u32, 1), b.label_len);
     try std.testing.expect(b.label_slots[label.index()].flags.bound);
     try std.testing.expectEqual(@as(u32, 11), b.label_slots[label.index()].bound_offset);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos); // bind invalidates
+    try std.testing.expectEqual(@as(?u32, null), b.last_opcode_pos); // bind invalidates
     // Ordinary builder writes are source-less, exactly like QuickJS emit_op.
     // Only the explicit grammar marker above is retained at the code tail.
     try std.testing.expectEqual(@as(u32, 1), b.source_len);
@@ -13065,7 +13064,7 @@ pub fn atomLiveEntryTotal(rt: *const core.JSRuntime) usize {
 
 test "parser releases identifier and private-name token atoms" {
     // qjs `free_token` drops the identifier/private-name atom that
-    // `next_token` interned into the token (quickjs.c:22190-22208). Without
+    // `next_token` interned into the token. Without
     // that release every identifier occurrence leaks one atom retain, so the
     // atom table never returns to its pre-compile balance.
     const rt = try core.JSRuntime.create(std.testing.allocator);

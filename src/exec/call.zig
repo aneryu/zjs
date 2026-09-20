@@ -7,7 +7,7 @@
 //! `ctx`/`output`/`global`/caller-function/caller-frame tuple is a measured call
 //! ABI: do not republish it through shared context state, and keep hot dispatch
 //! arms separate from cold host/error paths. Native calls follow
-//! js_call_c_function and OP_call_method at quickjs.c:17562 and 18220.
+//! js_call_c_function and OP_call_method at quickjs.c.
 
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
@@ -79,7 +79,7 @@ pub fn installHostGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
     try defineGlobalThisProperty(rt, global);
     try defineNumberConstantPropertyAssumingNew(rt, global, "NaN", std.math.nan(f64));
     try defineNumberConstantPropertyAssumingNew(rt, global, "Infinity", std.math.inf(f64));
-    try global.defineOwnPropertyAssumingNew(rt, core.atom.ids.undefined_, core.Descriptor.data(core.JSValue.undefinedValue(), false, false, false));
+    try global.defineOwnPropertyAssumingNew(rt, core.atom.ids.undefined_, core.Descriptor.data(core.JSValue.undefinedValue(), .none));
 
     try defineConsoleObject(rt, global, &output_host_entry);
 }
@@ -89,7 +89,7 @@ fn defineConsoleObject(rt: *core.JSRuntime, global: *core.Object, entry: *const 
     try global.defineConsoleAutoInitProperty(
         rt,
         key,
-        core.property.Flags.data(true, true, true),
+        core.property.Flags.data(.all),
         core.host_function.ids.output,
         entry,
     );
@@ -219,8 +219,8 @@ pub fn callValueWithThisGlobalsAndGlobal(
             if (try call_runtime.callInternalCallableByTag(ctx, output, active_global, object, tag, args, null, null)) |value| return value;
         }
     }
-    if (object.hostFunctionKind() != 0) {
-        const record = hostFunctionRecordFromId(object.hostFunctionKind()) orelse return error.TypeError;
+    if (object.hostFunctionKind()) |kind| {
+        const record = hostFunctionRecordFromId(kind) orelse return error.TypeError;
         return callHostFunction(ctx, output, global, globals, object, this_value, args, record, .{});
     }
     if (core.class.isBytecodeFunctionClass(object.class_id)) {
@@ -323,8 +323,7 @@ pub fn callHostFunctionObjectForVm(
     this_value: core.JSValue,
     args: []const core.JSValue,
 ) !?core.JSValue {
-    const kind = object.hostFunctionKind();
-    if (kind == 0) return null;
+    const kind = object.hostFunctionKind() orelse return null;
     if (!hostFunctionCanDispatchFromVmWithoutGlobals(kind)) return null;
     const record = hostFunctionRecordFromId(kind) orelse return error.TypeError;
     return try callHostFunction(ctx, output, global, &.{}, object, this_value, args, record, .{});
@@ -346,7 +345,7 @@ fn definePredefinedHostEntryFunction(
         predefinedStringAtom(name),
         name,
         length,
-        core.property.Flags.data(true, true, true),
+        core.property.Flags.data(.all),
         core.host_function.ids.output,
         false,
         null,
@@ -359,16 +358,16 @@ fn predefinedStringAtom(comptime name: []const u8) core.Atom {
 }
 
 pub fn defineObjectProperty(rt: *core.JSRuntime, object: *core.Object, key: core.Atom, value: core.JSValue) !void {
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(value, true, true, true));
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(value, .all));
 }
 
 fn defineGlobalThisProperty(rt: *core.JSRuntime, global: *core.Object) !void {
-    try global.defineOwnPropertyAssumingNew(rt, core.atom.predefinedId("globalThis", .string).?, core.Descriptor.data(global.value(), true, false, true));
+    try global.defineOwnPropertyAssumingNew(rt, core.atom.predefinedId("globalThis", .string).?, core.Descriptor.data(global.value(), .method));
 }
 
 fn defineConstantPropertyAssumingNew(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: core.JSValue) !void {
     const key = try rt.internAtom(name);
-    try object.defineOwnPropertyAssumingNew(rt, key, core.Descriptor.data(value, false, false, false));
+    try object.defineOwnPropertyAssumingNew(rt, key, core.Descriptor.data(value, .none));
 }
 
 fn defineNumberConstantPropertyAssumingNew(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: f64) !void {
@@ -376,7 +375,7 @@ fn defineNumberConstantPropertyAssumingNew(rt: *core.JSRuntime, object: *core.Ob
         try defineConstantPropertyAssumingNew(rt, object, name, value_ops.numberToValue(value));
         return;
     };
-    try object.defineOwnPropertyAssumingNew(rt, key, core.Descriptor.data(value_ops.numberToValue(value), false, false, false));
+    try object.defineOwnPropertyAssumingNew(rt, key, core.Descriptor.data(value_ops.numberToValue(value), .none));
 }
 
 fn promiseObjectFromValue(value: core.JSValue) ?*core.Object {
@@ -681,7 +680,7 @@ fn hasOwnPropertyProxyAware(
 }
 
 fn setArrayIndex(rt: *core.JSRuntime, array: *core.Object, index: u32, value: core.JSValue) !void {
-    try array.defineOwnProperty(rt, core.Atom.taggedInt(index), core.Descriptor.data(value, true, true, true));
+    try array.defineOwnProperty(rt, core.Atom.taggedInt(index), core.Descriptor.data(value, .all));
     if (array.arrayLength() <= index) array.setArrayLength(index + 1);
 }
 
@@ -771,13 +770,8 @@ test "createPromiseCombinatorState roots direct function bytecode resolve while 
 
     const values = try core.Object.create(rt, core.class.ids.array, null);
 
-    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
-    var fb_published = false;
-    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-combinator-state-resolve-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
-    fb.publishFixtureNoFail(rt);
-    fb_published = true;
+    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
 
     const resolve_value = core.JSValue.functionBytecode(&fb.header);
 
@@ -1039,7 +1033,7 @@ pub fn callObjectStatic(
             var desc = (try object.getOwnProperty(rt, key)) orelse continue;
             materializeMappedArgumentsDescriptorValue(rt, object, key, &desc);
             const desc_value = try descriptorObject(rt, desc);
-            try out.defineOwnProperty(rt, key, core.Descriptor.data(desc_value, true, true, true));
+            try out.defineOwnProperty(rt, key, core.Descriptor.data(desc_value, .all));
         }
         return out.value();
     }
@@ -1054,7 +1048,7 @@ pub fn callObjectStatic(
         var out_index: u32 = 0;
         for (keys) |key| {
             const name_value = try rt.atoms.toStringValue(rt, key);
-            try out.defineOwnProperty(rt, core.Atom.taggedInt(out_index), core.Descriptor.data(name_value, true, true, true));
+            try out.defineOwnProperty(rt, core.Atom.taggedInt(out_index), core.Descriptor.data(name_value, .all));
             out_index += 1;
         }
         return out.value();
@@ -1070,7 +1064,7 @@ pub fn callObjectStatic(
         for (keys) |key| {
             if (!rt.atoms.isPublicSymbol(key)) continue;
             const symbol_value = try rt.symbolValue(key);
-            try out.defineOwnProperty(rt, core.Atom.taggedInt(out.arrayLength()), core.Descriptor.data(symbol_value, true, true, true));
+            try out.defineOwnProperty(rt, core.Atom.taggedInt(out.arrayLength()), core.Descriptor.data(symbol_value, .all));
         }
         return out.value();
     }
@@ -1360,9 +1354,9 @@ fn objectPrototypeDefineAccessor(ctx: *core.JSContext, global: ?*core.Object, re
     const key_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const key = try atomFromPropertyKey(rt, key_value);
     const desc = if (getter)
-        core.Descriptor.accessor(accessor_value, core.JSValue.undefinedValue(), true, true)
+        core.Descriptor.accessor(accessor_value, core.JSValue.undefinedValue(), .{ .enumerable = true, .configurable = true })
     else
-        core.Descriptor.accessor(core.JSValue.undefinedValue(), accessor_value, true, true);
+        core.Descriptor.accessor(core.JSValue.undefinedValue(), accessor_value, .{ .enumerable = true, .configurable = true });
     object.defineOwnProperty(rt, key, desc) catch |err| switch (err) {
         error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return error.TypeError,
         error.InvalidLength => return error.RangeError,
@@ -1429,7 +1423,7 @@ test "primitiveWrapper roots direct symbol while creating call wrapper" {
 
     const symbol_value = try rt.takeSymbolValue(symbol_atom);
     const wrapper_value = try primitiveWrapper(ctx, core.class.ids.symbol, symbol_value, null);
-    const wrapper = property_ops.expectObject(wrapper_value) catch return error.TypeError;
+    const wrapper = try property_ops.expectObject(wrapper_value);
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const stored = wrapper.objectData() orelse return error.TypeError;
@@ -1453,18 +1447,6 @@ fn primitivePrototypeFromGlobal(rt: *core.JSRuntime, global: ?*core.Object, clas
     const key = core.atom.predefinedId(name, .string) orelse return null;
     const constructor = global_object.getOwnDataObjectBorrowed(key) orelse return null;
     return constructor.getOwnDataObjectBorrowed(core.atom.ids.prototype);
-}
-
-fn defineDataPropertyWithFlags(
-    rt: *core.JSRuntime,
-    object: *core.Object,
-    atom_id: core.Atom,
-    value: core.JSValue,
-    writable: bool,
-    enumerable: bool,
-    configurable: bool,
-) !void {
-    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, writable, enumerable, configurable));
 }
 
 fn boundFunctionNameValue(rt: *core.JSRuntime, target_name: core.JSValue) !core.JSValue {
@@ -1556,8 +1538,8 @@ fn createBoundFunction(
         rooted_owned_bound_args = &.{};
         rt.gc.rememberOwnerForBulkWrite(object.gcHeader());
     }
-    try defineDataPropertyWithFlags(rt, object, core.atom.ids.name, name_value, false, false, true);
-    try defineDataPropertyWithFlags(rt, object, core.atom.ids.length, length_value, false, false, true);
+    try object.defineOwnProperty(rt, core.atom.ids.name, core.Descriptor.data(name_value, .{ .configurable = true }));
+    try object.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(length_value, .{ .configurable = true }));
     return object.value();
 }
 
@@ -1691,7 +1673,7 @@ test "callValueWithThisGlobalsAndGlobal roots overflow args across the copy allo
 
     // Closure kind 17 echoes `args[0]` back, so the callee has to read the
     // window the helper handed it -- not the caller's original slice.
-    var callee = try closure_mod.create(rt, 17, 0, 0, 0);
+    var callee = try closure_mod.create(rt, .identity);
 
     // Strictly above the 8-slot inline buffer: this is the `initCopy` arm, and
     // `initCopy` allocates, which is a collection point.
@@ -1879,8 +1861,8 @@ pub const VmDispatchName = struct {
 /// an `allocator.dupe` + `free` round trip purely to run one `std.mem.eql`;
 /// a single `ta.subarray()` walked ~13 of them and paid 14 allocations before
 /// reaching its handler. QuickJS never re-derives a name to dispatch a native
-/// call: `js_call_c_function` (quickjs.c:17562, reached from OP_call_method at
-/// quickjs.c:18220) switches on the already-resolved function's `magic`. This
+/// call: `js_call_c_function` (quickjs.c, reached from OP_call_method at
+/// quickjs.c) switches on the already-resolved function's `magic`. This
 /// borrows the interned dispatch atom's bytes instead, which is the closest
 /// zjs equivalent of reading that pre-resolved identity.
 ///
@@ -2064,7 +2046,7 @@ fn isNativeFunctionPropertyName(name: []const u8) bool {
 }
 
 /// Non-ASCII identifier names ("ém") are legal JS identifiers and qjs
-/// js_function_toString (quickjs.c:41335) emits the name property verbatim,
+/// js_function_toString emits the name property verbatim,
 /// so the native-source name filter must not drop them. The name bytes are
 /// UTF-8 (appendRawString post-widening); reject invalid sequences.
 fn isUnicodeIdentifierName(name: []const u8) bool {
@@ -2147,8 +2129,7 @@ fn hostOutputValues(
     values: []const core.JSValue,
 ) HostError!core.JSValue {
     if (output) |writer| {
-        var i: usize = 0;
-        while (i < values.len) : (i += 1) {
+        for (0..values.len) |i| {
             if (i != 0) writer.writeByte(' ') catch |err|
                 return exception_ops.throwHostError(ctx, global, err);
             // qjs js_print (quickjs-libc.c:4063): a string argument is
@@ -2360,7 +2341,7 @@ test "descriptorObject roots direct symbol value while creating descriptor objec
     const symbol_value = try rt.takeSymbolValue(symbol_atom);
     const descriptor_value = try descriptorObject(
         rt,
-        core.Descriptor.data(symbol_value, true, true, true),
+        core.Descriptor.data(symbol_value, .all),
     );
     const descriptor = thisObject(descriptor_value) orelse return error.TypeError;
 
@@ -2482,7 +2463,7 @@ pub fn evalGlobalScriptSource(
         if (compiled.syntax_error) |*parse_error| {
             // Compile-error surface: own fileName/lineNumber/columnNumber +
             // leading stack line (build_backtrace filename branch,
-            // quickjs.c:7553-7570).
+            // quickjs.c).
             const parse_filename = ctx.runtime.atoms.name(parse_error.filename) orelse filename;
             _ = error_stack_ops.throwParseSyntaxError(ctx, global, parse_filename, parse_error.position.line, parse_error.position.column, parse_error.message) catch |err| break :blk err;
             break :blk error.SyntaxError;

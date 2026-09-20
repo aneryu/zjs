@@ -13,8 +13,10 @@ const builtin = @import("builtin");
 
 const atom_mod = @import("atom.zig");
 const conservative = @import("gc_conservative.zig");
+const conservative_diag = @import("gc_conservative_diag.zig");
 const context_mod = @import("context.zig");
 const gc = @import("gc.zig");
+const gc_visit = @import("gc_visit.zig");
 const module_mod = @import("module.zig");
 const object_gc = @import("object_gc.zig");
 const object_mod = @import("object.zig");
@@ -164,13 +166,13 @@ fn traceFunctionBytecodeAtoms(rt: *JSRuntime, fb: *FunctionBytecode, visitor: an
     const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
     if (comptime !@hasDecl(CleanType, "visitAtom")) return;
 
-    try atom_mod.callVisitAtom(visitor, fb.funcName());
-    try atom_mod.callVisitAtom(visitor, fb.filenameAtom());
-    try atom_mod.callVisitAtom(visitor, fb.scriptOrModule());
-    for (fb.allVarDefs()) |vardef| try atom_mod.callVisitAtom(visitor, vardef.var_name);
-    for (fb.closureVar()) |closure_var| try atom_mod.callVisitAtom(visitor, closure_var.var_name);
+    try gc_visit.atom(visitor, fb.funcName());
+    try gc_visit.atom(visitor, fb.filenameAtom());
+    try gc_visit.atom(visitor, fb.scriptOrModule());
+    for (fb.allVarDefs()) |vardef| try gc_visit.atom(visitor, vardef.var_name);
+    for (fb.closureVar()) |closure_var| try gc_visit.atom(visitor, closure_var.var_name);
     var operands = fb.atomOperandIterator();
-    while (operands.next()) |operand| try atom_mod.callVisitAtom(visitor, operand);
+    while (operands.next()) |operand| try gc_visit.atom(visitor, operand);
 
     const hook = rt.small_inline_trace_atoms orelse return;
     const Bridge = struct {
@@ -178,7 +180,7 @@ fn traceFunctionBytecodeAtoms(rt: *JSRuntime, fb: *FunctionBytecode, visitor: an
         failed: bool = false,
         fn visit(ctx: *anyopaque, id: atom_mod.Atom) void {
             const self: *@This() = @ptrCast(@alignCast(ctx));
-            atom_mod.callVisitAtom(self.vis, id) catch {
+            gc_visit.atom(self.vis, id) catch {
                 self.failed = true;
             };
         }
@@ -382,8 +384,6 @@ test "mark footprint separates direct candidates from true external storage" {
     try std.testing.expectEqual(@as(usize, 2), footprint.inline_ordinary_property_cache_lines[two_slot_index]);
 }
 
-pub var last_report: Report = .{};
-
 /// `ZJS_GC_VERIFY_MINOR=1`: what a FULL trace would keep, recomputed before
 /// each minor so the minor's condemned set can be checked against it.
 ///
@@ -475,7 +475,7 @@ fn computeFullReachable(rt: *JSRuntime, scan: runtime_mod.GCRootScan) !FullReach
             }
         }
     }
-    const diag_direct_before: usize = conservative.diagThreadDirect();
+    const diag_direct_before: usize = conservative_diag.diagThreadDirect();
     if (probe.conservative_on) {
         if (comptime gc.roots_diag_enabled) {
             // Same scan, but the callback records every header this arm
@@ -512,7 +512,7 @@ fn computeFullReachable(rt: *JSRuntime, scan: runtime_mod.GCRootScan) !FullReach
         }
     }
     if (comptime gc.roots_diag_enabled) {
-        if (probe.conservative_on) conservative.noteProbe(conservative_only_count, conservative.diagThreadDirect() - diag_direct_before);
+        if (probe.conservative_on) conservative_diag.noteProbe(conservative_only_count, conservative_diag.diagThreadDirect() - diag_direct_before);
     }
 
     probe.clearMarks();
@@ -598,7 +598,7 @@ pub var detailed_reports: bool = false;
 /// heap walk with per-object property-storage accounting.
 ///
 /// This is deliberately NOT `detailed_reports`. Deducting a census from the
-/// number a panel prints (`last_census_ns` below) makes the printed number
+/// number a panel prints (`rt.gc.last_census_ns` below) makes the printed number
 /// honest; it does not give the mutator its time back. The marked-set census
 /// is by far the most expensive of the walks -- on splay it is 525k headers
 /// per major, and it lands inside the final-remark stop -- so bundling it into
@@ -614,25 +614,6 @@ pub var detailed_reports: bool = false;
 /// questions and neither replaces the other.
 pub var mark_footprint_census: bool = false;
 
-/// Nanoseconds the last collection spent on census walks rather than on
-/// collecting, so the pause it reports is the pause it would have had.
-///
-/// Without this the only instrument for the pause distribution inflates it:
-/// the census runs inside the region `tryRunObjectCycleRemovalWithValueRoots`
-/// times, and it is enabled by the same `--gc-stats` that prints the result.
-/// Measured at +38-41% on raytrace's p50. An instrument that changes its
-/// subject by that much cannot be used to judge a change to the subject, and
-/// this repository has already been burned twice by rulers that moved.
-pub var last_census_ns: u64 = 0;
-
-/// The final-remark span BEFORE `last_census_ns` is deducted from it.
-///
-/// Written only under `detailed_reports`, and read only by the test that pins
-/// the deduction: without a raw witness "the phase total is census-net" is
-/// asserted about a quantity nothing else records, and the deduction can be
-/// dropped without a single test changing colour.
-pub var last_finish_remark_raw_ns: u64 = 0;
-
 /// Either census family is on, so the walks have to be timed to be deducted.
 /// `mark_footprint_census` is separately switchable, and timing it only when
 /// `detailed_reports` also happened to be set would leave the deduction silently
@@ -645,10 +626,10 @@ inline fn censusStart() u64 {
     return if (censusTimed()) profile.nowNanos() else 0;
 }
 
-inline fn censusEnd(started: u64) void {
+inline fn censusEnd(rt: *JSRuntime, started: u64) void {
     if (!censusTimed()) return;
     const now = profile.nowNanos();
-    if (now > started) last_census_ns +|= now - started;
+    if (now > started) rt.gc.last_census_ns +|= now - started;
 }
 
 fn requireInvariant(result: anyerror!void, audit: []const u8, panic_message: []const u8) void {
@@ -727,7 +708,7 @@ fn verifyCollectorInvariants(
 fn recordFinalMarkFootprint(rt: *JSRuntime) void {
     if (!mark_footprint_census) return;
     const started = censusStart();
-    defer censusEnd(started);
+    defer censusEnd(rt, started);
 
     const footprint = &rt.gc_mark_footprint;
     footprint.major_censuses +|= 1;
@@ -754,7 +735,7 @@ fn recordFinalMarkFootprint(rt: *JSRuntime) void {
 }
 
 pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) CollectError!usize {
-    last_census_ns = 0;
+    rt.gc.last_census_ns = 0;
     rt.gc.stats.collections += 1;
     // The epoch bump and the hot-block withdrawal belong to `clearMarks`,
     // which `Collector.run` reaches below; this entry used to do them a second
@@ -784,9 +765,9 @@ pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootF
     // A major resets the experiment: it changes what is old, and with it the
     // survival rate the next minor would measure.
     rt.gc.generation.decayLowYieldStreak();
-    last_report = collector.report;
-    last_report.swept = swept;
-    last_report.census_ns = last_census_ns;
+    rt.gc.last_report = collector.report;
+    rt.gc.last_report.swept = swept;
+    rt.gc.last_report.census_ns = rt.gc.last_census_ns;
     if (gc.invariantChecksEnabled()) {
         verifyCollectorInvariants(
             rt,
@@ -866,26 +847,13 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
     // for the whole phase (see there).
     rt.gc.generation.beginMinorRetirement();
 
-    const phase_stats = detailed_reports;
-    var phase_started = if (phase_stats) profile.nowNanos() else 0;
+    var phase_timer = MinorPhaseTimer.start(detailed_reports);
     collector.clearYoungMarks();
-    if (phase_stats) {
-        const ended = profile.nowNanos();
-        rt.gc.generation.stats.minor_clear_ns_total +|= ended -| phase_started;
-        phase_started = ended;
-    }
+    phase_timer.lap(rt, .clear);
     try collector.seedRoots();
-    if (phase_stats) {
-        const ended = profile.nowNanos();
-        rt.gc.generation.stats.minor_roots_ns_total +|= ended -| phase_started;
-        phase_started = ended;
-    }
+    phase_timer.lap(rt, .roots);
     if (collector.conservative_on) try collector.seedConservativeRoots();
-    if (phase_stats) {
-        const ended = profile.nowNanos();
-        rt.gc.generation.stats.minor_conservative_ns_total +|= ended -| phase_started;
-        phase_started = ended;
-    }
+    phase_timer.lap(rt, .conservative);
 
     // §8.3: force-trace each remembered owner instead of `tryMark`ing it. An
     // old owner already carries a sticky mark, so marking it would make the
@@ -899,18 +867,10 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
             rt.gc.generation.stats.remembered_without_young += 1;
         }
     }
-    if (phase_stats) {
-        const ended = profile.nowNanos();
-        rt.gc.generation.stats.minor_remembered_ns_total +|= ended -| phase_started;
-        phase_started = ended;
-    }
+    phase_timer.lap(rt, .remembered);
     try collector.drain();
     try collector.ephemeronFixedPoint();
-    if (phase_stats) {
-        const ended = profile.nowNanos();
-        rt.gc.generation.stats.minor_trace_ns_total +|= ended -| phase_started;
-        phase_started = ended;
-    }
+    phase_timer.lap(rt, .trace);
 
     rt.gc.generation.stats.young_at_start_total += young_before;
     if (young_before > rt.gc.generation.stats.young_at_start_max) {
@@ -926,18 +886,12 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
         // split for the next minor to trip over.
         promoteYoungSurvivorsInBulk(rt);
         closeYoungGeneration(rt);
-        if (phase_stats) {
-            rt.gc.generation.stats.minor_sweep_ns_total +|= profile.nowNanos() -| phase_started;
-        }
+        phase_timer.lap(rt, .sweep);
         return 0;
     }
     const reclaimed = collector.sweepUnmarkedYoung(if (full_reachable) |*reachable| reachable else null);
     rt.gc.generation.noteMinorYield(young_before, reclaimed);
-    if (phase_stats) {
-        const ended = profile.nowNanos();
-        rt.gc.generation.stats.minor_sweep_ns_total +|= ended -| phase_started;
-        phase_started = ended;
-    }
+    phase_timer.lap(rt, .sweep);
 
     // Promotion is the sticky rule made concrete: everything still young
     // after the sweep survived this collection, so it is old now. TGC S4-h
@@ -960,11 +914,27 @@ pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFr
         gc.minor_hot_publish_superblock_budget,
     );
     rt.gc.generation.noteMinorPromotion(young_before -| reclaimed);
-    if (phase_stats) {
-        rt.gc.generation.stats.minor_promote_ns_total +|= profile.nowNanos() -| phase_started;
-    }
+    phase_timer.lap(rt, .promote);
     return reclaimed;
 }
+
+/// Accumulates each minor phase's wall time into `generation.stats.minor_ns`
+/// when detailed reports are on; a no-op otherwise.
+const MinorPhaseTimer = struct {
+    enabled: bool,
+    started: u64,
+
+    fn start(enabled: bool) MinorPhaseTimer {
+        return .{ .enabled = enabled, .started = if (enabled) profile.nowNanos() else 0 };
+    }
+
+    fn lap(self: *MinorPhaseTimer, rt: *JSRuntime, phase: gc.generation.MinorPhase) void {
+        if (!self.enabled) return;
+        const now = profile.nowNanos();
+        rt.gc.generation.stats.minor_ns.getPtr(phase).* +|= now -| self.started;
+        self.started = now;
+    }
+};
 
 /// Bulk promotion: clear the young bit of every member of the young set.
 ///
@@ -1124,7 +1094,7 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     // Own the accumulator for this finish, the way `collectCycles` owns it for
     // a synchronous major. Without the reset the deduction below would charge
     // this pause with whatever the previous collection's walks cost.
-    last_census_ns = 0;
+    rt.gc.last_census_ns = 0;
     const t_remark = profile.nowNanos();
     rt.gc.incremental.stats.phase_finish_init_ns +|= t_remark -| t_enter;
     try collector.seedRoots();
@@ -1166,7 +1136,7 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
         // whole interval.
         rt.gc.requestGC(.collection_failed, .soon);
         collector.report.skipped_sweep_incomplete_arenas = true;
-        last_report = collector.report;
+        rt.gc.last_report = collector.report;
         return 0;
     }
 
@@ -1242,9 +1212,9 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     // "only" true; a census added after `t_weak` would inflate a segment the
     // deduction below never touches, silently.
     const raw_remark_ns = t_weak -| t_remark;
-    const census_ns = last_census_ns;
+    const census_ns = rt.gc.last_census_ns;
     std.debug.assert(census_ns <= raw_remark_ns);
-    if (detailed_reports) last_finish_remark_raw_ns = raw_remark_ns;
+    if (detailed_reports) rt.gc.last_finish_remark_raw_ns = raw_remark_ns;
     rt.gc.incremental.stats.phase_finish_remark_ns +|= raw_remark_ns -| census_ns;
     rt.gc.incremental.stats.phase_finish_weak_ns +|= t_sweep -| t_weak;
     rt.gc.incremental.stats.phase_finish_condemn_ns +|= t_end -| t_sweep;
@@ -1256,9 +1226,9 @@ pub fn finishIncrementalCycle(rt: *JSRuntime, extra_roots: ?*const runtime_mod.V
     clearYoungState(rt);
     rt.gc.generation.commitMajorRetirement();
     rt.gc.generation.decayLowYieldStreak();
-    last_report = collector.report;
-    last_report.swept = condemned;
-    last_report.census_ns = census_ns;
+    rt.gc.last_report = collector.report;
+    rt.gc.last_report.swept = condemned;
+    rt.gc.last_report.census_ns = census_ns;
     if (gc.invariantChecksEnabled()) {
         verifyCollectorInvariants(rt, collector.conservative_on, true);
     }
@@ -1308,7 +1278,7 @@ fn morgueIsEmpty(rt: *const JSRuntime) bool {
         if (authority.doomed.items.len != 0) return false;
     }
     for (&rt.gc.morgue.by_kind) |*bucket| {
-        if (!gc.listEmpty(bucket)) return false;
+        if (!bucket.isEmpty()) return false;
     }
     return true;
 }
@@ -1333,7 +1303,7 @@ pub fn doomedStateSnapshot(rt: *const JSRuntime) DoomedStateSnapshot {
     var nonempty_buckets: usize = if (doomed_nonblock_objects != 0) 1 else 0;
     var bucket_headers: usize = doomed_nonblock_objects;
     for (&rt.gc.morgue.by_kind) |*bucket| {
-        if (!gc.listEmpty(bucket)) nonempty_buckets += 1;
+        if (!bucket.isEmpty()) nonempty_buckets += 1;
         var header = bucket.sentinel.next_non_object;
         while (header) |current| {
             if (current == &bucket.sentinel) break;
@@ -1346,8 +1316,7 @@ pub fn doomedStateSnapshot(rt: *const JSRuntime) DoomedStateSnapshot {
     var block = rt.gc.block_heap.doomed_blocks;
     while (block) |current| {
         doomed_blocks += 1;
-        const link = current.doomed_link;
-        block = if (link <= 1) null else @ptrFromInt(link);
+        block = current.doomed_link.next();
     }
 
     return .{
@@ -1356,7 +1325,7 @@ pub fn doomedStateSnapshot(rt: *const JSRuntime) DoomedStateSnapshot {
         .bucket_headers = bucket_headers,
         .cursor_present = rt.gc.morgue.cursor != null,
         .doomed_blocks = doomed_blocks,
-        .deferred_finalizers = rt.deferred_class_payload_finalizers.len,
+        .deferred_finalizers = rt.deferred_class_payload_finalizers.items.len,
         .active_finalizer = rt.active_deferred_class_payload_finalizer != null,
     };
 }
@@ -1400,7 +1369,7 @@ fn assertMorgueEmptyBeforeCondemnation(rt: *const JSRuntime) void {
 inline fn condemnIntoBucket(rt: *JSRuntime, header: *gc.Header) void {
     const kind = header.metaConst().flags.kind;
     std.debug.assert(kind != .object);
-    gc.listAddTailTraversalOwned(&rt.gc.morgue.by_kind[@intFromEnum(kind)], header);
+    rt.gc.morgue.by_kind[@intFromEnum(kind)].addTailTraversalOwned(header);
 }
 
 /// The condemnation half of every sweep: detach the unmarked, unpinned
@@ -1445,7 +1414,7 @@ fn condemnListSweep(rt: *JSRuntime, sink: anytype, young_only: bool) usize {
         rt.gc.lists.objects.sentinel.next_non_object;
     if (list_head) |head| {
         var previous: *gc.Header = if (young_only)
-            rt.gc.lists.young_predecessor orelse unreachable
+            rt.gc.lists.young_predecessor.?
         else
             &rt.gc.lists.objects.sentinel;
         var cursor: ?*gc.Header = head;
@@ -1616,9 +1585,9 @@ fn destroyCondemnedSlice(rt: *JSRuntime, budget_ns: u64, sweep_string_extents: b
         // the doomed list FIRST: `reclaimDoomedCells` may hand an emptied
         // block to the free-block list, and a free-listed block must not
         // carry a live `doomed_link`.
-        const link = block.doomed_link;
-        block.doomed_link = 0;
-        rt.gc.block_heap.doomed_blocks = if (link <= 1) null else @ptrFromInt(link);
+        const next = block.doomed_link.next();
+        block.doomed_link = .unlinked;
+        rt.gc.block_heap.doomed_blocks = next;
         destroyed += rt.gc.reclaimDoomedBlock(block);
         // This block's doomed bitmap is fully consumed, so its alloc
         // bitmap and `allocated_count` are canonical again -- a claim
@@ -1681,7 +1650,7 @@ fn destroyCondemnedSlice(rt: *JSRuntime, budget_ns: u64, sweep_string_extents: b
             if (wanted) {
                 // Each kind owns one bucket and destruction consumes it from
                 // the head, including after a budgeted resume.
-                gc.listDelAfterTraversalOwned(bucket, &bucket.sentinel, h);
+                bucket.delAfterTraversalOwned(&bucket.sentinel, h);
                 rt.gc.lists.sweep_current = h;
                 switch (kind) {
                     .object => Object.destroyFromHeader(rt, h),
@@ -1917,7 +1886,7 @@ const Collector = struct {
         if (detailed_reports) {
             const t = censusStart();
             self.exact_mark_count = self.countMarked();
-            censusEnd(t);
+            censusEnd(self.rt, t);
         }
 
         if (self.conservative_on) {
@@ -1927,7 +1896,7 @@ const Collector = struct {
                 const t = censusStart();
                 const after = self.countMarked();
                 self.report.marked_conservative_extra = after - self.exact_mark_count;
-                censusEnd(t);
+                censusEnd(self.rt, t);
             }
         }
 
@@ -2152,26 +2121,26 @@ const Collector = struct {
         // are reached through host-create-ref `root_providers` (registered
         // by ownership, unregistered when that ref is consumed) and
         // `traceActiveRoots`.
-        for (self.rt.gc.pins.entries) |entry| {
+        for (self.rt.gc.pins.headers(), self.rt.gc.pins.pinCounts()) |header, pin_count| {
             // Detached generator shells have a complete payload but no Shape
             // until parameter initialization resolves the final prototype.
             // shade() correctly rejects unpublished objects; mark the block
             // cell directly and trace only its initialized payload.
-            if (self.rt.gc.pins.entryIsConstructionRoot(entry)) {
-                self.rt.gc.setHeaderMarked(entry.header);
-                const object = Object.fromHeader(entry.header);
+            if (pin_count == gc.construction_pin_count and self.rt.gc.pins.isConstructionRoot(header)) {
+                self.rt.gc.setHeaderMarked(header);
+                const object = Object.fromHeader(header);
                 try object.traceDetachedGeneratorShellEdges(self);
                 // A mark claim outside the frontier owes the same retirement a
                 // frontier pop does. Guarded on publication because that is
                 // what this arm exists for: an UNPUBLISHED shell is not young
                 // yet and is not in any young structure, so it has nothing to
                 // retire, and `retireTracedYoung` asserts on `heap_accounted`.
-                if (entry.header.metaConst().alloc_info.heap_accounted) {
-                    self.rt.gc.retireTracedYoung(entry.header);
+                if (header.metaConst().alloc_info.heap_accounted) {
+                    self.rt.gc.retireTracedYoung(header);
                 }
                 continue;
             }
-            self.shadeExact(entry.header);
+            self.shadeExact(header);
         }
         if (self.err) |err| return err;
 
@@ -2244,7 +2213,7 @@ const Collector = struct {
         self.shadeExact(header);
         if (comptime gc.roots_diag_enabled) {
             if (!was_marked and self.rt.gc.headerMarked(header)) {
-                conservative.noteDirect(self.rt, header, conservative.diagCurrentWord());
+                conservative_diag.noteDirect(self.rt, header, conservative_diag.diagCurrentWord());
             }
         }
     }
@@ -2338,7 +2307,7 @@ const Collector = struct {
     /// `finishGeneratorShell` resolves the prototype, while
     /// `runGeneratorParameterInit` already stores into its payload -- so the
     /// shell is a legitimate remembered owner with no readable Shape, and the
-    /// ordinary object edge walk starts at `callVisitShape(self.shape_ref)`.
+    /// ordinary object edge walk starts at `gc_visit.shape(self.shape_ref)`.
     /// `seedRoots` routes construction-root pins to the shell protocol; this
     /// is the same exemption for the walk that does not go through the pin
     /// ledger.
@@ -2381,7 +2350,7 @@ const Collector = struct {
                 const next = object.weakReferenceHolderNext();
                 if (self.rt.gc.headerMarked(object.gcHeader())) {
                     if (object.collectionPayloadForCycleGc()) |payload| {
-                        for (payload.weak_entries) |*entry| {
+                        for (payload.weak_entries.items) |*entry| {
                             if (!keyIsMarked(self.rt, entry.key_identity)) continue;
                             const child = entry.value.cycleMarkHeader() orelse continue;
                             if (self.rt.gc.headerMarked(child)) continue;
@@ -2400,7 +2369,7 @@ const Collector = struct {
     }
 
     fn processWeak(self: *Collector) void {
-        for (self.rt.weak_root_slots) |slot| {
+        for (self.rt.weak_root_slots.items) |slot| {
             const identity = slot.identity orelse continue;
             if (!keyIsMarked(self.rt, identity)) {
                 self.rt.clearWeakRootSlot(slot, true);
@@ -2431,10 +2400,10 @@ const Collector = struct {
             var read_index: usize = 0;
             var write_index: usize = 0;
             var removed = false;
-            while (read_index < payload.weak_entries.len) : (read_index += 1) {
-                const entry = payload.weak_entries[read_index];
+            while (read_index < payload.weak_entries.items.len) : (read_index += 1) {
+                const entry = payload.weak_entries.items[read_index];
                 if (keyIsMarked(self.rt, entry.key_identity)) {
-                    if (write_index != read_index) payload.weak_entries[write_index] = entry;
+                    if (write_index != read_index) payload.weak_entries.items[write_index] = entry;
                     write_index += 1;
                     continue;
                 }
@@ -2442,7 +2411,7 @@ const Collector = struct {
                 removed = true;
             }
             if (removed) {
-                payload.weak_entries = payload.weak_entries.ptr[0..write_index];
+                payload.weak_entries.shrinkRetainingCapacity(write_index);
                 holder.clearCollectionIndex(self.rt);
             }
         }
@@ -2453,20 +2422,20 @@ const Collector = struct {
         };
         var read_index: usize = 0;
         var write_index: usize = 0;
-        while (read_index < finalization_payload.cells.len) : (read_index += 1) {
-            var cell = finalization_payload.cells[read_index];
+        while (read_index < finalization_payload.cells.items.len) : (read_index += 1) {
+            var cell = finalization_payload.cells.items[read_index];
             if (cell.unregister_token_identity) |identity| {
                 if (!keyIsMarked(self.rt, identity)) {
                     self.rt.clearWeakIdentitySlot(&cell.unregister_token_identity);
                 }
             }
             const target_identity = cell.target_identity orelse {
-                finalization_payload.cells[write_index] = cell;
+                finalization_payload.cells.items[write_index] = cell;
                 write_index += 1;
                 continue;
             };
             if (keyIsMarked(self.rt, target_identity)) {
-                finalization_payload.cells[write_index] = cell;
+                finalization_payload.cells.items[write_index] = cell;
                 write_index += 1;
                 continue;
             }
@@ -2474,18 +2443,18 @@ const Collector = struct {
             if (cell.state == .queued) continue;
             if (cell.isActive()) cell.state = .pending_enqueue;
             if (finalization_enqueue_blocked.*) {
-                finalization_payload.cells[write_index] = cell;
+                finalization_payload.cells.items[write_index] = cell;
                 write_index += 1;
                 continue;
             }
             // Tombstone before enqueue/destroy so a reentrant collection cannot
             // consume another cell's reserved job slot (§9.3).
-            finalization_payload.cells[read_index].state = .queued;
+            finalization_payload.cells.items[read_index].state = .queued;
             object_gc.enqueueFinalizationCleanup(self.rt, finalization_payload, cell.held_value);
             cell.state = .queued;
             cell.destroy(self.rt);
         }
-        finalization_payload.cells = finalization_payload.cells.ptr[0..write_index];
+        finalization_payload.cells.shrinkRetainingCapacity(write_index);
         holder.pruneBorrowedReferenceHolderIfEmpty(self.rt);
     }
 
@@ -2504,7 +2473,7 @@ const Collector = struct {
     fn stampYoungBlockCorpses(self: *Collector) void {
         var cursor = self.rt.gc.block_heap.young_blocks;
         while (cursor) |block| {
-            const next_link = block.young_link;
+            const next = block.young_link.next();
             for (block.doomedWords(), 0..) |word_bits, word_index| {
                 var bits = word_bits;
                 while (bits != 0) {
@@ -2520,7 +2489,7 @@ const Collector = struct {
                     self.rt.gc.detachBlockObjectCandidate(header);
                 }
             }
-            cursor = if (next_link <= 1) null else @ptrFromInt(next_link);
+            cursor = next;
         }
     }
 

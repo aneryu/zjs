@@ -53,7 +53,7 @@ pub fn checkAsyncArrowHeadAfterAsync(s: *State, return_type_forbidden: bool) Err
         s.advance() catch |err| return lookaheadErrorAsNoMatch(err);
         return typescript.tsGenericArrowHead(s, return_type_forbidden);
     }
-    // qjs `update_token_ident` (quickjs.c:22738-22764) keeps sloppy
+    // qjs `update_token_ident` keeps sloppy
     // context keywords as TOK_IDENT. zjs lexes them as dedicated kinds,
     // so AsyncArrowBindingIdentifier must accept those kinds here.
     if (isAsyncArrowBindingIdentifierKind(s, param_kind)) {
@@ -78,7 +78,7 @@ pub fn checkAsyncArrowHeadAfterAsync(s: *State, return_type_forbidden: bool) Err
 
 /// AsyncArrowBindingIdentifier in sloppy non-generator. Keep `await`
 /// rejected: +Await makes it illegal even though qjs accepts
-/// `async await => 1` at sloppy top-level (quickjs.c:22749-22756).
+/// `async await => 1` at sloppy top-level.
 fn isAsyncArrowBindingIdentifierKind(s: *State, kind: tok.TokenKind) bool {
     if (kind == .ident) return true;
     if (s.is_strict or s.curFunc().is_strict_mode) return false;
@@ -90,7 +90,7 @@ fn isAsyncArrowBindingIdentifierKind(s: *State, kind: tok.TokenKind) bool {
 }
 
 /// Check if we're at an arrow function head
-/// Mirrors `js_parse_skip_parens_token` in quickjs.c:24194.
+/// Mirrors `js_parse_skip_parens_token` in quickjs.c.
 ///
 /// Saves the lexer position, scans forward with scratch tokens, then
 /// restores the lexer so the cached parser token remains valid.
@@ -355,7 +355,6 @@ pub const ParserSnapshot = struct {
     last_token_line_num: u32,
     last_token_col_num: u32,
     last_opcode_source_offset: ?u32,
-    last_opcode_pos: i32,
     code_len: usize,
     atom_len: usize,
     source_loc_len: usize,
@@ -379,7 +378,6 @@ pub fn takeParserSnapshot(s: *State) Error!ParserSnapshot {
         .last_token_line_num = s.last_token_line_num,
         .last_token_col_num = s.last_token_col_num,
         .last_opcode_source_offset = s.last_opcode_source_offset,
-        .last_opcode_pos = s.curFunc().last_opcode_pos,
         .code_len = s.currentCodeLen(),
         .atom_len = s.currentAtomOperandLen(),
         .source_loc_len = if (s.emit_to_function_def)

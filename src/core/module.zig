@@ -4,7 +4,7 @@
 //! namespace/meta/exception values, closure cells, and dependency arrays.
 //! Request edges borrow records from that same registry; retained VarRefs and
 //! JSValues document the edges that keep bindings/results alive and are traced
-//! by core GC. QuickJS source map: `JSModuleDef` at quickjs.c:888-936. This is
+//! by core GC. QuickJS source map: `JSModuleDef` at quickjs.c. This is
 //! realm-core state used by parser/compiler/exec orchestration; it must not
 //! import exec or binding.
 
@@ -12,6 +12,7 @@ const std = @import("std");
 
 const atom = @import("atom.zig");
 const gc = @import("gc.zig");
+const gc_visit = @import("gc_visit.zig");
 const memory = @import("memory.zig");
 const module_auto_init = @import("module_auto_init.zig");
 const value_mod = @import("value.zig");
@@ -387,7 +388,7 @@ pub const ModuleRecord = struct {
     /// `.errored` and every later import rethrows this value instead of
     /// re-running the body (mirrors qjs `JSModuleDef.eval_has_exception` /
     /// `eval_exception`, rethrown by js_inner_module_evaluation
-    /// quickjs.c:31442).
+    /// quickjs.c).
     eval_exception: ?value_mod.JSValue = null,
 
     fn prepare(self: *ModuleRecord, account: *memory.MemoryAccount, atoms: *atom.AtomTable, name: atom.Atom) void {
@@ -501,52 +502,37 @@ pub const ModuleRecord = struct {
 
     pub inline fn traceChildEdgesFallible(self: *ModuleRecord, rt: anytype, visitor: anytype) !void {
         _ = rt;
-        const Helper = struct {
-            inline fn callVisitValue(vis: anytype, value: *value_mod.JSValue) !void {
-                const VisitorType = @TypeOf(vis);
-                const CleanType = comptime if (@typeInfo(VisitorType) == .pointer) @typeInfo(VisitorType).pointer.child else VisitorType;
-                if (comptime @hasDecl(CleanType, "visitValue")) {
-                    const ReturnType = @typeInfo(@TypeOf(CleanType.visitValue)).@"fn".return_type.?;
-                    if (comptime @typeInfo(ReturnType) == .error_union) {
-                        try vis.visitValue(value);
-                    } else {
-                        vis.visitValue(value);
-                    }
-                }
-            }
-        };
-
         for (self.exports) |*entry| {
             if (entry.retained_cell) |*cell| {
                 std.debug.assert(VarRef.fromValue(cell.*) != null);
-                try Helper.callVisitValue(visitor, cell);
+                try gc_visit.value(visitor, cell);
             }
         }
-        try Helper.callVisitValue(visitor, &self.func_obj);
-        try Helper.callVisitValue(visitor, &self.module_ns);
-        if (self.import_meta) |*value| try Helper.callVisitValue(visitor, value);
-        if (self.eval_exception) |*value| try Helper.callVisitValue(visitor, value);
+        try gc_visit.value(visitor, &self.func_obj);
+        try gc_visit.value(visitor, &self.module_ns);
+        if (self.import_meta) |*value| try gc_visit.value(visitor, value);
+        if (self.eval_exception) |*value| try gc_visit.value(visitor, value);
 
         // TGC S3 §2.2 edge E: the record's own name plus every atom in the
         // six metadata arrays -- exactly the set `clearForDestroy` releases.
         // `star_exports` holds only a request index, so it contributes none.
-        try atom.callVisitAtom(visitor, self.module_name);
-        for (self.requests) |entry| try atom.callVisitAtom(visitor, entry.module_name);
+        try gc_visit.atom(visitor, self.module_name);
+        for (self.requests) |entry| try gc_visit.atom(visitor, entry.module_name);
         for (self.imports) |entry| {
-            try atom.callVisitAtom(visitor, entry.import_name);
-            try atom.callVisitAtom(visitor, entry.local_name);
+            try gc_visit.atom(visitor, entry.import_name);
+            try gc_visit.atom(visitor, entry.local_name);
         }
         for (self.exports) |entry| {
-            try atom.callVisitAtom(visitor, entry.export_name);
-            try atom.callVisitAtom(visitor, entry.local_name);
+            try gc_visit.atom(visitor, entry.export_name);
+            try gc_visit.atom(visitor, entry.local_name);
         }
         for (self.indirect_exports) |entry| {
-            try atom.callVisitAtom(visitor, entry.export_name);
-            try atom.callVisitAtom(visitor, entry.import_name);
+            try gc_visit.atom(visitor, entry.export_name);
+            try gc_visit.atom(visitor, entry.import_name);
         }
         for (self.import_attributes) |entry| {
-            try atom.callVisitAtom(visitor, entry.key);
-            try atom.callVisitAtom(visitor, entry.value);
+            try gc_visit.atom(visitor, entry.key);
+            try gc_visit.atom(visitor, entry.value);
         }
     }
 
@@ -560,7 +546,7 @@ pub const ModuleRecord = struct {
 
     /// Take ownership of `value` as the cached evaluation exception
     /// (mirrors qjs js_set_module_evaluated error path setting
-    /// `m->eval_exception`, quickjs.c:31279).
+    /// `m->eval_exception`, quickjs.c).
     pub fn setEvalException(self: *ModuleRecord, rt: anytype, value: value_mod.JSValue) void {
         self.eval_exception = value;
         rt.gc.generationalBarrier(&self.header, value.cycleMarkHeader());
@@ -587,7 +573,7 @@ pub const ModuleRecord = struct {
     /// Publish the borrowed dependency identity after host resolution. Both
     /// records must belong to this same realm registry.
     pub fn setRequestModuleNoFail(self: *ModuleRecord, request_index: u32, dependency: *ModuleRecord) void {
-        const entry = self.request(request_index) orelse unreachable;
+        const entry = self.request(request_index).?;
         std.debug.assert(self.registry != null);
         std.debug.assert(dependency.registry == self.registry);
         std.debug.assert(!self.requests_resolved);
@@ -736,23 +722,8 @@ pub const Registry = struct {
     }
 
     pub inline fn traceChildEdgesFallible(self: *Registry, visitor: anytype) !void {
-        const Helper = struct {
-            inline fn callVisitModule(vis: anytype, record: *ModuleRecord) !void {
-                const VisitorType = @TypeOf(vis);
-                const CleanType = comptime if (@typeInfo(VisitorType) == .pointer) @typeInfo(VisitorType).pointer.child else VisitorType;
-                if (comptime @hasDecl(CleanType, "visitModule")) {
-                    const ReturnType = @typeInfo(@TypeOf(CleanType.visitModule)).@"fn".return_type.?;
-                    if (comptime @typeInfo(ReturnType) == .error_union) {
-                        try vis.visitModule(record);
-                    } else {
-                        vis.visitModule(record);
-                    }
-                }
-            }
-        };
-
         var iter = self.iterator();
-        while (iter.next()) |record| try Helper.callVisitModule(visitor, record);
+        while (iter.next()) |record| try gc_visit.module(visitor, record);
     }
 
     pub inline fn traceChildEdgesNoFail(self: *Registry, visitor: anytype) void {

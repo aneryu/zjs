@@ -96,7 +96,7 @@ pub fn reflectConstruct(ctx: *core.JSContext, args: []const core.JSValue, global
             defer construct_args.deinit();
             const primitive = if (construct_args.values.len >= 1) blk: {
                 if (construct_args.values[0].is(.symbol)) return error.TypeError;
-                // qjs js_number_constructor (quickjs.c:44822-44841): ToNumeric,
+                // qjs js_number_constructor: ToNumeric,
                 // then a bigint result converts to float64 rather than throwing.
                 if (construct_args.values[0].isBigInt()) {
                     break :blk value_ops.numberToValue(try value_ops.bigIntToNumber(rt, construct_args.values[0]));
@@ -376,7 +376,7 @@ pub fn reflectSetCall(
 ) !?core.JSValue {
     if (args.len < 1) return error.TypeError;
     const set_value = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
-    const object = property_ops.expectObject(args[0]) catch return error.TypeError;
+    const object = try property_ops.expectObject(args[0]);
     const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
     if (object.class_id == core.class.ids.module_ns) return core.JSValue.boolean(false);
@@ -420,7 +420,7 @@ pub fn reflectSetCall(
         return core.JSValue.boolean(ok);
     }
     // qjs JS_SetPropertyInternal: when obj != this_obj (Reflect.set receiver),
-    // `if (unlikely(p != p1)) goto retry2` (quickjs.c:9701-9702) skips the
+    // `if (unlikely(p != p1)) goto retry2` skips the
     // own JS_PROP_LENGTH / set_array_length arm (9714-9717) and later takes
     // the generic receiver path (9892-9929). Only the 4-arg form can have a
     // distinct receiver; the 3-arg path is identical to pre-X-02.
@@ -573,14 +573,14 @@ pub fn reflectOwnKeysCall(
     args: []const core.JSValue,
 ) !?core.JSValue {
     if (args.len < 1) return error.TypeError;
-    const object = property_ops.expectObject(args[0]) catch return error.TypeError;
+    const object = try property_ops.expectObject(args[0]);
     const keys = try object_ops.objectRestOwnKeys(ctx, output, global, object);
     defer core.Object.freeKeys(ctx.runtime, keys);
     const out = try core.Object.createArray(ctx.runtime, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global));
     errdefer core.Object.destroyFromHeader(ctx.runtime, out.gcHeader());
     for (keys) |key| {
         const key_value = try object_ops.proxyTrapKeyValue(ctx.runtime, key);
-        try out.defineOwnProperty(ctx.runtime, core.Atom.taggedInt(out.arrayLength()), core.Descriptor.data(key_value, true, true, true));
+        try out.defineOwnProperty(ctx.runtime, core.Atom.taggedInt(out.arrayLength()), core.Descriptor.data(key_value, .all));
     }
     return out.value();
 }

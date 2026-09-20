@@ -1,10 +1,10 @@
 //! CLI `print` / `console.log` value inspector: the QuickJS `JS_PrintValue`
-//! dump (quickjs.c:13678-14432) reproduced byte for byte, so a benchmark
+//! dump reproduced byte for byte, so a benchmark
 //! driver or a test262 harness line reads the same under both shells.
 //!
 //! Scope mirrors `js_print` (quickjs-libc.c:4063): a top-level *string*
 //! argument is written raw by the caller; every other value comes here.
-//! Defaults are `JS_PrintValueSetDefaultOptions` (quickjs.c:14401):
+//! Defaults are `JS_PrintValueSetDefaultOptions`:
 //! depth 2, strings cut at 1000 characters, 100 items per container,
 //! enumerable properties only, no `raw_dump`.
 //!
@@ -25,9 +25,9 @@ const dtoa = @import("../libs/number_format.zig");
 
 pub const Error = std.Io.Writer.Error || error{OutOfMemory};
 
-/// `JS_PRINT_MAX_DEPTH` (quickjs.c:13678): the print stack bound.
+/// `JS_PRINT_MAX_DEPTH`: the print stack bound.
 const max_stack_depth: usize = 8;
-/// `JS_PrintValueSetDefaultOptions` (quickjs.c:14401-14407).
+/// `JS_PrintValueSetDefaultOptions`.
 const default_max_depth: usize = 2;
 const default_max_string_length: usize = 1000;
 const default_max_item_count: usize = 100;
@@ -72,8 +72,8 @@ pub fn printHostArgument(ctx: *core.JSContext, global: *core.Object, output: ?*s
     try printValueRec(&state, value);
 }
 
-/// `js_print_float64` (quickjs.c:13713): `js_dtoa` free format with
-/// `JS_DTOA_MINUS_ZERO`, i.e. Number::toString except that -0 keeps its sign.
+/// `js_print_float64`: `js_dtoa` free format with
+/// `minus_zero`, i.e. Number::toString except that -0 keeps its sign.
 fn printFloat64(s: *State, d: f64) Error!void {
     if (std.math.isNan(d)) return s.puts("NaN");
     if (std.math.isPositiveInf(d)) return s.puts("Infinity");
@@ -104,7 +104,7 @@ const Units = union(enum) {
     }
 };
 
-/// `js_print_string1` (quickjs.c:13736-13791): pretty-print the first `len`
+/// `js_print_string1`: pretty-print the first `len`
 /// units with `sep` as the quote to escape.
 fn printUnits(s: *State, units: Units, len: usize, sep: u16) Error!void {
     var i: usize = 0;
@@ -166,7 +166,7 @@ fn unitsOfString(body: *const core.string.String) Units {
     };
 }
 
-/// `js_print_string` (quickjs.c:13812-13829): quoted, escaped, cut at
+/// `js_print_string`: quoted, escaped, cut at
 /// `max_string_length` with the `... N more characters` tail.
 fn printString(s: *State, value: core.JSValue) Error!void {
     const body = value.asStringBody() orelse return s.puts("<invalid string tag>");
@@ -182,7 +182,7 @@ fn printString(s: *State, value: core.JSValue) Error!void {
     }
 }
 
-/// `js_print_raw_string` (quickjs.c:13831): the string text as-is.
+/// `js_print_raw_string`: the string text as-is.
 fn printRawString(s: *State, value: core.JSValue) Error!void {
     const body = value.asStringBody() orelse return;
     switch (body.resolveData()) {
@@ -206,7 +206,7 @@ fn printRawString(s: *State, value: core.JSValue) Error!void {
     }
 }
 
-/// `is_ascii_ident` (quickjs.c:13843): bare key or quoted key.
+/// `is_ascii_ident`: bare key or quoted key.
 fn isAsciiIdent(bytes: []const u8) bool {
     if (bytes.len == 0) return false;
     for (bytes, 0..) |c, i| {
@@ -217,7 +217,7 @@ fn isAsciiIdent(bytes: []const u8) bool {
     return true;
 }
 
-/// `js_print_atom` (quickjs.c:13857-13877). Atom names are stored as UTF-8;
+/// `js_print_atom`. Atom names are stored as UTF-8;
 /// the quoted arm re-encodes to UTF-16 units so the escaper sees what qjs
 /// sees (`\u00xx` for U+007F..U+009F, raw UTF-8 above).
 fn printAtom(s: *State, atom_id: core.Atom) Error!void {
@@ -276,7 +276,7 @@ fn printClassName(s: *State, class_id: core.class.ClassId) Error!void {
     try printNameBytes(s, fallback);
 }
 
-/// `js_print_comma` (quickjs.c:13903): 0 = first item, 1 = `, `, 2 = the
+/// `js_print_comma`: 0 = first item, 1 = `, `, 2 = the
 /// `[Function f]` / regexp / error heads that open ` { ` only if a property
 /// follows.
 fn printComma(s: *State, comma_state: *u8) Error!void {
@@ -288,13 +288,13 @@ fn printComma(s: *State, comma_state: *u8) Error!void {
     comma_state.* = 1;
 }
 
-/// `js_print_more_items` (quickjs.c:13918).
+/// `js_print_more_items`.
 fn printMoreItems(s: *State, comma_state: *u8, n: usize) Error!void {
     try printComma(s, comma_state);
     try s.printf("... {d} more item{s}", .{ n, if (n > 1) "s" else "" });
 }
 
-/// `get_prop_string` (quickjs.c:7504): an own plain data string property, or
+/// `get_prop_string`: an own plain data string property, or
 /// the same one level up the prototype (the Error `name` case).
 fn ownOrProtoDataString(object: *const core.Object, atom_id: core.Atom) ?core.JSValue {
     var owner: ?*const core.Object = object;
@@ -318,7 +318,7 @@ fn ownOrProtoDataString(object: *const core.Object, atom_id: core.Atom) ?core.JS
     return null;
 }
 
-/// `js_print_regexp` (quickjs.c:13926-13990): the pattern with `/`, line
+/// `js_print_regexp`: the pattern with `/`, line
 /// terminators and the `[/]` bracket case escaped, then the flag letters in
 /// the `lre` bit order (g i m s u y d, then bit 7 — which is the named-groups
 /// bit — printed as `v`; the real unicode-sets bit is never shown. That is
@@ -378,10 +378,19 @@ fn printRegExp(s: *State, object: *const core.Object) Error!void {
         }
     }
     try s.putc('/');
-    const flags = regexp_adapter.flagBitsFromBytecode(bytecode);
-    const letters = [_]u8{ 'g', 'i', 'm', 's', 'u', 'y', 'd', 'v' };
-    for (letters, 0..) |letter, bit| {
-        if ((flags >> @intCast(bit)) & 1 != 0) try s.putc(letter);
+    const flags = regexp_adapter.flagsFromBytecode(bytecode);
+    const letters = [_]struct { byte: u8, field: std.meta.FieldEnum(regexp_adapter.Flags) }{
+        .{ .byte = 'g', .field = .global },
+        .{ .byte = 'i', .field = .ignore_case },
+        .{ .byte = 'm', .field = .multiline },
+        .{ .byte = 's', .field = .dot_all },
+        .{ .byte = 'u', .field = .unicode },
+        .{ .byte = 'y', .field = .sticky },
+        .{ .byte = 'd', .field = .indices },
+        .{ .byte = 'v', .field = .unicode_sets },
+    };
+    inline for (letters) |letter| {
+        if (@field(flags, @tagName(letter.field))) try s.putc(letter.byte);
     }
 }
 
@@ -394,7 +403,7 @@ fn putUnitRaw(s: *State, c: u32) Error!void {
     try s.puts(utf8[0..n]);
 }
 
-/// `js_print_error` (quickjs.c:13992-14026): `Name: message` then the
+/// `js_print_error`: `Name: message` then the
 /// `stack` text on its own line, trailing newline dropped.
 fn printError(s: *State, object: *const core.Object) Error!void {
     if (ownOrProtoDataString(object, core.atom.ids.name)) |name| {
@@ -444,7 +453,7 @@ fn isTypedArrayClass(class_id: core.class.ClassId) bool {
 }
 
 /// The `rt->class_array[class_id].call != NULL && class_id != JS_CLASS_PROXY`
-/// test (quickjs.c:14106): every class qjs registers with a call handler.
+/// test: every class qjs registers with a call handler.
 fn isCallableClass(class_id: core.class.ClassId) bool {
     return switch (class_id) {
         core.class.ids.c_function,
@@ -464,7 +473,7 @@ fn isCallableClass(class_id: core.class.ClassId) bool {
     };
 }
 
-/// `js_print_object` (quickjs.c:14028-14267).
+/// `js_print_object`.
 fn printObject(s: *State, object: *const core.Object) Error!void {
     var comma_state: u8 = 0;
     var is_array = false;
@@ -498,8 +507,7 @@ fn printObject(s: *State, object: *const core.Object) Error!void {
         if (payload) |p| {
             if (p.data) |data| {
                 const size: usize = p.element_size;
-                var i: usize = 0;
-                while (i < shown) : (i += 1) {
+                for (0..shown) |i| {
                     const ptr = data + i * size;
                     try printComma(s, &comma_state);
                     switch (class_id) {
@@ -538,7 +546,7 @@ fn printObject(s: *State, object: *const core.Object) Error!void {
         try printClassName(s, class_id);
         try s.printf("({d}) {{ ", .{payload.active_count});
         var shown: usize = 0;
-        for (payload.entries) |entry| {
+        for (payload.entries.items) |entry| {
             if (!entry.active) continue;
             try printComma(s, &comma_state);
             try printValueRec(s, entry.key);
@@ -569,8 +577,7 @@ fn printObject(s: *State, object: *const core.Object) Error!void {
     // Shape properties in shape order; enumerable only (show_hidden is off).
     var shown: usize = 0;
     const prop_count = object.shapeProps().len;
-    var index: usize = 0;
-    while (index < prop_count) : (index += 1) {
+    for (0..prop_count) |index| {
         const flags = object.propFlagsAt(index);
         if (flags.deleted) continue;
         if (!flags.enumerable) continue;
@@ -612,7 +619,7 @@ fn printObject(s: *State, object: *const core.Object) Error!void {
     }
 }
 
-/// The `JS_CLASS_DATE` arm (quickjs.c:14153): `get_date_string(..., 0x23)`
+/// The `JS_CLASS_DATE` arm: `get_date_string(..., 0x23)`
 /// — toISOString without side effects; a NaN time value falls back to the
 /// generic `Date {  }` dump. Returns false when nothing was written.
 fn dateIsoText(s: *State, object: *const core.Object) bool {
@@ -629,7 +636,7 @@ fn printStackIndex(s: *State, object: *const core.Object) ?usize {
     return null;
 }
 
-/// `js_print_value` (quickjs.c:14278-14399).
+/// `js_print_value`.
 fn printValueRec(s: *State, value: core.JSValue) Error!void {
     if (value.as(.int)) |int_value| {
         var buf: [32]u8 = undefined;

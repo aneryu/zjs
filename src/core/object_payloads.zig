@@ -1,6 +1,7 @@
 //! Out-of-line object payload representations and their ownership teardown.
 
 const atom = @import("atom.zig");
+const gc_visit = @import("gc_visit.zig");
 const class = @import("class.zig");
 const context_mod = @import("context.zig");
 const gc = @import("gc.zig");
@@ -15,6 +16,7 @@ const JSRuntime = runtime_mod.JSRuntime;
 const JSValue = @import("value.zig").JSValue;
 const FunctionBytecode = @import("../bytecode.zig").function_bytecode.FunctionBytecode;
 const std = @import("std");
+const typed_array_names = @import("typed_array_names.zig");
 const builtin = @import("builtin");
 
 // Payload entry records and shared ownership helpers.
@@ -75,140 +77,12 @@ pub const FinalizationRegistryCell = struct {
     }
 };
 
-/// Generic visitor dispatch used by payload `traceChildEdges` (paired with
-/// the destroy helpers above). Copied from `Object.traceChildEdgesFallible`'s
-/// local Helper so each payload can sit beside its destroy method.
-pub inline fn callVisitObject(vis: anytype, obj_ptr: anytype) !void {
-    const VisType = @TypeOf(vis);
-    const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
-    if (comptime @hasDecl(CleanType, "visitObject")) {
-        const ReturnType = @typeInfo(@TypeOf(CleanType.visitObject)).@"fn".return_type.?;
-        if (comptime @typeInfo(ReturnType) == .error_union) {
-            try vis.visitObject(obj_ptr);
-        } else {
-            vis.visitObject(obj_ptr);
-        }
-    }
-}
-
-pub inline fn callVisitValue(vis: anytype, val_ptr: anytype) !void {
-    const VisType = @TypeOf(vis);
-    const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
-    if (comptime @hasDecl(CleanType, "visitValue")) {
-        const ReturnType = @typeInfo(@TypeOf(CleanType.visitValue)).@"fn".return_type.?;
-        if (comptime @typeInfo(ReturnType) == .error_union) {
-            try vis.visitValue(val_ptr);
-        } else {
-            vis.visitValue(val_ptr);
-        }
-    }
-}
-
-/// TGC S4 spec 2.2: an owner's edge to a bare storage cell (property entries,
-/// array elements). Visitors that do not declare `storageCell` -- the root
-/// adaptors, which never enumerate heap edges -- compile this away entirely.
-pub inline fn callVisitStorageCell(vis: anytype, header: anytype) !void {
-    const VisType = @TypeOf(vis);
-    const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
-    if (comptime @hasDecl(CleanType, "storageCell")) {
-        const ReturnType = @typeInfo(@TypeOf(CleanType.storageCell)).@"fn".return_type.?;
-        if (comptime @typeInfo(ReturnType) == .error_union) {
-            try vis.storageCell(header);
-        } else {
-            vis.storageCell(header);
-        }
-    }
-}
-
-pub inline fn callVisitShape(vis: anytype, shape_ref: anytype) !void {
-    const VisType = @TypeOf(vis);
-    const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
-    if (comptime @hasDecl(CleanType, "visitShape")) {
-        const ReturnType = @typeInfo(@TypeOf(CleanType.visitShape)).@"fn".return_type.?;
-        if (comptime @typeInfo(ReturnType) == .error_union) {
-            try vis.visitShape(shape_ref);
-        } else {
-            vis.visitShape(shape_ref);
-        }
-    }
-}
-
-pub inline fn callVisitRealm(vis: anytype, ctx_ptr: anytype) !void {
-    const VisType = @TypeOf(vis);
-    const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
-    if (comptime @hasDecl(CleanType, "visitRealm")) {
-        const ReturnType = @typeInfo(@TypeOf(CleanType.visitRealm)).@"fn".return_type.?;
-        if (comptime @typeInfo(ReturnType) == .error_union) {
-            try vis.visitRealm(ctx_ptr);
-        } else {
-            vis.visitRealm(ctx_ptr);
-        }
-    }
-}
-
-pub inline fn traceOptValue(vis: anytype, opt_val: anytype) !void {
-    if (opt_val.*) |*stored| try callVisitValue(vis, stored);
-}
-
-pub inline fn callVisitWeakCollectionEntry(vis: anytype, entry: anytype) !void {
-    const VisType = @TypeOf(vis);
-    const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
-    if (comptime @hasDecl(CleanType, "visitWeakCollectionEntry")) {
-        const ReturnType = @typeInfo(@TypeOf(CleanType.visitWeakCollectionEntry)).@"fn".return_type.?;
-        if (comptime @typeInfo(ReturnType) == .error_union) {
-            try vis.visitWeakCollectionEntry(entry);
-        } else {
-            vis.visitWeakCollectionEntry(entry);
-        }
-    }
-}
-
-pub inline fn callVisitFinalizationCell(vis: anytype, entry: anytype) !void {
-    const VisType = @TypeOf(vis);
-    const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
-    if (comptime @hasDecl(CleanType, "visitFinalizationCell")) {
-        const ReturnType = @typeInfo(@TypeOf(CleanType.visitFinalizationCell)).@"fn".return_type.?;
-        if (comptime @typeInfo(ReturnType) == .error_union) {
-            try vis.visitFinalizationCell(entry);
-        } else {
-            vis.visitFinalizationCell(entry);
-        }
-    }
-}
-
-pub fn destroyOptionalValue(_: *JSRuntime, slot: *?JSValue) void {
-    slot.* = null;
-}
-
-pub fn destroyOwnedValue(_: *JSRuntime, slot: *JSValue) void {
-    slot.* = JSValue.undefinedValue();
-}
-
-pub fn replaceOwnedValue(_: *JSRuntime, slot: *JSValue, next_value: JSValue) void {
-    slot.* = next_value;
-}
-
-pub fn destroyValueSlice(rt: *JSRuntime, slot: *[]JSValue) void {
-    const values = slot.*;
-    slot.* = &.{};
-    if (values.len != 0) rt.memory.free(JSValue, values);
-}
-
-pub fn destroyValueSliceValuesOnly(_: *JSRuntime, slot: *[]JSValue) void {
-    slot.* = &.{};
-}
-
 /// TGC S4-c: the collector header of a subordinate `.payload` cell -- the
 /// variable-length slice an a-class payload owns. Only valid where the owning
 /// payload says the slice names a cell (a non-zero capacity, or a non-empty
 /// fixed slice); the empty slice is a sentinel, not an allocation.
 pub inline fn payloadSliceCellHeader(ptr: anytype) *gc.Header {
     return @ptrCast(@alignCast(ptr));
-}
-
-/// Clear a var-ref window whose backing memory belongs to another slab.
-pub fn clearVarRefCellSlice(slot: *[]*var_ref_mod.VarRef) void {
-    slot.* = &.{};
 }
 
 /// Close and release the frame-owned references in an open-var-ref window.
@@ -250,31 +124,23 @@ pub const PromiseReactionCapability = union(enum) {
     external: struct { resolve: ?JSValue = null, reject: ?JSValue = null },
     intrinsic: IntrinsicPromiseReaction,
 
+    pub const gc_edges: gc_visit.Edges = .{ .manual = &.{ "external", "intrinsic" } };
+
+    comptime {
+        gc_visit.assertClassified(@This());
+    }
+
     pub fn traceChildEdges(self: *PromiseReactionCapability, visitor: anytype) !void {
         switch (self.*) {
             .external => |*external| {
-                try traceOptValue(visitor, &external.resolve);
-                try traceOptValue(visitor, &external.reject);
+                try gc_visit.optionalValue(visitor, &external.resolve);
+                try gc_visit.optionalValue(visitor, &external.reject);
             },
             .intrinsic => |*intrinsic| {
-                try callVisitValue(visitor, &intrinsic.target);
-                try callVisitValue(visitor, &intrinsic.self_error_global);
+                try gc_visit.value(visitor, &intrinsic.target);
+                try gc_visit.value(visitor, &intrinsic.self_error_global);
             },
         }
-    }
-
-    pub fn destroy(self: *PromiseReactionCapability, rt: *JSRuntime) void {
-        switch (self.*) {
-            .external => |*external| {
-                destroyOptionalValue(rt, &external.resolve);
-                destroyOptionalValue(rt, &external.reject);
-            },
-            .intrinsic => |*intrinsic| {
-                destroyOwnedValue(rt, &intrinsic.target);
-                destroyOwnedValue(rt, &intrinsic.self_error_global);
-            },
-        }
-        self.* = .{ .external = .{} };
     }
 };
 
@@ -283,10 +149,17 @@ pub const PromiseReactionRecordPayload = struct {
     on_rejected: ?JSValue = null, // gc-slot: heap; Object.setPromiseReactionOnRejected uses setOptionalValueSlot.
     capability: PromiseReactionCapability = .{ .external = .{} },
 
+    pub const gc_edges: gc_visit.Edges = .{
+        .strong = &.{ "on_fulfilled", "on_rejected" },
+        .nested = &.{"capability"},
+    };
+
+    comptime {
+        gc_visit.assertClassified(@This());
+    }
+
     pub fn traceChildEdges(self: *PromiseReactionRecordPayload, visitor: anytype) !void {
-        try traceOptValue(visitor, &self.on_fulfilled);
-        try traceOptValue(visitor, &self.on_rejected);
-        try self.capability.traceChildEdges(visitor);
+        try gc_visit.traceDeclared(self, visitor);
     }
 };
 
@@ -312,49 +185,42 @@ pub const OrdinaryPayload = struct {
     promise_already_resolved: bool = false,
     promise_combinator_remaining: i32 = 0,
 
-    pub fn destroy(self: *OrdinaryPayload, rt: *JSRuntime) void {
-        destroyOptionalValue(rt, &self.callsite_file);
-        destroyOptionalValue(rt, &self.callsite_function);
-        destroyOptionalValue(rt, &self.promise_reaction_on_fulfilled);
-        destroyOptionalValue(rt, &self.promise_reaction_on_rejected);
-        self.promise_reaction_capability.destroy(rt);
-        destroyOptionalValue(rt, &self.promise_capability_resolve);
-        destroyOptionalValue(rt, &self.promise_capability_reject);
-        destroyOptionalValue(rt, &self.promise_combinator_resolve);
-        destroyOptionalValue(rt, &self.promise_combinator_reject);
-        destroyOptionalValue(rt, &self.promise_combinator_values);
-        destroyOptionalValue(rt, &self.promise_combinator_keys);
-        destroyOptionalValue(rt, &self.error_stack);
-        destroyOptionalValue(rt, &self.error_stack_sites);
-        self.* = .{};
+    pub const gc_edges: gc_visit.Edges = .{
+        .strong = &.{
+            "callsite_file",
+            "callsite_function",
+            "promise_reaction_on_fulfilled",
+            "promise_reaction_on_rejected",
+            "promise_capability_resolve",
+            "promise_capability_reject",
+            "promise_combinator_resolve",
+            "promise_combinator_reject",
+            "promise_combinator_values",
+            "promise_combinator_keys",
+            "error_stack",
+            "error_stack_sites",
+        },
+        .nested = &.{"promise_reaction_capability"},
+    };
+
+    comptime {
+        gc_visit.assertClassified(@This());
     }
 
     pub fn traceChildEdges(self: *OrdinaryPayload, visitor: anytype) !void {
-        try traceOptValue(visitor, &self.callsite_file);
-        try traceOptValue(visitor, &self.callsite_function);
-        try traceOptValue(visitor, &self.promise_reaction_on_fulfilled);
-        try traceOptValue(visitor, &self.promise_reaction_on_rejected);
-        try self.promise_reaction_capability.traceChildEdges(visitor);
-        try traceOptValue(visitor, &self.promise_capability_resolve);
-        try traceOptValue(visitor, &self.promise_capability_reject);
-        try traceOptValue(visitor, &self.promise_combinator_resolve);
-        try traceOptValue(visitor, &self.promise_combinator_reject);
-        try traceOptValue(visitor, &self.promise_combinator_values);
-        try traceOptValue(visitor, &self.promise_combinator_keys);
-        try traceOptValue(visitor, &self.error_stack);
-        try traceOptValue(visitor, &self.error_stack_sites);
+        try gc_visit.traceDeclared(self, visitor);
     }
 };
 
 pub const IteratorPayload = struct {
-    target: ?JSValue = null, // gc-slot: heap
-    data: ?JSValue = null, // gc-slot: heap
-    next: ?JSValue = null, // gc-slot: heap
-    callback: ?JSValue = null, // gc-slot: heap
-    inner_next: ?JSValue = null, // gc-slot: heap
-    zip_nexts: ?JSValue = null, // gc-slot: heap
-    zip_pads: ?JSValue = null, // gc-slot: heap
-    zip_keys: ?JSValue = null, // gc-slot: heap
+    target: ?JSValue = null,
+    data: ?JSValue = null,
+    next: ?JSValue = null,
+    callback: ?JSValue = null,
+    inner_next: ?JSValue = null,
+    zip_nexts: ?JSValue = null,
+    zip_pads: ?JSValue = null,
+    zip_keys: ?JSValue = null,
     atom_keys: []atom.Atom = &.{},
     index: usize = 0,
     length: u32 = 0,
@@ -367,37 +233,31 @@ pub const IteratorPayload = struct {
     /// array. Taken on the first advance and dropped on exhaustion or
     /// finalization, mirroring qjs's `it->cur_record` reference: an iterator
     /// that has not stepped yet holds no record (js_map_iterator_next
-    /// quickjs.c:52596 only refs once it has picked one), so it must not pin
+    /// quickjs.c only refs once it has picked one), so it must not pin
     /// anything either.
     collection_cursor_held: bool = false,
 
     pub fn destroy(self: *IteratorPayload, rt: *JSRuntime) void {
-        destroyOptionalValue(rt, &self.target);
-        destroyOptionalValue(rt, &self.data);
-        destroyOptionalValue(rt, &self.next);
-        destroyOptionalValue(rt, &self.callback);
-        destroyOptionalValue(rt, &self.inner_next);
-        destroyOptionalValue(rt, &self.zip_nexts);
-        destroyOptionalValue(rt, &self.zip_pads);
-        destroyOptionalValue(rt, &self.zip_keys);
         const atom_keys = self.atom_keys;
         self.atom_keys = &.{};
         if (atom_keys.len != 0) rt.memory.free(atom.Atom, atom_keys);
     }
 
+    pub const gc_edges: gc_visit.Edges = .{
+        .strong = &.{ "target", "data", "next", "callback", "inner_next", "zip_nexts", "zip_pads", "zip_keys" },
+        .manual = &.{"atom_keys"},
+    };
+
+    comptime {
+        gc_visit.assertClassified(@This());
+    }
+
     pub fn traceChildEdges(self: *IteratorPayload, visitor: anytype) !void {
-        try traceOptValue(visitor, &self.target);
-        try traceOptValue(visitor, &self.data);
-        try traceOptValue(visitor, &self.next);
-        try traceOptValue(visitor, &self.callback);
-        try traceOptValue(visitor, &self.inner_next);
-        try traceOptValue(visitor, &self.zip_nexts);
-        try traceOptValue(visitor, &self.zip_pads);
-        try traceOptValue(visitor, &self.zip_keys);
+        try gc_visit.traceDeclared(self, visitor);
         // TGC S3 §2.2 edge F: `atom_keys` is a real holder of atom ids (a
         // for-in / ownKeys snapshot parked on the iterator), so the tracer
         // needs the edge even though the cycle graph has nothing to see.
-        for (self.atom_keys) |atom_id| try atom.callVisitAtom(visitor, atom_id);
+        for (self.atom_keys) |atom_id| try gc_visit.atom(visitor, atom_id);
     }
 };
 
@@ -407,69 +267,59 @@ pub const IteratorPayload = struct {
 /// into Runtime.borrowed_reference_holders; keeping both pieces here matches
 /// QuickJS's payload-resident JSWeakRefHeader without growing JSObject.
 pub const WeakReferenceHolderLink = struct {
-    previous: ?*Object = null, // gc-slot: weak
-    next: ?*Object = null, // gc-slot: weak
+    previous: ?*Object = null,
+    next: ?*Object = null,
     borrowed_holder_index: u32 = 0,
     registered: bool = false,
 };
 
 pub const CollectionPayload = struct {
-    entries: []CollectionEntry = &.{},
-    entries_capacity: usize = 0,
+    entries: std.ArrayListUnmanaged(CollectionEntry) = .empty,
     bucket_heads: []usize = &.{},
     active_count: usize = 0,
     /// Number of cursors currently parked inside `entries`: live Map/Set
     /// iterators plus in-flight native scans (forEach, the Set-composition
     /// helpers). This is the zjs form of the per-record `ref_count` an
-    /// enumerator takes in qjs (`JSMapRecord.ref_count`, quickjs.c:1080;
-    /// `mr->ref_count++` in js_map_iterator_next quickjs.c:52605 and
-    /// js_map_forEach quickjs.c:52320): a qjs cursor is a record pointer, so it
+    /// enumerator takes in qjs (`JSMapRecord.ref_count`, quickjs.c;
+    /// `mr->ref_count++` in js_map_iterator_next quickjs.c and
+    /// js_map_forEach quickjs.c): a qjs cursor is a record pointer, so it
     /// pins one record, while a zjs cursor is an entry index, so it pins the
     /// whole array layout. Nonzero => deletions keep tombstones exactly like a
-    /// qjs zombie record (`mr->empty = TRUE`, quickjs.c:52082); zero => the
+    /// qjs zombie record (`mr->empty = TRUE`, quickjs.c); zero => the
     /// tombstones can be compacted away, which is what
     /// `map_delete_record_internal` does when `--ref_count == 0`.
     live_cursors: usize = 0,
-    weak_entries: []WeakCollectionEntry = &.{},
-    weak_entries_capacity: usize = 0,
+    weak_entries: std.ArrayListUnmanaged(WeakCollectionEntry) = .empty,
     weak_holder_link: WeakReferenceHolderLink = .{},
 
+    /// `weak_holder_link` is deliberately left alone: the payload may still
+    /// sit in the runtime's weak-holder list, which unlinks it separately.
     pub fn destroy(self: *CollectionPayload, rt: *JSRuntime) void {
-        const old_entries = self.entries;
-        const old_entries_capacity = self.entries_capacity;
+        self.entries.deinit(rt.memory.persistent_allocator);
         const old_bucket_heads = self.bucket_heads;
-        const old_weak_entries = self.weak_entries;
-        const old_weak_entries_capacity = self.weak_entries_capacity;
-        self.entries = &.{};
-        self.entries_capacity = 0;
         self.bucket_heads = &.{};
         self.active_count = 0;
-        self.weak_entries = &.{};
-        self.weak_entries_capacity = 0;
-
-        if (old_entries_capacity != 0) {
-            rt.memory.free(CollectionEntry, old_entries.ptr[0..old_entries_capacity]);
-        } else if (old_entries.len != 0) {
-            rt.memory.free(CollectionEntry, old_entries);
-        }
         if (old_bucket_heads.len != 0) rt.memory.free(usize, old_bucket_heads);
-        for (old_weak_entries) |entry| {
-            rt.releaseWeakIdentity(entry.key_identity);
-        }
-        if (old_weak_entries_capacity != 0) {
-            rt.memory.free(WeakCollectionEntry, old_weak_entries.ptr[0..old_weak_entries_capacity]);
-        } else if (old_weak_entries.len != 0) {
-            rt.memory.free(WeakCollectionEntry, old_weak_entries);
-        }
+        for (self.weak_entries.items) |entry| rt.releaseWeakIdentity(entry.key_identity);
+        self.weak_entries.deinit(rt.memory.persistent_allocator);
+    }
+
+    pub const gc_edges: gc_visit.Edges = .{
+        .manual = &.{ "entries", "weak_entries" },
+        .weak = &.{"weak_holder_link"},
+    };
+
+    comptime {
+        gc_visit.assertClassified(@This());
     }
 
     pub fn traceChildEdges(self: *CollectionPayload, visitor: anytype) !void {
-        for (self.entries) |*entry| {
-            try callVisitValue(visitor, &entry.key);
-            try callVisitValue(visitor, &entry.value);
+        for (self.entries.items) |*entry| {
+            try gc_visit.value(visitor, &entry.key);
+            try gc_visit.value(visitor, &entry.value);
         }
-        for (self.weak_entries) |*entry| {
-            try callVisitWeakCollectionEntry(visitor, entry);
+        for (self.weak_entries.items) |*entry| {
+            try gc_visit.weakCollectionEntry(visitor, entry);
         }
     }
 };
@@ -567,12 +417,16 @@ pub const BufferPayload = struct {
         self.releaseStorage(rt);
     }
 
+    /// Byte storage is external or inline memory and views hold the buffer,
+    /// not the reverse: the payload has no collector edges.
+    pub const gc_edges: gc_visit.Edges = .{};
+
+    comptime {
+        gc_visit.assertClassified(@This());
+    }
+
     pub fn traceChildEdges(self: *const BufferPayload, visitor: anytype) !void {
-        _ = self;
-        _ = visitor;
-        // Byte storage and first_view are not strong cycle-GC edges: bytes are
-        // external/inline memory, and views hold the buffer rather than the
-        // reverse.
+        try gc_visit.traceDeclared(self, visitor);
     }
 
     pub fn releaseStorage(self: *BufferPayload, rt: *JSRuntime) void {
@@ -653,27 +507,32 @@ pub const BufferPayload = struct {
 };
 
 pub const TypedArrayPayload = struct {
-    buffer: ?JSValue = null, // gc-slot: heap
+    buffer: ?JSValue = null,
     byte_offset: usize = 0,
     element_size: u32 = 0,
     fixed_length: ?u32 = null,
-    kind: u8 = 0,
+    kind: typed_array_names.Kind = .none,
     live_length: u32 = 0,
     data: ?[*]u8 = null,
     backing_payload: ?*BufferPayload = null,
     buffer_prev: ?*TypedArrayPayload = null,
     buffer_next: ?*TypedArrayPayload = null,
 
-    pub fn destroy(self: *TypedArrayPayload, rt: *JSRuntime) void {
-        // Mirrors js_typed_array_finalizer: unlink before releasing the strong
-        // buffer value because that release may immediately finalize the
-        // ArrayBuffer payload.
+    /// Unlink from the buffer's view list; the buffer value itself is a
+    /// tracer edge and needs no release.
+    pub fn destroy(self: *TypedArrayPayload) void {
         if (self.backing_payload) |backing| backing.detachView(self);
-        destroyOptionalValue(rt, &self.buffer);
+        self.buffer = null;
+    }
+
+    pub const gc_edges: gc_visit.Edges = .{ .strong = &.{"buffer"} };
+
+    comptime {
+        gc_visit.assertClassified(@This());
     }
 
     pub fn traceChildEdges(self: *TypedArrayPayload, visitor: anytype) !void {
-        try traceOptValue(visitor, &self.buffer);
+        try gc_visit.traceDeclared(self, visitor);
     }
 
     fn clearLiveState(self: *TypedArrayPayload) void {
@@ -694,7 +553,7 @@ pub const TypedArrayPayload = struct {
         // length-tracking DataView's byte length from the ArrayBuffer list; the
         // fixed-length form stays live only while its complete range fits.
         if (self.element_size == 0) {
-            const tracks_buffer = self.kind == 1 and backing.max_byte_length != null;
+            const tracks_buffer = self.kind == .data_view_length_tracking and backing.max_byte_length != null;
             const live: usize = if (!tracks_buffer) blk: {
                 const fixed = self.fixed_length orelse return;
                 if (@as(usize, fixed) > remaining) return;
@@ -730,26 +589,22 @@ pub const TypedArrayPayload = struct {
 
 pub const RegExpPayload = extern struct {
     /// QuickJS stores these two owned `JSString *` fields directly in
-    /// `JSObject.u.regexp` (quickjs.c:748-751, 47554-47564). Keeping the zjs
+    /// `JSObject.u.regexp`. Keeping the zjs
     /// representation pointer-only lets the standard RegExp class use the
     /// object's existing union instead of a second payload allocation.
-    source: ?*string.String = null, // gc-slot: immutable
-    compiled_bytecode: ?*string.String = null, // gc-slot: immutable
+    source: ?*string.String = null,
+    compiled_bytecode: ?*string.String = null,
 
-    pub fn destroy(self: *RegExpPayload, _: *JSRuntime) void {
-        self.* = .{};
+    /// Source and compiled bytecode are tracer-owned string child edges.
+    pub const gc_edges: gc_visit.Edges = .{ .manual = &.{ "source", "compiled_bytecode" } };
+
+    comptime {
+        gc_visit.assertClassified(@This());
     }
 
     pub fn traceChildEdges(self: *const RegExpPayload, visitor: anytype) !void {
-        // Source and compiled bytecode are tracer-owned string child edges.
-        if (self.source) |body| {
-            var slot = body.value();
-            try callVisitValue(visitor, &slot);
-        }
-        if (self.compiled_bytecode) |body| {
-            var slot = body.value();
-            try callVisitValue(visitor, &slot);
-        }
+        if (self.source) |body| try gc_visit.stringBody(visitor, body);
+        if (self.compiled_bytecode) |body| try gc_visit.stringBody(visitor, body);
     }
 
     comptime {
@@ -759,68 +614,68 @@ pub const RegExpPayload = extern struct {
 
 /// Cold Function.prototype.bind payload.
 pub const BoundFunctionPayload = struct {
-    target: ?JSValue = null, // gc-slot: heap
-    this_value: ?JSValue = null, // gc-slot: heap
-    args: []JSValue = &.{}, // gc-slot: heap
+    target: ?JSValue = null,
+    this_value: ?JSValue = null,
+    args: []JSValue = &.{},
 
-    pub fn destroy(self: *BoundFunctionPayload, rt: *JSRuntime) void {
-        destroyOptionalValue(rt, &self.target);
-        destroyOptionalValue(rt, &self.this_value);
-        // TGC S4-c: the argument array is a subordinate `.payload` cell; the
-        // sweep returns it once no edge names it.
-        destroyValueSliceValuesOnly(rt, &self.args);
+    pub const gc_edges: gc_visit.Edges = .{ .strong = &.{ "target", "this_value" }, .manual = &.{"args"} };
+
+    comptime {
+        gc_visit.assertClassified(@This());
     }
 
     pub fn traceChildEdges(self: *BoundFunctionPayload, visitor: anytype) !void {
-        try traceOptValue(visitor, &self.target);
-        try traceOptValue(visitor, &self.this_value);
+        try gc_visit.traceDeclared(self, visitor);
         // The argument array is fixed at creation, so a non-empty slice IS the
         // cell (there is no over-allocated capacity to distinguish).
         if (self.args.len != 0)
-            try callVisitStorageCell(visitor, payloadSliceCellHeader(self.args.ptr));
-        for (self.args) |*stored| try callVisitValue(visitor, stored);
+            try gc_visit.storageCell(visitor, payloadSliceCellHeader(self.args.ptr));
+        for (self.args) |*stored| try gc_visit.value(visitor, stored);
     }
 };
 
 pub const ProxyPayload = struct {
-    target: ?JSValue = null, // gc-slot: heap
-    handler: ?JSValue = null, // gc-slot: heap
+    target: ?JSValue = null,
+    handler: ?JSValue = null,
 
-    pub fn destroy(self: *ProxyPayload, rt: *JSRuntime) void {
-        destroyOptionalValue(rt, &self.target);
-        destroyOptionalValue(rt, &self.handler);
+    pub const gc_edges: gc_visit.Edges = .{ .strong = &.{ "target", "handler" } };
+
+    comptime {
+        gc_visit.assertClassified(@This());
     }
 
     pub fn traceChildEdges(self: *ProxyPayload, visitor: anytype) !void {
-        try traceOptValue(visitor, &self.target);
-        try traceOptValue(visitor, &self.handler);
+        try gc_visit.traceDeclared(self, visitor);
     }
 };
 
 pub const ArgumentsPayload = struct {
-    var_refs: []JSValue = &.{}, // gc-slot: heap
+    var_refs: []JSValue = &.{},
 
-    pub fn destroy(self: *ArgumentsPayload, rt: *JSRuntime) void {
-        // TGC S4-c: the value slice is a subordinate `.payload` cell.
-        destroyValueSliceValuesOnly(rt, &self.var_refs);
+    pub const gc_edges: gc_visit.Edges = .{ .manual = &.{"var_refs"} };
+
+    comptime {
+        gc_visit.assertClassified(@This());
     }
 
     pub fn traceChildEdges(self: *ArgumentsPayload, visitor: anytype) !void {
         if (self.var_refs.len != 0)
-            try callVisitStorageCell(visitor, payloadSliceCellHeader(self.var_refs.ptr));
-        for (self.var_refs) |*stored| try callVisitValue(visitor, stored);
+            try gc_visit.storageCell(visitor, payloadSliceCellHeader(self.var_refs.ptr));
+        for (self.var_refs) |*stored| try gc_visit.value(visitor, stored);
     }
 };
 
 pub const ObjectDataPayload = struct {
-    data: ?JSValue = null, // gc-slot: heap
+    data: ?JSValue = null,
 
-    pub fn destroy(self: *ObjectDataPayload, rt: *JSRuntime) void {
-        destroyOptionalValue(rt, &self.data);
+    pub const gc_edges: gc_visit.Edges = .{ .strong = &.{"data"} };
+
+    comptime {
+        gc_visit.assertClassified(@This());
     }
 
     pub fn traceChildEdges(self: *ObjectDataPayload, visitor: anytype) !void {
-        try traceOptValue(visitor, &self.data);
+        try gc_visit.traceDeclared(self, visitor);
     }
 };
 
@@ -832,10 +687,15 @@ pub const WeakRefPayload = struct {
         rt.clearWeakIdentitySlot(&self.weak_target_identity);
     }
 
+    /// Weak identities are not strong cycle-GC edges.
+    pub const gc_edges: gc_visit.Edges = .{ .weak = &.{"weak_holder_link"} };
+
+    comptime {
+        gc_visit.assertClassified(@This());
+    }
+
     pub fn traceChildEdges(self: *const WeakRefPayload, visitor: anytype) !void {
-        _ = self;
-        _ = visitor;
-        // Weak identities are not strong cycle-GC edges.
+        try gc_visit.traceDeclared(self, visitor);
     }
 };
 
@@ -845,20 +705,20 @@ pub const VarRefPayload = struct {
     is_function_name: bool = false,
     is_deletable: bool = false,
 
-    pub fn destroy(self: *VarRefPayload, rt: *JSRuntime) void {
-        destroyOptionalValue(rt, &self.value);
-        self.* = .{};
+    pub const gc_edges: gc_visit.Edges = .{ .strong = &.{"value"} };
+
+    comptime {
+        gc_visit.assertClassified(@This());
     }
 
     pub fn traceChildEdges(self: *VarRefPayload, visitor: anytype) !void {
-        try traceOptValue(visitor, &self.value);
+        try gc_visit.traceDeclared(self, visitor);
     }
 };
 
 pub const FinalizationRegistryPayload = struct {
     cleanup_callback: ?JSValue = null,
-    cells: []FinalizationRegistryCell = &.{},
-    cells_capacity: usize = 0,
+    cells: std.ArrayListUnmanaged(FinalizationRegistryCell) = .empty,
     /// QuickJS `JSFinalizationRegistryData.realm`: the registry, not its
     /// callback, selects the Realm used to enqueue and begin the cleanup job.
     /// The callback's own callable carrier may subsequently switch execution
@@ -867,26 +727,27 @@ pub const FinalizationRegistryPayload = struct {
     weak_holder_link: WeakReferenceHolderLink = .{},
 
     pub fn destroy(self: *FinalizationRegistryPayload, rt: *JSRuntime) void {
-        destroyOptionalValue(rt, &self.cleanup_callback);
         self.realm.deinit();
-        const old_cells = self.cells;
-        const old_capacity = self.cells_capacity;
-        self.cells = &.{};
-        self.cells_capacity = 0;
-        for (old_cells) |entry| entry.destroy(rt);
-        if (old_capacity != 0) {
-            rt.memory.free(FinalizationRegistryCell, old_cells.ptr[0..old_capacity]);
-        } else if (old_cells.len != 0) {
-            rt.memory.free(FinalizationRegistryCell, old_cells);
-        }
+        for (self.cells.items) |entry| entry.destroy(rt);
+        self.cells.deinit(rt.memory.persistent_allocator);
         self.* = .{};
     }
 
+    pub const gc_edges: gc_visit.Edges = .{
+        .strong = &.{"cleanup_callback"},
+        .manual = &.{ "realm", "cells" },
+        .weak = &.{"weak_holder_link"},
+    };
+
+    comptime {
+        gc_visit.assertClassified(@This());
+    }
+
     pub fn traceChildEdges(self: *FinalizationRegistryPayload, visitor: anytype) !void {
-        try callVisitRealm(visitor, &self.realm.ptr);
-        try traceOptValue(visitor, &self.cleanup_callback);
-        for (self.cells) |*entry| {
-            try callVisitFinalizationCell(visitor, entry);
+        try gc_visit.realm(visitor, &self.realm.ptr);
+        try gc_visit.traceDeclared(self, visitor);
+        for (self.cells.items) |*entry| {
+            try gc_visit.finalizationCell(visitor, entry);
         }
     }
 };
@@ -900,9 +761,14 @@ pub const StdFilePayload = struct {
         self.* = .{};
     }
 
+    pub const gc_edges: gc_visit.Edges = .{};
+
+    comptime {
+        gc_visit.assertClassified(@This());
+    }
+
     pub fn traceChildEdges(self: *const StdFilePayload, visitor: anytype) !void {
-        _ = self;
-        _ = visitor;
+        try gc_visit.traceDeclared(self, visitor);
         // FILE* host handle; no cycle-GC child edges.
     }
 };
@@ -939,26 +805,23 @@ pub const DisposableStackPayload = struct {
     async_dispose_reject: ?JSValue = null,
     async_dispose_error: ?JSValue = null,
 
-    pub fn destroy(self: *DisposableStackPayload, rt: *JSRuntime) void {
-        // TGC S4-c: the resource list is a subordinate `.payload` cell.
-        self.resources = &.{};
-        self.resource_capacity = 0;
-        destroyOptionalValue(rt, &self.async_dispose_resolve);
-        destroyOptionalValue(rt, &self.async_dispose_reject);
-        destroyOptionalValue(rt, &self.async_dispose_error);
-        self.* = .{};
+    pub const gc_edges: gc_visit.Edges = .{
+        .strong = &.{ "async_dispose_resolve", "async_dispose_reject", "async_dispose_error" },
+        .manual = &.{"resources"},
+    };
+
+    comptime {
+        gc_visit.assertClassified(@This());
     }
 
     pub fn traceChildEdges(self: *DisposableStackPayload, visitor: anytype) !void {
         if (self.resource_capacity != 0)
-            try callVisitStorageCell(visitor, payloadSliceCellHeader(self.resources.ptr));
+            try gc_visit.storageCell(visitor, payloadSliceCellHeader(self.resources.ptr));
         for (self.resources) |*resource| {
-            try callVisitValue(visitor, &resource.value);
-            try callVisitValue(visitor, &resource.method);
+            try gc_visit.value(visitor, &resource.value);
+            try gc_visit.value(visitor, &resource.method);
         }
-        try traceOptValue(visitor, &self.async_dispose_resolve);
-        try traceOptValue(visitor, &self.async_dispose_reject);
-        try traceOptValue(visitor, &self.async_dispose_error);
+        try gc_visit.traceDeclared(self, visitor);
     }
 };
 
@@ -973,12 +836,15 @@ pub const GlobalPayload = struct {
     // (js_global_object_find_uninitialized_var, 17098-17123) so every earlier
     // capture aliases the new binding.
     uninitialized_vars: ?*Object = null,
-    pub fn destroy(self: *GlobalPayload, _: *JSRuntime) void {
-        self.* = .{};
+
+    pub const gc_edges: gc_visit.Edges = .{ .strong = &.{"uninitialized_vars"} };
+
+    comptime {
+        gc_visit.assertClassified(@This());
     }
 
     pub fn traceChildEdges(self: *GlobalPayload, visitor: anytype) !void {
-        try callVisitObject(visitor, &self.uninitialized_vars);
+        try gc_visit.traceDeclared(self, visitor);
     }
 };
 
@@ -993,9 +859,15 @@ pub const RealmRecordPayload = struct {
         self.* = .{};
     }
 
+    pub const gc_edges: gc_visit.Edges = .{ .manual = &.{"realm"} };
+
+    comptime {
+        gc_visit.assertClassified(@This());
+    }
+
     pub fn traceChildEdges(self: *RealmRecordPayload, visitor: anytype) !void {
         var realm = self.realm.borrow();
-        try callVisitRealm(visitor, &realm);
+        try gc_visit.realm(visitor, &realm);
     }
 };
 
@@ -1004,7 +876,7 @@ pub const PromisePayload = struct {
     reaction_callback: ?JSValue = null,
     reaction_arg: ?JSValue = null,
     /// Live prefix of the subscriber list. qjs threads reaction records onto
-    /// the promise with `list_add_tail` (quickjs.c:54221-54222), so a pending
+    /// the promise with `list_add_tail`, so a pending
     /// promise absorbs N subscribers in O(N); `reactions_capacity` describes
     /// the backing allocation so the array adaptation grows amortized instead
     /// of reallocating at the exact length on every subscription.
@@ -1013,28 +885,23 @@ pub const PromisePayload = struct {
     is_rejected: bool = false,
     atomics_wait_async: bool = false,
 
-    pub fn destroy(self: *PromisePayload, rt: *JSRuntime) void {
-        destroyOptionalValue(rt, &self.result);
-        destroyOptionalValue(rt, &self.reaction_callback);
-        destroyOptionalValue(rt, &self.reaction_arg);
-        // TGC S4-c: the subscriber list is a subordinate `.payload` cell; the
-        // sweep returns it (and every superseded growth cell) on its own.
-        self.reactions = &.{};
-        self.reactions_capacity = 0;
-        self.is_rejected = false;
-        self.atomics_wait_async = false;
+    pub const gc_edges: gc_visit.Edges = .{
+        .strong = &.{ "result", "reaction_callback", "reaction_arg" },
+        .manual = &.{"reactions"},
+    };
+
+    comptime {
+        gc_visit.assertClassified(@This());
     }
 
     pub fn traceChildEdges(self: *PromisePayload, visitor: anytype) !void {
-        try traceOptValue(visitor, &self.result);
-        try traceOptValue(visitor, &self.reaction_callback);
-        try traceOptValue(visitor, &self.reaction_arg);
+        try gc_visit.traceDeclared(self, visitor);
         // `reactions_capacity != 0` is exactly "the slice names a cell": the
         // live prefix may be shorter than the allocation, and an empty list
         // holds the `&.{}` sentinel.
         if (self.reactions_capacity != 0)
-            try callVisitStorageCell(visitor, payloadSliceCellHeader(self.reactions.ptr));
-        for (self.reactions) |*stored| try callVisitValue(visitor, stored);
+            try gc_visit.storageCell(visitor, payloadSliceCellHeader(self.reactions.ptr));
+        for (self.reactions) |*stored| try gc_visit.value(visitor, stored);
     }
 };
 
@@ -1056,16 +923,6 @@ pub const RegExpLegacyStatics = struct {
     lazy_match_index: usize = 0,
     lazy_match_len: usize = 0,
     lazy_input_len: usize = 0,
-
-    pub fn destroy(self: *RegExpLegacyStatics, rt: *JSRuntime) void {
-        destroyOptionalValue(rt, &self.input);
-        destroyOptionalValue(rt, &self.last_match);
-        destroyOptionalValue(rt, &self.last_paren);
-        destroyOptionalValue(rt, &self.left_context);
-        destroyOptionalValue(rt, &self.right_context);
-        for (&self.captures) |*slot| destroyOptionalValue(rt, slot);
-        self.* = .{};
-    }
 };
 
 pub const FunctionRarePayload = struct {
@@ -1086,7 +943,7 @@ pub const FunctionRarePayload = struct {
     async_disposable_stack_method: u8 = 0,
     collection_method_owner_class: class.ClassId = class.invalid_class_id,
     typed_array_element_size: u32 = 0,
-    typed_array_kind: u8 = 0,
+    typed_array_kind: typed_array_names.Kind = .none,
     iterator_wrap_method: u8 = 0,
     async_from_sync_unwrap_done: u8 = 0,
     realm_global: ?JSValue = null,
@@ -1109,39 +966,33 @@ pub const FunctionRarePayload = struct {
     async_function_rejected: bool = false,
     /// Action discriminator for `.async_generator_resolve` trampolines (zjs
     /// adaptation of the js_async_generator_resolve_function magic,
-    /// quickjs.c:21670; extra actions carry the awaits qjs compiles into the
+    /// quickjs.c; extra actions carry the awaits qjs compiles into the
     /// body bytecode — see exec/async_generator.zig ResolveAction).
     async_generator_action: u8 = 0,
 
-    pub fn destroy(self: *FunctionRarePayload, rt: *JSRuntime) void {
-        destroyOptionalValue(rt, &self.source);
-        destroyOptionalValue(rt, &self.realm_global);
-        destroyOptionalValue(rt, &self.proxy_revoke_target);
-        destroyOptionalValue(rt, &self.promise_capability_slot);
-        destroyOptionalValue(rt, &self.promise_resolving_target);
-        destroyOptionalValue(rt, &self.promise_resolving_state);
-        destroyOptionalValue(rt, &self.promise_combinator_state);
-        destroyOptionalValue(rt, &self.promise_finally_payload);
-        destroyOptionalValue(rt, &self.promise_finally_callback);
-        destroyOptionalValue(rt, &self.promise_finally_constructor);
-        destroyOptionalValue(rt, &self.async_dispose_stack);
-        destroyOptionalValue(rt, &self.async_function_continuation);
-        self.* = .{};
+    pub const gc_edges: gc_visit.Edges = .{
+        .strong = &.{
+            "source",
+            "realm_global",
+            "proxy_revoke_target",
+            "promise_capability_slot",
+            "promise_resolving_target",
+            "promise_resolving_state",
+            "promise_combinator_state",
+            "promise_finally_payload",
+            "promise_finally_callback",
+            "promise_finally_constructor",
+            "async_dispose_stack",
+            "async_function_continuation",
+        },
+    };
+
+    comptime {
+        gc_visit.assertClassified(@This());
     }
 
     pub fn traceChildEdges(self: *FunctionRarePayload, visitor: anytype) !void {
-        try traceOptValue(visitor, &self.source);
-        try traceOptValue(visitor, &self.realm_global);
-        try traceOptValue(visitor, &self.proxy_revoke_target);
-        try traceOptValue(visitor, &self.promise_capability_slot);
-        try traceOptValue(visitor, &self.promise_resolving_target);
-        try traceOptValue(visitor, &self.promise_resolving_state);
-        try traceOptValue(visitor, &self.promise_combinator_state);
-        try traceOptValue(visitor, &self.promise_finally_payload);
-        try traceOptValue(visitor, &self.promise_finally_callback);
-        try traceOptValue(visitor, &self.promise_finally_constructor);
-        try traceOptValue(visitor, &self.async_dispose_stack);
-        try traceOptValue(visitor, &self.async_function_continuation);
+        try gc_visit.traceDeclared(self, visitor);
     }
 };
 
@@ -1159,7 +1010,7 @@ pub const FunctionPayload = struct {
         native_function_id: i32 = 0,
         native_dispatch_name: atom.Atom = atom.null_atom,
         typed_array_element_size: u32 = 0,
-        typed_array_kind: u8 = 0,
+        typed_array_kind: typed_array_names.Kind = .none,
     };
 
     // Bytecode functions use Object.u.bytecode_function directly, so this
@@ -1176,7 +1027,6 @@ pub const FunctionPayload = struct {
     fn destroyRare(self: *FunctionPayload, rt: *JSRuntime) void {
         if (self.rare) |rare| {
             self.rare = null;
-            rare.destroy(rt);
             rt.memory.destroy(FunctionRarePayload, rare);
         }
     }
@@ -1189,11 +1039,11 @@ pub const FunctionPayload = struct {
     }
 
     pub fn traceNativeRealm(self: *FunctionPayload, visitor: anytype) !void {
-        try callVisitRealm(visitor, &self.native.realm.ptr);
+        try gc_visit.realm(visitor, &self.native.realm.ptr);
         // TGC S3 §2.2 edge F: the dispatch name is an atom id this payload
         // names (`destroyNative` only writes the field back to
         // `atom.null_atom`; there is no atom release any more).
-        try atom.callVisitAtom(visitor, self.native.native_dispatch_name);
+        try gc_visit.atom(visitor, self.native.native_dispatch_name);
     }
 
     comptime {
@@ -1209,11 +1059,6 @@ pub const FunctionPayload = struct {
 pub const BytecodeFunctionAux = struct {
     home_object: ?*Object = null,
     rare: FunctionRarePayload = .{},
-
-    pub fn destroy(self: *BytecodeFunctionAux, rt: *JSRuntime) void {
-        self.home_object = null;
-        self.rare.destroy(rt);
-    }
 };
 
 /// Exact qjs `JSObject.u.func` three-word arm.

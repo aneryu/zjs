@@ -57,7 +57,7 @@ fn expressionStatementKeepsCompletion(s: *const State) bool {
 ///
 /// When the last opcode is a terminator, the tail is still live if a
 /// referenced label is bound at `code_len` — the same incoming-edge rule
-/// as `isLiveCode` / qjs `js_is_live_code` (quickjs.c:23816). v2 label
+/// as `isLiveCode` / qjs `js_is_live_code`. v2 label
 /// binds emit zero bytes, so a while-family back-edge `goto` would otherwise
 /// look like "cannot continue" even though `break` lands at the case end.
 /// Keep this 5-opcode terminator set; do not reuse `isLiveCode`'s wider set.
@@ -364,7 +364,7 @@ pub fn parseFunctionBodyBlock(s: *State) Error!void {
 }
 
 /// Mirror the directive-prologue portion of `js_parse_directives`
-/// (`quickjs.c:35642`) for runtime-visible strict-mode behavior.
+/// for runtime-visible strict-mode behavior.
 pub fn parseDirectives(s: *State) Error!void {
     // Only directives before the first non-directive statement participate in
     // strict-mode detection; non-strict directives are consumed as statements.
@@ -467,7 +467,7 @@ fn isAsciiIdentifierContinue(c: u8) bool {
     return unicode.isAsciiIdentifierPartByte(c);
 }
 
-/// Mirror `js_parse_statement_or_decl` (`quickjs.c:28228`).
+/// Mirror `js_parse_statement_or_decl`.
 pub fn parseStatementOrDecl(s: *State, decl_mask: DeclMask) Error!void {
     s.features.insert(.statement);
     const tok_kind = s.peekKind();
@@ -601,7 +601,7 @@ fn parseThrowStatement(s: *State) Error!void {
     const throw_snapshot = s.takeEmissionSnapshot();
     errdefer s.rollbackEmission(throw_snapshot);
     // qjs TOK_THROW emits the keyword source immediately before
-    // its source-less OP_throw (quickjs.c:28984-28997).
+    // its source-less OP_throw.
     try emitter.emitGrammarSource(s, statement_source);
     try Emitter.op(s, opcode.op.throw);
     _ = try s.expectSemicolon();
@@ -727,7 +727,7 @@ fn parseIfStatement(s: *State) Error!void {
     try s.expectToken(.lparen);
     try expressions.parseExpr2(s, ParseFlags{ .in_accepted = true, .result_needed = true });
     try s.expectToken(.rparen);
-    // qjs TOK_IF (quickjs.c:29018): emit_goto(OP_if_false) / emit_goto(OP_goto) / emit_label at each merge.
+    // qjs TOK_IF: emit_goto(OP_if_false) / emit_goto(OP_goto) / emit_label at each merge.
     const if_false_label = try Emitter.newLabel(s);
     try Emitter.jump(s, opcode.op.if_false, if_false_label);
     const allow_annex_b_if_function = !s.is_strict and !s.curFunc().is_strict_mode;
@@ -1050,7 +1050,7 @@ fn parseSwitchStatement(s: *State) Error!void {
 
     while (s.peekKind() != .rbrace and s.peekKind() != .eof) {
         if (s.peekKind() == .kw_case) {
-            // qjs TOK_SWITCH (quickjs.c:29305): label_case binds at
+            // qjs TOK_SWITCH: label_case binds at
             // the next case test before dispatch continues.
             for (no_match_labels[0..no_match_jumps_count]) |label| {
                 try Emitter.bind(s, label);
@@ -1094,7 +1094,7 @@ fn parseSwitchStatement(s: *State) Error!void {
             {
                 try parseStatementOrDecl(s, DeclMask{ .func = true, .func_with_label = true, .other = true });
             }
-            // qjs TOK_SWITCH (quickjs.c:29313-29318) always emits
+            // qjs TOK_SWITCH always emits
             // the fallthrough goto; js_is_live_code strips dead
             // tails. Do not also require "no switch-break in the
             // body" — that drops `case 0: if(false) break; y(); case 1:`.
@@ -1205,7 +1205,7 @@ fn parseTryStatement(s: *State) Error!void {
     var label_catch2: compiler.LabelId = undefined;
     var label_finally: compiler.LabelId = undefined;
     var label_end: compiler.LabelId = undefined;
-    // qjs TOK_TRY (quickjs.c:29396-29400) creates all four labels upfront;
+    // qjs TOK_TRY creates all four labels upfront;
     // v2 label discipline requires every created label to end up bound, and
     // a no-catch try never binds catch2 — so catch2 is created at its first
     // use in the catch clause (id order differs from qjs; resolved output
@@ -1215,7 +1215,7 @@ fn parseTryStatement(s: *State) Error!void {
     label_end = try Emitter.newLabel(s);
     const finally_ref: FinallyLabel = label_finally;
 
-    // qjs TOK_TRY (quickjs.c:29401): emit_goto(OP_catch, label_catch) — the handler target is born as a LabelId.
+    // qjs TOK_TRY: emit_goto(OP_catch, label_catch) — the handler target is born as a LabelId.
     try Emitter.jump(s, opcode.op.@"catch", label_catch);
     var try_region = try emitter.openProtectedRegion(s, finally_ref);
     errdefer try_region.leave(s);
@@ -1225,7 +1225,7 @@ fn parseTryStatement(s: *State) Error!void {
     try_region.leave(s);
 
     if (emitter.isLiveCode(s)) {
-        // qjs TOK_TRY live try tail (quickjs.c:29412-29420): drop, undefined, gosub finally, drop, goto end.
+        // qjs TOK_TRY live try tail: drop, undefined, gosub finally, drop, goto end.
         try Emitter.opNoSource(s, opcode.op.drop);
         try Emitter.opNoSource(s, opcode.op.undefined);
         try Emitter.jumpNoSource(s, opcode.op.gosub, label_finally);
@@ -1235,13 +1235,13 @@ fn parseTryStatement(s: *State) Error!void {
 
     if (s.peekKind() == .kw_catch) {
         try s.advance();
-        // qjs TOK_TRY catch entry (quickjs.c:29427-29428): bind label_catch at the handler entry.
+        // qjs TOK_TRY catch entry: bind label_catch at the handler entry.
         try Emitter.bindParser(s, label_catch);
 
         var catch_binding_scope = try s.openScope();
         errdefer catch_binding_scope.pop(s);
         if (s.peekKind() == .lbrace) {
-            // qjs TOK_TRY optional catch binding (quickjs.c:29430-29432): drop the exception object.
+            // qjs TOK_TRY optional catch binding: drop the exception object.
             try Emitter.opNoSource(s, opcode.op.drop);
         } else {
             try s.expectToken(.lparen);
@@ -1267,7 +1267,7 @@ fn parseTryStatement(s: *State) Error!void {
             try s.expectToken(.rparen);
         }
 
-        // qjs TOK_TRY catch body (quickjs.c:29460-29461): create and target the second catch handler.
+        // qjs TOK_TRY catch body: create and target the second catch handler.
         label_catch2 = try Emitter.newLabel(s);
         try Emitter.jump(s, opcode.op.@"catch", label_catch2);
         var catch_region = try emitter.openProtectedRegion(s, finally_ref);
@@ -1285,7 +1285,7 @@ fn parseTryStatement(s: *State) Error!void {
         try catch_binding_scope.close(s);
 
         if (emitter.isLiveCode(s)) {
-            // qjs TOK_TRY live catch tail (quickjs.c:29475-29483): drop, undefined, gosub finally, drop, goto end.
+            // qjs TOK_TRY live catch tail: drop, undefined, gosub finally, drop, goto end.
             try Emitter.opNoSource(s, opcode.op.drop);
             try Emitter.opNoSource(s, opcode.op.undefined);
             try Emitter.jumpNoSource(s, opcode.op.gosub, label_finally);
@@ -1293,12 +1293,12 @@ fn parseTryStatement(s: *State) Error!void {
             try Emitter.jumpNoSource(s, opcode.op.goto, label_end);
         }
 
-        // qjs TOK_TRY catch rethrow (quickjs.c:29485-29490): bind catch2, gosub finally, then throw.
+        // qjs TOK_TRY catch rethrow: bind catch2, gosub finally, then throw.
         try Emitter.bindParser(s, label_catch2);
         try Emitter.jumpNoSource(s, opcode.op.gosub, label_finally);
         try Emitter.opNoSource(s, opcode.op.throw);
     } else if (s.peekKind() == .kw_finally) {
-        // qjs TOK_TRY finally-only rethrow (quickjs.c:29492-29498): bind catch, gosub finally, then throw.
+        // qjs TOK_TRY finally-only rethrow: bind catch, gosub finally, then throw.
         try Emitter.bindParser(s, label_catch);
         try Emitter.jumpNoSource(s, opcode.op.gosub, label_finally);
         try Emitter.opNoSource(s, opcode.op.throw);
@@ -1306,15 +1306,15 @@ fn parseTryStatement(s: *State) Error!void {
         return s.failUnexpectedToken();
     }
 
-    // qjs TOK_TRY finally entry (quickjs.c:29503): bind label_finally.
+    // qjs TOK_TRY finally entry: bind label_finally.
     try Emitter.bindParser(s, label_finally);
     if (s.peekKind() == .kw_finally) {
         try s.advance();
         try emitter.parseSharedFinallyBlock(s);
     }
-    // qjs TOK_TRY finally return (quickjs.c:29538): emit OP_ret.
+    // qjs TOK_TRY finally return: emit OP_ret.
     try Emitter.opNoSource(s, opcode.op.ret);
-    // qjs TOK_TRY exit (quickjs.c:29539): bind label_end.
+    // qjs TOK_TRY exit: bind label_end.
     try Emitter.bindParser(s, label_end);
 }
 
@@ -1328,7 +1328,7 @@ fn parseEmptyStatement(s: *State) Error!void {
     try s.advance();
 }
 
-/// Expression statement, `quickjs.c:28960`: in eval mode the completion
+/// Expression statement, `quickjs.c`: in eval mode the completion
 /// value is stored in `eval_ret_idx` so `eval()` can return it, otherwise
 /// it is dropped. `<ret>` is a non-lexical slot, so the lowered bytecode
 /// is just `put_loc <idx>` (or its short form).
@@ -1407,7 +1407,7 @@ fn canParseModuleDeclarationHere(s: *State) bool {
     return s.lex.is_module and s.atProgramBodyScope();
 }
 
-/// Mirrors QuickJS `is_let` (quickjs.c:28619), inverted: returns true when
+/// Mirrors QuickJS `is_let`, inverted: returns true when
 /// a leading `let` token introduces an ExpressionStatement instead of a
 /// lexical declaration. In qjs, `let [` never introduces an
 /// ExpressionStatement; `let` followed by `{`, a non-reserved identifier,
@@ -1430,7 +1430,7 @@ pub fn canTreatLetAsExpressionStatement(s: *State, decl_mask: DeclMask) bool {
     const val = peek_token.val;
     if (val == .lbracket) {
         // `let [` is a syntax restriction: it never introduces an
-        // ExpressionStatement (quickjs.c:28632).
+        // ExpressionStatement.
         return false;
     }
     // qjs checks `{`, non-reserved TOK_IDENT, TOK_LET, TOK_YIELD and
@@ -1447,7 +1447,6 @@ pub fn canTreatLetAsExpressionStatement(s: *State, decl_mask: DeclMask) bool {
         identifiers.isSloppyFutureReservedToken(val);
     if (declaration_start) {
         // Check for possible ASI if not scanning for a Declaration
-        // (quickjs.c:28644-28652).
         if (peek_token.line_num == current_line or decl_mask.other) return false;
         return true;
     }
@@ -1474,7 +1473,7 @@ fn parseLetKeywordExpressionStatement(s: *State) Error!void {
     try emitExpressionStatementCompletion(s, keep_completion);
 }
 
-/// Mirror `js_parse_var` (`quickjs.c:27847`).
+/// Mirror `js_parse_var`.
 ///
 /// Registers each identifier in `function_def.vars` with the correct
 /// `VarKind` / `is_lexical` / `is_const` flags so the full
@@ -1515,7 +1514,7 @@ pub fn parseVar(s: *State, declared_tok: tok.TokenKind, export_decl: bool, parse
             const token_atom = if (s.peekKind() == .ident) s.token.payload.ident.atom else tok.keywordAtom(s.peekKind());
             // qjs js_parse_var takes its own `name` reference before
             // next_token frees the identifier token (quickjs.c:
-            // 28163-28189). Keep that owner through this declarator.
+            // Keep that owner through this declarator.
             const atom_id = token_atom;
             if (binding_identifier and s.peekKind() == .ident and
                 identifiers.escapedIdentifierIsReservedWordForBinding(s, atom_id, s.token.payload.ident.has_escape))
@@ -1666,7 +1665,7 @@ fn parseWith(s: *State) Error!void {
         .local => |idx| idx,
         else => unreachable,
     };
-    // qjs TOK_WITH lowering (quickjs.c:29553-29570): coerce the
+    // qjs TOK_WITH lowering: coerce the
     // expression and store the with-object binding at the same source.
     try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.to_object);
     try Emitter.opU16(s, opcode.op.put_loc, with_idx);
@@ -1692,7 +1691,7 @@ fn declareForInOfVarBinding(s: *State, atom_id: Atom) Error!void {
 }
 
 /// Parse for-in or for-of loop
-/// Mirrors `js_parse_for_in_of` in quickjs.c:27991
+/// Mirrors `js_parse_for_in_of` in quickjs.c
 /// What the head of `for (target in/of rhs)` bound, for the loop lowering.
 const ForInOfTarget = struct {
     atom: ?Atom = null,
@@ -1761,7 +1760,7 @@ fn parseForInOfDeclarationTarget(s: *State, var_tok: tok.TokenKind, target: *For
         } }, .{ .has_value = true }, ParseFlags.default);
     } else {
         // Must match parseVar's full sloppy_keyword_var predicate
-        // (quickjs.c:22738 update_token_ident is the one qjs gate, so
+        // (quickjs.c update_token_ident is the one qjs gate, so
         // js_parse_var and js_parse_for_in_of cannot diverge).
         const sloppy_keyword_var = var_tok == .kw_var and
             (s.peekKind() == .kw_yield or s.peekKind() == .kw_static or

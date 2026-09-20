@@ -367,7 +367,7 @@ const corpus = [_]Snippet{
     },
     .{
         // Refcounted object-literal fields through OP_define_field (qjs
-        // CASE(OP_define_field) -> JS_DefinePropertyValue, quickjs.c:19269,
+        // CASE(OP_define_field) -> JS_DefinePropertyValue, quickjs.c,
         // has no value-form gate). The fast leg's failure contract is
         // borrow-until-commit: an injected allocation failure mid-append or
         // mid-replace must leave the value owned by the VM stack for the
@@ -1035,7 +1035,7 @@ test "oom recovery canary: ordinary GLOBAL selector retries auto-init" {
     try global.definePerformanceAutoInitProperty(
         rt,
         name,
-        core.property.Flags.data(true, false, true),
+        core.property.Flags.data(.method),
         global,
     );
 

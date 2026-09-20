@@ -241,6 +241,6 @@ pub const Morgue = struct {
     /// Bind the per-kind cyclic sentinels. Must run before any condemnation,
     /// and is idempotent.
     pub fn init(self: *Morgue) void {
-        for (&self.by_kind) |*head| registry_lists.listInit(head);
+        for (&self.by_kind) |*head| head.init();
     }
 };

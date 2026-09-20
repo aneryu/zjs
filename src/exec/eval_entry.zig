@@ -100,7 +100,7 @@ noinline fn prepareRootFunction(
         .script_or_module = if (module_name != core.atom.null_atom) module_name else null,
         .strict = options.parse_strict,
         // QuickJS `js_parse_program` always materializes the hidden `<ret>`
-        // completion slot for scripts (quickjs.c:37095-37121). Whether an
+        // completion slot for scripts. Whether an
         // embedding caller wants that value is a host-result policy, not a
         // different parser/CFG mode; apply that policy after execution below.
         .return_completion = options.mode == .script,
@@ -119,7 +119,7 @@ noinline fn prepareRootFunction(
         // Compile-error surface: message is the bare parse diagnostic and the
         // error carries own fileName/lineNumber/columnNumber plus the leading
         // `at file:line:col` stack line (qjs JS_ThrowSyntaxError +
-        // build_backtrace filename branch, quickjs.c:7553-7570).
+        // build_backtrace filename branch, quickjs.c).
         const parse_filename = rt.atoms.name(err.filename) orelse options.filename;
         // Always an error return; the `!JSValue` signature is for the other
         // call sites.
@@ -389,11 +389,7 @@ fn runEvalModule(
                 timing,
             );
             resume_value = await_resume.value;
-            try call_runtime.setGeneratorResumeCompletionType(
-                rt,
-                module_state,
-                if (await_resume.rejected) 2 else 0,
-            );
+            call_runtime.setGeneratorResumeCompletion(module_state, if (await_resume.rejected) .throw else .next);
             continue;
         }
 

@@ -78,7 +78,7 @@ fn mathOpEntry(comptime name: []const u8, comptime length: u8, comptime id: u32)
 
 /// `Math.min` / `Math.max`: the shared `mathOpCall` record plus an exec_direct
 /// arm (`js_call_c_function` shape) whose hot leg is qjs `js_math_min_max`
-/// (quickjs.c:46952) over int32 / float64 arguments only.
+/// over int32 / float64 arguments only.
 fn mathMinMaxEntry(comptime name: []const u8, comptime id: u32) core.host_function.InternalEntry {
     var entry = mathOpEntry(name, 2, id);
     entry.managed = &mathMinMaxDirect;
@@ -106,7 +106,7 @@ noinline fn mathMinMaxDirect(
     return builtin_dispatch.hostResultToValue(ctx, preparedOpCall(ctx, builtin_dispatch.vmCallerView(ctx).output, global, if (is_max) 8 else 7, args));
 }
 
-/// qjs `js_math_min_max` (quickjs.c:46952-47003) restricted to arguments that
+/// qjs `js_math_min_max` restricted to arguments that
 /// are already numbers: an int32 prefix folds with `max_int` / `min_int` and
 /// returns `JS_NewInt32`; the first non-int32 argument switches to the
 /// float64 leg (`generic_case`) with qjs's NaN sticky rule and the `js_fmax` /
@@ -251,7 +251,7 @@ fn mathBinaryNative(comptime id: u32) core.host_function.NativeF64F64Fn {
 /// With a realm global the arguments take the full spec ToNumber coercion
 /// path; without one (bare-runtime callers) the primitive-only `call`
 /// fallback below preserves the legacy host-path behavior.
-/// qjs `xorshift64star` (quickjs.c:47362).
+/// qjs `xorshift64star`.
 fn xorshift64star(state: *u64) u64 {
     var x = state.*;
     x ^= x >> 12;
@@ -261,7 +261,7 @@ fn xorshift64star(state: *u64) u64 {
     return x *% 0x2545F4914F6CDD1D;
 }
 
-/// qjs `js_math_random` (quickjs.c:47383): advance the per-realm xorshift
+/// qjs `js_math_random`: advance the per-realm xorshift
 /// state and pack the top 52 bits into a [1.0, 2.0) double, returning d - 1.
 fn mathRandom(ctx: *core.JSContext) f64 {
     const v = xorshift64star(&ctx.random_state);

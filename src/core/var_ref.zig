@@ -22,13 +22,13 @@ pub const VarRef = struct {
     value: JSValue = JSValue.undefinedValue(),
     pvalue: *JSValue = undefined,
     is_const: bool = false,
-    // QuickJS JSVarRef.is_lexical (quickjs.c:453) — only meaningful for
+    // QuickJS JSVarRef.is_lexical — only meaningful for
     // top-level global lexical bindings; gates TDZ-throw on read.
     is_lexical: bool = false,
     is_function_name: bool = false,
     // qjs has no per-cell deleted flag: deleting a captured binding parks the
     // cell's value at UNINITIALIZED (remove_global_object_property,
-    // quickjs.c:9289-9309); deletable-ness itself is a zjs bookkeeping bit for
+    // quickjs.c); deletable-ness itself is a zjs bookkeeping bit for
     // eval-created bindings (qjs encodes it as the property's CONFIGURABLE flag).
     is_deletable: bool = false,
     is_open: bool = false,
@@ -144,7 +144,7 @@ pub const VarRef = struct {
         // incoming cell value first (replaceAdapterOwned / execPutVarRef),
         // and the direct-eval const view pvalue-ALIASES its target cell instead
         // (eval_ops.directEvalOuterVarRefView), so readers do qjs's bare
-        // `*var_ref->pvalue` (quickjs.c:18627) with no chase. Debug-resident
+        // `*var_ref->pvalue` with no chase. Debug-resident
         // so a regression that would silently corrupt the read fast path traps.
         if (comptime builtin.mode == .Debug) {
             std.debug.assert(fromValue(next_value) == null);

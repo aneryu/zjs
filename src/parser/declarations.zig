@@ -169,13 +169,13 @@ pub const DeclarationConflictIndexRegistry =
     std.AutoHashMapUnmanaged(*function_def_mod.FunctionDef, DeclarationConflictIndex);
 
 /// Register a variable declaration in `function_def.vars`.
-/// Mirrors `add_scope_var` (`quickjs.c:23577`). `kind` selects
+/// Mirrors `add_scope_var`. `kind` selects
 /// the `VarKind` (normal for `var`, normal + is_lexical for let,
 /// normal + is_lexical + is_const for const). Returns the var
 /// index. Currently informational only; the interim pipeline
 /// ignores `function_def` and relies on global fallback for all
 /// var references.
-pub const ScopeVarOptions = struct { is_lexical: bool = false, is_const: bool = false };
+pub const ScopeVarOptions = function_def_mod.FunctionDef.ScopeVarOptions;
 
 /// Parser-time declaration classes accepted by QuickJS `define_var`.
 /// Private names and pseudo locals deliberately bypass this API, just
@@ -236,7 +236,7 @@ pub fn declarationConflictIndex(
 
     try s.declaration_conflict_indices.put(allocator, fd, candidate);
     candidate_owned = false;
-    return s.declaration_conflict_indices.getPtr(fd) orelse unreachable;
+    return s.declaration_conflict_indices.getPtr(fd).?;
 }
 
 pub fn readyDeclarationConflictIndexForWrite(
@@ -326,7 +326,7 @@ pub fn commitLinkedDeclarationIndexWrite(
         if (!index.scope_names.contains(key)) {
             index.scope_names.putAssumeCapacity(key, .{});
         }
-        const value = index.scope_names.getPtr(key) orelse unreachable;
+        const value = index.scope_names.getPtr(key).?;
         if (vd.is_lexical) value.newest_lexical = @intCast(var_index);
         value.newest_lexical_or_catch = @intCast(var_index);
     }
@@ -404,7 +404,7 @@ pub fn commitFunctionVarOriginIndexWrite(
         if (!index.scope_names.contains(key)) {
             index.scope_names.putAssumeCapacity(key, .{});
         }
-        const value = index.scope_names.getPtr(key) orelse unreachable;
+        const value = index.scope_names.getPtr(key).?;
         if (value.oldest_child_function_var == no_declaration_index) {
             value.oldest_child_function_var = @intCast(var_index);
         }
@@ -473,7 +473,7 @@ pub fn findLexicalDeclaration(
 }
 
 /// Authoritative QuickJS `find_lexical_decl` scan
-/// (`quickjs.c:24087`). The parser-only index below is derived from
+///. The parser-only index below is derived from
 /// this exact linked topology and falls back here when unavailable or
 /// dirty. Only global-eval (not module/direct eval) adds the
 /// GLOBAL_VAR_OFFSET lexical fallback.
@@ -528,7 +528,7 @@ pub fn findFunctionVarInChildScope(
     return findFunctionVarInChildScopeLegacy(s, name, scope_level);
 }
 
-/// QuickJS `find_var_in_child_scope` (quickjs.c:24048).  A function
+/// QuickJS `find_var_in_child_scope`. A function
 /// `var` remains a scope-0 row, but until final scope-link rebuilding
 /// its `scope_next` field is the lexical scope where the declaration
 /// occurred.  Such rows are intentionally absent from scope.first.
@@ -540,7 +540,7 @@ pub fn findFunctionVarInChildScopeLegacy(s: *State, name: Atom, scope_level: i32
     return null;
 }
 
-/// qjs find_lexical_global_var (quickjs.c:24078): a global_vars entry with
+/// qjs find_lexical_global_var: a global_vars entry with
 /// is_lexical set (a top-level let/const declared as JS_CLOSURE_GLOBAL_DECL).
 pub fn findLexicalGlobalVar(s: *State, name: Atom) bool {
     for (s.curFunc().global_vars) |gv| {
@@ -587,7 +587,7 @@ pub fn visibleLexicalScopeVar(s: *State, name: Atom) ?u16 {
 }
 
 /// Single declaration-semantics owner mirroring QuickJS `define_var`
-/// (quickjs.c:24303).  Syntax-token restrictions stay in the thin
+///. Syntax-token restrictions stay in the thin
 /// producer wrappers; every scope collision and physical row choice
 /// belongs here.
 pub fn defineVar(s: *State, name: Atom, var_def_type: DefineVarType) Error!DefinedVar {
@@ -690,7 +690,6 @@ pub fn defineVar(s: *State, name: Atom, var_def_type: DefineVarType) Error!Defin
 
 pub fn addScopeVar(s: *State, name: Atom, kind: function_def_mod.VarKind, options: ScopeVarOptions) Error!i32 {
     const is_lexical = options.is_lexical;
-    const is_const = options.is_const;
     const fd = s.curFunc();
     const index_prepared = try prepareLinkedDeclarationIndexWrite(
         s,
@@ -699,13 +698,7 @@ pub fn addScopeVar(s: *State, name: Atom, kind: function_def_mod.VarKind, option
         kind,
         is_lexical,
     );
-    const var_index = try fd.addScopeVar(
-        name,
-        kind,
-        s.scope_level,
-        is_lexical,
-        is_const,
-    );
+    const var_index = try fd.addScopeVar(name, kind, s.scope_level, options);
     commitLinkedDeclarationIndexWrite(s, fd, var_index, index_prepared);
     return var_index;
 }
@@ -762,7 +755,7 @@ pub fn ensureFunctionScopeVar(s: *State, name: Atom) Error!u16 {
     return try appendFunctionVarAtOrigin(s, name, 0);
 }
 
-/// qjs find_global_var (quickjs.c:24066): any global_vars entry with this
+/// qjs find_global_var: any global_vars entry with this
 /// name — top-level var, hoisted function declaration, or lexical.
 pub fn findGlobalVar(s: *State, name: Atom) bool {
     for (s.curFunc().global_vars) |gv| {

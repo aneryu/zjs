@@ -4,8 +4,8 @@
 //! owned. Core owns ArrayBuffer, SharedArrayBuffer, DataView, and TypedArray
 //! storage mechanics; option-reading constructors and record dispatch remain in
 //! exec because they can invoke user code. The tables map to QuickJS's buffer and
-//! DataView builtin families, including codecs at quickjs.c:59812-59820 and
-//! constructors at quickjs.c:61036-61046.
+//! DataView builtin families, including codecs at quickjs.c and
+//! constructors at quickjs.c.
 
 const core = @import("../core/root.zig");
 const std = @import("std");
@@ -36,18 +36,24 @@ pub const TypedArrayAccessorMethod = core.host_function.builtin_method_ids.buffe
 pub const Uint8ArrayStaticMethod = core.host_function.builtin_method_ids.buffer.Uint8ArrayStaticMethod;
 pub const Uint8ArrayPrototypeMethod = core.host_function.builtin_method_ids.buffer.Uint8ArrayPrototypeMethod;
 
+const uint8_array_static_names = std.StaticStringMap(Uint8ArrayStaticMethod).initComptime(.{
+    .{ "fromBase64", .from_base64 },
+    .{ "fromHex", .from_hex },
+});
+
+const uint8_array_prototype_names = std.StaticStringMap(Uint8ArrayPrototypeMethod).initComptime(.{
+    .{ "toBase64", .to_base64 },
+    .{ "toHex", .to_hex },
+    .{ "setFromBase64", .set_from_base64 },
+    .{ "setFromHex", .set_from_hex },
+});
+
 pub fn uint8ArrayStaticMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "fromBase64")) return @intFromEnum(Uint8ArrayStaticMethod.from_base64);
-    if (std.mem.eql(u8, name, "fromHex")) return @intFromEnum(Uint8ArrayStaticMethod.from_hex);
-    return null;
+    return @intFromEnum(uint8_array_static_names.get(name) orelse return null);
 }
 
 pub fn uint8ArrayPrototypeMethodId(name: []const u8) ?u32 {
-    if (std.mem.eql(u8, name, "toBase64")) return @intFromEnum(Uint8ArrayPrototypeMethod.to_base64);
-    if (std.mem.eql(u8, name, "toHex")) return @intFromEnum(Uint8ArrayPrototypeMethod.to_hex);
-    if (std.mem.eql(u8, name, "setFromBase64")) return @intFromEnum(Uint8ArrayPrototypeMethod.set_from_base64);
-    if (std.mem.eql(u8, name, "setFromHex")) return @intFromEnum(Uint8ArrayPrototypeMethod.set_from_hex);
-    return null;
+    return @intFromEnum(uint8_array_prototype_names.get(name) orelse return null);
 }
 
 const buffer_id_lookup = core.host_function.builtin_method_id_lookup.buffer;
@@ -168,7 +174,7 @@ pub const internal_entries = bufferEntries: {
         bufferEntry("get length", 0, @intFromEnum(TypedArrayAccessorMethod.length)),
         bufferEntry("get [Symbol.toStringTag]", 0, @intFromEnum(TypedArrayAccessorMethod.to_string_tag)),
         // Uint8Array base64/hex codecs: qjs js_uint8array_funcs
-        // (quickjs.c:59820) and js_uint8array_proto_funcs (quickjs.c:59812).
+        // and js_uint8array_proto_funcs.
         codecEntry("fromBase64", 1, @intFromEnum(Uint8ArrayStaticMethod.from_base64)),
         codecEntry("fromHex", 1, @intFromEnum(Uint8ArrayStaticMethod.from_hex)),
         codecEntry("toBase64", 0, @intFromEnum(Uint8ArrayPrototypeMethod.to_base64)),
@@ -177,7 +183,7 @@ pub const internal_entries = bufferEntries: {
         codecEntry("setFromHex", 1, @intFromEnum(Uint8ArrayPrototypeMethod.set_from_hex)),
         // The two buffer constructor ids (qjs `JS_NewCConstructor(...,
         // js_array_buffer_constructor, 1, JS_CFUNC_constructor, 0)`,
-        // quickjs.c:61036 / :61046). `installStandardConstructor` stamps these
+        // quickjs.c /:61046). `installStandardConstructor` stamps these
         // ids onto the live `ArrayBuffer` / `SharedArrayBuffer` objects
         // (standard_globals.zig), so they must resolve to a record; without
         // these rows the id decoded but pointed past the end of the domain's
@@ -237,7 +243,7 @@ fn codecEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) 
 
 /// Record handler for the Uint8Array base64/hex codecs. Unlike the rest of the
 /// `.buffer` domain these need the writer/caller-frame context, because
-/// `check_options_object` (quickjs.c:59376) and the `alphabet` /
+/// `check_options_object` and the `alphabet` /
 /// `lastChunkHandling` / `omitPadding` reads run user getters. The magic only
 /// picks which constant name `uint8ArrayCodecCall` branches on, so each
 /// body -- and with it the qjs-ordered receiver check / string check /

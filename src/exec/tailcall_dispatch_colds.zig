@@ -339,7 +339,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     t[op.add_loc] = dispatch.op_add_loc_cold;
 
     // --- control ---
-    // qjs polls interrupts on every OP_goto/goto16/goto8 (quickjs.c:18822-18836)
+    // qjs polls interrupts on every OP_goto/goto16/goto8
     // — the loop back edge; a pure loop otherwise never reaches a poll point.
     t[op.goto] = h(struct {
         fn b(vm: *Vm) HostError!void {
@@ -834,7 +834,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     }) |e| t[e.o] = e.h;
     // TDZ-checked locals: the per-iteration hot loc ops in `for (let i…)` loops
     // (quickjs.c emits OP_get_loc_check/OP_put_loc_check for every lexical var,
-    // 33072-33078). get_loc_checkthis stays on cold h_checkedloc; the plain-slot
+    // get_loc_checkthis stays on cold h_checkedloc; the plain-slot
     // set_loc_uninitialized / put_loc_check_init cases have dedicated fast handlers.
     inline for ([_]struct { o: u8, h: Handler }{
         .{ .o = op.get_loc_check, .h = dispatch.opLocCheck(.get) },
@@ -865,7 +865,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     t[op.special_object] = dispatch.op_special_object; // THIS_FUNC direct dup; other subtypes stay cold
     t[op.push_this] = dispatch.op_push_this; // objects and (in strict code) any non-uninitialized value push directly; sloppy nullish->global too. Only sloppy ToObject boxing and uninitialized stay cold
     // Per-op binary handlers (qjs CASE(OP_add)/…/CASE(OP_xor) are distinct labels,
-    // quickjs.c:19696-20227; op.pow keeps the cold h_binary — qjs OP_pow:19916 has
+    // quickjs.c; op.pow keeps the cold h_binary — qjs OP_pow:19916 has
     // no fast leg and falls straight to js_binary_arith_slow).
     inline for ([_]struct { o: u8, h: Handler }{
         .{ .o = op.add, .h = dispatch.opBinary(.add) },
@@ -881,14 +881,14 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
         .{ .o = op.xor, .h = dispatch.opBinary(.bxor) },
     }) |e| t[e.o] = e.h;
     // Per-op compare handlers (qjs OP_CMP/OP_CMP_EQ/OP_CMP_STRICT_EQ expand one
-    // independent CASE per opcode, quickjs.c:20268-20271/20340-20341/20397-20398 —
+    // independent CASE per opcode, quickjs.c —
     // no runtime predicate select on the int fast path).
     inline for ([_]u8{ op.lt, op.lte, op.gt, op.gte, op.eq, op.neq, op.strict_eq, op.strict_neq }) |o| t[o] = dispatch.opCompare(o);
     // qjs OP_neg keeps int/bool/null/float in its CASE and calls
-    // js_unary_arith_slow only for ToNumeric operands (quickjs.c:19940-19970).
+    // js_unary_arith_slow only for ToNumeric operands.
     t[op.neg] = dispatch.op_neg;
     inline for ([_]u8{ op.inc, op.dec }) |o| t[o] = dispatch.op_inc_dec;
-    // qjs OP_post_inc/OP_post_dec int fast leg (quickjs.c:20009-20045). Every
+    // qjs OP_post_inc/OP_post_dec int fast leg. Every
     // `let` loop update emits post_inc+put_loc_check+drop (checked lvalues are
     // outside the resolve_labels plain-loc fusions, matching qjs), so this is
     // the per-iteration update op of every lexical counter loop.
@@ -955,7 +955,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     t[op.put_array_el] = dispatch.op_put_array_el; // dense write fast path; miss → cold h_put_array_element
     t[op.get_length] = dispatch.op_get_length; // inline data read; accessor/Proxy/typed payload → resident action tail
     // Object/array-literal ops (qjs CASE(OP_object)/(OP_define_field)/(OP_array_from)
-    // are register-resident single-`bl` inlines, quickjs.c:17961/19269/18239). Without
+    // are register-resident single-`bl` inlines, quickjs.c). Without
     // these overrides they routed through the 224-byte coldStd publish shell EVERY
     // iteration — the per-iter hottest ops of the object/array-literal benchmarks (see
     // dispatch-audit). Fast handler on the plain-data-add / OOM-free path; every exotic
@@ -981,7 +981,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
         .{ .o = op.put_var_ref2, .h = dispatch.opPutVarRef },
         .{ .o = op.put_var_ref3, .h = dispatch.opPutVarRef },
         .{ .o = op.put_var_ref, .h = dispatch.opPutVarRef },
-        // qjs OP_put_var_ref_check (quickjs.c:18670-18682): TDZ probe + set_value.
+        // qjs OP_put_var_ref_check: TDZ probe + set_value.
         // The TDZ-throw / synthetic-bounds / generator-stop forms fall back to
         // the cold h_varref shell (execPutVarRef) via cold_table[pc[0]].
         .{ .o = op.put_var_ref_check, .h = dispatch.op_put_var_ref_check },

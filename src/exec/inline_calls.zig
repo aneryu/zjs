@@ -70,7 +70,6 @@ pub const RegionLayout = enum {
 /// shape (plain vs method region) and the function's strict-mode flags,
 /// mirroring qjs JS_CallInternal where `this_obj` is the caller-supplied
 /// raw word and only OP_push_this consults the callee's strict flag
-/// (quickjs.c:17924-17944).
 pub const LeafThis = enum {
     /// Sloppy plain call: borrow the realm global as the frame's `this`.
     sloppy_global,
@@ -135,7 +134,7 @@ pub const ResolvedInlineFunction = struct {
 /// this prefix separate lets OP_call0 enter a published empty leaf without
 /// first constructing fields that its dedicated frame constructor cannot use.
 pub inline fn resolveInlineFunction(global: *core.Object, func: core.JSValue) ?ResolvedInlineFunction {
-    // qjs single-compare admission (JS_CallInternal, quickjs.c:17816):
+    // qjs single-compare admission (JS_CallInternal, quickjs.c):
     // generator/async function classes fall to the slow path here instead of
     // passing the four-class set test only to be rejected by the kind check.
     const function_object = object_ops.plainBytecodeFunctionObjectFromValue(func) orelse return null;
@@ -410,11 +409,11 @@ pub const Entry = struct {
     /// JSValue (empty-leaf resume, tail-chain budget).
     native_caller_hi: u64 = 0,
     /// Caller's Entry, or null when the caller is the L0 frame — qjs
-    /// `JSStackFrame.prev_frame` (quickjs.c:408, "NULL if first stack
+    /// `JSStackFrame.prev_frame` (quickjs.c, "NULL if first stack
     /// frame"). Together with `Machine.top` (≅ rt->current_stack_frame)
     /// this is the frame-navigation mechanism: qjs never derives a frame
     /// address from an index, it follows this pointer pair (set at
-    /// quickjs.c:17869-17870, restored at the done: epilogue 20709).
+    /// quickjs.c, restored at the done: epilogue 20709).
     prev: ?*Entry,
 
     /// Move the post-call work out before this frame releases its resources.
@@ -626,7 +625,7 @@ pub const Entry = struct {
     /// an EMPTY callee operand window: the parser elides trailing
     /// expression-statement drops and leaves switch discriminants on the
     /// stack at `return` (qjs frees them in the done: local_buf..sp loop,
-    /// quickjs.c:20701-20706), and the driver-side falloff completion peeks
+    /// quickjs.c), and the driver-side falloff completion peeks
     /// its result without popping. Those returns route through general
     /// teardown, which releases the remaining operand values exactly once.
     inline fn deinitReturned(self: *Entry, ctx: *core.JSContext) void {
@@ -711,7 +710,7 @@ pub const Entry = struct {
         std.debug.assert(frame.cold == null);
         std.debug.assert(frame.ownership.storage == .borrowed);
         // The exact-args forwarded shape borrows its argument window in place
-        // from the caller region (qjs `arg_buf = argv`, quickjs.c:17841), so
+        // from the caller region (qjs `arg_buf = argv`, quickjs.c), so
         // there is nothing to release here either: those slots sit above the
         // caller's retreated operand top and are dead once the frame unlinks.
         std.debug.assert(frame.locals.len == 0);
@@ -1317,7 +1316,7 @@ pub const Machine = struct {
     chunk_count: usize = 0,
     depth: usize = 0,
     /// Current (innermost) live Entry, or null at depth 0 — qjs
-    /// `rt->current_stack_frame` (quickjs.c:358). All frame ADDRESSES come
+    /// `rt->current_stack_frame`. All frame ADDRESSES come
     /// from this pointer and the `Entry.prev` chain; `depth` stays purely
     /// for accounting (L0 boundary tests, backtrace length, slot reuse).
     /// Maintained in lockstep with `depth` by pushFrame/popFrame.
@@ -1396,7 +1395,7 @@ pub const Machine = struct {
     }
 
     /// The current Entry — the cached `top` pointer (qjs reads
-    /// `rt->current_stack_frame` directly, quickjs.c:2864), NOT re-derived
+    /// `rt->current_stack_frame` directly, quickjs.c), NOT re-derived
     /// from the depth index: `entryAt`'s chunk math costs a umaddl chain on
     /// every use, and qjs never computes a frame address from an index.
     pub fn topEntry(self: *Machine) *Entry {
@@ -1451,7 +1450,7 @@ pub const Machine = struct {
         if (chunk_index >= max_chunks) {
             // QuickJS throws InternalError "stack overflow" for call-depth
             // exhaustion (JS_ThrowStackOverflow at the JS_CallInternal guard,
-            // quickjs.c:17837/7789), not a RangeError.
+            // quickjs.c), not a RangeError.
             _ = exception_ops.throwInternalErrorMessage(self.ctx, global, "stack overflow") catch |err| return err;
             return error.StackOverflow;
         }
@@ -1538,7 +1537,7 @@ pub const Machine = struct {
     /// func_obj; nothing struct-sized is copied per call).
     /// Returns the new top entry so the caller can enter it directly — qjs's
     /// callee frame address is the `alloca` result already in a register
-    /// (quickjs.c:17846); re-deriving it from the depth index (`topEntry()`)
+    ///; re-deriving it from the depth index (`topEntry`)
     /// would redo the chunk multiply for nothing.
     fn pushFrame(
         self: *Machine,
@@ -1585,10 +1584,7 @@ pub const Machine = struct {
             try setupBorrowedIteratorEntry(self.ctx, entry, target);
         } else if (setup_path == .moved_method) {
             if (methodSimpleInlineMode(target, source)) |mode| switch (mode) {
-                .moved_exact => try setupSimpleInlineEntryDispatch(false, false, false, true, true, self.ctx, global, entry, target, source),
-                .moved_padded => try setupSimpleInlineEntryDispatch(false, false, true, true, true, self.ctx, global, entry, target, source),
-                .moved_snapshot_exact => try setupSimpleInlineEntryDispatch(false, true, false, true, true, self.ctx, global, entry, target, source),
-                .moved_snapshot_padded => try setupSimpleInlineEntryDispatch(false, true, true, true, true, self.ctx, global, entry, target, source),
+                inline .moved_exact, .moved_padded, .moved_snapshot_exact, .moved_snapshot_padded => |moved| try setupSimpleInlineEntryDispatch(comptime moved.shape(), self.ctx, global, entry, target, source),
                 .stack_exact, .stack_padded, .stack_snapshot_exact, .stack_snapshot_padded => unreachable,
             } else {
                 try setupInlineEntry(self.ctx, global, entry, target, source);
@@ -1596,9 +1592,9 @@ pub const Machine = struct {
         } else if (setup_path == .generic_after_exact_plain) {
             try setupFallbackInlineEntry(self.ctx, global, entry, target, source);
         } else if (isSimpleInlineFrame(target, source)) {
-            try setupSimpleInlineEntryDispatch(false, false, false, false, false, self.ctx, global, entry, target, source);
+            try setupSimpleInlineEntryDispatch(.{}, self.ctx, global, entry, target, source);
         } else if (isStrictSimpleInlineFrame(false, target, source)) {
-            try setupSimpleInlineEntryDispatch(true, false, false, false, false, self.ctx, global, entry, target, source);
+            try setupSimpleInlineEntryDispatch(.{ .strict_this = true }, self.ctx, global, entry, target, source);
         } else {
             try setupFallbackInlineEntry(self.ctx, global, entry, target, source);
         }
@@ -1606,7 +1602,6 @@ pub const Machine = struct {
         entry.frame.planned_stack_bytes = @intCast(planned_stack_bytes);
         // Link the new frame into the chain — qjs `sf->prev_frame =
         // rt->current_stack_frame; rt->current_stack_frame = sf;`
-        // (quickjs.c:17869-17870).
         entry.prev = self.top;
         self.top = entry;
         self.depth += 1;
@@ -1640,15 +1635,35 @@ pub const Machine = struct {
         if (!canBorrowSourceArgs(function, source)) return false;
         // No captures check: `[]*core.VarRef` makes "every capture is a cell"
         // a type invariant (qjs js_closure2 slots are always JSVarRef*,
-        // quickjs.c:17297-17331) — the allCapturesAreCellsCached memo and its
+        // quickjs.c) — the allCapturesAreCellsCached memo and its
         // per-closure header-load loop are deleted by the phase-D flip.
         return true;
     }
+
+    /// Compile-time shape of a simple inline frame. Every field is one
+    /// branch the specialised setup body resolves at instantiation; the
+    /// instantiation set is exactly the set of distinct literals below.
+    const FrameShape = struct {
+        strict_this: bool = false,
+        snapshot_args: bool = false,
+        pad_args: bool = false,
+        method_receiver: bool = false,
+        move_args: bool = false,
+        constructor_this: bool = false,
+    };
 
     const PaddedSimpleInlineMode = enum {
         sloppy,
         strict,
         strict_snapshot,
+
+        fn shape(self: PaddedSimpleInlineMode) FrameShape {
+            return switch (self) {
+                .sloppy => .{ .pad_args = true },
+                .strict => .{ .strict_this = true, .pad_args = true },
+                .strict_snapshot => .{ .strict_this = true, .snapshot_args = true, .pad_args = true },
+            };
+        }
     };
 
     const MethodSimpleInlineMode = enum {
@@ -1660,12 +1675,32 @@ pub const Machine = struct {
         moved_padded,
         moved_snapshot_exact,
         moved_snapshot_padded,
+
+        fn shape(self: MethodSimpleInlineMode) FrameShape {
+            return switch (self) {
+                .stack_exact => .{ .method_receiver = true },
+                .stack_padded => .{ .pad_args = true, .method_receiver = true },
+                .stack_snapshot_exact => .{ .snapshot_args = true, .method_receiver = true },
+                .stack_snapshot_padded => .{ .snapshot_args = true, .pad_args = true, .method_receiver = true },
+                .moved_exact => .{ .method_receiver = true, .move_args = true },
+                .moved_padded => .{ .pad_args = true, .method_receiver = true, .move_args = true },
+                .moved_snapshot_exact => .{ .snapshot_args = true, .method_receiver = true, .move_args = true },
+                .moved_snapshot_padded => .{ .snapshot_args = true, .pad_args = true, .method_receiver = true, .move_args = true },
+            };
+        }
+
+        /// Constructor frames use the method prologue with `constructor_this`.
+        fn constructorShape(self: MethodSimpleInlineMode) FrameShape {
+            var result = self.shape();
+            result.constructor_this = true;
+            return result;
+        }
     };
 
     /// Select the qjs `argc < arg_count` twin of a simple frame. qjs does not
     /// switch to a second frame constructor for this case: it prefixes the
     /// existing alloca region with `arg_count` slots, moves the supplied argv,
-    /// and fills the missing tail with undefined (quickjs.c:17828-17861).
+    /// and fills the missing tail with undefined.
     /// Keep this call-site-dependent classification in the outlined fallback
     /// so exact-arity `pushFrame` retains its established hot shape.
     fn paddedSimpleInlineMode(target: *const InlineTarget, source: ArgsSource) ?PaddedSimpleInlineMode {
@@ -1685,7 +1720,7 @@ pub const Machine = struct {
     /// continuation/tail-call reuse. Object and primitive receivers both
     /// transfer verbatim: qjs stores raw `this_obj` in this same
     /// JS_CallInternal frame and performs sloppy substitution or boxing only
-    /// at OP_push_this (quickjs.c:17924-17944).
+    /// at OP_push_this.
     fn methodSimpleInlineMode(target: *const InlineTarget, source: ArgsSource) ?MethodSimpleInlineMode {
         const function = target.fb;
         const execution = target.call_facts.execution;
@@ -1738,36 +1773,25 @@ pub const Machine = struct {
     /// frame.
     noinline fn setupFallbackInlineEntry(ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
         if (methodSimpleInlineMode(target, source)) |mode| switch (mode) {
-            .stack_exact => return setupSimpleInlineEntryDispatch(false, false, false, true, false, ctx, global, entry, target, source),
-            .stack_padded => return setupSimpleInlineEntryDispatch(false, false, true, true, false, ctx, global, entry, target, source),
-            .stack_snapshot_exact => return setupSimpleInlineEntryDispatch(false, true, false, true, false, ctx, global, entry, target, source),
-            .stack_snapshot_padded => return setupSimpleInlineEntryDispatch(false, true, true, true, false, ctx, global, entry, target, source),
-            .moved_exact => return setupSimpleInlineEntryDispatch(false, false, false, true, true, ctx, global, entry, target, source),
-            .moved_padded => return setupSimpleInlineEntryDispatch(false, false, true, true, true, ctx, global, entry, target, source),
-            .moved_snapshot_exact => return setupSimpleInlineEntryDispatch(false, true, false, true, true, ctx, global, entry, target, source),
-            .moved_snapshot_padded => return setupSimpleInlineEntryDispatch(false, true, true, true, true, ctx, global, entry, target, source),
+            inline else => |m| return setupSimpleInlineEntryDispatch(comptime m.shape(), ctx, global, entry, target, source),
         };
         if (paddedSimpleInlineMode(target, source)) |mode| switch (mode) {
-            .sloppy => return setupSimpleInlineEntryDispatch(false, false, true, false, false, ctx, global, entry, target, source),
-            .strict => return setupSimpleInlineEntryDispatch(true, false, true, false, false, ctx, global, entry, target, source),
-            .strict_snapshot => return setupSimpleInlineEntryDispatch(true, true, true, false, false, ctx, global, entry, target, source),
+            inline else => |m| return setupSimpleInlineEntryDispatch(comptime m.shape(), ctx, global, entry, target, source),
         };
         if (isStrictSimpleInlineFrame(true, target, source)) {
-            return setupSimpleInlineEntryDispatch(true, true, false, false, false, ctx, global, entry, target, source);
+            return setupSimpleInlineEntryDispatch(.{ .strict_this = true, .snapshot_args = true }, ctx, global, entry, target, source);
         }
         return setupInlineEntry(ctx, global, entry, target, source);
     }
 
     inline fn simpleInlineSlabTotal(
+        comptime shape: FrameShape,
         function: *const bytecode.FunctionBytecode,
         actual_arg_count: usize,
-        comptime pad_args: bool,
-        comptime move_args: bool,
-        comptime snapshot_args: bool,
     ) usize {
-        const frame_arg_count: usize = if (pad_args) @intCast(function.arg_count) else actual_arg_count;
-        const arg_storage_count: usize = if (pad_args or move_args) frame_arg_count else 0;
-        const snapshot_count: usize = if (snapshot_args) actual_arg_count else 0;
+        const frame_arg_count: usize = if (shape.pad_args) @intCast(function.arg_count) else actual_arg_count;
+        const arg_storage_count: usize = if (shape.pad_args or shape.move_args) frame_arg_count else 0;
+        const snapshot_count: usize = if (shape.snapshot_args) actual_arg_count else 0;
         const var_count: usize = function.var_count;
         const stack_count = @as(usize, function.stack_size) + 1;
         const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(function);
@@ -1784,11 +1808,7 @@ pub const Machine = struct {
     /// for the same reason as `setupSimpleInlineEntry` — do not fold into
     /// `pushExactSimpleFrame` / `pushConstructorCall` / `pushFrame`.
     noinline fn setupSimpleInlineEntryWarm(
-        comptime strict_this: bool,
-        comptime pad_args: bool,
-        comptime method_receiver: bool,
-        comptime move_args: bool,
-        comptime constructor_this: bool,
+        comptime shape: FrameShape,
         ctx: *core.JSContext,
         global: *core.Object,
         entry: *Entry,
@@ -1801,15 +1821,15 @@ pub const Machine = struct {
         entry.catch_target = null;
         entry.teardown = .{ .simple = true };
 
-        comptime std.debug.assert(!move_args or method_receiver);
-        comptime std.debug.assert(!constructor_this or (method_receiver and !move_args and !strict_this));
-        std.debug.assert(source.metadata.moved == move_args);
-        std.debug.assert(source.metadata.has_receiver == method_receiver);
-        const receiver_count: usize = @intFromBool(method_receiver);
+        comptime std.debug.assert(!shape.move_args or shape.method_receiver);
+        comptime std.debug.assert(!shape.constructor_this or (shape.method_receiver and !shape.move_args and !shape.strict_this));
+        std.debug.assert(source.metadata.moved == shape.move_args);
+        std.debug.assert(source.metadata.has_receiver == shape.method_receiver);
+        const receiver_count: usize = @intFromBool(shape.method_receiver);
         const actual_arg_count = source.argCount();
-        const frame_arg_count: usize = if (pad_args) @intCast(function.arg_count) else actual_arg_count;
-        const arg_storage_count: usize = if (pad_args or move_args) frame_arg_count else 0;
-        if (pad_args) {
+        const frame_arg_count: usize = if (shape.pad_args) @intCast(function.arg_count) else actual_arg_count;
+        const arg_storage_count: usize = if (shape.pad_args or shape.move_args) frame_arg_count else 0;
+        if (shape.pad_args) {
             std.debug.assert(actual_arg_count < frame_arg_count);
         } else {
             std.debug.assert(actual_arg_count >= @as(usize, @intCast(function.arg_count)));
@@ -1836,22 +1856,22 @@ pub const Machine = struct {
         if (open_var_refs.len != 0) @memset(open_var_refs, null);
 
         const values = source.slice();
-        const receiver_slot: ?*core.JSValue = if (method_receiver) &values[0] else null;
+        const receiver_slot: ?*core.JSValue = if (shape.method_receiver) &values[0] else null;
         const callable_slot = &values[receiver_count];
         const args = values[receiver_count + 1 ..][0..actual_arg_count];
-        const frame_args = if (pad_args or move_args) arg_storage else args;
-        if (pad_args or move_args) {
+        const frame_args = if (shape.pad_args or shape.move_args) arg_storage else args;
+        if (shape.pad_args or shape.move_args) {
             @memcpy(frame_args[0..actual_arg_count], args);
             @memset(args, core.JSValue.undefinedValue());
-            if (pad_args) @memset(frame_args[actual_arg_count..], core.JSValue.undefinedValue());
+            if (shape.pad_args) @memset(frame_args[actual_arg_count..], core.JSValue.undefinedValue());
         }
 
         const captures = target.captureSlice();
         entry.frame = .{
             .function = function,
-            .this_value = if (method_receiver)
+            .this_value = if (shape.method_receiver)
                 takeSourceSlot(receiver_slot.?)
-            else if (strict_this)
+            else if (shape.strict_this)
                 core.JSValue.undefinedValue()
             else
                 global.value(),
@@ -1875,50 +1895,45 @@ pub const Machine = struct {
     /// `bl` (no error-union check). Snapshot shapes and arena misses keep the
     /// existing `!void` function as the OOM channel.
     inline fn setupSimpleInlineEntryDispatch(
-        comptime strict_this: bool,
-        comptime snapshot_args: bool,
-        comptime pad_args: bool,
-        comptime method_receiver: bool,
-        comptime move_args: bool,
+        comptime shape: FrameShape,
         ctx: *core.JSContext,
         global: *core.Object,
         entry: *Entry,
         target: *const InlineTarget,
         source: ArgsSource,
     ) HostError!void {
-        if (comptime !snapshot_args) {
-            const total = simpleInlineSlabTotal(target.fb, source.argCount(), pad_args, move_args, false);
+        if (comptime !shape.snapshot_args) {
+            const total = simpleInlineSlabTotal(shape, target.fb, source.argCount());
             if (ctx.runtime.vm_stack.carveActiveMarked(total)) |carve| {
-                setupSimpleInlineEntryWarm(strict_this, pad_args, method_receiver, move_args, false, ctx, global, entry, target, source, carve);
+                setupSimpleInlineEntryWarm(shape, ctx, global, entry, target, source, carve);
                 return;
             }
         }
-        return setupSimpleInlineEntry(strict_this, snapshot_args, pad_args, method_receiver, move_args, ctx, global, entry, target, source);
+        return setupSimpleInlineEntry(shape, ctx, global, entry, target, source);
     }
 
     inline fn setupSimpleConstructorEntryDispatch(
-        comptime snapshot_args: bool,
-        comptime pad_args: bool,
+        comptime shape: FrameShape,
         ctx: *core.JSContext,
         global: *core.Object,
         entry: *Entry,
         target: *const InlineTarget,
         source: ArgsSource,
     ) HostError!void {
-        if (comptime !snapshot_args) {
-            const total = simpleInlineSlabTotal(target.fb, source.argCount(), pad_args, false, false);
+        if (comptime !shape.snapshot_args) {
+            const total = simpleInlineSlabTotal(shape, target.fb, source.argCount());
             if (ctx.runtime.vm_stack.carveActiveMarked(total)) |carve| {
-                setupSimpleInlineEntryWarm(false, pad_args, true, false, true, ctx, global, entry, target, source, carve);
+                setupSimpleInlineEntryWarm(shape, ctx, global, entry, target, source, carve);
                 return;
             }
         }
-        return setupSimpleConstructorEntry(snapshot_args, pad_args, ctx, global, entry, target, source);
+        return setupSimpleConstructorEntry(shape, ctx, global, entry, target, source);
     }
 
     /// Straight-line frame setup for the plain/method simple-inline shapes —
     /// the hot fib/closure/method-call paths, a line-for-line mirror of qjs
     /// `JS_CallInternal`'s
-    /// prologue (quickjs.c:17828-17871): compute the storage need, carve ONE
+    /// prologue: compute the storage need, carve ONE
     /// contiguous slab, partition it by pointer arithmetic, bind every frame
     /// field exactly once. No shared-primitive calls, no `Frame.init`
     /// default-then-overwrite pass, no by-value `FrameSlab` /
@@ -1938,14 +1953,15 @@ pub const Machine = struct {
     /// allocation OFF the general `setupInlineEntry`/`pushFrame` chain. If LLVM
     /// inlines it back into `pushFrame`, the simple path's spills re-couple with
     /// the general path and the win evaporates (measured: 3.09x→3.26x qjs on fib).
-    noinline fn setupSimpleInlineEntry(comptime strict_this: bool, comptime snapshot_args: bool, comptime pad_args: bool, comptime method_receiver: bool, comptime move_args: bool, ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
-        return setupSimpleInlineEntryImpl(strict_this, snapshot_args, pad_args, method_receiver, move_args, false, ctx, global, entry, target, source);
+    noinline fn setupSimpleInlineEntry(comptime shape: FrameShape, ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
+        comptime std.debug.assert(!shape.constructor_this);
+        return setupSimpleInlineEntryImpl(shape, ctx, global, entry, target, source);
     }
 
     /// Constructor member of the simple-frame family. qjs builds constructor
     /// frames with the byte-identical JS_CallInternal prologue used for method
-    /// calls — JS_CallConstructorInternal (quickjs.c:20845) passes straight
-    /// into the shared alloca prologue (quickjs.c:17828-17871) and
+    /// calls — JS_CallConstructorInternal passes straight
+    /// into the shared alloca prologue and
     /// JS_CALL_FLAG_CONSTRUCTOR is never consumed by that bytecode prologue.
     /// The `constructor_this` instantiation differs from the method arm in one
     /// ownership byte: the frame's `this` binding is written `.borrowed` ONCE
@@ -1958,11 +1974,12 @@ pub const Machine = struct {
     /// this body must not fold back into `pushConstructorCall`, or its
     /// register allocation re-couples with the push shell (fib precedent
     /// 3.09x→3.26x).
-    noinline fn setupSimpleConstructorEntry(comptime snapshot_args: bool, comptime pad_args: bool, ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
-        return setupSimpleInlineEntryImpl(false, snapshot_args, pad_args, true, false, true, ctx, global, entry, target, source);
+    noinline fn setupSimpleConstructorEntry(comptime shape: FrameShape, ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
+        comptime std.debug.assert(shape.constructor_this and shape.method_receiver and !shape.strict_this and !shape.move_args);
+        return setupSimpleInlineEntryImpl(shape, ctx, global, entry, target, source);
     }
 
-    inline fn setupSimpleInlineEntryImpl(comptime strict_this: bool, comptime snapshot_args: bool, comptime pad_args: bool, comptime method_receiver: bool, comptime move_args: bool, comptime constructor_this: bool, ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
+    inline fn setupSimpleInlineEntryImpl(comptime shape: FrameShape, ctx: *core.JSContext, global: *core.Object, entry: *Entry, target: *const InlineTarget, source: ArgsSource) HostError!void {
         const rt = ctx.runtime;
         const function = target.fb;
         entry.catch_target = null;
@@ -1974,20 +1991,20 @@ pub const Machine = struct {
         // calls borrow/move out of their caller stack region, while Proxy
         // continuations and tail-call reuse consume a temporary owned region.
         // Both share `[receiver, callable, args...]` for method calls.
-        comptime std.debug.assert(!move_args or method_receiver);
+        comptime std.debug.assert(!shape.move_args or shape.method_receiver);
         // Constructors are method-shaped stack regions (op_call_constructor
         // recast `[instance, callable, args...]`); tail-call reuse never
         // replaces a constructor Entry, so the moved variant cannot occur.
-        comptime std.debug.assert(!constructor_this or (method_receiver and !move_args and !strict_this));
-        std.debug.assert(source.metadata.moved == move_args);
-        std.debug.assert(source.metadata.has_receiver == method_receiver);
-        const receiver_count: usize = @intFromBool(method_receiver);
+        comptime std.debug.assert(!shape.constructor_this or (shape.method_receiver and !shape.move_args and !shape.strict_this));
+        std.debug.assert(source.metadata.moved == shape.move_args);
+        std.debug.assert(source.metadata.has_receiver == shape.method_receiver);
+        const receiver_count: usize = @intFromBool(shape.method_receiver);
         const argc = source.argCount();
         const actual_arg_count = argc;
-        const frame_arg_count: usize = if (pad_args) @intCast(function.arg_count) else actual_arg_count;
-        const arg_storage_count: usize = if (pad_args or move_args) frame_arg_count else 0;
-        const snapshot_count: usize = if (snapshot_args) actual_arg_count else 0;
-        if (pad_args) {
+        const frame_arg_count: usize = if (shape.pad_args) @intCast(function.arg_count) else actual_arg_count;
+        const arg_storage_count: usize = if (shape.pad_args or shape.move_args) frame_arg_count else 0;
+        const snapshot_count: usize = if (shape.snapshot_args) actual_arg_count else 0;
+        if (shape.pad_args) {
             std.debug.assert(actual_arg_count < frame_arg_count);
         } else {
             std.debug.assert(actual_arg_count >= @as(usize, @intCast(function.arg_count)));
@@ -2002,15 +2019,15 @@ pub const Machine = struct {
         // in the frame literal, after the last failable point). Release the
         // off-window source region directly, matching the general path's
         // `.full` cleanup without temporarily republishing it to the GC view.
-        errdefer if (!move_args) {
+        errdefer if (!shape.move_args) {
             cleanupStackSource(source);
         };
 
-        // alloca_size (quickjs.c:17834-17836): optional padded args | locals |
+        // alloca_size: optional padded args | locals |
         // operand stack | open var-ref slots | zjs original-args snapshot.
-        // Exact args are borrowed in place (`arg_buf = argv`, 17841). Missing
+        // Exact args are borrowed in place (`arg_buf = argv`). Missing
         // args use qjs's `arg_allocated_size = b->arg_count` prefix (17828,
-        // 17848-17857). var_refs remain borrowed from the closure (17844).
+        // var_refs remain borrowed from the closure (17844).
         const var_count: usize = function.var_count;
         const stack_count = @as(usize, function.stack_size) + 1;
         const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(function);
@@ -2069,7 +2086,7 @@ pub const Machine = struct {
         // slab carve, matching qjs's late argv consumption and avoiding an
         // args-start scalar live across every failable allocation point.
         const values = source.slice();
-        const receiver_slot: ?*core.JSValue = if (method_receiver) &values[0] else null;
+        const receiver_slot: ?*core.JSValue = if (shape.method_receiver) &values[0] else null;
         const callable_slot = &values[receiver_count];
         const args = values[receiver_count + 1 ..][0..actual_arg_count];
 
@@ -2089,11 +2106,11 @@ pub const Machine = struct {
         // into the padded/moved prefix, clear the source slots, then initialize
         // only a missing tail. Exact caller-stack args continue borrowing the
         // original operand slots.
-        const frame_args = if (pad_args or move_args) arg_storage else args;
-        if (pad_args or move_args) {
+        const frame_args = if (shape.pad_args or shape.move_args) arg_storage else args;
+        if (shape.pad_args or shape.move_args) {
             @memcpy(frame_args[0..actual_arg_count], args);
             @memset(args, core.JSValue.undefinedValue());
-            if (pad_args) @memset(frame_args[actual_arg_count..], core.JSValue.undefinedValue());
+            if (shape.pad_args) @memset(frame_args[actual_arg_count..], core.JSValue.undefinedValue());
         }
 
         const captures = target.captureSlice();
@@ -2106,9 +2123,9 @@ pub const Machine = struct {
         // original-args snapshot box.
         entry.frame = .{
             .function = function,
-            .this_value = if (method_receiver)
+            .this_value = if (shape.method_receiver)
                 takeSourceSlot(receiver_slot.?)
-            else if (strict_this)
+            else if (shape.strict_this)
                 core.JSValue.undefinedValue()
             else
                 global.value(),
@@ -2157,16 +2174,14 @@ pub const Machine = struct {
     /// with unrolled NULL stores (qjs:17865-17866).
     noinline fn pushExactSimpleFrame(
         self: *Machine,
-        comptime strict_this: bool,
-        comptime snapshot_args: bool,
-        comptime method_receiver: bool,
+        comptime shape: FrameShape,
         global: *core.Object,
         target: *const InlineTarget,
         source: ArgsSource,
         caller_fp: usize,
     ) align(32) ?*Entry {
-        comptime std.debug.assert(!method_receiver or !strict_this);
-        if (comptime snapshot_args) return null;
+        comptime std.debug.assert(!shape.method_receiver or !shape.strict_this);
+        if (comptime shape.snapshot_args) return null;
 
         const function = target.fb;
         const argc = source.argCount();
@@ -2232,7 +2247,7 @@ pub const Machine = struct {
         @memset(locals, core.JSValue.undefinedValue()); // qjs:17860-17861
 
         const values = source.slice();
-        const receiver_count: usize = @intFromBool(method_receiver);
+        const receiver_count: usize = @intFromBool(shape.method_receiver);
         const args = values[receiver_count + 1 ..][0..argc];
         const captures = target.captureSlice();
 
@@ -2256,9 +2271,9 @@ pub const Machine = struct {
         // (C12), Stack.{memory,capacity,policy} (live grow/teardown).
         entry.frame.function = function;
         entry.frame.pc = 0;
-        entry.frame.this_value = if (method_receiver)
+        entry.frame.this_value = if (shape.method_receiver)
             takeSourceSlot(&values[0])
-        else if (strict_this)
+        else if (shape.strict_this)
             core.JSValue.undefinedValue()
         else
             global.value();
@@ -2292,32 +2307,28 @@ pub const Machine = struct {
     /// `enterInlineCallDepthBytes`.
     noinline fn pushExactSimpleFrameSlow(
         self: *Machine,
-        comptime strict_this: bool,
-        comptime snapshot_args: bool,
-        comptime method_receiver: bool,
+        comptime shape: FrameShape,
         global: *core.Object,
         target: *const InlineTarget,
         source: ArgsSource,
     ) align(32) HostError!*Entry {
-        return pushExactSimpleFrameImpl(self, strict_this, snapshot_args, method_receiver, global, target, source);
+        return pushExactSimpleFrameImpl(self, shape, global, target, source);
     }
 
     inline fn pushExactSimpleOrSlow(
         self: *Machine,
-        comptime strict_this: bool,
-        comptime snapshot_args: bool,
-        comptime method_receiver: bool,
+        comptime shape: FrameShape,
         global: *core.Object,
         target: *const InlineTarget,
         source: ArgsSource,
     ) HostError!*Entry {
-        if (comptime snapshot_args) {
-            return self.pushExactSimpleFrameSlow(strict_this, snapshot_args, method_receiver, global, target, source);
+        if (comptime shape.snapshot_args) {
+            return self.pushExactSimpleFrameSlow(shape, global, target, source);
         }
-        if (self.pushExactSimpleFrame(strict_this, snapshot_args, method_receiver, global, target, source, @frameAddress())) |entry| {
+        if (self.pushExactSimpleFrame(shape, global, target, source, @frameAddress())) |entry| {
             return entry;
         }
-        return self.pushExactSimpleFrameSlow(strict_this, snapshot_args, method_receiver, global, target, source);
+        return self.pushExactSimpleFrameSlow(shape, global, target, source);
     }
 
     /// Shared straight-line body of the exact-simple Slow constructor.
@@ -2326,25 +2337,23 @@ pub const Machine = struct {
     /// `bl` that leaf instead of expanding this body (r12-KNIFE §c).
     inline fn pushExactSimpleFrameImpl(
         self: *Machine,
-        comptime strict_this: bool,
-        comptime snapshot_args: bool,
-        comptime method_receiver: bool,
+        comptime shape: FrameShape,
         global: *core.Object,
         target: *const InlineTarget,
         source: ArgsSource,
     ) HostError!*Entry {
-        comptime std.debug.assert(!method_receiver or !strict_this);
-        if (method_receiver) {
+        comptime std.debug.assert(!shape.method_receiver or !shape.strict_this);
+        if (shape.method_receiver) {
             std.debug.assert(!source.metadata.moved and source.metadata.has_receiver);
             std.debug.assert(target.this_value.same(source.values[0]));
             std.debug.assert(source.argCount() >= @as(usize, target.fb.arg_count));
-            if (snapshot_args) {
+            if (shape.snapshot_args) {
                 std.debug.assert(target.call_facts.execution.strict_simple_snapshot_inline_eligible);
             } else {
                 std.debug.assert(target.call_facts.execution.simple_inline_eligible or
                     target.call_facts.execution.strict_simple_inline_eligible);
             }
-        } else if (strict_this) {
+        } else if (shape.strict_this) {
             std.debug.assert(isStrictSimpleInlineFrame(false, target, source));
         } else {
             std.debug.assert(isSimpleInlineFrame(target, source));
@@ -2365,7 +2374,7 @@ pub const Machine = struct {
         };
         entry.return_action = .next;
         entry.continuation_payload = 0;
-        try setupSimpleInlineEntryDispatch(strict_this, snapshot_args, false, method_receiver, false, self.ctx, global, entry, target, source);
+        try setupSimpleInlineEntryDispatch(shape, self.ctx, global, entry, target, source);
         entry.frame.planned_stack_bytes = @intCast(planned_stack_bytes);
         entry.prev = self.top;
         self.top = entry;
@@ -2385,7 +2394,7 @@ pub const Machine = struct {
     /// undefined), `[receiver, callable, args...]` for method calls whose
     /// receiver becomes the callee's raw `this`. `exact_args` frames borrow
     /// the args window in place from the caller region (qjs `arg_buf = argv`,
-    /// quickjs.c:17841).
+    /// quickjs.c).
     noinline fn pushEmptyLeafFrame(
         self: *Machine,
         comptime leaf_this: LeafThis,
@@ -2630,7 +2639,7 @@ pub const Machine = struct {
         // committed figure is passed in instead of re-deriving the three
         // function-header scalars here (LLVM cannot CSE the reload across the
         // intervening entry stores; qjs prices alloca_size exactly once,
-        // quickjs.c:17828-17836).
+        // quickjs.c).
         std.debug.assert(planned_stack_bytes == vm_call.bytecodeLeafFrameAllocaSize(function));
         // No failable operation follows the ownership transfer.
         entry.frame = .{
@@ -2665,7 +2674,7 @@ pub const Machine = struct {
     /// `finishEmptyLeafFrame` (separate body; see `pushExactArgsLeafFrame`
     /// for why the zero-arg source is not shared). Adds exactly the args
     /// window binding: the frame borrows the caller-region slots in place —
-    /// qjs `arg_buf = argv` (quickjs.c:17841). Value ownership transfers to
+    /// qjs `arg_buf = argv`. Value ownership transfers to
     /// the frame (the caller's logical top already retreated below the
     /// window); the backing slots stay caller storage, the same
     /// `initArgumentsBorrowedSlots` contract the exact simple frame uses.
@@ -2709,7 +2718,7 @@ pub const Machine = struct {
         std.debug.assert(planned_stack_bytes == vm_call.bytecodeLeafFrameAllocaSize(function));
         // No failable operation follows the ownership transfer. `var_refs`
         // borrows the closure's cell array (qjs `var_refs =
-        // p->u.func.var_refs`, quickjs.c:17844), rooted by the owned
+        // p->u.func.var_refs`, quickjs.c), rooted by the owned
         // `current_function` until teardown. Unconditionally `.borrowed`
         // (the general path publishes `.owned` for the empty slice, but both
         // dispositions are teardown no-ops at len 0 and the constant byte
@@ -2766,7 +2775,7 @@ pub const Machine = struct {
     /// Capture-leaf publication tail (O2) — the parallel twin of
     /// `finishEmptyLeafFrame` plus exactly the capture binding: `var_refs`
     /// borrows the closure's cell array (qjs `var_refs = p->u.func.var_refs`,
-    /// quickjs.c:17844), rooted by the owned `current_function` until
+    /// quickjs.c), rooted by the owned `current_function` until
     /// teardown, `.borrowed` so no teardown path ever releases or closes the
     /// cells (they belong to the still-live closure). No args window binds:
     /// `args` keeps the empty default, so the published `exact_args_leaf`
@@ -2869,8 +2878,8 @@ pub const Machine = struct {
         const planned_stack_bytes = vm_call.bytecodeLeafFrameAllocaSize(function);
         // K2 admission-commit fusion: one rt load carries the budget check,
         // the commit RMW, the carve, and the profile guard (qjs
-        // check-then-alloca: the check is the commitment, quickjs.c:17837/
-        // 17845). The rare chunk/carve misses below retreat the committed
+        // check-then-alloca: the check is the commitment, quickjs.c/
+        // The rare chunk/carve misses below retreat the committed
         // charge on their cold exits before honoring the pure-miss contract.
         if (!vm_call.tryCommitInlineCallDepthBytesRt(rt, planned_stack_bytes)) return null;
 
@@ -3126,14 +3135,14 @@ pub const Machine = struct {
         const need_original_snapshot = frame_mod.argumentsNeedsOriginalSnapshot(function);
         const borrow_source_args = canBorrowSourceArgs(function, source);
         const storage_arg_count: usize = if (borrow_source_args) 0 else frame_arg_count;
-        // qjs `var_refs = p->u.func.var_refs` (quickjs.c:17844): borrow the callee's
+        // qjs `var_refs = p->u.func.var_refs`: borrow the callee's
         // closure captures array directly instead of carving + dup-ing a per-frame
         // copy. Only when every mutation of `frame.var_refs` is provably routed
         // through a cell (never the array element) and the shared array is never
         // realloced. Global declarations are the remaining element-rebinding
         // escape; direct eval captures only alias the existing indexed cells.
         // "All captures are cells" is now the `[]*core.VarRef` type invariant
-        // (phase-D flip; qjs js_closure2, quickjs.c:17297-17331), so writes
+        // (phase-D flip; qjs js_closure2, quickjs.c), so writes
         // always go through the cell — the former allVarRefCells scan is gone.
         // Captures.len == closure_var.len ≥ every bytecode var_ref idx, so
         // `ensureVarRefsCapacity` never fires either. Teardown skips the per-element
@@ -3142,25 +3151,16 @@ pub const Machine = struct {
             frame_var_refs.len > 0;
         const var_ref_storage_count: usize = if (borrow_var_refs) 0 else frame_mod.frameVarRefStorageCount(function, frame_var_refs);
         const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(function);
-        const slab = frame_mod.FrameSlab.carve(
-            &rt.memory,
-            &rt.vm_stack,
-            storage_arg_count,
-            frame_mod.originalArgCount(argc, need_original_snapshot),
-            function.var_count,
-            @as(usize, function.stack_size) + 1,
-            var_ref_storage_count,
-            open_var_ref_count,
-        ) orelse blk: {
-            const heap_windows = try frame_mod.FrameSlab.allocHeap(
-                &rt.memory,
-                storage_arg_count,
-                frame_mod.originalArgCount(argc, need_original_snapshot),
-                function.var_count,
-                @as(usize, function.stack_size) + 1,
-                var_ref_storage_count,
-                open_var_ref_count,
-            );
+        const slab_layout: frame_mod.SlabLayout = .{
+            .args = storage_arg_count,
+            .original_args = frame_mod.originalArgCount(argc, need_original_snapshot),
+            .locals = function.var_count,
+            .stack = @as(usize, function.stack_size) + 1,
+            .var_refs = var_ref_storage_count,
+            .open_var_refs = open_var_ref_count,
+        };
+        const slab = frame_mod.FrameSlab.carve(&rt.memory, &rt.vm_stack, slab_layout) orelse blk: {
+            const heap_windows = try frame_mod.FrameSlab.allocHeap(&rt.memory, slab_layout);
             entry.frame.installOwnedStorage(heap_windows.storage);
             break :blk heap_windows;
         };
@@ -3402,10 +3402,10 @@ pub const Machine = struct {
         }
         const source = ArgsSource.initStack(region_start, argc, false);
         if (isSimpleInlineFrame(target, source)) {
-            return self.pushExactSimpleOrSlow(false, false, false, global, target, source);
+            return self.pushExactSimpleOrSlow(.{}, global, target, source);
         }
         if (isStrictSimpleInlineFrame(false, target, source)) {
-            return self.pushExactSimpleOrSlow(true, false, false, global, target, source);
+            return self.pushExactSimpleOrSlow(.{ .strict_this = true }, global, target, source);
         }
         return self.pushFrame(.generic_after_exact_plain, false, false, global, target, source);
     }
@@ -3483,7 +3483,7 @@ pub const Machine = struct {
     /// The sloppy-exact arm collapses the retired three-deep chain (bl
     /// `pushFrame` -> bl `setupFallbackInlineEntry` -> b
     /// `setupSimpleInlineEntry`) into one bl: qjs OP_call_method enters the
-    /// same single JS_CallInternal prologue as OP_call (quickjs.c:18201);
+    /// same single JS_CallInternal prologue as OP_call;
     /// there is no second/third setup hop to re-save callee-saved registers
     /// or re-classify the shape `methodSimpleInlineMode` already proved. The
     /// shell stays outline (`pushExactSimpleFrame` is noinline): the win is
@@ -3506,10 +3506,10 @@ pub const Machine = struct {
         // instead of walking every eligibility byte on their way out.
         if (argc >= function.arg_count) {
             if (execution.simple_inline_eligible) {
-                return self.pushExactSimpleOrSlow(false, false, true, global, target, source);
+                return self.pushExactSimpleOrSlow(.{ .method_receiver = true }, global, target, source);
             }
             if (execution.strict_simple_snapshot_inline_eligible) {
-                return self.pushExactSimpleOrSlow(false, true, true, global, target, source);
+                return self.pushExactSimpleOrSlow(.{ .snapshot_args = true, .method_receiver = true }, global, target, source);
             }
         }
         return self.pushFrame(.generic, false, false, global, target, source);
@@ -3555,8 +3555,8 @@ pub const Machine = struct {
         entry.continuation_payload = 0;
         // qjs constructor frames are built by the byte-identical
         // JS_CallInternal prologue used for method calls:
-        // JS_CallConstructorInternal (quickjs.c:20845) enters the shared
-        // alloca prologue (quickjs.c:17828-17871) and JS_CALL_FLAG_CONSTRUCTOR
+        // JS_CallConstructorInternal enters the shared
+        // alloca prologue and JS_CALL_FLAG_CONSTRUCTOR
         // is never consumed by that bytecode prologue. The caller already
         // recast the region to method shape `[instance, callable, args...]`
         // with `target.this_value == values[0]`, so the ordinary method
@@ -3569,10 +3569,7 @@ pub const Machine = struct {
         // aborted in ReleaseSafe inside `popConstructorReturn`.
         if (methodSimpleInlineMode(target, source)) |mode| {
             switch (mode) {
-                .stack_exact => try setupSimpleConstructorEntryDispatch(false, false, self.ctx, global, entry, target, source),
-                .stack_padded => try setupSimpleConstructorEntryDispatch(false, true, self.ctx, global, entry, target, source),
-                .stack_snapshot_exact => try setupSimpleConstructorEntryDispatch(true, false, self.ctx, global, entry, target, source),
-                .stack_snapshot_padded => try setupSimpleConstructorEntryDispatch(true, true, self.ctx, global, entry, target, source),
+                inline .stack_exact, .stack_padded, .stack_snapshot_exact, .stack_snapshot_padded => |stack| try setupSimpleConstructorEntryDispatch(comptime stack.constructorShape(), self.ctx, global, entry, target, source),
                 // `source` is built by initStack above: `moved` is statically
                 // false, so the temporary-region variants cannot be selected.
                 .moved_exact, .moved_padded, .moved_snapshot_exact, .moved_snapshot_padded => unreachable,
@@ -3593,9 +3590,9 @@ pub const Machine = struct {
         entry.native_caller = entry.frame.this_value;
         entry.teardown.constructor_completion = true;
         // qjs keeps `new_target` in a JS_CallInternal register and gives
-        // JSStackFrame no field for it (quickjs.c:405-417); only a function
+        // JSStackFrame no field for it; only a function
         // that actually reads `new.target` pays anything, at the
-        // OP_special_object dup (quickjs.c:17984). Direct construction has
+        // OP_special_object dup. Direct construction has
         // `new.target == current_function`, so record the alias instead of
         // heap-allocating a cold box on every `new`.
         entry.frame.ownership.new_target = .aliases_function;
@@ -4581,7 +4578,7 @@ pub const Machine = struct {
     /// `setupBorrowedIteratorEntry` builds, minus its noinline bl, the
     /// generic depth-accounting shell, the acquireSlot round-trip, and the
     /// mark/carve split. qjs anchor: JS_CallInternal's whole frame for
-    /// this shape is one alloca plus seven sf stores (quickjs.c:17841-17871).
+    /// this shape is one alloca plus seven sf stores.
     /// A null result is the established pure miss contract: call depth,
     /// arena watermark, the untouched caller iterator record, and Machine
     /// links are unchanged, so the caller can invoke
@@ -4629,11 +4626,11 @@ pub const Machine = struct {
     /// shared). Field-for-field the frame `setupBorrowedIteratorEntry`
     /// publishes for the zero-storage geometry: both call bindings borrow
     /// the caller's iterator record (qjs JS_CallInternal reads
-    /// `func_obj`/`this_obj` without retaining either, quickjs.c:17815-17849;
+    /// `func_obj`/`this_obj` without retaining either, quickjs.c;
     /// the record slots stay untouched on the suspended caller stack and
     /// root both values until the continuation returns), `var_refs` aliases
     /// the closure's cell array (qjs `var_refs = p->u.func.var_refs`,
-    /// quickjs.c:17844), and the `.for_of_next` continuation was published
+    /// quickjs.c), and the `.for_of_next` continuation was published
     /// by the warm constructor above before this tail linked the Entry.
     /// `teardown = {simple}` (no leaf bit): returns MUST route through the
     /// general continuation-carrying pop so `popAndResume` hands the result
@@ -4843,7 +4840,7 @@ pub const Machine = struct {
         vm_call.leaveInlineCallDepthBytes(self.ctx, dying_stack_bytes);
         self.depth -= 1;
         // Unlink — qjs `rt->current_stack_frame = sf->prev_frame;` at the
-        // done: epilogue (quickjs.c:20709).
+        // done: epilogue.
         self.top = dying.prev;
         return continuation;
     }
@@ -4905,7 +4902,7 @@ pub const Machine = struct {
         vm_call.leaveInlineCallDepthBytes(self.ctx, dying_stack_bytes);
         self.depth -= 1;
         // Unlink — qjs `rt->current_stack_frame = sf->prev_frame;` at the
-        // done: epilogue (quickjs.c:20709).
+        // done: epilogue.
         self.top = dying.prev;
     }
 
@@ -5093,9 +5090,9 @@ pub const Machine = struct {
     }
 
     /// Apply constructor return completion, fused to qjs's construct-return
-    /// two-branch: after the shared done: epilogue (quickjs.c:20699-20709)
+    /// two-branch: after the shared done: epilogue
     /// JS_CallConstructorInternal keeps only a tag test plus one free
-    /// (quickjs.c:20846-20856). A base Entry still owns its fallback
+    ///. A base Entry still owns its fallback
     /// instance: an object result replaces it, while every primitive is
     /// discarded in favor of the instance. A derived Entry carries the
     /// undefined no-fallback sentinel and forwards the checked result.
@@ -5146,7 +5143,7 @@ pub const Machine = struct {
         vm_call.leaveInlineCallDepthBytes(self.ctx, dying_stack_bytes);
         self.depth -= 1;
         // Unlink — qjs `rt->current_stack_frame = sf->prev_frame;` at the
-        // done: epilogue (quickjs.c:20709).
+        // done: epilogue.
         self.top = dying.prev;
         if (fallback.is(.undefined_value)) return result;
         if (result.is(.object)) {

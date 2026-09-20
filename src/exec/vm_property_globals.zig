@@ -47,7 +47,7 @@ fn throwGlobalTdzReferenceError(
     return err;
 }
 
-/// qjs OP_get_var slow arm (quickjs.c:18474-18480): an uninitialized cell for a
+/// qjs OP_get_var slow arm: an uninitialized cell for a
 /// non-lexical closure var resolves via JS_GetPropertyInternal on the global
 /// OBJECT — proto chain and getters included, the lexical env never consulted.
 /// `op.get_var` throws ReferenceError when no binding exists; `op.get_var_undef`
@@ -115,7 +115,7 @@ pub noinline fn getVar(
                 // The bound cell is authoritative: a global lexical shadowing
                 // this name would have performed definition-time cell surgery /
                 // parked-cell reuse (qjs js_closure_define_global_var,
-                // quickjs.c:17148-17162 + 17186-17205), so no per-read lexical
+                // quickjs.c + 17186-17205), so no per-read lexical
                 // check is needed (qjs OP_get_var has none, 18461-18488).
                 // Guard #7 retired: cell values are never cells (the
                 // direct-eval const view pvalue-aliases its target), so
@@ -123,7 +123,7 @@ pub noinline fn getVar(
                 try stack.push(value);
                 return .done;
             } else {
-                // qjs OP_get_var uninitialized arm (quickjs.c:18469-18483):
+                // qjs OP_get_var uninitialized arm:
                 // a lexical closure var in its TDZ window throws; everything
                 // else — undeclared global, deleted binding parked at
                 // UNINITIALIZED (remove_global_object_property, 9289-9309),
@@ -222,7 +222,7 @@ pub noinline fn putVar(
             // Slot is a cell by type (phase D); the non-cell arm is gone.
             const cell = slot_ops.varRefSlotCell(frame, ref_idx);
             const current = cell.pvalue.*;
-            // qjs OP_put_var (quickjs.c:18490-18525): the exceptional arm is
+            // qjs OP_put_var: the exceptional arm is
             // keyed on `uninitialized || is_const`, and inside it on the
             // CELL's is_lexical (unlike OP_get_var's cv-keyed check) — a
             // lexical cell throws (TDZ ReferenceError while uninitialized,
@@ -278,7 +278,7 @@ pub noinline fn putVar(
     }
     {
         // qjs OP_put_var always performs JS_HasProperty on the global object
-        // before its SetProperty slow leg (quickjs.c:18511-18521).  Only the
+        // before its SetProperty slow leg. Only the
         // missing-binding throw is strict-only; skipping HasProperty in sloppy
         // mode loses observable Proxy/exotic-global `has` traps.
         const global_value = global.value();
@@ -430,7 +430,7 @@ test "QuickJS global declaration validation does not materialize auto-init prope
         binding_name,
         "qjs-pass1-auto-init-binding",
         0,
-        core.property.Flags.data(true, false, true),
+        core.property.Flags.data(.method),
         global,
     );
     const property_index = global.findProperty(binding_name) orelse return error.TestExpectedEqual;

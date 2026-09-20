@@ -5,8 +5,8 @@
 //! account and with the matching type/alignment/FAM size. Production GC
 //! threshold checks intentionally occur at the object boundary, while OOM and
 //! accounting probes are comptime diagnostic tiers. QuickJS source map:
-//! `JSMallocState` at quickjs.c:314 and the allocator family around
-//! quickjs.c:1566-1826. This leaf core allocator must not depend on exec or
+//! `JSMallocState` at quickjs.c and the allocator family around
+//! quickjs.c. This leaf core allocator must not depend on exec or
 //! binding.
 
 const std = @import("std");
@@ -63,7 +63,7 @@ pub const NonBlockObjectPrepare = *const fn (*anyopaque) std.mem.Allocator.Error
 /// Issue the next slab pop's block-header fetch one allocation early.
 ///
 /// The free chain qjs threads through the free blocks themselves
-/// (`JSMallocBlockHeader.u.next_block`, quickjs.c:275) costs one load per pop,
+/// (`JSMallocBlockHeader.u.next_block`, quickjs.c) costs one load per pop,
 /// and that load's result is what names the *following* pop's block -- so
 /// without this it cannot start until the caller has finished initializing the
 /// previous object.
@@ -87,12 +87,12 @@ const slab_alloc_prefetch: bool = true;
 ///
 /// QuickJS reaches its allocation-threshold GC from exactly one site:
 /// `js_trigger_gc(ctx->rt, sizeof(JSObject))` at the top of
-/// `JS_NewObjectFromShape` (quickjs.c:5619). The allocators underneath it —
-/// `js_malloc_rt` / `js_realloc_rt` / `js_mallocz_rt` (quickjs.c:1799-1826)
-/// and the `__js_malloc` family they call (quickjs.c:1566) — only ever check
+/// `JS_NewObjectFromShape`. The allocators underneath it —
+/// `js_malloc_rt` / `js_realloc_rt` / `js_mallocz_rt`
+/// and the `__js_malloc` family they call — only ever check
 /// `malloc_limit`; none of them reads `malloc_gc_threshold`, which is touched
-/// exclusively by `js_trigger_gc` itself (quickjs.c:1780-1797). Property
-/// arrays (quickjs.c:5636), bytecode buffers, atom tables and parser scratch
+/// exclusively by `js_trigger_gc` itself. Property
+/// arrays, bytecode buffers, atom tables and parser scratch
 /// therefore carry no per-allocation GC bookkeeping in QuickJS at all.
 ///
 /// zjs mirrors that shape: `JSRuntime.collectBeforeObjectAllocation` is the
@@ -115,8 +115,8 @@ const slab_alloc_prefetch: bool = true;
 /// those comptime modes retain the full per-allocation trigger.
 pub const allocation_gc_trigger_enabled: bool = builtin.is_test or force_gc_on_allocation_enabled;
 
-/// qjs `MALLOC_OVERHEAD` (quickjs.c:59-62): 0 on Apple, 8 elsewhere.
-/// Added to every `js_malloc` usable size in `js_def_malloc` (quickjs.c:2168).
+/// qjs `MALLOC_OVERHEAD`: 0 on Apple, 8 elsewhere.
+/// Added to every `js_malloc` usable size in `js_def_malloc`.
 pub const malloc_overhead: usize = if (builtin.os.tag.isDarwin()) 0 else 8;
 
 const oom_coverage = struct {
@@ -210,12 +210,12 @@ pub const SmallObjectSlab = struct {
         /// Allocated: block index. Free: next free block index.
         index_or_next: u16,
         /// Size-class index of the owning arena, mirroring qjs
-        /// `JSMallocBlockHeader.block_size_idx` (quickjs.c:275) so a free never
+        /// `JSMallocBlockHeader.block_size_idx` so a free never
         /// has to recompute the class from the byte size. GC allocations stamp
         /// it too (low 5 bits of `gc.Metadata.alloc_info`, written by
         /// initGcPrefix together with the kind/flags byte); GC tenants may also
         /// set the accounting bits in its high bits, so rather than qjs's
-        /// write-once-per-arena (quickjs.c:1527), each allocation re-stamps the
+        /// write-once-per-arena, each allocation re-stamps the
         /// byte at block-pop/prefix-init time and it stays valid for that
         /// block's lifetime.
         block_size_idx: u8,
@@ -276,7 +276,7 @@ pub const SmallObjectSlab = struct {
     /// Eligibility-only variant of `classIndex`: true iff that would return an
     /// index, without materializing the class arithmetic. Free paths pair this
     /// with `headerClassIndex` (qjs `__js_free` reads `b->block_size_idx`,
-    /// quickjs.c:1614-1617, instead of re-deriving the class from the size).
+    /// quickjs.c, instead of re-deriving the class from the size).
     inline fn eligibleSize(byte_count: usize, alignment: std.mem.Alignment) bool {
         if (alignment.compare(.gt, slab_alignment)) return false;
         return totalBlockSize(byte_count) != null;
@@ -290,7 +290,7 @@ pub const SmallObjectSlab = struct {
         return blockHeaderFromUser(ptr).block_size_idx;
     }
 
-    /// qjs `__js_malloc_usable_size` small-block formula (quickjs.c:1722).
+    /// qjs `__js_malloc_usable_size` small-block formula.
     pub inline fn usablePayloadFromClass(class: usize) usize {
         return block_sizes[class] - block_header_size;
     }
@@ -306,7 +306,7 @@ pub const SmallObjectSlab = struct {
     }
 
     /// Hot small-block pop, mirroring the qjs `__js_malloc` small arm
-    /// (quickjs.c:1566-1587): unlink the first free block, stamp its live
+    ///: unlink the first free block, stamp its live
     /// block index, and retire the arena from the free list when it fills.
     inline fn popFreeBlock(self: *SmallObjectSlab, arena: *Arena, index: usize, comptime stamp_class: bool) [*]u8 {
         const block_size = block_sizes[index];
@@ -374,7 +374,7 @@ pub const SmallObjectSlab = struct {
     }
 
     /// QuickJS `js_free` returns an empty 4 KiB arena immediately
-    /// (quickjs.c:1626-1630), but its re-acquisition is a tcache pop; ours
+    ///, but its re-acquisition is a tcache pop; ours
     /// is a page-aligned backing allocation, a stamp of every block header
     /// and an address-registry insert, plus the matching removal here. A
     /// builtin that allocates a handful of small blocks per call and frees
@@ -420,7 +420,7 @@ pub const SmallObjectSlab = struct {
         self.* = .{};
     }
 
-    /// qjs `js_malloc_new_arena` is no_inline (quickjs.c:1496); keeping the
+    /// qjs `js_malloc_new_arena` is no_inline; keeping the
     /// arena-construction loop out of the per-alloc hot functions saves their
     /// prologues from carrying its register pressure.
     noinline fn addArena(self: *SmallObjectSlab, backing: std.mem.Allocator, index: usize) !*Arena {
@@ -465,7 +465,7 @@ pub const SmallObjectSlab = struct {
     /// Map a required block size (<= `max_size`) to its `block_sizes` index by
     /// piecewise arithmetic instead of walking a fully-unrolled 31-rung linear
     /// `cmp` ladder. Faithful port of qjs `get_block_size_index`
-    /// (quickjs.c:1453): the `block_sizes` table is byte-identical to qjs
+    ///: the `block_sizes` table is byte-identical to qjs
     /// `js_malloc_block_sizes`, so the three arithmetic segments (step-8 up to
     /// 128, step-16 up to 256, step-32 up to 512) reproduce the exact same
     /// index the linear scan returned (verified by the comptime cross-check
@@ -664,7 +664,7 @@ pub const MemoryAccount = struct {
     small_slab: SmallObjectSlab = .{},
     small_slab_enabled: bool = false,
     /// qjs `malloc_state.malloc_size`. Slab blocks charge class size
-    /// (`usable + MALLOC_OVERHEAD`, quickjs.c:2168/1740); standalone charges
+    /// (`usable + MALLOC_OVERHEAD`, quickjs.c); standalone charges
     /// the backing request.
     allocated_bytes: usize = 0,
     allocation_count: usize = 0,
@@ -716,11 +716,11 @@ pub const MemoryAccount = struct {
         return .{ .allocator = allocator, .persistent_allocator = allocator, .backing_allocator = allocator };
     }
 
-    /// qjs `js_def_malloc` / `js_def_free` (quickjs.c:2168/2178):
+    /// qjs `js_def_malloc` / `js_def_free`:
     /// `malloc_size ±= js_def_malloc_usable_size(ptr) + MALLOC_OVERHEAD`.
     ///
     /// Slab: `__js_malloc_usable_size` is `block_size - header`
-    /// (quickjs.c:1740-1741). Plus `MALLOC_OVERHEAD` that equals the class
+    ///. Plus `MALLOC_OVERHEAD` that equals the class
     /// size on Linux (96/112/…), which is what we charge. Standalone / large
     /// have no class; charge the backing request. Adding another
     /// `MALLOC_OVERHEAD` there would double-count the 8-byte GC prefix that
@@ -973,7 +973,7 @@ pub const MemoryAccount = struct {
         // aligned allocations keep the standalone prefix.
         const is_gc = comptime @typeInfo(T) == .@"struct" and @hasDecl(T, "gc_kind_tag");
         if (comptime is_gc) std.debug.assert(count == 1);
-        // Inline hot arm = qjs `__js_malloc` small-block path (quickjs.c:1566):
+        // Inline hot arm = qjs `__js_malloc` small-block path:
         // limit check + block pop + single-scalar ledger bump. Arena refill and
         // the backing/standalone-prefix routes live in the noinline slow twin
         // (qjs keeps `js_malloc_new_arena` / `js_malloc_large` no_inline too).
@@ -1099,7 +1099,7 @@ pub const MemoryAccount = struct {
             return;
         }
         // The alloc side validated this product with a checked multiply; qjs
-        // `__js_free` (quickjs.c:1595) recomputes nothing on free.
+        // `__js_free` recomputes nothing on free.
         const payload_bytes = @sizeOf(T) *% slice.len;
         const bytes_ptr: [*]u8 = @ptrCast(slice.ptr);
         self.freeAlignedBytes(bytes_ptr[0..payload_bytes], std.mem.Alignment.of(T));
@@ -1340,12 +1340,12 @@ pub const MemoryAccount = struct {
 
     fn recordBlockGcAllocation(self: *MemoryAccount, base: usize, payload_bytes: usize) void {
         if (comptime !heap_accounting_oracle_enabled) return;
-        const heap = self.gc_object_cell_heap orelse unreachable;
+        const heap = self.gc_object_cell_heap.?;
         const generation = if (comptime block_generation_enabled)
-            (heap.generationHandle(base, gc_prefix_size) orelse unreachable).generation
+            (heap.generationHandle(base, gc_prefix_size).?).generation
         else
             0;
-        const raw_bytes = heap.rawBytesForCell(base, gc_prefix_size) orelse unreachable;
+        const raw_bytes = heap.rawBytesForCell(base, gc_prefix_size).?;
         if (self.gc_heap_oracle) |oracle| oracle.recordRawAlloc(.{
             .audit_id = 0,
             .base = base,
@@ -1441,7 +1441,7 @@ pub const MemoryAccount = struct {
 
     /// Reads back byte 2 of a live GC object's prefix. For slab-backed objects
     /// it carries the allocator's class index (qjs `__js_free` reads
-    /// `b->block_size_idx`, quickjs.c:1614-1617, instead of re-deriving the
+    /// `b->block_size_idx`, quickjs.c, instead of re-deriving the
     /// class); for standalone prefixes bit 7 is set.
     inline fn gcAllocInfoByte(ptr: *const anyopaque) u8 {
         return @as(*const u8, @ptrFromInt(@intFromPtr(ptr) - gc_prefix_size + 2)).*;
@@ -1465,7 +1465,7 @@ pub const MemoryAccount = struct {
     /// case must preserve them. `slab_class` = the slab size-class backing this
     /// allocation (null = standalone prefix); it lands in the alloc_info byte,
     /// mirroring qjs `JSMallocBlockHeader`'s adjacent block_size_idx +
-    /// gc_obj_type:7|mark:1 bytes (quickjs.c:275-277) with one u16 store.
+    /// gc_obj_type:7|mark:1 bytes with one u16 store.
     inline fn initGcPrefix(comptime T: type, meta: [*]u8, slab_class: ?usize) void {
         // The kind must stay inside the low nibble of the shared kind/flags
         // byte (gc.BlockFlags.kind).
@@ -1502,7 +1502,7 @@ pub const MemoryAccount = struct {
         if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
         const is_gc = comptime @typeInfo(T) == .@"struct" and @hasDecl(T, "gc_kind_tag");
         const payload_size = comptime @sizeOf(T) + fam_bytes;
-        // Inline hot arm = qjs `__js_malloc` small-block path (quickjs.c:1566);
+        // Inline hot arm = qjs `__js_malloc` small-block path;
         // everything else (arena refill, slab-disabled, standalone prefix,
         // non-slab classes) lives in the noinline slow twin.
         const slab_class = comptime SmallObjectSlab.classIndex(
@@ -1540,7 +1540,7 @@ pub const MemoryAccount = struct {
                     }
                 }
                 if (comptime prepare_nonblock) |prepare| {
-                    try prepare(prepare_context orelse unreachable);
+                    try prepare(prepare_context.?);
                 }
             }
         }
@@ -1648,7 +1648,7 @@ pub const MemoryAccount = struct {
             }
         }
         // Straight-line slab arm mirroring qjs `__js_free`'s small-block path
-        // (quickjs.c:1613); the class index is filled by the typed wrapper.
+        //; the class index is filled by the typed wrapper.
         if (l.slab_class) |slab_class| {
             if (self.small_slab_enabled) {
                 if (l.is_gc) std.debug.assert(gcAllocInfoByte(ptr) & (alloc_info_standalone | alloc_info_class_mask) == slab_class);
@@ -1747,7 +1747,7 @@ pub const MemoryAccount = struct {
                 const prospective_accounted = gc_block_heap.accountedBodyBytesForRequest(
                     gc_prefix_size + payload_bytes,
                     gc_prefix_size,
-                ) orelse unreachable;
+                ).?;
                 try self.checkAllocation(prospective_accounted);
                 if (comptime trigger_gc) self.triggerGCBeforeAllocation(prospective_accounted);
                 if (comptime block_tracking_enabled) try self.prepareGcRawAudit();
@@ -1762,10 +1762,10 @@ pub const MemoryAccount = struct {
                 }
             }
             if (comptime prepare_nonblock) |prepare| {
-                try prepare(prepare_context orelse unreachable);
+                try prepare(prepare_context.?);
             }
         }
-        // Inline hot arm = qjs `__js_malloc` small-block path (quickjs.c:1566)
+        // Inline hot arm = qjs `__js_malloc` small-block path
         // with the runtime `get_block_size_index` classification qjs also pays
         // for a runtime size. Arena refill and the standalone-prefix route live
         // in the noinline slow twin.
@@ -1830,7 +1830,7 @@ pub const MemoryAccount = struct {
     /// Frees a `createWithFam` allocation. `fam_bytes` MUST equal the value
     /// passed to `createWithFam` (the caller derives it from the live object's
     /// capacity fields before clearing them) on the standalone-prefix path.
-    /// The slab arm trusts the header class (qjs `__js_free`, quickjs.c:1614)
+    /// The slab arm trusts the header class (qjs `__js_free`, quickjs.c)
     /// and does not re-run `classIndex` on the requested length.
     pub fn destroyWithFam(self: *MemoryAccount, comptime T: type, ptr: *T, fam_bytes: usize) void {
         comptime std.debug.assert(@hasDecl(T, "gc_kind_tag"));
@@ -1848,7 +1848,7 @@ pub const MemoryAccount = struct {
                     const accounted = gc_block_heap.accountedBodyBytesForRequest(
                         gc_prefix_size + payload_bytes,
                         gc_prefix_size,
-                    ) orelse unreachable;
+                    ).?;
                     if (comptime block_tracking_enabled) self.beginGcRawFree(@intFromPtr(ptr));
                     self.debitAlloc(accounted, null);
                     self.noteFreeDiagnostics(true);
@@ -1859,7 +1859,7 @@ pub const MemoryAccount = struct {
             }
         }
         // Straight-line slab arm mirroring qjs `__js_free`'s small-block path
-        // (quickjs.c:1613-1617): the block header byte carries the class index,
+        //: the block header byte carries the class index,
         // so the free never re-derives the class from the byte size.
         if (info & alloc_info_standalone == 0) {
             const slab_class: usize = info & alloc_info_class_mask;
@@ -1915,7 +1915,7 @@ pub const MemoryAccount = struct {
     /// is the body pointer (cell base + 8); the accounted byte count mirrors
     /// the one `createStringCell` charged, so the ledger balances.
     pub fn destroyStringCell(self: *MemoryAccount, payload: *const anyopaque, total_bytes: usize) void {
-        const heap = self.gc_object_cell_heap orelse unreachable;
+        const heap = self.gc_object_cell_heap.?;
         const accounted = gc_block_heap.accountedBodyBytesForRequest(total_bytes, gc_prefix_size).?;
         if (comptime diagnostic_accounting_enabled) self.traceFree(@intFromPtr(payload));
         if (comptime block_tracking_enabled) self.beginGcRawFree(@intFromPtr(payload));
@@ -1981,7 +1981,7 @@ pub const MemoryAccount = struct {
     /// body pointer (base + 8); the registry side (`unpublishStringExtent`)
     /// has already run. Mirrors `destroyWithFam`'s standalone arm.
     pub fn destroyStringExtent(self: *MemoryAccount, payload: *const anyopaque, total_bytes: usize) void {
-        const heap = self.gc_object_cell_heap orelse unreachable;
+        const heap = self.gc_object_cell_heap.?;
         const body = @intFromPtr(payload);
         if (comptime diagnostic_accounting_enabled) self.traceFree(body);
         if (comptime extent_tracking_enabled) self.beginGcRawFree(body);
@@ -2108,10 +2108,10 @@ pub const MemoryAccount = struct {
     }
 
     inline fn triggerGCBeforeAllocation(self: *MemoryAccount, byte_count: usize) void {
-        // qjs `__js_malloc` (quickjs.c:1566) checks `malloc_limit` and nothing
+        // qjs `__js_malloc` checks `malloc_limit` and nothing
         // else; `malloc_gc_threshold` belongs to `js_trigger_gc`
-        // (quickjs.c:1780-1797), whose only caller is `JS_NewObjectFromShape`
-        // (quickjs.c:5619). A production allocation therefore has no GC trigger
+        //, whose only caller is `JS_NewObjectFromShape`
+        //. A production allocation therefore has no GC trigger
         // — see `allocation_gc_trigger_enabled`.
         //
         // Runtime-owned accounts install this after GC initialization. In the
@@ -2187,7 +2187,7 @@ pub const MemoryAccount = struct {
             // The runtime enables the slab before managed allocations begin;
             // while enabled, every eligible allocation comes from it. This path
             // frees raw (non-GC-object) payloads, whose blocks keep the
-            // allocator's class byte (qjs __js_free, quickjs.c:1614).
+            // allocator's class byte (qjs __js_free, quickjs.c).
             const index = SmallObjectSlab.headerClassIndex(bytes.ptr);
             std.debug.assert(index == SmallObjectSlab.classIndex(bytes.len, alignment).?);
             self.small_slab.freeAtIndex(&self.backing_allocator, bytes.ptr, index);
@@ -2264,8 +2264,7 @@ test "reallocElements matches alloc(T, n+1) ledger for exact-fit append" {
             std.mem.Alignment.of(u32),
         );
 
-        var n: usize = 0;
-        while (n < 8) : (n += 1) {
+        for (0..8) |n| {
             const before_typed = typed.allocated_bytes;
             const before_erased = erased.allocated_bytes;
             const next_typed = try typed.alloc(u32, n + 1);
@@ -2479,7 +2478,7 @@ test "small slab GC allocation reuses allocator header for metadata" {
     const second = try account.create(TestGc);
     second.* = .{};
 
-    // qjs js_def_malloc (quickjs.c:2168): usable + MALLOC_OVERHEAD per block.
+    // qjs js_def_malloc: usable + MALLOC_OVERHEAD per block.
     // 64-byte TestGc lands in class 72; Linux charge is the class size.
     const test_class = SmallObjectSlab.classIndex(@sizeOf(TestGc), MemoryAccount.gcAlignment(TestGc)).?;
     try std.testing.expectEqual(2 * MemoryAccount.accountedMallocSize(@sizeOf(TestGc), test_class), account.allocated_bytes);

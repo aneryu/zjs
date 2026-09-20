@@ -5,7 +5,6 @@
 //! keeps the explicit call environment. Register-resident integer and short-
 //! BigInt hot paths stay in the dispatch layer. The generic arithmetic shape
 //! follows QuickJS's operator helpers and opcode cases at
-//! quickjs.c:14905-15098 and quickjs.c:20268-20330.
 
 const std = @import("std");
 
@@ -33,8 +32,8 @@ pub fn binary(
     // The two pops above guarantee capacity for one push, and none of the
     // fast legs below run user code that could touch the operand stack in
     // between — mirror qjs js_add_slow/js_binary_arith_slow writing the
-    // result straight to sp[-2] with no capacity check (quickjs.c:15098,
-    // 14905). The coercing tail below keeps the checked push: toPrimitive
+    // result straight to sp[-2] with no capacity check (quickjs.c,
+    // The coercing tail below keeps the checked push: toPrimitive
     // re-enters user code.
     if (lhs.as(.int)) |lhs_int| {
         if (rhs.as(.int)) |rhs_int| {
@@ -164,7 +163,7 @@ pub noinline fn compareVm(
 /// borrowing coercions, exactly as `compare`'s popped operands were).
 ///
 /// `cmp` is COMPTIME — qjs reaches its slow calls from independent CASE labels
-/// (`js_relational_slow(ctx, sp, opcode)` at quickjs.c:20268-20271 vs
+/// (`js_relational_slow(ctx, sp, opcode)` at quickjs.c vs
 /// `js_eq_slow(ctx, sp, inv)` at 20330), so no qjs slow path ever selects its
 /// predicate at run time. With a runtime `u8` here every eq-family call still
 /// evaluated the relational float leg's switch and every relational call still

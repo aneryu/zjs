@@ -421,12 +421,13 @@ pub const EventLoop = struct {
     }
 
     fn runNextSignalHandler(self: *EventLoop, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
-        if (os_pending_signals == 0) return false;
+        const pending = os_pending_signals.load(.monotonic);
+        if (pending == 0) return false;
         _ = ctx.runtimePtr();
         for (self.signal_handlers.items) |handler| {
             const mask = @as(u64, 1) << @intCast(handler.sig);
-            if ((os_pending_signals & mask) == 0) continue;
-            os_pending_signals &= ~mask;
+            if ((pending & mask) == 0) continue;
+            _ = os_pending_signals.fetchAnd(~mask, .monotonic);
             const callback = handler.callback;
             _ = try exec.call_runtime.callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), callback, &.{}, null, null);
             return true;
@@ -583,11 +584,14 @@ fn runNextSignalHandler(ptr: *anyopaque, core_ctx: *core.context.JSContext, outp
     return installedLoop(ptr, core_ctx).runNextSignalHandler(core_ctx, output, global);
 }
 
-var os_pending_signals: u64 = 0;
+/// Set from the signal handler, consumed by `runNextSignalHandler` on the
+/// loop thread; both sides go through atomics so a signal landing between the
+/// reader's load and store cannot be lost.
+var os_pending_signals = std.atomic.Value(u64).init(0);
 
 fn osSignalHandler(sig: c_int) callconv(.c) void {
     if (sig < 0 or sig >= 64) return;
-    os_pending_signals |= @as(u64, 1) << @intCast(sig);
+    _ = os_pending_signals.fetchOr(@as(u64, 1) << @intCast(sig), .monotonic);
 }
 
 fn nowMs() u64 {
@@ -842,17 +846,12 @@ test "runtime.EventLoop roots one-shot function bytecode timer callback after de
     var loop = EventLoop.init(ctx, .{});
     defer loop.deinit();
 
-    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-timer-bytecode-symbol");
+    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{
         .realm = ctx.core,
         .flags = .{ .func_kind = .generator },
         .cpool_count = 1,
-    });
-    var fb_published = false;
-    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-timer-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
-    fb.publishFixtureNoFail(rt);
-    fb_published = true;
+    }, &.{try rt.takeSymbolValue(symbol_atom)});
 
     const callback = core.JSValue.functionBytecode(&fb.header);
 

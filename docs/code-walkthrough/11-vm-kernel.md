@@ -8,7 +8,7 @@
 
 | 文件 | 内容 |
 | --- | --- |
-| [11-vm-kernel.md](11-vm-kernel.md) | `root.zig`、`zjs_vm.zig`、`vm_exec_state.zig`、`vm_profile.zig`、`active_invocation_trace.zig` |
+| [11-vm-kernel.md](11-vm-kernel.md) | `root.zig`、`zjs_vm.zig`、`vm_profile.zig`、`active_invocation_trace.zig` |
 | [11-vm-dispatch.md](11-vm-dispatch.md) | `tailcall_dispatch.zig`（289 个函数，每个 opcode handler 一条） |
 | [11-vm-dispatch-colds.md](11-vm-dispatch-colds.md) | `tailcall_dispatch_colds.zig` 全冷表与 `b` 体 |
 | [11-vm-frame-stack.md](11-vm-frame-stack.md) | `frame.zig`、`stack.zig` |
@@ -52,23 +52,6 @@ generator/async 必须跨 `yield`/`await` 存活，**不能**把窗口借在本�
 - 已启动：`GeneratorExecutionState.has_frame` 为真则 **跳过抛片**（qjs `JS_CALL_FLAG_GENERATOR` early-out，quickjs.c:17790），`resumeExecutionState` 把保存的 locals/args/var_refs/stack 装回临时 `Frame`。
 - 挂起：`finishExecutionStateRun` 把窗口所有权搬回 execution record；临时 Frame 变成 `isEmptyResidentExecutionShell`，`deinit` 是 no-op。
 - L0 `stop_before_pc` / `stop_on_yield` 是夹具/无标记内部 generator 的停机缝；生产 generator 用 `OP_initial_yield`。只有 `depth == 0` 且 `l0.stop_before_pc != null` 时 `runDispatchLoop` 才置 `local_fast_blocked` 并把 `active_dispatch_tbl` 指向 `&cold_table`，让每条 op 都经过 `coldNext` 里的 `maybeStop`。
-
-## `VmExecState` ABI
-
-`vm_exec_state.zig` **零函数**。它钉的是解释器、`vm_native` 与未来 baseline JIT 共用的执行态布局（engine-evolution-plan §5.3/§5.4）。字段顺序是 ABI（`VM_ABI_VERSION = 1`）：
-
-| 偏移 | 字段 | 含义 |
-| --- | --- | --- |
-| 0 | `vm: *anyopaque` | 解释器私有 `tailcall_dispatch.Vm*`；JIT 传自己的等价物 |
-| 8 | `pc` | 当前 opcode 指针 |
-| 16 | `sp` | 操作数栈顶 |
-| 24 | `fp` | 帧指针（局部基） |
-| 32 | `var_base` | 变量基 |
-| 40 | `function` | 当前 `FunctionBytecode*` |
-
-`function` 之后紧跟 `exit_reason`/`exit_value`（各带默认值 `.none` / `undefined`），再是 native-call 子集 `ctx/rt/global/output/stack/frame/machine/catch_target`。`tail` / `reenter` / `native_returned` **不**穿过这条边界。生成的 `.inc` 必须从这个 struct 出，禁止手写偏移。
-
-`VmHelperStatus`：`continue_execution / exception / function_return / suspended / interrupted / bailout`。`VmExitReason`：`none / returned / threw / suspended`。
 
 ## `tail_hot_layout_aarch64.ld`
 
@@ -229,10 +212,6 @@ exec 子系统命名空间与嵌入用薄 `Vm` 门面。只 re-export 各域，�
 - **作用**：按 FB `stack_size` 预留操作数栈（Debug 允许未 finalize 的夹具用 code 长度）。
 - **实现**：ReleaseFast 用 finalize 过的 `stack_size`；Debug 若 stack_size==0 但有 code，用 code 长度兜未跑 stack-size pass 的夹具。然后 `Stack.reserveFrameCapacity`。
 - **所有权 / 错误 / 调用**：错误：error union（`StackOverflow` / OOM），由 `runWithArgsState` 交给上层。 调用：只由 `runWithArgsState` 在非 resume（`!skip_resume_slab`）时调用；已驻留的 generator 帧在创建那次已过同一道门。
-## `src/exec/vm_exec_state.zig`
-**零函数文件。** 只钉 ABI 类型，见上文「`VmExecState` ABI」。`VM_ABI_VERSION: u32 = 1`。comptime 断言 `vm/pc/sp/fp/var_base/function` 的偏移为 0/8/16/24/32/40。
-
-native helper（`vm_native.zig`）吃 `*VmExecState` 而不是解释器私有 `*tailcall_dispatch.Vm`，这样 JIT 第一天就能调同一组 helper。通过 typed 字段拿 `ctx/rt/global/output`，不要把 `vm: *anyopaque` 再转回去。
 ## `src/exec/vm_profile.zig`
 默认构建整文件编译掉。剖析构建把计数放在 `cont`/`next`，handler 体保持未包一层（曾经的 256 槽 `profiledHandler` 把 L-1 岛滑开，zlib 上 `op_return` musttail ABI 崩溃）。
 
@@ -292,6 +271,6 @@ native helper（`vm_native.zig`）吃 `*VmExecState` 而不是解释器私有 `*
 python3 docs/code-walkthrough/_check_coverage.py --docs 'docs/code-walkthrough/11-*.md' \
   src/exec/root.zig src/exec/zjs_vm.zig src/exec/tailcall_dispatch.zig \
   src/exec/tailcall_dispatch_colds.zig src/exec/frame.zig src/exec/stack.zig \
-  src/exec/inline_calls.zig src/exec/small_inline.zig src/exec/vm_exec_state.zig \
+  src/exec/inline_calls.zig src/exec/small_inline.zig \
   src/exec/vm_profile.zig src/exec/active_invocation_trace.zig
 ```

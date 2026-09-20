@@ -6,10 +6,11 @@
 //! promise seams without erasing their ownership boundaries. Keep the measured
 //! `ctx`/`output`/`global`/caller-function/caller-frame tuple explicit and never
 //! share iterator hot arms with cold protocol fallbacks. The core protocol maps
-//! to QuickJS JS_IteratorNext2 and for-in handling at quickjs.c:16341-16548,
-//! with collection iterators around quickjs.c:52556-52605.
+//! to QuickJS JS_IteratorNext2 and for-in handling at quickjs.c,
+//! with collection iterators around quickjs.c.
 
 const std = @import("std");
+const iterator_slots = @import("iterator_slots.zig");
 
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
@@ -215,16 +216,11 @@ test "createAsyncFromSyncIterator roots direct function bytecode next method whi
     ctx.cached_function_proto = function_proto;
     const iterator = try core.Object.create(rt, core.class.ids.object, null);
 
-    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-async-from-sync-next-bytecode-symbol");
+    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{
         .flags = .{ .func_kind = .generator },
         .cpool_count = 1,
-    });
-    var fb_published = false;
-    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-async-from-sync-next-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
-    fb.publishFixtureNoFail(rt);
-    fb_published = true;
+    }, &.{try rt.takeSymbolValue(symbol_atom)});
 
     const next_method = core.JSValue.functionBytecode(&fb.header);
     test_async_from_sync_next_method = next_method;
@@ -264,7 +260,7 @@ fn asyncFromSyncMethod(ctx: *core.JSContext, name: []const u8, method_id: i32) !
 }
 
 fn defineValueProperty(rt: *core.JSRuntime, object: *core.Object, key: core.Atom, value: core.JSValue) !void {
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(value, true, false, true));
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(value, .method));
 }
 
 pub fn forInStart(
@@ -636,8 +632,8 @@ fn fastArrayForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_in
     const next_function = objectFromValue(stack.values[iterator_index + 1]) orelse return false;
     if (!next_function.isArrayIteratorNextFunction()) return false;
 
-    const kind = iterator.iteratorKindSlot().*;
-    if (kind != 1 and kind != 2) return false;
+    const kind = iterator_slots.arrayIteratorKind(iterator);
+    if (kind != .key and kind != .value) return false;
 
     const target_value = (iterator.iteratorTargetSlot().*) orelse {
         try stack.reserveAdditional(2);
@@ -663,8 +659,8 @@ fn fastArrayForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_in
     const element_index: u32 = @intCast(index);
 
     const value = switch (kind) {
-        1 => core.JSValue.int32(@intCast(element_index)),
-        2 => blk: {
+        .key => core.JSValue.int32(@intCast(element_index)),
+        .value => blk: {
             const atom_id = core.Atom.taggedInt(element_index);
             if (target.findProperty(atom_id) != null) return false;
             const elements = target.arrayElements();
@@ -672,7 +668,7 @@ fn fastArrayForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_in
             const element = elements[index];
             break :blk element;
         },
-        else => unreachable,
+        .key_value => unreachable,
     };
 
     try stack.reserveAdditional(2);
@@ -683,7 +679,7 @@ fn fastArrayForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_in
 }
 
 /// Result-object-free for-of step for the built-in Map/Set iterators (qjs
-/// JS_IteratorNext2 built-in fast path, quickjs.c:16548): when the iterator is a
+/// JS_IteratorNext2 built-in fast path, quickjs.c): when the iterator is a
 /// default map/set iterator (its `next` is the builtin collection iterator_next,
 /// not user-overridden), advance its entry cursor and push the value + done flag
 /// straight onto the operand stack, skipping the per-step `{value, done}` result
@@ -697,9 +693,8 @@ fn fastMapSetForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_i
     if (iterator_index + 1 >= stack.len()) return false;
     const iterator = objectFromValue(stack.values[iterator_index]) orelse return false;
     if (iterator.class_id != core.class.ids.map_iterator and iterator.class_id != core.class.ids.set_iterator) return false;
-    const kind = iterator.iteratorKindSlot().*;
-    // key=1, value=2, key_value=3 (entries -> [k,v] pair). Anything else falls through.
-    if (kind != 1 and kind != 2 and kind != 3) return false;
+    // key / value / key_value (entries -> [k,v] pair). Anything else falls through.
+    const kind = iterator_slots.collectionIteratorKind(iterator) orelse return false;
     const next_function = objectFromValue(stack.values[iterator_index + 1]) orelse return false;
     const ref = core.function.decodeNativeBuiltinId(next_function.nativeFunctionId()) orelse return false;
     if (ref.domain != .collection or ref.id != @intFromEnum(method_ids.collection.PrototypeMethod.iterator_next)) return false;
@@ -709,12 +704,12 @@ fn fastMapSetForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_i
     if (target.class_id != core.class.ids.map and target.class_id != core.class.ids.set) return false;
     const is_set = target.class_id == core.class.ids.set;
 
-    // Same cursor park as the generic collectionIteratorNext (quickjs.c:52605).
+    // Same cursor park as the generic collectionIteratorNext.
     iterator.retainCollectionIteratorCursor();
-    while ((iterator.iteratorIndexSlot().*) < target.collectionEntriesSlot().*.len) {
+    while ((iterator.iteratorIndexSlot().*) < target.collectionEntriesSlot().items.len) {
         const index = iterator.iteratorIndexSlot().*;
         iterator.iteratorIndexSlot().* += 1;
-        const entry = target.collectionEntriesSlot().*[index];
+        const entry = target.collectionEntriesSlot().items[index];
         if (!entry.active) continue;
         // key/value are borrowed entry slots, kept alive by the collection
         // (reachable via the iterator's target on the operand stack), so the dup
@@ -722,15 +717,14 @@ fn fastMapSetForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_i
         // the array path. key_value builds a fresh [k,v] pair (mirrors
         // collection.iteratorValue's key_value), held alive by its own refcount.
         const value = switch (kind) {
-            1 => entry.key,
-            2 => if (is_set) entry.key else entry.value,
-            3 => try buildCollectionEntryPair(
+            .key => entry.key,
+            .value => if (is_set) entry.key else entry.value,
+            .key_value => try buildCollectionEntryPair(
                 ctx.runtime,
                 is_set,
                 entry,
                 if (ctx.global) |global| array_ops.arrayPrototypeFromGlobal(ctx.runtime, global) else null,
             ),
-            else => unreachable,
         };
         try stack.reserveAdditional(2);
         stack.pushOwnedAssumeCapacity(value);
@@ -741,7 +735,7 @@ fn fastMapSetForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_i
 }
 
 /// Result-object-free for-of step for a pristine sync generator (qjs JS_IteratorNext2
-/// built-in fast path, quickjs.c:16548): when the iterator is a sync generator whose
+/// built-in fast path, quickjs.c): when the iterator is a sync generator whose
 /// `next` is the un-overridden %GeneratorPrototype%.next, resume one step via
 /// `syncGeneratorStep` (returns the raw value+done) and push value + done straight onto
 /// the operand stack, skipping the per-step `{value, done}` iterator-result object the
@@ -780,9 +774,9 @@ fn fastGeneratorForOfNext(
 
 /// Build the `[key, value]` pair for a Map/Set entries iterator step. Mirrors
 /// collection.iteratorValue's key_value arm and qjs js_create_array
-/// (quickjs.c:9601 → JS_NewArray), whose proto is the realm Array.prototype.
+/// (quickjs.c → JS_NewArray), whose proto is the realm Array.prototype.
 fn buildCollectionEntryPair(rt: *core.JSRuntime, is_set: bool, entry: core.object.CollectionEntry, prototype: ?*core.Object) !core.JSValue {
-    // qjs js_create_array (quickjs.c:9601): a pre-sized dense fast array filled by
+    // qjs js_create_array: a pre-sized dense fast array filled by
     // direct slot writes, NOT two per-element defineOwnProperty (each an
     // atomFromUInt32 + Descriptor build + the indexed-property machinery). Every
     // allocation (createArray, the elements slice) happens BEFORE the dups, so no
@@ -829,12 +823,12 @@ pub noinline fn forOfNextVm(
     return .done;
 }
 
-/// Mirrors qjs js_for_in_next (quickjs.c:16404): step the snapshot of the
+/// Mirrors qjs js_for_in_next: step the snapshot of the
 /// CURRENT chain object; on exhaustion walk the prototype chain LAZILY (one
 /// prototype per step, own keys re-snapshotted on entry, visited-key dedup on
 /// the iterator object) and re-check every candidate key with an OWN-property
 /// existence probe on the current chain object (JS_GetOwnPropertyInternal
-/// desc==NULL, quickjs.c:16480 "check if the property was deleted" -- the
+/// desc==NULL, quickjs.c "check if the property was deleted" -- the
 /// gopd trap for proxies, NEVER a proto-walking [[HasProperty]]).
 pub noinline fn forInNext(
     ctx: *core.JSContext,
@@ -844,35 +838,34 @@ pub noinline fn forInNext(
 ) !void {
     const rt = ctx.runtime;
     const iterator_value = stack.peek() orelse return error.StackUnderflow;
-    // fail safe (quickjs.c:16418-16422).
-    const iterator = property_ops.expectObject(iterator_value) catch return pushForInDone(stack);
+    // fail safe.
+    const iterator = core.value_semantics.objectFromValue(iterator_value) orelse return pushForInDone(stack);
     if (iterator.class_id != core.class.ids.for_in_iterator) return pushForInDone(stack);
 
     const yielded_key: core.Atom = loop: while (true) {
         const index = iterator.iteratorIndexSlot().*;
         if (index >= iterator.iteratorLength()) {
-            // not an object / no more prototype (quickjs.c:16428-16429).
+            // not an object / no more prototype.
             const obj_value = iterator.iteratorTargetSlot().* orelse return pushForInDone(stack);
             const obj = try property_ops.expectObject(obj_value);
             // "no more property in the current object: look in the prototype"
-            // (quickjs.c:16430-16437).
             if (forof_ops.forInInProtoChainSlot(iterator).* == 0) {
                 if (try forInPrepareProtoChainEnum(ctx, output, global, iterator, obj)) {
                     return pushForInDone(stack);
                 }
                 forof_ops.forInInProtoChainSlot(iterator).* = 1;
             }
-            // it->obj = JS_GetPrototypeFree(ctx, it->obj) (quickjs.c:16438).
+            // it->obj = JS_GetPrototypeFree(ctx, it->obj).
             const proto_value = try object_ops.objectGetPrototypeOfValue(ctx, output, global, obj, null, null);
             if (proto_value.is(.null_value)) {
                 iterator.clearOptionalValueSlot(rt, iterator.iteratorTargetSlot());
-                return pushForInDone(stack); // no more prototype (quickjs.c:16441)
+                return pushForInDone(stack); // no more prototype
             }
             const proto = property_ops.expectObject(proto_value) catch |err| {
                 return err;
             };
             try iterator.setOptionalValueSlot(rt, iterator.iteratorTargetSlot(), proto_value);
-            // snapshot the prototype's own string keys (quickjs.c:16447-16455).
+            // snapshot the prototype's own string keys.
             const keys = try forof_ops.forInSnapshotOwnStringKeys(ctx, output, global, proto, iterator);
             core.atom.freeAtomList(rt, iterator.iteratorAtomKeysSlot().*);
             // TGC S3 §2.3: the key snapshot moves into a published payload.
@@ -886,10 +879,10 @@ pub noinline fn forInNext(
         const obj_value = iterator.iteratorTargetSlot().* orelse return pushForInDone(stack);
         const obj = try property_ops.expectObject(obj_value);
         if (forof_ops.forInIsArraySlot(iterator).* != 0) {
-            // prop = __JS_AtomFromUInt32(it->idx) (quickjs.c:16457-16459).
+            // prop = __JS_AtomFromUInt32(it->idx).
             const key = core.Atom.taggedInt(@intCast(index));
             iterator.iteratorIndexSlot().* = index + 1;
-            // check if the property was deleted (quickjs.c:16480-16485).
+            // check if the property was deleted.
             if (try object_ops.proxyAwareExistsOwnProperty(ctx, output, global, obj, key, null, null)) break :loop key;
             continue;
         }
@@ -899,17 +892,17 @@ pub noinline fn forInNext(
         if (forof_ops.forInInProtoChainSlot(iterator).* != 0) {
             // "slow case: we are in the prototype chain" -- visited-key dedup
             // via an own-prop probe on the enum object itself, then add to
-            // the visited list (quickjs.c:16463-16472).
+            // the visited list.
             if (try iterator.existsOwnProperty(rt, key)) continue; // already visited
             try forof_ops.forInDefineVisited(rt, iterator, key);
         }
-        // qjs's `if (!is_enumerable) continue` (quickjs.c:16476) is folded
+        // qjs's `if (!is_enumerable) continue` is folded
         // into the snapshot: atom_keys holds only the enumerable tab entries.
-        // check if the property was deleted (quickjs.c:16480-16485).
+        // check if the property was deleted.
         if (try object_ops.proxyAwareExistsOwnProperty(ctx, output, global, obj, key, null, null)) break :loop key;
     };
 
-    // return the property (quickjs.c:16487-16489).
+    // return the property.
     const key_value = try rt.atoms.toStringValue(rt, yielded_key);
     try stack.reserveAdditional(2);
     stack.pushOwnedAssumeCapacity(key_value);
@@ -922,7 +915,7 @@ fn pushForInDone(stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(true));
 }
 
-/// Mirrors qjs js_for_in_prepare_prototype_chain_enum (quickjs.c:16341).
+/// Mirrors qjs js_for_in_prepare_prototype_chain_enum.
 /// Returns true when the enumeration is finished (no enumerable string key
 /// anywhere in the prototype chain); false to enter the slow prototype-chain
 /// phase after seeding the visited-key set with the root snapshot.
@@ -936,7 +929,7 @@ fn forInPrepareProtoChainEnum(
     const rt = ctx.runtime;
 
     // "check if there are enumerable properties in the prototype chain (fast
-    // path)" (quickjs.c:16353-16377): walk the chain with the ENUM_ONLY probe.
+    // path)": walk the chain with the ENUM_ONLY probe.
     var obj1_val = try object_ops.objectGetPrototypeOfValue(ctx, output, global, root, null, null);
     var value_root_frame = core.runtime.rootValues(.{&obj1_val});
     value_root_frame.activate(rt);
@@ -947,7 +940,7 @@ fn forInPrepareProtoChainEnum(
         const obj1 = try property_ops.expectObject(obj1_val);
         if (try forof_ops.forInHasEnumerableStringKey(ctx, output, global, obj1)) {
             has_enumerable = true;
-            break; // goto slow_path (quickjs.c:16367-16368)
+            break; // goto slow_path
         }
         const next_val = try object_ops.objectGetPrototypeOfValue(ctx, output, global, obj1, null, null);
         obj1_val = next_val;
@@ -955,12 +948,12 @@ fn forInPrepareProtoChainEnum(
     if (!has_enumerable) return true;
 
     // slow_path: "add the visited properties, even if they are not
-    // enumerable" (quickjs.c:16379-16391).
+    // enumerable".
     if (forof_ops.forInIsArraySlot(iterator).* != 0) {
         // convert the fast-array count snapshot into a real key tab
-        // (quickjs.c:16381-16388). qjs stores the converted tab in
+        //. qjs stores the converted tab in
         // it->tab_atom, but the caller immediately steps it->obj to the
-        // prototype and replaces the tab (quickjs.c:16438-16455); it is only
+        // prototype and replaces the tab; it is only
         // ever read by the visited defines, so it stays local here.
         const keys = try forof_ops.forInSnapshotOwnStringKeys(ctx, output, global, root, iterator);
         defer core.atom.freeAtomList(rt, keys);
@@ -1040,7 +1033,7 @@ pub fn arrayIteratorPrototypeFromContext(
     const slot: usize = core.class.ids.array_iterator;
     if (slot < ctx.class_prototypes.len) {
         const stored = ctx.class_prototypes[slot];
-        if (stored.is(.object)) return property_ops.expectObject(stored) catch return error.TypeError;
+        if (stored.is(.object)) return try property_ops.expectObject(stored);
     }
 
     const object = try iteratorPrototype(ctx.runtime, global, "Array Iterator");
@@ -1055,7 +1048,7 @@ pub fn arrayIteratorPrototypeFromContext(
     );
     const next_atom = core.atom.predefinedId("next", .string) orelse return error.TypeError;
     const next_value = try object.getProperty(next_atom);
-    const next_function = property_ops.expectObject(next_value) catch return error.TypeError;
+    const next_function = try property_ops.expectObject(next_value);
     if (!try next_function.addArrayIteratorNextFunction(ctx.runtime)) return error.TypeError;
 
     // %ArrayIteratorPrototype% inherits @@iterator from %IteratorPrototype%.
@@ -1081,8 +1074,7 @@ pub fn arrayIteratorMethod(
     receiver: core.JSValue,
     function_object: *core.Object,
 ) !?core.JSValue {
-    const kind = function_object.arrayIteratorKind();
-    if (kind < 1 or kind > 3) return null;
+    const kind = std.enums.fromInt(iterator_slots.ArrayIteratorKind, function_object.arrayIteratorKind()) orelse return null;
     if (receiver.is(.null_value) or receiver.is(.undefined_value)) return error.TypeError;
     var rooted_object = if (receiver.is(.object)) receiver else try object_ops.primitiveObjectForAccess(ctx.runtime, global, receiver);
 
@@ -1102,7 +1094,7 @@ pub fn arrayIteratorMethod(
     try iterator.setOptionalValueSlot(ctx.runtime, iterator.iteratorTargetSlot(), rooted_object);
     rooted_object = core.JSValue.undefinedValue();
     iterator.iteratorIndexSlot().* = 0;
-    iterator.iteratorKindSlot().* = kind;
+    iterator_slots.setArrayIteratorKind(iterator, kind);
     return iterator.value();
 }
 
@@ -1112,10 +1104,10 @@ pub fn arrayIteratorNext(
     global: *core.Object,
     receiver: core.JSValue,
 ) !?core.JSValue {
-    const iterator = property_ops.expectObject(receiver) catch return error.TypeError;
+    const iterator = try property_ops.expectObject(receiver);
     if (iterator.class_id != core.class.ids.array_iterator) return error.TypeError;
     const target_value = (iterator.iteratorTargetSlot().*) orelse return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
-    const target = property_ops.expectObject(target_value) catch return error.TypeError;
+    const target = try property_ops.expectObject(target_value);
     const length = if (core.object.isTypedArrayObject(target)) blk: {
         if (try core.object.typedArrayDetached(target)) return error.TypeError;
         if (try core.object.typedArrayOutOfBounds(target)) return error.TypeError;
@@ -1131,7 +1123,7 @@ pub fn arrayIteratorNext(
     }
     const index: u32 = @intCast((iterator.iteratorIndexSlot().*));
     iterator.iteratorIndexSlot().* += 1;
-    const value = try arrayIteratorValue(ctx, output, global, target, index, (iterator.iteratorKindSlot().*), object_ops.getValueProperty);
+    const value = try arrayIteratorValue(ctx, output, global, target, index, iterator_slots.arrayIteratorKind(iterator), object_ops.getValueProperty);
     return try createIteratorResult(ctx.runtime, global, value, false);
 }
 
@@ -1141,16 +1133,16 @@ pub fn arrayIteratorValue(
     global: *core.Object,
     target: *core.Object,
     index: u32,
-    kind: u8,
+    kind: iterator_slots.ArrayIteratorKind,
     comptime getValueProperty: anytype,
 ) !core.JSValue {
     return switch (kind) {
-        1 => core.JSValue.int32(@intCast(index)),
-        2 => if (core.object.isTypedArrayObject(target))
+        .key => core.JSValue.int32(@intCast(index)),
+        .value => if (core.object.isTypedArrayObject(target))
             try core.typed_array.typedArrayGetIndex(ctx.runtime, target, index)
         else
             try getValueProperty(ctx, output, global, target.value(), core.Atom.taggedInt(index), null, null),
-        3 => blk: {
+        .key_value => blk: {
             var pair_value = core.JSValue.undefinedValue();
             var value = core.JSValue.undefinedValue();
             var root_frame = core.runtime.rootValues(.{ &pair_value, &value });
@@ -1164,11 +1156,10 @@ pub fn arrayIteratorValue(
                 try core.typed_array.typedArrayGetIndex(ctx.runtime, target, index)
             else
                 try getValueProperty(ctx, output, global, target.value(), core.Atom.taggedInt(index), null, null);
-            try pair.defineOwnProperty(ctx.runtime, core.Atom.taggedInt(0), core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true));
-            try pair.defineOwnProperty(ctx.runtime, core.Atom.taggedInt(1), core.Descriptor.data(value, true, true, true));
+            try pair.defineOwnProperty(ctx.runtime, core.Atom.taggedInt(0), core.Descriptor.data(core.JSValue.int32(@intCast(index)), .all));
+            try pair.defineOwnProperty(ctx.runtime, core.Atom.taggedInt(1), core.Descriptor.data(value, .all));
             break :blk pair_value;
         },
-        else => error.TypeError,
     };
 }
 
@@ -1201,14 +1192,14 @@ test "arrayIteratorValue roots entry value while creating pair array" {
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-iterator-entry-symbol");
     const symbol_value = try rt.takeSymbolValue(symbol_atom);
-    try target.defineOwnProperty(rt, core.Atom.taggedInt(0), core.Descriptor.data(symbol_value, true, true, true));
+    try target.defineOwnProperty(rt, core.Atom.taggedInt(0), core.Descriptor.data(symbol_value, .all));
     target.setArrayLength(1);
 
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const pair_value = try arrayIteratorValue(ctx, null, global, target, 0, 3, testArrayIteratorGetValueProperty);
+    const pair_value = try arrayIteratorValue(ctx, null, global, target, 0, .key_value, testArrayIteratorGetValueProperty);
     const pair = try property_ops.expectObject(pair_value);
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
@@ -1249,7 +1240,7 @@ pub fn iteratorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*
 pub fn defineToStringTag(rt: *core.JSRuntime, object: *core.Object, tag_name: []const u8) !void {
     const tag_atom = core.atom.predefinedId("Symbol.toStringTag", .symbol) orelse return error.TypeError;
     const tag = try value_ops.createStringValue(rt, tag_name);
-    try object.defineOwnProperty(rt, tag_atom, core.Descriptor.data(tag, false, false, true));
+    try object.defineOwnProperty(rt, tag_atom, core.Descriptor.data(tag, .{ .configurable = true }));
 }
 
 pub fn iteratorPrototype(rt: *core.JSRuntime, global: *core.Object, tag_name: []const u8) !*core.Object {
@@ -1307,10 +1298,10 @@ pub fn iteratorPrototypeAccessorSet(
     atom_id: core.Atom,
     value: core.JSValue,
 ) !core.JSValue {
-    const object = property_ops.expectObject(receiver) catch return error.TypeError;
+    const object = try property_ops.expectObject(receiver);
     if (atom_id == core.atom.ids.constructor) {
         if (!value.is(.object)) return error.TypeError;
-        try object.defineOwnProperty(ctx.runtime, atom_id, core.Descriptor.data(value, true, false, true));
+        try object.defineOwnProperty(ctx.runtime, atom_id, core.Descriptor.data(value, .method));
         return core.JSValue.undefinedValue();
     }
     const tag_atom = core.atom.predefinedId("Symbol.toStringTag", .symbol) orelse return error.TypeError;
@@ -1326,7 +1317,7 @@ pub fn iteratorPrototypeAccessorSet(
         };
         return core.JSValue.undefinedValue();
     }
-    try object.defineOwnProperty(ctx.runtime, atom_id, core.Descriptor.data(value, true, true, true));
+    try object.defineOwnProperty(ctx.runtime, atom_id, core.Descriptor.data(value, .all));
     return core.JSValue.undefinedValue();
 }
 
@@ -1341,7 +1332,7 @@ pub fn iteratorFromCall(
     if (args.len < 1) return error.TypeError;
     const source = args[0];
     if (source.is(.null_value) or source.is(.undefined_value)) return error.TypeError;
-    if (!source.isString() and (property_ops.expectObject(source) catch null) == null) return error.TypeError;
+    if (!source.isString() and (core.value_semantics.objectFromValue(source)) == null) return error.TypeError;
 
     const result = try iteratorFromSourceForIteratorFrom(ctx, output, global, source, caller_function, caller_frame);
     if (!result.wrap) {
@@ -1416,7 +1407,7 @@ pub fn iteratorConcatCall(
         loop_root_frame.activate(ctx.runtime);
         defer loop_root_frame.deactivate(ctx.runtime);
 
-        _ = property_ops.expectObject(rooted_item) catch return error.TypeError;
+        _ = try property_ops.expectObject(rooted_item);
         rooted_iterator_method = try getIteratorMethod(ctx, output, global, rooted_item);
         if (rooted_iterator_method.is(.undefined_value) or rooted_iterator_method.is(.null_value) or !isCallableValue(rooted_iterator_method)) return error.TypeError;
         try records.setProperty(ctx.runtime, core.Atom.taggedInt(@intCast(index * 2)), rooted_item);
@@ -1428,7 +1419,7 @@ pub fn iteratorConcatCall(
     errdefer core.Object.destroyFromHeader(ctx.runtime, helper.gcHeader());
     try helper.setOptionalValueSlot(ctx.runtime, helper.iteratorTargetSlot(), rooted_records);
     rooted_records = core.JSValue.undefinedValue();
-    helper.iteratorKindSlot().* = 6;
+    iterator_slots.setHelperKind(helper, .concat);
     helper.iteratorIndexSlot().* = 0;
     return helper.value();
 }
@@ -1469,16 +1460,11 @@ test "iteratorConcatCall roots direct function bytecode iterator method while cr
     const concat_prototype = try core.Object.create(rt, core.class.ids.object, null);
     try global.setCachedRealmValue(rt, .iterator_concat_prototype, concat_prototype.value());
 
-    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-iterator-concat-method-bytecode-symbol");
+    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{
         .flags = .{ .func_kind = .generator },
         .cpool_count = 1,
-    });
-    var fb_published = false;
-    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-iterator-concat-method-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
-    fb.publishFixtureNoFail(rt);
-    fb_published = true;
+    }, &.{try rt.takeSymbolValue(symbol_atom)});
 
     const iterator_method = core.JSValue.functionBytecode(&fb.header);
     test_iterator_concat_method = iterator_method;
@@ -1510,11 +1496,7 @@ test "iteratorConcatCall roots direct function bytecode iterator method while cr
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-pub const IteratorZipMode = enum(u8) {
-    shortest = 0,
-    longest = 1,
-    strict = 2,
-};
+pub const IteratorZipMode = iterator_slots.IteratorZipMode;
 
 pub const IteratorZipRecord = struct {
     iterator: core.JSValue,
@@ -1554,11 +1536,6 @@ pub const IteratorZipCompletion = struct {
         }
         self.err = null;
     }
-};
-
-const IteratorZipHelperKind = enum(u8) {
-    zip = 7,
-    zip_keyed = 8,
 };
 
 const objectFromValue = core.value_semantics.objectFromValue;
@@ -1774,8 +1751,7 @@ pub fn iteratorZipCollectIndexed(
                 try iteratorZipStoreIndex(ctx.runtime, pads, index, core.JSValue.undefinedValue());
             }
         } else {
-            var index: usize = 0;
-            while (index < count) : (index += 1) {
+            for (0..count) |index| {
                 try iteratorZipStoreIndex(ctx.runtime, pads, index, core.JSValue.undefinedValue());
             }
         }
@@ -1827,8 +1803,7 @@ pub fn iteratorZipCollectKeyed(
     }
 
     if (mode == .longest) {
-        var index: usize = 0;
-        while (index < count) : (index += 1) {
+        for (0..count) |index| {
             if (!padding.is(.undefined_value) and !padding.is(.null_value)) {
                 const key_value = iteratorZipGetIndex(keys, index);
                 const key = property_ops.propertyKeyAtom(ctx.runtime, key_value) catch |err| {
@@ -1917,10 +1892,10 @@ pub fn iteratorZipCreateHelper(
     const helper = try core.Object.create(rt, core.class.ids.iterator_helper, prototype);
     errdefer core.Object.destroyFromHeader(rt, helper.gcHeader());
     helper_value = helper.value();
-    helper.iteratorKindSlot().* = @intFromEnum(if (keyed) IteratorZipHelperKind.zip_keyed else IteratorZipHelperKind.zip);
+    iterator_slots.setHelperKind(helper, if (keyed) .zip_keyed else .zip);
     helper.iteratorIndexSlot().* = count;
-    helper.iteratorZipModeSlot().* = @intFromEnum(mode);
-    helper.iteratorZipStateSlot().* = 0;
+    iterator_slots.setZipMode(helper, mode);
+    iterator_slots.setZipState(helper, .fresh);
     helper.iteratorZipAliveSlot().* = count;
     try installIteratorHelperMethod(rt, global, helper, core.atom.ids.next, 1);
     try installIteratorHelperMethod(rt, global, helper, core.atom.ids.return_, 2);
@@ -1943,7 +1918,7 @@ pub fn iteratorZipStoreIndex(rt: *core.JSRuntime, object: *core.Object, index: u
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    try object.defineOwnProperty(rt, core.Atom.taggedInt(@intCast(index)), core.Descriptor.data(rooted_value, true, true, true));
+    try object.defineOwnProperty(rt, core.Atom.taggedInt(@intCast(index)), core.Descriptor.data(rooted_value, .all));
 }
 
 test "iteratorZipStoreIndex roots direct function bytecode value while defining property" {
@@ -1952,16 +1927,11 @@ test "iteratorZipStoreIndex roots direct function bytecode value while defining 
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
 
-    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-iterator-zip-store-bytecode-symbol");
+    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{
         .flags = .{ .func_kind = .generator },
         .cpool_count = 1,
-    });
-    var fb_published = false;
-    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-iterator-zip-store-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
-    fb.publishFixtureNoFail(rt);
-    fb_published = true;
+    }, &.{try rt.takeSymbolValue(symbol_atom)});
 
     const stored_value = core.JSValue.functionBytecode(&fb.header);
 
@@ -2119,16 +2089,7 @@ const IteratorPredicateKind = enum {
     some,
 };
 
-pub const IteratorHelperKind = enum(u8) {
-    map = 1,
-    filter = 2,
-    take = 3,
-    drop = 4,
-    flatMap = 5,
-    concat = 6,
-    zip = 7,
-    zip_keyed = 8,
-};
+pub const IteratorHelperKind = iterator_slots.IteratorHelperKind;
 
 pub fn iteratorCloseWithCompletionAndPropagate(
     ctx: *core.JSContext,
@@ -2240,7 +2201,7 @@ fn iteratorToArrayCall(
             out.setArrayLength(index);
             return out.value();
         }
-        try out.defineOwnProperty(ctx.runtime, core.Atom.taggedInt(index), core.Descriptor.data(step.value, true, true, true));
+        try out.defineOwnProperty(ctx.runtime, core.Atom.taggedInt(index), core.Descriptor.data(step.value, .all));
     }
 }
 
@@ -2539,7 +2500,7 @@ fn iteratorCreateHelper(
     const helper = try core.Object.create(ctx.runtime, core.class.ids.iterator_helper, prototype);
     errdefer core.Object.destroyFromHeader(ctx.runtime, helper.gcHeader());
     try helper.setOptionalValueSlot(ctx.runtime, helper.iteratorTargetSlot(), rooted_receiver);
-    helper.iteratorKindSlot().* = @intFromEnum(kind);
+    iterator_slots.setHelperKind(helper, kind);
     helper.iteratorIndexSlot().* = limit orelse 0;
     try helper.setOptionalValueSlot(ctx.runtime, helper.iteratorNextSlot(), rooted_next_method);
     if (!rooted_callback.is(.undefined_value)) try helper.setOptionalValueSlot(ctx.runtime, helper.iteratorCallbackSlot(), rooted_callback);
@@ -2559,21 +2520,16 @@ test "iteratorCreateHelper roots direct function bytecode callback while creatin
     const iterator = try core.Object.create(rt, core.class.ids.object, null);
 
     const next_key = try rt.internAtom("next");
-    try iterator.defineOwnProperty(rt, next_key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
+    try iterator.defineOwnProperty(rt, next_key, core.Descriptor.data(core.JSValue.int32(1), .all));
 
     const helper_prototype = try core.Object.create(rt, core.class.ids.object, null);
     try global.setCachedRealmValue(rt, .iterator_helper_prototype, helper_prototype.value());
 
-    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-iterator-helper-callback-bytecode-symbol");
+    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{
         .flags = .{ .func_kind = .generator },
         .cpool_count = 1,
-    });
-    var fb_published = false;
-    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-iterator-helper-callback-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
-    fb.publishFixtureNoFail(rt);
-    fb_published = true;
+    }, &.{try rt.takeSymbolValue(symbol_atom)});
 
     const callback = core.JSValue.functionBytecode(&fb.header);
 
@@ -2613,10 +2569,10 @@ fn iteratorZipPutResult(
     if (keys) |key_store| {
         const key_value = iteratorZipGetIndex(key_store, index);
         const atom_id = try property_ops.propertyKeyAtom(rt, key_value);
-        try results.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, true, true, true));
+        try results.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, .all));
         return;
     }
-    try results.defineOwnProperty(rt, core.Atom.taggedInt(@intCast(index)), core.Descriptor.data(value, true, true, true));
+    try results.defineOwnProperty(rt, core.Atom.taggedInt(@intCast(index)), core.Descriptor.data(value, .all));
 }
 
 fn iteratorZipCompleteAbrupt(
@@ -2642,7 +2598,7 @@ fn iteratorZipCompleteAbrupt(
         return close_err;
     };
     try iteratorHelperClear(ctx.runtime, helper);
-    helper.iteratorZipStateSlot().* = 3;
+    iterator_slots.setZipState(helper, .done);
     completion.restore(ctx);
     return completion.err orelse err;
 }
@@ -2655,12 +2611,10 @@ fn iteratorZipHelperNext(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const state = helper.iteratorZipStateSlot().*;
-    switch (state) {
-        0, 1 => helper.iteratorZipStateSlot().* = 2,
-        2 => return error.TypeError,
-        3 => return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true),
-        else => return error.TypeError,
+    switch (iterator_slots.zipState(helper)) {
+        .fresh, .yielded => iterator_slots.setZipState(helper, .running),
+        .running => return error.TypeError,
+        .done => return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true),
     }
 
     const iterator_value = (helper.iteratorTargetSlot().*) orelse return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
@@ -2669,11 +2623,11 @@ fn iteratorZipHelperNext(
     const nexts = objectFromValue(nexts_value) orelse return error.TypeError;
     const pads_value = helper.iteratorZipPads() orelse return error.TypeError;
     const pads = objectFromValue(pads_value) orelse return error.TypeError;
-    const keys = if ((helper.iteratorKindSlot().*) == @intFromEnum(IteratorHelperKind.zip_keyed)) blk: {
+    const keys = if (iterator_slots.helperKind(helper) == .zip_keyed) blk: {
         const keys_value = helper.iteratorZipKeys() orelse return error.TypeError;
         break :blk objectFromValue(keys_value) orelse return error.TypeError;
     } else null;
-    const mode: IteratorZipMode = @enumFromInt(helper.iteratorZipModeSlot().*);
+    const mode = iterator_slots.zipMode(helper);
     var alive: usize = helper.iteratorZipAliveSlot().*;
     const count = (helper.iteratorIndexSlot().*);
 
@@ -2687,8 +2641,7 @@ fn iteratorZipHelperNext(
 
     var dones: usize = 0;
     var values: usize = 0;
-    var index: usize = 0;
-    while (index < count) : (index += 1) {
+    for (0..count) |index| {
         const iter = iteratorZipGetIndex(iters, index);
         if (iter.is(.undefined_value) or iter.is(.null_value)) {
             if (mode != .longest) return error.TypeError;
@@ -2730,7 +2683,7 @@ fn iteratorZipHelperNext(
                 defer completion.deinit(ctx.runtime);
                 try iteratorZipCloseAllWithCompletion(ctx, output, global, &completion, iters, count, caller_function, caller_frame);
                 try iteratorHelperClear(ctx.runtime, helper);
-                helper.iteratorZipStateSlot().* = 3;
+                iterator_slots.setZipState(helper, .done);
                 if (completion.err) |err| {
                     completion.restore(ctx);
                     return err;
@@ -2740,7 +2693,7 @@ fn iteratorZipHelperNext(
             .longest => {
                 if (alive < 1) {
                     try iteratorHelperClear(ctx.runtime, helper);
-                    helper.iteratorZipStateSlot().* = 3;
+                    iterator_slots.setZipState(helper, .done);
                     return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
                 }
                 const pad = iteratorZipGetIndex(pads, index);
@@ -2756,12 +2709,12 @@ fn iteratorZipHelperNext(
 
     if (values == 0) {
         try iteratorHelperClear(ctx.runtime, helper);
-        helper.iteratorZipStateSlot().* = 3;
+        iterator_slots.setZipState(helper, .done);
         return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
     }
 
     if (keys == null) results.setArrayLength(@intCast(count));
-    helper.iteratorZipStateSlot().* = 1;
+    iterator_slots.setZipState(helper, .yielded);
     return try createIteratorResult(ctx.runtime, global, results_value, false);
 }
 
@@ -2773,13 +2726,11 @@ fn iteratorZipHelperReturn(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const state = helper.iteratorZipStateSlot().*;
-    switch (state) {
-        0 => helper.iteratorZipStateSlot().* = 3,
-        1 => helper.iteratorZipStateSlot().* = 2,
-        2 => return error.TypeError,
-        3 => return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true),
-        else => return error.TypeError,
+    switch (iterator_slots.zipState(helper)) {
+        .fresh => iterator_slots.setZipState(helper, .done),
+        .yielded => iterator_slots.setZipState(helper, .running),
+        .running => return error.TypeError,
+        .done => return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true),
     }
 
     if ((helper.iteratorTargetSlot().*)) |iterator_value| {
@@ -2788,7 +2739,7 @@ fn iteratorZipHelperReturn(
         defer completion.deinit(ctx.runtime);
         try iteratorZipCloseAllWithCompletion(ctx, output, global, &completion, iters, (helper.iteratorIndexSlot().*), caller_function, caller_frame);
         try iteratorHelperClear(ctx.runtime, helper);
-        helper.iteratorZipStateSlot().* = 3;
+        iterator_slots.setZipState(helper, .done);
         if (completion.err) |err| {
             completion.restore(ctx);
             return err;
@@ -2796,7 +2747,7 @@ fn iteratorZipHelperReturn(
         return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
     }
     try iteratorHelperClear(ctx.runtime, helper);
-    helper.iteratorZipStateSlot().* = 3;
+    iterator_slots.setZipState(helper, .done);
     return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
 }
 
@@ -2816,7 +2767,7 @@ pub fn iteratorHelperNext(
     helper.generatorExecutingSlot().* = true;
     defer helper.generatorExecutingSlot().* = false;
     const iterator = (helper.iteratorTargetSlot().*) orelse return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
-    const kind: IteratorHelperKind = @enumFromInt((helper.iteratorKindSlot().*));
+    const kind = iterator_slots.helperKind(helper);
 
     switch (kind) {
         .zip, .zip_keyed => return try iteratorZipHelperNext(ctx, output, global, helper, caller_function, caller_frame),
@@ -2979,9 +2930,7 @@ pub fn iteratorHelperReturn(
     if (function_object.iteratorHelperMethod() != 2) return null;
     const helper = objectFromValue(receiver) orelse return error.TypeError;
     if (helper.class_id != core.class.ids.iterator_helper) return error.TypeError;
-    if ((helper.iteratorKindSlot().*) == @intFromEnum(IteratorHelperKind.zip) or
-        (helper.iteratorKindSlot().*) == @intFromEnum(IteratorHelperKind.zip_keyed))
-    {
+    if (iterator_slots.helperKind(helper) == .zip or iterator_slots.helperKind(helper) == .zip_keyed) {
         return try iteratorZipHelperReturn(ctx, output, global, helper, caller_function, caller_frame);
     }
     if (helper.generatorExecuting()) return error.TypeError;
@@ -3000,7 +2949,7 @@ fn iteratorHelperClose(
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     try iteratorHelperCloseInner(ctx, output, global, helper, caller_function, caller_frame);
-    if ((helper.iteratorKindSlot().*) == @intFromEnum(IteratorHelperKind.concat)) {
+    if (iterator_slots.helperKind(helper) == .concat) {
         try iteratorHelperClear(ctx.runtime, helper);
         return;
     }
@@ -3057,7 +3006,7 @@ fn testIteratorGetValuePropertyOptional(
     _ = global;
     _ = caller_function;
     _ = caller_frame;
-    const object = property_ops.expectObject(value) catch return error.TypeError;
+    const object = try property_ops.expectObject(value);
     return try object.getProperty(key);
 }
 
@@ -3085,7 +3034,7 @@ pub fn iteratorForValue(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     if (source_value.isString()) return core.object.stringIterator(ctx, source_value);
-    const source_object = property_ops.expectObject(source_value) catch null;
+    const source_object = core.value_semantics.objectFromValue(source_value);
     if (source_object != null and source_object.?.class_id == core.class.ids.string) return core.object.stringIterator(ctx, source_value);
     if (source_object != null and
         (source_object.?.class_id == core.class.ids.array_iterator or
@@ -3098,7 +3047,7 @@ pub fn iteratorForValue(
     const iterator_method = try call_runtime.getIteratorMethod(ctx, output, global, source_value);
     if (!call_runtime.isCallableValue(iterator_method)) return exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable");
     const iterator_value = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, source_value, iterator_method, &.{}, caller_function, caller_frame);
-    _ = property_ops.expectObject(iterator_value) catch return error.TypeError;
+    _ = try property_ops.expectObject(iterator_value);
     try call_runtime.cacheIteratorNextMethod(ctx, output, global, iterator_value);
     return iterator_value;
 }
@@ -3131,7 +3080,7 @@ pub fn iteratorStepValue(
     // `next()` returned. There is no class-based dispatch here: a Promise is
     // an ordinary object to the SYNCHRONOUS protocol (unwrapping one would
     // observe its internal state outside the job queue), and a RegExp is too.
-    const next_result = property_ops.expectObject(next_result_value) catch return error.TypeError;
+    const next_result = try property_ops.expectObject(next_result_value);
     const done_key = core.atom.predefinedId("done", .string).?;
     const done = try object_ops.getValueProperty(ctx, output, global, next_result.value(), done_key, null, null);
     if (value_ops.isTruthy(done)) return .{ .value = core.JSValue.undefinedValue(), .done = true };
@@ -3153,7 +3102,7 @@ pub fn iteratorStepResult(
     };
     if (!call_runtime.isCallableValue(next_method)) return error.TypeError;
     const next_result_value = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator_value, next_method, &.{next_arg}, null, null);
-    const next_result = property_ops.expectObject(next_result_value) catch return error.TypeError;
+    const next_result = try property_ops.expectObject(next_result_value);
     const done_key = core.atom.predefinedId("done", .string).?;
     const done = try object_ops.getValueProperty(ctx, output, global, next_result.value(), done_key, null, null);
     const is_done = coercion_ops.valueTruthy(done);
@@ -3360,12 +3309,12 @@ pub noinline fn createIteratorResult(rt: *core.JSRuntime, global: ?*core.Object,
     try object.defineOwnPropertyAssumingNew(
         rt,
         core.atom.ids.value,
-        core.Descriptor.data(rooted_value, true, true, true),
+        core.Descriptor.data(rooted_value, .all),
     );
     try object.defineOwnPropertyAssumingNew(
         rt,
         core.atom.ids.done,
-        core.Descriptor.data(core.JSValue.boolean(done), true, true, true),
+        core.Descriptor.data(core.JSValue.boolean(done), .all),
     );
     return object.value();
 }
@@ -3381,4 +3330,31 @@ pub fn closeIteratorForFromEntriesAbrupt(
     if (return_method.is(.undefined_value) or return_method.is(.null_value)) return;
     if (!call_runtime.isCallableValue(return_method)) return error.TypeError;
     _ = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator_value, return_method, &.{}, null, null);
+}
+
+test "createIteratorResult roots direct function bytecode value while creating result" {
+    const rt = try core.JSRuntime.create(std.testing.allocator);
+    defer rt.destroy();
+
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-closure-iterator-result-bytecode-symbol");
+    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
+
+    const result_value = core.JSValue.functionBytecode(&fb.header);
+
+    const old_threshold = rt.gcThreshold();
+    rt.setGCThreshold(0);
+    defer rt.setGCThreshold(old_threshold);
+
+    const iterator_result_value = try createIteratorResult(rt, null, result_value, false);
+    const iterator_result = try core.value_semantics.expectObject(iterator_result_value);
+
+    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
+    const value_atom = try rt.internAtom("value");
+    {
+        const stored = try iterator_result.getProperty(value_atom);
+        try std.testing.expect(stored.same(result_value));
+    }
+
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }

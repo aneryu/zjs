@@ -59,7 +59,7 @@ fn dynEnvProbeAccess(
     const operand_pc = frame.pc;
     frame.pc += 9;
     const obj_value = stack.peek() orelse return error.StackUnderflow;
-    const object = property_ops.expectObject(obj_value) catch {
+    const object = core.value_semantics.objectFromValue(obj_value) orelse {
         _ = try stack.pop();
         return .continue_loop;
     };
@@ -247,7 +247,7 @@ pub fn getRefValue(
     const obj = stack.values[stack.len() - 2];
     const key = stack.values[stack.len() - 1];
     if (obj.is(.undefined_value)) {
-        // qjs OP_get_ref_value (quickjs.c:19499): the atom is resolved first,
+        // qjs OP_get_ref_value: the atom is resolved first,
         // then the undefined base reports the identifier.
         const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key, function, frame);
         _ = exception_ops.throwReferenceErrorNotDefined(ctx, global, atom_id) catch |err| return err;
@@ -305,7 +305,7 @@ pub fn putRefValue(
     const runtime_strict = function.isStrictMode() or function.runtimeStrictMode();
     if (obj.is(.undefined_value)) {
         if (runtime_strict) {
-            // qjs OP_put_ref_value (quickjs.c:19606).
+            // qjs OP_put_ref_value.
             const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key, function, frame);
             _ = exception_ops.throwReferenceErrorNotDefined(ctx, global, atom_id) catch |err| return err;
             return error.ReferenceError;
@@ -437,7 +437,7 @@ pub noinline fn deletePropertyVm(
 ) !Step {
     const prop = try stack.pop();
     const obj = try stack.pop();
-    // qjs js_operator_delete (quickjs.c:16072) runs JS_ValueToAtom on the key
+    // qjs js_operator_delete runs JS_ValueToAtom on the key
     // FIRST: user toString/Symbol.toPrimitive side effects (and their
     // exceptions) fire before any base check.
     const atom_id = object_ops.toPropertyKeyAtom(ctx, output, global, prop, function, frame) catch |err| {
@@ -448,7 +448,7 @@ pub noinline fn deletePropertyVm(
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
         return error.TypeError;
     }
-    // JS_DeleteProperty (quickjs.c:10920) converts the base via JS_ToObject and
+    // JS_DeleteProperty converts the base via JS_ToObject and
     // runs the real delete on the wrapper, so string-exotic non-configurable
     // props (indices, .length) report false and strict mode throws.
     const obj_value = if (obj.is(.object)) obj else object_ops.primitiveObjectForAccess(ctx.runtime, global, obj) catch |err| {

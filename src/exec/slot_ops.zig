@@ -159,7 +159,7 @@ pub fn execGetVarRefMaybeTdz(
             return false;
         }
     }
-    // Slot is a cell by type (qjs OP_get_var_ref_check, quickjs.c:18630);
+    // Slot is a cell by type (qjs OP_get_var_ref_check, quickjs.c);
     // the pre-typed raw-slot arm is gone with the type flip.
     const cell = varRefSlotCell(frame, idx);
     const value = cell.varRefValue();
@@ -203,7 +203,7 @@ pub fn execPutVarRef(
     if (idx >= frame.var_refs.len) try ensureVarRefsCapacity(ctx, frame, idx);
     const value = try stack.pop();
     // Slot is a cell by type (qjs OP_put_var_ref set_value into
-    // var_refs[idx]->pvalue, quickjs.c:18638); the raw-slot arm — including
+    // var_refs[idx]->pvalue, quickjs.c); the raw-slot arm — including
     // its global-lexical/sentinel fallbacks, which post phase-B could never
     // execute (every slot was already a cell) — is deleted with the type.
     const cell = varRefSlotCell(frame, idx);
@@ -272,7 +272,7 @@ pub fn adapterValueBorrow(slot: core.JSValue) callconv(.c) core.JSValue {
     // Terminal-state invariant: a cell's VALUE is never itself a cell — the
     // last nesting producer (the direct-eval const view) now pvalue-aliases
     // its target (eval_ops.directEvalOuterVarRefView) — so ONE unwrap reaches
-    // the plain value (qjs bare `*var_ref->pvalue`, quickjs.c:18627).
+    // the plain value (qjs bare `*var_ref->pvalue`, quickjs.c).
     const cell = varRefCellFromValue(slot) orelse return slot;
     const value = cell.varRefValue();
     if (comptime builtin.mode == .Debug) {
@@ -287,7 +287,7 @@ pub fn adapterValueIsUninitialized(slot: core.JSValue) bool {
 
 /// A deleted eval-created binding: its deletable cell was parked at
 /// UNINITIALIZED by ordinary global property deletion (qjs
-/// remove_global_object_property, quickjs.c:9289-9309). Distinct from a TDZ
+/// remove_global_object_property, quickjs.c). Distinct from a TDZ
 /// cell, which is uninitialized but NOT deletable.
 pub fn adapterIsDeletedEvalBinding(slot: core.JSValue) bool {
     const cell = varRefCellFromValue(slot) orelse return false;
@@ -325,8 +325,8 @@ pub fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
 // ---- frame.var_refs slot accessors (VARREFS-SLOT-TYPING-BLUEPRINT, phase D) ----
 //
 // Single funnel for every ELEMENT access of `frame.var_refs: []*core.VarRef`
-// (qjs `JSVarRef **var_refs`: JSObject.u.func.var_refs alloc, quickjs.c:17277;
-// JS_CallInternal prologue `var_refs = p->u.func.var_refs`, 17844). Every slot
+// (qjs `JSVarRef **var_refs`: JSObject.u.func.var_refs alloc, quickjs.c;
+// JS_CallInternal prologue `var_refs = p->u.func.var_refs`). Every slot
 // is a live cell by the type; the phase-A/B "is this slot a cell" runtime
 // discrimination and its debug canary are gone. `varRefSlot*` returning
 // JSValue are the boundary views for the JSValue-typed domains (eval name
@@ -350,11 +350,11 @@ pub inline fn varRefSlot(frame: *const frame_mod.Frame, idx: usize) core.JSValue
 /// The JSValue parameter is the boundary form those callers hold (an owned
 /// ref to a cell by construction); the transfer keeps its refcount.
 pub inline fn storeVarRefSlot(frame: *frame_mod.Frame, idx: usize, slot: core.JSValue) void {
-    frame.var_refs[idx] = varRefCellFromValue(slot) orelse unreachable;
+    frame.var_refs[idx] = varRefCellFromValue(slot).?;
 }
 
 /// Write-through store into the slot's cell (qjs OP_put_var_ref
-/// `set_value(ctx, var_refs[idx]->pvalue, ...)`, quickjs.c:18638). Preserves
+/// `set_value(ctx, var_refs[idx]->pvalue,...)`, quickjs.c). Preserves
 /// the Adapter replacement unwrap: an incoming cell VALUE is dereferenced
 /// before the store so cell values never nest through writes.
 pub inline fn replaceVarRefValueOwned(ctx: *core.JSContext, frame: *frame_mod.Frame, idx: usize, value: core.JSValue) void {

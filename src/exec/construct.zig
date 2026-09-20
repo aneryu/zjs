@@ -5,8 +5,8 @@
 //! payload slots duplicate or explicitly take their inputs. Builtin record
 //! domains own their direct bodies; this module selects the constructor seam
 //! and delegates TypedArray allocation to `typed_array_construct.zig`.
-//! Construction follows `JS_CallConstructorInternal` at quickjs.c:20809-20869,
-//! with Error/Object bodies at quickjs.c:41441 and quickjs.c:40098.
+//! Construction follows `JS_CallConstructorInternal` at quickjs.c,
+//! with Error/Object bodies at quickjs.c and quickjs.c.
 
 const core = @import("../core/root.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
@@ -79,8 +79,8 @@ pub fn functionObject(ctx: *core.RealmContext, name: core.Atom) !core.JSValue {
     const prototype = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, object_proto, 1);
     const prototype_value = prototype.value();
 
-    try prototype.defineOwnPropertyAssumingNew(rt, core.atom.ids.constructor, core.Descriptor.data(function_value, true, false, true));
-    try function.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(prototype_value, true, false, false));
+    try prototype.defineOwnPropertyAssumingNew(rt, core.atom.ids.constructor, core.Descriptor.data(function_value, .method));
+    try function.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(prototype_value, .{ .writable = true }));
 
     return function_value;
 }
@@ -120,7 +120,7 @@ pub fn constructValue(ctx: *core.JSContext, callee: core.JSValue, args: []const 
         break :object core.Object.fromHeader(header);
     };
 
-    if (constructor.typedArrayElementSize() != 0 and constructor.typedArrayKind() != 0) {
+    if (constructor.typedArrayElementSize() != 0 and constructor.typedArrayKind() != .none) {
         const kind = constructor.typedArrayKind();
         return constructTypedArrayValue(rt, constructor, prototype, .{
             .size = constructor.typedArrayElementSize(),
@@ -181,7 +181,7 @@ pub fn constructValue(ctx: *core.JSContext, callee: core.JSValue, args: []const 
         }
         if (std.mem.eql(u8, name, "Number")) {
             if (rooted_args.len >= 1 and rooted_args[0].is(.symbol)) return error.TypeError;
-            // qjs js_number_constructor (quickjs.c:44822) uses JS_ToNumeric
+            // qjs js_number_constructor uses JS_ToNumeric
             // (qjs:13030 → JS_ToNumberHintFree TON_FLAG_NUMERIC, qjs:12946),
             // which ToPrimitive's objects (qjs:12975-12979) before ToNumber.
             const primitive = if (rooted_args.len >= 1) blk: {
@@ -206,7 +206,7 @@ pub fn constructValue(ctx: *core.JSContext, callee: core.JSValue, args: []const 
         core.Object.destroyFromHeader(rt, instance.gcHeader());
     }
     const constructor_key = core.atom.ids.constructor;
-    try instance.defineOwnProperty(rt, constructor_key, core.Descriptor.data(rooted_callee, true, false, true));
+    try instance.defineOwnProperty(rt, constructor_key, core.Descriptor.data(rooted_callee, .method));
     return rooted_instance;
 }
 
@@ -231,7 +231,7 @@ test "constructValue fallback roots callee while defining constructor property" 
     const marker_key = try rt.internAtom("marker");
     const marker_atom = try rt.atoms.newValueSymbol("gc-construct-fallback-callee-symbol");
     const marker_value = try rt.takeSymbolValue(marker_atom);
-    try constructor_object.defineOwnProperty(rt, marker_key, core.Descriptor.data(marker_value, true, true, true));
+    try constructor_object.defineOwnProperty(rt, marker_key, core.Descriptor.data(marker_value, .all));
 
     const instance_value = try constructValue(ctx, constructor, &.{}, &.{});
     const instance = try expectObject(instance_value);
@@ -273,7 +273,7 @@ pub fn constructTypedArrayValue(rt: *core.JSRuntime, constructor: *core.Object, 
     if (element_count < 0) return error.RangeError;
     const byte_length = try std.math.mul(i32, element_count, @intCast(element.size));
     const backing_buffer = try createTypedArrayBackingBuffer(rt, array_buffer_prototype, byte_length);
-    const backing_buffer_object = expectObject(backing_buffer) catch return error.TypeError;
+    const backing_buffer_object = try expectObject(backing_buffer);
     return core.typed_array.typedArrayConstructFullBufferOwned(rt, element.size, element.kind, backing_buffer, backing_buffer_object, prototype);
 }
 
@@ -294,10 +294,10 @@ pub fn constructErrorObject(rt: *core.JSRuntime, name: []const u8, constructor: 
     const instance = try core.Object.create(rt, core.class.ids.error_, prototype);
     errdefer core.Object.destroyFromHeader(rt, instance.gcHeader());
     // No own `name` property: it lives on the per-class prototype only
-    // (qjs js_error_constructor quickjs.c:41441 defines only message/cause).
+    // (qjs js_error_constructor quickjs.c defines only message/cause).
     if (rooted_args.len >= 1 and !rooted_args[0].is(.undefined_value)) {
         const message = try value_ops.toStringValue(rt, rooted_args[0]);
-        try defineData(rt, instance, core.atom.ids.message, message, true, false, true);
+        try instance.defineOwnProperty(rt, core.atom.ids.message, core.Descriptor.data(message, .method));
     }
     return instance.value();
 }
@@ -351,9 +351,9 @@ pub fn constructDOMExceptionObject(rt: *core.JSRuntime, prototype: ?*core.Object
         try value_ops.toStringValue(rt, rooted_args[1])
     else
         try value_ops.createStringValue(rt, "Error");
-    try defineData(rt, instance, core.atom.ids.name, name, true, false, true);
-    try defineData(rt, instance, core.atom.ids.message, message, true, false, true);
-    try defineData(rt, instance, core.atom.ids.code, core.JSValue.int32(try domExceptionCode(rt, name)), true, false, true);
+    try instance.defineOwnProperty(rt, core.atom.ids.name, core.Descriptor.data(name, .method));
+    try instance.defineOwnProperty(rt, core.atom.ids.message, core.Descriptor.data(message, .method));
+    try instance.defineOwnProperty(rt, core.atom.ids.code, core.Descriptor.data(core.JSValue.int32(try domExceptionCode(rt, name)), .method));
     return instance.value();
 }
 
@@ -456,14 +456,14 @@ fn constructAggregateErrorObject(rt: *core.JSRuntime, constructor: core.JSValue,
     const instance = try core.Object.create(rt, core.class.ids.error_, prototype);
     errdefer core.Object.destroyFromHeader(rt, instance.gcHeader());
     // No own `name` property: it lives on AggregateError.prototype
-    // (qjs js_error_constructor quickjs.c:41441, JS_AGGREGATE_ERROR magic).
+    // (qjs js_error_constructor quickjs.c, JS_AGGREGATE_ERROR magic).
 
     if (rooted_args.len < 1 or !rooted_args[0].is(.object)) return error.TypeError;
     const errors_source = try expectObject(rooted_args[0]);
     if (!errors_source.isArray()) return error.TypeError;
     if (rooted_args.len >= 2 and !rooted_args[1].is(.undefined_value)) {
         const message = try value_ops.toStringValue(rt, rooted_args[1]);
-        try defineData(rt, instance, core.atom.ids.message, message, true, false, true);
+        try instance.defineOwnProperty(rt, core.atom.ids.message, core.Descriptor.data(message, .method));
     }
 
     if (rooted_args.len >= 3 and rooted_args[2].is(.object)) {
@@ -474,7 +474,7 @@ fn constructAggregateErrorObject(rt: *core.JSRuntime, constructor: core.JSValue,
         if (!has_cause) {
             has_cause = (try options.getOwnProperty(rt, cause_key)) != null;
         }
-        if (has_cause) try defineData(rt, instance, core.atom.ids.cause, cause_val, true, false, true);
+        if (has_cause) try instance.defineOwnProperty(rt, core.atom.ids.cause, core.Descriptor.data(cause_val, .method));
         cause_val = core.JSValue.undefinedValue();
     }
 
@@ -484,12 +484,12 @@ fn constructAggregateErrorObject(rt: *core.JSRuntime, constructor: core.JSValue,
     var index: u32 = 0;
     while (index < errors_source.arrayLength()) : (index += 1) {
         copied_error_val = try errors_source.getProperty(core.Atom.taggedInt(index));
-        try errors_array.defineOwnProperty(rt, core.Atom.taggedInt(index), core.Descriptor.data(copied_error_val, true, true, true));
+        try errors_array.defineOwnProperty(rt, core.Atom.taggedInt(index), core.Descriptor.data(copied_error_val, .all));
         copied_error_val = core.JSValue.undefinedValue();
     }
     errors_array.setArrayLength(errors_source.arrayLength());
-    try errors_array.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(@intCast(errors_source.arrayLength())), true, false, false));
-    try defineData(rt, instance, core.atom.ids.errors, errors_array_val, true, false, true);
+    try errors_array.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(@intCast(errors_source.arrayLength())), .{ .writable = true }));
+    try instance.defineOwnProperty(rt, core.atom.ids.errors, core.Descriptor.data(errors_array_val, .method));
     return instance.value();
 }
 
@@ -538,7 +538,7 @@ test "constructWeakRef roots direct symbol target while creating weak ref" {
 
     const symbol_value = try rt.takeSymbolValue(symbol_atom);
     const weak_ref_value = try constructWeakRef(rt, &.{symbol_value}, null);
-    const weak_ref = expectObject(weak_ref_value) catch return error.TypeError;
+    const weak_ref = try expectObject(weak_ref_value);
 
     {
         const live = weak_ref.weakRefDeref(rt);
@@ -550,18 +550,6 @@ test "constructWeakRef roots direct symbol target while creating weak ref" {
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
     try std.testing.expect(weak_ref.weakRefDeref(rt).is(.undefined_value));
-}
-
-fn defineData(
-    rt: *core.JSRuntime,
-    target: *core.Object,
-    key: core.Atom,
-    value: core.JSValue,
-    writable: bool,
-    enumerable: bool,
-    configurable: bool,
-) !void {
-    try target.defineOwnProperty(rt, key, core.Descriptor.data(value, writable, enumerable, configurable));
 }
 
 fn constructPrimitiveWrapper(rt: *core.JSRuntime, class_id: core.class.ClassId, prototype: ?*core.Object, primitive: core.JSValue) !core.JSValue {
@@ -587,7 +575,7 @@ test "constructPrimitiveWrapper roots direct symbol while creating wrapper" {
 
     const symbol_value = try rt.takeSymbolValue(symbol_atom);
     const wrapper_value = try constructPrimitiveWrapper(rt, core.class.ids.symbol, null, symbol_value);
-    const wrapper = expectObject(wrapper_value) catch return error.TypeError;
+    const wrapper = try expectObject(wrapper_value);
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const stored = wrapper.objectData() orelse return error.TypeError;
@@ -625,7 +613,7 @@ pub fn objectConstructorValue(ctx: *core.JSContext, args: []const core.JSValue, 
         }
     }
     const object_prototype = try constructor.getProperty(core.atom.ids.prototype);
-    const prototype = if (object_prototype.is(.object)) expectObject(object_prototype) catch null else null;
+    const prototype = if (object_prototype.is(.object)) core.value_semantics.objectFromValue(object_prototype) else null;
     const object = try core.Object.create(rt, core.class.ids.object, prototype);
     return object.value();
 }
@@ -747,7 +735,7 @@ fn typedArraySourceValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue
 }
 
 fn constructFunctionValue(rt: *core.JSRuntime) !core.JSValue {
-    return closure_mod.create(rt, 13, 0, 0, 0);
+    return closure_mod.create(rt, .returns_undefined);
 }
 
 fn constructCollectionValue(

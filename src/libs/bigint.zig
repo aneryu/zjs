@@ -5,9 +5,9 @@ const limb_bits = 64;
 pub const Limb = u64;
 const DoubleLimb = u128;
 
-/// qjs JS_BIGINT_MAX_SIZE (quickjs.c:11266): `(1024*1024)/JS_LIMB_BITS` limbs —
+/// qjs JS_BIGINT_MAX_SIZE: `(1024*1024)/JS_LIMB_BITS` limbs —
 /// a 1M-bit cap enforced at every fresh bigint allocation by js_bigint_new
-/// (quickjs.c:11592-11596, RangeError "BigInt is too large to allocate").
+/// (quickjs.c, RangeError "BigInt is too large to allocate").
 pub const max_bits: usize = 1024 * 1024;
 pub const max_limbs: usize = max_bits / limb_bits;
 
@@ -24,7 +24,7 @@ pub const test_only = if (builtin.is_test) struct {
     }
 } else struct {};
 
-/// Mirror of the js_bigint_new length check (quickjs.c:11592-11596), applied at
+/// Mirror of the js_bigint_new length check, applied at
 /// the zjs result-allocation choke points.
 fn checkLimbCount(len: usize) error{BigIntTooLarge}!void {
     if (len > max_limbs) return error.BigIntTooLarge;
@@ -163,7 +163,7 @@ pub const BigInt = struct {
 
     pub fn pow(self: BigInt, exponent: BigInt, allocator: std.mem.Allocator) !BigInt {
         if (exponent.negative) return error.NegativeExponent;
-        // qjs js_bigint_pow small shortcuts (quickjs.c:12118-12130): a^0 = 1,
+        // qjs js_bigint_pow small shortcuts: a^0 = 1,
         // 0^e = 0, (±1)^e = ±1 by exponent parity — all valid for arbitrarily
         // wide exponents and computed before any exponent-width check.
         if (exponent.isZero()) return BigInt.fromIntAlloc(allocator, 1);
@@ -173,9 +173,9 @@ pub const BigInt = struct {
             return BigInt.fromIntAlloc(allocator, if (negative) -1 else 1);
         }
         const exp = exponent.toUsize() orelse return error.BigIntTooLarge;
-        // qjs js_bigint_pow power-of-two base shortcut (quickjs.c:12131-12150):
+        // qjs js_bigint_pow power-of-two base shortcut:
         // |a| = 2^n builds ±2^(e*n) directly, with the exponent capped at
-        // JS_BIGINT_MAX_SIZE bits (quickjs.c:12142) instead of walking the
+        // JS_BIGINT_MAX_SIZE bits instead of walking the
         // repeated-squaring ladder whose intermediates would hit the mul cap.
         if (self.isPowerOfTwoAbs()) {
             const n = self.bitLengthAbs() - 1;
@@ -219,7 +219,7 @@ pub const BigInt = struct {
         const width = @max(self.bitLengthAbs(), other.bitLengthAbs()) + 1;
         const limb_count = (width + limb_bits - 1) / limb_bits;
         // qjs js_bigint_logic allocates the operand-width result through
-        // js_bigint_new's cap (quickjs.c:11592-11596).
+        // js_bigint_new's cap.
         try checkLimbCount(limb_count);
         const lhs = try self.toTwosComplement(allocator, limb_count);
         defer allocator.free(lhs);
@@ -238,7 +238,7 @@ pub const BigInt = struct {
     pub fn shl(self: BigInt, allocator: std.mem.Allocator, shift: usize) !BigInt {
         if (self.isZero()) return .{ .allocator = allocator };
         // qjs js_bigint_shl allocates a->len + d limbs through js_bigint_new's
-        // cap and extends by the carry limb (quickjs.c:12049-2076): the result
+        // cap and extends by the carry limb: the result
         // value may use at most JS_BIGINT_MAX_SIZE bits. Enforce the cap on the
         // result's bit length. The `shift >= max_bits` pre-test keeps the sum
         // from overflowing usize for huge shifts.
@@ -260,7 +260,7 @@ pub const BigInt = struct {
 
     pub fn shr(self: BigInt, allocator: std.mem.Allocator, shift: usize) !BigInt {
         if (self.isZero()) return .{ .allocator = allocator };
-        // qjs js_bigint_shr (quickjs.c:12078-2088): when d >= a->len the result
+        // qjs js_bigint_shr: when d >= a->len the result
         // saturates to -sign (0 for positive, -1 for negative) before any
         // allocation — the guard that keeps huge right-shifts allocation-free.
         if (shift / limb_bits >= self.limbs.len) {
@@ -316,7 +316,7 @@ pub const BigInt = struct {
     }
 
     /// Round to nearest, ties to even, ±Infinity when too large. Mirrors qjs
-    /// `js_bigint_to_float64` (quickjs.c:12258) on sign-magnitude limbs: the
+    /// `js_bigint_to_float64` on sign-magnitude limbs: the
     /// top 64 bits carry a sticky bit for everything below, then one
     /// rounding to 53 bits. No decimal detour, so exact for every size.
     pub fn toFloat64(self: BigInt) f64 {
@@ -356,7 +356,7 @@ pub const BigInt = struct {
     }
 
     /// True when |self| is a power of two (exactly one bit set); zero is not.
-    /// Mirrors the `(v & (v - 1)) == 0` test in js_bigint_pow (quickjs.c:12131).
+    /// Mirrors the `(v & (v - 1)) == 0` test in js_bigint_pow.
     pub fn isPowerOfTwoAbs(self: BigInt) bool {
         if (self.limbs.len == 0) return false;
         const top = self.limbs[self.limbs.len - 1];
@@ -438,8 +438,7 @@ pub const BigInt = struct {
         if (bit_shift == 0) {
             @memcpy(limbs, self.limbs[limb_shift..]);
         } else {
-            var i: usize = 0;
-            while (i < out_len) : (i += 1) {
+            for (0..out_len) |i| {
                 const low = self.limbs[i + limb_shift] >> bit_shift;
                 const high = if (i + limb_shift + 1 < self.limbs.len) self.limbs[i + limb_shift + 1] << @intCast(64 - @as(u7, bit_shift)) else 0;
                 limbs[i] = low | high;
@@ -525,7 +524,7 @@ pub fn pow2(allocator: std.mem.Allocator, bits: usize) !BigInt {
     const limb_index = bits / limb_bits;
     // Materializing 2^bits allocates limb_index+1 limbs; qjs reaches the same
     // js_bigint_new cap when asUintN/asIntN materialize the modulus
-    // (quickjs.c:11592-11596). Fixes BigInt.asUintN(2**32, -1n) hanging.
+    //. Fixes BigInt.asUintN(2**32, -1n) hanging.
     try checkLimbCount(limb_index + 1);
     const offset: u6 = @intCast(bits % limb_bits);
     const limbs = try allocator.alloc(Limb, limb_index + 1);
@@ -542,7 +541,7 @@ pub fn compareParts(lhs_negative: bool, lhs_limbs: []const Limb, rhs_negative: b
 
 /// Single-limb divisor: one high-to-low pass over the numerator instead of the
 /// bit loop. This is qjs's shape for the same case -- `mp_div1norm`
-/// (quickjs.c:11332) walks limbs, not bits -- and it is the same kernel
+/// walks limbs, not bits -- and it is the same kernel
 /// `divRemSmallInPlace` already uses for base conversion, lifted to an
 /// allocating caller.
 ///
@@ -620,7 +619,7 @@ fn divRemAbsByLimb(lhs: []const Limb, divisor: Limb, quotient: []Limb) Limb {
 pub const DivOutput = enum { quotient, remainder, both };
 
 /// Reciprocal of a normalized limb, mirroring qjs `udiv1norm_init`
-/// (quickjs.c:11433). `divisor` must have its high bit set.
+///. `divisor` must have its high bit set.
 ///
 /// The value is `floor((2^128 - 1) / divisor) - 2^64`, built as qjs builds it
 /// -- numerator `((-divisor - 1) : -1)` -- so no 129-bit intermediate is
@@ -640,7 +639,7 @@ pub fn normalizedReciprocalInit(divisor: Limb) Limb {
 }
 
 /// Exact `(high:low) / divisor` and its remainder, from the precomputed
-/// reciprocal. Mirrors qjs `udiv1norm` (quickjs.c:11444).
+/// reciprocal. Mirrors qjs `udiv1norm`.
 ///
 /// **Not an approximation.** The result is identical to what
 /// `((high:low)) / divisor` and `% divisor` produce, which is what lets the
@@ -673,14 +672,14 @@ pub inline fn divTwoByOneReciprocal(
 }
 
 /// Quotient-position count at which precomputing the reciprocal pays for
-/// itself, matching qjs `UDIV1NORM_THRESHOLD` (quickjs.c:11463). Below it the
+/// itself, matching qjs `UDIV1NORM_THRESHOLD`. Below it the
 /// loop keeps the direct `u128 / u64` estimate, so short quotients pay neither
 /// the initialization nor the extra code.
 const reciprocal_threshold: usize = 3;
 
 /// Multi-limb divisor: normalized schoolbook long division, one quotient limb
 /// per step. This is qjs's mechanism (`js_bigint_divrem` normalizes and then
-/// runs `mp_divnorm`, quickjs.c:11893-11976): normalize so the divisor's top
+/// runs `mp_divnorm`, quickjs.c): normalize so the divisor's top
 /// limb has its high bit set, estimate one quotient digit from the leading
 /// numerator limbs, multiply-subtract, and add back on the rare overshoot.
 ///
@@ -857,7 +856,7 @@ fn unshiftedLimbAt(normalized: []const Limb, index: usize, shift: u6) Limb {
 /// when the result went negative, meaning `qhat` was one too large.
 ///
 /// One fused wrapping `u128` chain per limb, mirroring qjs `mp_sub_mul1`
-/// (quickjs.c:11419). The previous shape split the same computation into a
+///. The previous shape split the same computation into a
 /// product carry plus two `@subWithOverflow` results, and LLVM materialized
 /// each of those overflow bits into a register, spilled it to the stack, then
 /// re-narrowed and masked it -- six instructions per limb of pure overhead plus
@@ -948,13 +947,13 @@ pub fn subAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !BigInt 
 
 pub fn mulAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !BigInt {
     if (lhs.isZero() or rhs.isZero()) return .{ .allocator = allocator };
-    // qjs js_bigint_mul: js_bigint_new(ctx, a->len + b->len) (quickjs.c:11860),
+    // qjs js_bigint_mul: js_bigint_new(ctx, a->len + b->len),
     // capped by js_bigint_new. This also bounds js_bigint_pow's repeated
-    // squaring (quickjs.c:12169/12175) the same way qjs does.
+    // squaring the same way qjs does.
     try checkLimbCount(lhs.limbs.len + rhs.limbs.len);
     const limbs = try allocator.alloc(Limb, lhs.limbs.len + rhs.limbs.len);
     errdefer allocator.free(limbs);
-    // qjs mp_mul_basecase (quickjs.c:11401-11413) writes its first pass with
+    // qjs mp_mul_basecase writes its first pass with
     // mp_mul1 and only accumulates from the second, so js_bigint_new hands back
     // uninitialized memory and no pre-zeroing pass exists at all. Mirror that:
     // the first row overwrites, later rows accumulate.
@@ -1011,7 +1010,7 @@ fn parseBaseAlloc(allocator: std.mem.Allocator, bytes: []const u8, base: u32) !B
         text = text[1..];
     }
     if (text.len == 0) return error.InvalidBigInt;
-    // qjs js_atobigint (quickjs.c:12455-12490): skip leading zeros, bound the
+    // qjs js_atobigint: skip leading zeros, bound the
     // digit count, then bound the estimated bit width (radix 10 uses
     // (n_digits*27+7)/8 >= n_digits*log2(10); power-of-two radixes use
     // ceil(log2(radix)) bits per digit) before any allocation.
@@ -1036,8 +1035,7 @@ fn addAbsAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !BigInt {
     const max_len = @max(lhs.limbs.len, rhs.limbs.len);
     const limbs = try allocator.alloc(Limb, max_len + 1);
     var carry: DoubleLimb = 0;
-    var i: usize = 0;
-    while (i < max_len) : (i += 1) {
+    for (0..max_len) |i| {
         const a: DoubleLimb = if (i < lhs.limbs.len) lhs.limbs[i] else 0;
         const b: DoubleLimb = if (i < rhs.limbs.len) rhs.limbs[i] else 0;
         const sum = a + b + carry;
@@ -1046,7 +1044,7 @@ fn addAbsAlloc(allocator: std.mem.Allocator, lhs: BigInt, rhs: BigInt) !BigInt {
     }
     limbs[max_len] = @intCast(carry);
     // qjs js_bigint_add hits the js_bigint_new cap on its max(a,b)+1 result
-    // allocation (quickjs.c:11811); with 64-bit sign-magnitude limbs the
+    // allocation; with 64-bit sign-magnitude limbs the
     // speculative +1 would throw a band earlier than qjs's 32-bit limbs, so
     // the cap is enforced on the normalized result instead.
     var out = try normalize(.{ .limbs = limbs, .allocator = allocator });

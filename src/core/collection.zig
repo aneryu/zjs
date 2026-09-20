@@ -36,7 +36,7 @@ pub fn findStrongEntry(object: *core.Object, key: core.JSValue) ?usize {
     const heads = object.collectionBucketHeads();
     if (heads.len != 0) {
         var cursor = heads[bucketIndex(hash, heads.len)];
-        const entries = object.collectionEntriesSlot().*;
+        const entries = object.collectionEntriesSlot().items;
         while (cursor != strong_no_entry) {
             if (cursor >= entries.len) return null;
             const entry = entries[cursor];
@@ -46,7 +46,7 @@ pub fn findStrongEntry(object: *core.Object, key: core.JSValue) ?usize {
         return null;
     }
 
-    for (object.collectionEntriesSlot().*, 0..) |entry, index| {
+    for (object.collectionEntriesSlot().items, 0..) |entry, index| {
         if (!entry.active) continue;
         if (entry.key.sameValueZero(key)) return index;
     }
@@ -57,7 +57,7 @@ pub fn findStrongEntryLatin1Concat(object: *core.Object, prefix: []const u8, dig
     const heads = object.collectionBucketHeads();
     if (heads.len != 0) {
         var cursor = heads[bucketIndex(hash, heads.len)];
-        const entries = object.collectionEntriesSlot().*;
+        const entries = object.collectionEntriesSlot().items;
         while (cursor != strong_no_entry) {
             if (cursor >= entries.len) return null;
             const entry = entries[cursor];
@@ -67,7 +67,7 @@ pub fn findStrongEntryLatin1Concat(object: *core.Object, prefix: []const u8, dig
         return null;
     }
 
-    for (object.collectionEntriesSlot().*, 0..) |entry, index| {
+    for (object.collectionEntriesSlot().items, 0..) |entry, index| {
         if (!entry.active) continue;
         if (stringValueEqlLatin1Concat(entry.key, prefix, digits)) return index;
     }
@@ -200,7 +200,7 @@ pub fn findWeakEntry(object: *core.Object, key_identity: usize) ?usize {
     const heads = object.collectionBucketHeads();
     if (heads.len != 0) {
         var cursor = heads[bucketIndex(hash, heads.len)];
-        const entries = object.weakCollectionEntriesSlot().*;
+        const entries = object.weakCollectionEntriesSlot().items;
         while (cursor != weak_no_entry) {
             if (cursor >= entries.len) return null;
             const entry = entries[cursor];
@@ -210,7 +210,7 @@ pub fn findWeakEntry(object: *core.Object, key_identity: usize) ?usize {
         return null;
     }
 
-    for (object.weakCollectionEntriesSlot().*, 0..) |entry, index| {
+    for (object.weakCollectionEntriesSlot().items, 0..) |entry, index| {
         if (entry.key_identity == key_identity) return index;
     }
     return null;
@@ -261,7 +261,7 @@ fn rebuildStrongIndex(rt: *core.JSRuntime, object: *core.Object, bucket_count: u
     errdefer rt.memory.free(usize, next);
     @memset(next, strong_no_entry);
 
-    for (object.collectionEntriesSlot().*, 0..) |*entry, index| {
+    for (object.collectionEntriesSlot().items, 0..) |*entry, index| {
         entry.hash_next = strong_no_entry;
         if (!entry.active) continue;
         entry.hash = strongEntryHash(entry.key);
@@ -278,7 +278,7 @@ fn rebuildStrongIndex(rt: *core.JSRuntime, object: *core.Object, bucket_count: u
 fn linkStrongEntry(object: *core.Object, index: usize) void {
     const heads = object.collectionBucketHeadsSlot();
     if (heads.*.len == 0) return;
-    const entries = object.collectionEntriesSlot().*;
+    const entries = object.collectionEntriesSlot().items;
     const bucket = bucketIndex(entries[index].hash, heads.*.len);
     entries[index].hash_next = heads.*[bucket];
     heads.*[bucket] = index;
@@ -287,7 +287,7 @@ fn linkStrongEntry(object: *core.Object, index: usize) void {
 fn unlinkStrongEntry(object: *core.Object, index: usize) void {
     const heads = object.collectionBucketHeadsSlot();
     if (heads.*.len == 0) return;
-    const entries = object.collectionEntriesSlot().*;
+    const entries = object.collectionEntriesSlot().items;
     if (index >= entries.len) return;
     var link = &heads.*[bucketIndex(entries[index].hash, heads.*.len)];
     while (link.* != strong_no_entry) {
@@ -313,16 +313,16 @@ pub fn appendWeakEntry(rt: *core.JSRuntime, object: *core.Object, entry: core.ob
     rt.retainWeakIdentity(stored.key_identity);
     errdefer rt.releaseWeakIdentity(stored.key_identity);
     const entries_slot = object.weakCollectionEntriesSlot();
-    const index = entries_slot.*.len;
+    const index = entries_slot.items.len;
     const inserted_holder = !rt.borrowedReferenceHolderRegistered(object);
     if (inserted_holder) try rt.registerBorrowedReferenceHolder(object);
     errdefer if (inserted_holder) rt.unregisterBorrowedReferenceHolder(object);
     try ensureWeakIndexForInsert(rt, object, index + 1);
     try object.ensureWeakCollectionEntryCapacity(rt, index + 1);
     const refreshed_entries = object.weakCollectionEntriesSlot();
-    refreshed_entries.* = refreshed_entries.*.ptr[0 .. index + 1];
-    errdefer refreshed_entries.* = refreshed_entries.*[0..index];
-    refreshed_entries.*[index] = stored;
+    refreshed_entries.items = refreshed_entries.items.ptr[0 .. index + 1];
+    errdefer refreshed_entries.items = refreshed_entries.items[0..index];
+    refreshed_entries.items[index] = stored;
     linkWeakEntry(object, index);
     // No second `registerBorrowedReferenceHolder` here: the registration above
     // is idempotent and already covered by `errdefer`, whereas a repeat call on
@@ -347,7 +347,7 @@ fn rebuildWeakIndex(rt: *core.JSRuntime, object: *core.Object, bucket_count: usi
     errdefer rt.memory.free(usize, next);
     @memset(next, weak_no_entry);
 
-    for (object.weakCollectionEntriesSlot().*, 0..) |*entry, index| {
+    for (object.weakCollectionEntriesSlot().items, 0..) |*entry, index| {
         entry.hash = weakEntryHash(entry.key_identity);
         entry.hash_next = weak_no_entry;
         const bucket = bucketIndex(entry.hash, next.len);
@@ -363,19 +363,19 @@ fn rebuildWeakIndex(rt: *core.JSRuntime, object: *core.Object, bucket_count: usi
 fn linkWeakEntry(object: *core.Object, index: usize) void {
     const heads = object.collectionBucketHeadsSlot();
     if (heads.*.len == 0) return;
-    const entries = object.weakCollectionEntriesSlot().*;
+    const entries = object.weakCollectionEntriesSlot().items;
     const bucket = bucketIndex(entries[index].hash, heads.*.len);
     entries[index].hash_next = heads.*[bucket];
     heads.*[bucket] = index;
 }
 
 /// Splice entry `index` out of its bucket chain. Mirrors `map_delete_record`
-/// (quickjs.c:52177-52201), which walks the one bucket the record hashes to and
+///, which walks the one bucket the record hashes to and
 /// re-points the predecessor link; the strong twin is `unlinkStrongEntry`.
 fn unlinkWeakEntry(object: *core.Object, index: usize) void {
     const heads = object.collectionBucketHeadsSlot();
     if (heads.*.len == 0) return;
-    const entries = object.weakCollectionEntriesSlot().*;
+    const entries = object.weakCollectionEntriesSlot().items;
     if (index >= entries.len) return;
     var link = &heads.*[bucketIndex(entries[index].hash, heads.*.len)];
     while (link.* != weak_no_entry) {
@@ -401,13 +401,13 @@ const strong_compact_min_tombstones: usize = 4;
 
 /// True when the entry array is at least half tombstones and no cursor is
 /// parked in it. qjs frees a deleted record immediately unless an enumerator
-/// holds it (`map_delete_record_internal`, quickjs.c:52078-52085); zjs cursors
+/// holds it (`map_delete_record_internal`, quickjs.c); zjs cursors
 /// address entries by index, so the whole array has to be pinned instead of one
 /// record, and the reclaim is batched behind a 50% fill test to keep the
 /// per-delete cost amortized O(1).
 fn shouldCompactStrongEntries(object: *core.Object) bool {
     if (object.collectionLiveCursors() != 0) return false;
-    const len = object.collectionEntriesSlot().*.len;
+    const len = object.collectionEntriesSlot().items.len;
     const tombstones = len - object.collectionActiveCount();
     return tombstones >= strong_compact_min_tombstones and tombstones * 2 >= len;
 }
@@ -418,23 +418,23 @@ fn shouldCompactStrongEntries(object: *core.Object) bool {
 /// and needs no OOM rollback.
 ///
 /// This is the batched form of qjs's per-record `list_del(&mr->link)` +
-/// `js_free_rt(rt, mr)` (quickjs.c:52080-52081). The caller must have checked
+/// `js_free_rt(rt, mr)`. The caller must have checked
 /// `collectionLiveCursors() == 0`: every surviving entry moves to a lower index,
 /// so any parked cursor index would silently change meaning — the qjs analogue
 /// is that a record is only unlinked once its `ref_count` reaches zero.
 fn compactStrongEntries(object: *core.Object) void {
     const entries_slot = object.collectionEntriesSlot();
-    const old_len = entries_slot.*.len;
+    const old_len = entries_slot.items.len;
     var write: usize = 0;
     for (0..old_len) |read| {
-        if (!entries_slot.*[read].active) continue;
-        if (write != read) entries_slot.*[write] = entries_slot.*[read];
+        if (!entries_slot.items[read].active) continue;
+        if (write != read) entries_slot.items[write] = entries_slot.items[read];
         write += 1;
     }
     // Blank the vacated tail so a stale `[]CollectionEntry` slice captured
     // before the compaction (the Set-composition scans hold one across user
     // code) sees inactive slots instead of duplicated live entries.
-    for (entries_slot.*[write..old_len]) |*entry| {
+    for (entries_slot.items[write..old_len]) |*entry| {
         entry.* = .{
             .key = core.JSValue.undefinedValue(),
             .value = core.JSValue.undefinedValue(),
@@ -442,13 +442,13 @@ fn compactStrongEntries(object: *core.Object) void {
             .hash_next = strong_no_entry,
         };
     }
-    entries_slot.* = entries_slot.*.ptr[0..write];
+    entries_slot.items = entries_slot.items.ptr[0..write];
     std.debug.assert(write == object.collectionActiveCount());
 
     const heads = object.collectionBucketHeadsSlot();
     if (heads.*.len == 0) return;
     @memset(heads.*, strong_no_entry);
-    for (entries_slot.*, 0..) |*entry, index| {
+    for (entries_slot.items, 0..) |*entry, index| {
         // The stored hash is still valid: compaction moves entries, it never
         // rewrites keys, so no rehash is needed (unlike `rebuildStrongIndex`).
         const bucket = bucketIndex(entry.hash, heads.*.len);
@@ -459,25 +459,21 @@ fn compactStrongEntries(object: *core.Object) void {
 
 /// Hand surplus entry/bucket capacity back once a collection has shrunk far
 /// below its high-water mark. qjs releases the memory of every deleted record
-/// on the spot (`js_free_rt(rt, mr)`, quickjs.c:52081), so a map that shed most
+/// on the spot (`js_free_rt(rt, mr)`, quickjs.c), so a map that shed most
 /// of its records also sheds their memory; zjs holds one array, so the
 /// equivalent is re-sizing that array. Best effort: on allocation failure the
 /// existing buffers stay in use, so a delete can never fail or half-apply.
 fn shrinkStrongStorage(rt: *core.JSRuntime, object: *core.Object) void {
-    const entries_slot = object.collectionEntriesSlot();
-    const capacity_slot = object.collectionEntriesCapacitySlot();
-    const live = entries_slot.*.len;
-    if (capacity_slot.* >= 32 and live * 4 <= capacity_slot.*) {
+    const entries = object.collectionEntriesSlot();
+    const live = entries.items.len;
+    if (entries.capacity >= 32 and live * 4 <= entries.capacity) {
         var next_capacity: usize = 8;
         while (next_capacity < live * 2) next_capacity *= 2;
-        if (next_capacity < capacity_slot.*) shrink: {
-            const next = rt.allocRuntime(core.object.CollectionEntry, next_capacity) catch break :shrink;
-            @memcpy(next[0..live], entries_slot.*);
-            const old_entries = entries_slot.*;
-            const old_capacity = capacity_slot.*;
-            entries_slot.* = next[0..live];
-            capacity_slot.* = next_capacity;
-            rt.memory.free(core.object.CollectionEntry, old_entries.ptr[0..old_capacity]);
+        if (next_capacity < entries.capacity) shrink: {
+            var next = std.ArrayListUnmanaged(core.object.CollectionEntry).initCapacity(rt.memory.persistent_allocator, next_capacity) catch break :shrink;
+            next.appendSliceAssumeCapacity(entries.items);
+            entries.deinit(rt.memory.persistent_allocator);
+            entries.* = next;
         }
     }
 
@@ -487,7 +483,7 @@ fn shrinkStrongStorage(rt: *core.JSRuntime, object: *core.Object) void {
     if (next_count >= heads.*.len) return;
     const next = rt.memory.alloc(usize, next_count) catch return;
     @memset(next, strong_no_entry);
-    for (entries_slot.*, 0..) |*entry, index| {
+    for (entries.items, 0..) |*entry, index| {
         const bucket = bucketIndex(entry.hash, next.len);
         entry.hash_next = next[bucket];
         next[bucket] = index;
@@ -505,15 +501,15 @@ pub fn removeStrongEntry(rt: *core.JSRuntime, object: *core.Object, index: usize
 
 fn rollbackLastStrongEntry(object: *core.Object, index: usize) void {
     const entries_slot = object.collectionEntriesSlot();
-    std.debug.assert(index + 1 == entries_slot.*.len);
+    std.debug.assert(index + 1 == entries_slot.items.len);
     _ = takeStrongEntry(object, index) orelse return;
-    entries_slot.* = entries_slot.*.ptr[0..index];
+    entries_slot.items = entries_slot.items.ptr[0..index];
 }
 
 pub fn rollbackStrongEntriesTo(object: *core.Object, len: usize, active_count: usize) void {
     const entries_slot = object.collectionEntriesSlot();
-    while (entries_slot.*.len > len) {
-        rollbackLastStrongEntry(object, entries_slot.*.len - 1);
+    while (entries_slot.items.len > len) {
+        rollbackLastStrongEntry(object, entries_slot.items.len - 1);
     }
     object.collectionActiveCountSlot().* = active_count;
 }
@@ -522,57 +518,57 @@ pub fn rollbackStrongEntriesTo(object: *core.Object, len: usize, active_count: u
 /// and rechain only that one entry.
 ///
 /// qjs deletes a record by splicing it out of its bucket chain and its record
-/// list and freeing it (`map_delete_record` quickjs.c:52196-52202 ->
-/// `map_delete_record_internal` quickjs.c:52066-52086) — O(1), no surviving
+/// list and freeing it (`map_delete_record` quickjs.c ->
+/// `map_delete_record_internal` quickjs.c) — O(1), no surviving
 /// record is touched. zjs stores weak entries in a dense array, so the faithful
 /// adaptation of "unlink one node" is unlink + swap-remove. Weak collections
 /// have no iterator and no JS-observable order (qjs only walks the list in
-/// `map_delete_weakrefs`, quickjs.c:52099), so reordering is unobservable, and
+/// `map_delete_weakrefs`, quickjs.c), so reordering is unobservable, and
 /// the O(n) `@memmove` + full `relinkWeakIndex` rehash it replaces had no qjs
 /// counterpart at all.
 pub fn removeWeakEntry(rt: *core.JSRuntime, object: *core.Object, index: usize) !void {
     const entries_slot = object.weakCollectionEntriesSlot();
-    const last = entries_slot.*.len - 1;
+    const last = entries_slot.items.len - 1;
     unlinkWeakEntry(object, index);
-    const entry = entries_slot.*[index];
+    const entry = entries_slot.items[index];
     if (index != last) {
         // Unchain the mover under its old index first: its bucket link stores
         // the index, so it has to be rewritten after the move.
         unlinkWeakEntry(object, last);
-        entries_slot.*[index] = entries_slot.*[last];
-        entries_slot.* = entries_slot.*.ptr[0..last];
+        entries_slot.items[index] = entries_slot.items[last];
+        entries_slot.items = entries_slot.items.ptr[0..last];
         linkWeakEntry(object, index);
     } else {
-        entries_slot.* = entries_slot.*.ptr[0..last];
+        entries_slot.items = entries_slot.items.ptr[0..last];
     }
     entry.destroy(rt);
     object.pruneBorrowedReferenceHolderIfEmpty(rt);
 }
 
-/// Mirrors js_map_clear (quickjs.c:52266-52285): wipe the hash table first,
+/// Mirrors js_map_clear: wipe the hash table first,
 /// then walk the record list releasing every record. qjs's per-record release
 /// reclaims the record unless an enumerator pinned it, so with no cursor parked
 /// the array is truncated to zero here; with a cursor parked the slots survive
 /// as tombstones, matching qjs's zombie records.
 pub fn clearStrongEntries(object: *core.Object) void {
     const entries_slot = object.collectionEntriesSlot();
-    const old_len = entries_slot.*.len;
+    const old_len = entries_slot.items.len;
     if (old_len == 0) return;
     const drop_slots = object.collectionLiveCursors() == 0;
     if (object.collectionActiveCount() == 0) {
         // Nothing to release; only the tombstone slots are left to reclaim.
-        if (drop_slots) entries_slot.* = entries_slot.*.ptr[0..0];
+        if (drop_slots) entries_slot.items = entries_slot.items.ptr[0..0];
         return;
     }
 
     const heads = object.collectionBucketHeadsSlot();
     if (heads.*.len != 0) @memset(heads.*, strong_no_entry);
     object.collectionActiveCountSlot().* = 0;
-    if (drop_slots) entries_slot.* = entries_slot.*.ptr[0..0];
+    if (drop_slots) entries_slot.items = entries_slot.items.ptr[0..0];
 
     for (0..old_len) |index| {
-        if (!entries_slot.*.ptr[index].active) continue;
-        entries_slot.*.ptr[index] = .{
+        if (!entries_slot.items.ptr[index].active) continue;
+        entries_slot.items.ptr[index] = .{
             .key = core.JSValue.undefinedValue(),
             .value = core.JSValue.undefinedValue(),
             .active = false,
@@ -588,10 +584,10 @@ pub fn clearStrongEntries(object: *core.Object) void {
 
 fn takeStrongEntry(object: *core.Object, index: usize) ?core.object.CollectionEntry {
     const entries_slot = object.collectionEntriesSlot();
-    if (index >= entries_slot.*.len or !entries_slot.*[index].active) return null;
+    if (index >= entries_slot.items.len or !entries_slot.items[index].active) return null;
     unlinkStrongEntry(object, index);
-    const entry = entries_slot.*[index];
-    entries_slot.*[index] = .{ .key = core.JSValue.undefinedValue(), .value = core.JSValue.undefinedValue(), .active = false, .hash_next = strong_no_entry };
+    const entry = entries_slot.items[index];
+    entries_slot.items[index] = .{ .key = core.JSValue.undefinedValue(), .value = core.JSValue.undefinedValue(), .active = false, .hash_next = strong_no_entry };
     const active_count = object.collectionActiveCountSlot();
     if (active_count.* != 0) active_count.* -= 1;
     return entry;
@@ -599,10 +595,10 @@ fn takeStrongEntry(object: *core.Object, index: usize) ?core.object.CollectionEn
 
 pub fn clearWeakEntries(rt: *core.JSRuntime, object: *core.Object) void {
     const entries_slot = object.weakCollectionEntriesSlot();
-    while (entries_slot.*.len != 0) {
-        const index = entries_slot.*.len - 1;
-        const entry = entries_slot.*[index];
-        entries_slot.* = entries_slot.*.ptr[0..index];
+    while (entries_slot.items.len != 0) {
+        const index = entries_slot.items.len - 1;
+        const entry = entries_slot.items[index];
+        entries_slot.items = entries_slot.items.ptr[0..index];
         entry.destroy(rt);
     }
     const heads = object.collectionBucketHeadsSlot();
@@ -640,8 +636,8 @@ pub fn sweepWeakEntries(
     if (object.class_id != core.class.ids.weakmap and object.class_id != core.class.ids.weakset) return error.TypeError;
     var removed: usize = 0;
     var i: usize = 0;
-    while (i < object.weakCollectionEntriesSlot().*.len) {
-        if (isLive(context, object.weakCollectionEntriesSlot().*[i].key_identity)) {
+    while (i < object.weakCollectionEntriesSlot().items.len) {
+        if (isLive(context, object.weakCollectionEntriesSlot().items[i].key_identity)) {
             i += 1;
             continue;
         }
@@ -657,7 +653,7 @@ pub fn sweepWeakEntries(
 /// guarantees `object` is a WeakMap.
 pub fn setWeakMapEntryByIdentityChecked(rt: *core.JSRuntime, object: *core.Object, key_identity: usize, value: core.JSValue) !void {
     if (findWeakEntry(object, key_identity)) |index| {
-        const entry = &object.weakCollectionEntriesSlot().*[index];
+        const entry = &object.weakCollectionEntriesSlot().items[index];
         const next_value = value;
         entry.value = next_value;
         return;
@@ -691,7 +687,7 @@ pub fn mapGetLatin1PrefixIntValue(object: *core.Object, prefix: []const u8, int_
     const digits = dtoa.formatInt32(&int_buf, int_value);
     const hash = strongEntryHashLatin1ConcatWithSeed(prefix, digits, core.string.hashLatin1(prefix, 0));
     const index = findStrongEntryLatin1Concat(object, prefix, digits, hash) orelse return null;
-    return object.collectionEntriesSlot().*[index].value;
+    return object.collectionEntriesSlot().items[index].value;
 }
 
 /// Bulk insert-or-update Map entries keyed by `prefix ++ decimal(i)` for every
@@ -708,10 +704,10 @@ pub fn mapSetLatin1PrefixInt32Range(
     if (object.class_id != core.class.ids.map or start < 0 or limit < start) return error.TypeError;
     const max_new_count: usize = @intCast(limit - start);
     if (max_new_count == 0) return;
-    try object.ensureCollectionEntryCapacity(rt, object.collectionEntriesSlot().*.len + max_new_count);
+    try object.ensureCollectionEntryCapacity(rt, object.collectionEntriesSlot().items.len + max_new_count);
     try ensureStrongIndexForInsert(rt, object, object.collectionActiveCount() + max_new_count);
 
-    const original_len = object.collectionEntriesSlot().*.len;
+    const original_len = object.collectionEntriesSlot().items.len;
     const original_active_count = object.collectionActiveCount();
     var inserted = false;
     errdefer if (inserted) rollbackStrongEntriesTo(object, original_len, original_active_count);
@@ -723,7 +719,7 @@ pub fn mapSetLatin1PrefixInt32Range(
         const digits = dtoa.formatInt32(&int_buf, int_value);
         const hash = strongEntryHashLatin1ConcatWithSeed(prefix, digits, prefix_seed);
         if (findStrongEntryLatin1Concat(object, prefix, digits, hash)) |index| {
-            const entry = &object.collectionEntriesSlot().*[index];
+            const entry = &object.collectionEntriesSlot().items[index];
             entry.value = core.JSValue.int32(int_value);
             continue;
         }

@@ -887,12 +887,6 @@ setter 先经 `captureDateValueMs`（getTime 记录）抓 `[[DateValue]]`，再 
 - **实现**：一串 `std.mem.eql` 线性比对，命中即返回对应 `PrototypeMethod` 或 `ExtendedPrototypeMethod` 的枚举值（setUTC* / getUTCDay / toLocale* 三组落在扩展枚举上）；`toGMTString` 与 `toUTCString` 共用同一个 id（Annex B 别名）；全不匹配返回 null。
 - **所有权 / 错误 / 调用**：纯函数，不分配。只在属性安装期按名字查一次，不在热路径上，所以没有建哈希表。
 
-### `decodeExtendedPrototypeMethodId` (`src/exec/date_ops.zig:685`)
-
-- **签名**：`fn decodeExtendedPrototypeMethodId(id: u32) ?u32`。
-- **作用**：把扩展记录 id 映回旧的 body 选择子（延续 1..34 空间）：35 getUTCDay、36..42 setUTC*、43..45 toLocale*。
-- **实现**：11 条 comptime 常量的 `switch`：138 getUTCDay → 35，139..145 的七个 setUTC* → 36..42，146..148 的三个 toLocale* → 43..45，其余 null。它与引擎核心的 `decodePrototypeMethodId` 是两张互不重叠的表，合起来盖满 body 用的 1..45 选择子空间。
-- **所有权 / 错误 / 调用**：纯查表，不分配、不失败。两个调用方都在本文件：`dateCall`（540，决定是否转 `dateExtendedPrototypeCall`）与 `dateInternalBodyCall`（577，决定用哪个 body 选择子）。
 
 ### `call` (`src/exec/date_ops.zig:704`)
 

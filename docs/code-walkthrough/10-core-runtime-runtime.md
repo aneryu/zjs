@@ -789,7 +789,7 @@ core 不得 import exec/parser/binding；标准全局安装、builtin 表、acti
 
 - **签名**：`pub fn registerBorrowedReferenceHolder(self: *JSRuntime, object: *Object) !void`。
 - **作用**：把对象记入借用引用侧表（realm/weak 指针寿命记账）。不给对象加 exotic，不毒 shape 快路径。
-- **实现**：已登记返回。`appendRuntimeObject`，写 index 与 flag，`markNeedsFinalizer`。
+- **实现**：已登记返回。`appendRuntimeItem(Object, …)`，写 index 与 flag，`markNeedsFinalizer`。
 - **所有权 / 错误 / 调用**：侧表扩容可能失败；成功追加后才写对象的 index/flag 并标记需要终结。已有 flag 时直接返回，不验证是否属于这个 Runtime；调用方必须保证归属正确。此登记不增加强根。
 
 ### `JSRuntime.borrowedReferenceHolderRegistered` (`src/core/runtime.zig:2077`)
@@ -2204,26 +2204,8 @@ sweep 弱集合时，borrowed 指针可能指向正在被清的身份。窗口�
 - **实现**：assert owner、idle、!gc_running、phase none、无 active finalizer。无 morgue 则只 audit。否则 `finishPendingDestruction` + `finishDoomedCompletion(0)`。
 - **所有权 / 错误 / 调用**：test262/gate。
 
-### `appendRuntimeObject` (`src/core/runtime.zig:4782`)
 
-- **签名**：`fn appendRuntimeObject(account: *memory.MemoryAccount, slice: *[]*Object, capacity: *usize, item: *Object) !void`。
-- **作用**：`[]*Object` 增长（borrowed holders），初始 cap 64。
-- **实现**：len 等于 capacity 时分配初始 64 或两倍容量，复制有效指针、替换切片并释放旧 backing，随后扩 len 并追加 item。
-- **所有权 / 错误 / 调用**：分配失败保留旧数组，不消费 item；不复制、保活或释放对象，也不去重。调用方须保证 len<=capacity、分配账户匹配；倍增未提供可恢复溢出处理。
 
-### `appendRuntimeRootSlot` (`src/core/runtime.zig:4799`)
-
-- **签名**：`fn appendRuntimeRootSlot(account: *memory.MemoryAccount, slice: *[]*RootSlot, capacity: *usize, item: *RootSlot) !void`。
-- **作用**：local/persistent 槽指针数组，初始 4。
-- **实现**：满时分配初始 4 或两倍容量，复制有效槽指针并释放旧 backing，再将 item 追加到有效切片。
-- **所有权 / 错误 / 调用**：createRootSlot 使用；本函数不初始化或销毁 RootSlot。失败保留数组且由调用方清理尚未登记的槽；数组增长不移动槽本身，但使借用旧指针数组的切片失效。
-
-### `appendRuntimeWeakRootSlot` (`src/core/runtime.zig:4816`)
-
-- **签名**：`fn appendRuntimeWeakRootSlot(account: *memory.MemoryAccount, slice: *[]*WeakRootSlot, capacity: *usize, item: *WeakRootSlot) !void`。
-- **作用**：弱槽指针数组，初始 4。
-- **实现**：满时分配初始 4 或两倍容量，复制有效弱槽指针，替换 backing 并释放旧数组，再追加 item。
-- **所有权 / 错误 / 调用**：createWeakRootSlot 使用；不 retain 弱身份、不建立目标强根、不执行 callback。分配失败不消费 item，成功扩容只搬移指针数组；容量算术依赖有效且可表示的请求大小。
 
 ### `newRealmRandomSeed` (`src/core/runtime.zig:4943`)
 

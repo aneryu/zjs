@@ -208,8 +208,8 @@ pub fn toFixed(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.J
     const fraction_digits = try integerDigitsArgument(rt, args, 0);
     if (fraction_digits < 0 or fraction_digits > 100) return error.RangeError;
 
-    const flags = if (@abs(number) >= 1e21) dtoa.JS_DTOA_FORMAT_FREE else dtoa.JS_DTOA_FORMAT_FRAC;
-    return dtoaStringValue(rt, number, fraction_digits, flags);
+    const format: dtoa.Format = if (@abs(number) >= 1e21) .free else .frac;
+    return dtoaStringValue(rt, number, fraction_digits, .{ .format = format });
 }
 
 pub fn toExponential(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
@@ -217,15 +217,15 @@ pub fn toExponential(rt: *core.JSRuntime, receiver: core.JSValue, args: []const 
     const fraction_arg_undefined = args.len == 0 or args[0].is(.undefined_value);
     var fraction_digits = try integerDigitsArgument(rt, args, 0);
     if (std.math.isNan(number) or !std.math.isFinite(number)) return numberStringValue(rt, number);
-    const flags = if (fraction_arg_undefined) flags: {
+    const format: dtoa.Format = if (fraction_arg_undefined) format: {
         fraction_digits = 0;
-        break :flags dtoa.JS_DTOA_FORMAT_FREE;
-    } else flags: {
+        break :format .free;
+    } else format: {
         if (fraction_digits < 0 or fraction_digits > 100) return error.RangeError;
         fraction_digits += 1;
-        break :flags dtoa.JS_DTOA_FORMAT_FIXED;
+        break :format .fixed;
     };
-    return dtoaStringValue(rt, number, fraction_digits, flags | dtoa.JS_DTOA_EXP_ENABLED);
+    return dtoaStringValue(rt, number, fraction_digits, .{ .format = format, .exp = .enabled });
 }
 
 pub fn toPrecision(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
@@ -234,12 +234,12 @@ pub fn toPrecision(rt: *core.JSRuntime, receiver: core.JSValue, args: []const co
     const precision = try integerDigitsArgument(rt, args, 0);
     if (std.math.isNan(number) or !std.math.isFinite(number)) return numberStringValue(rt, number);
     if (precision < 1 or precision > 100) return error.RangeError;
-    return dtoaStringValue(rt, number, precision, dtoa.JS_DTOA_FORMAT_FIXED);
+    return dtoaStringValue(rt, number, precision, .{ .format = .fixed });
 }
 
 pub fn toStringMethod(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     const number = core.number.numberValue(receiver) orelse return error.TypeError;
-    // qjs js_number_toString (quickjs.c:44975) uses js_get_radix → JS_ToInt32Sat
+    // qjs js_number_toString uses js_get_radix → JS_ToInt32Sat
     // (qjs:44953 / JS_ToInt32SatFree qjs:13125) BEFORE the 2..36 range check.
     // Saturate out-of-i32 values (Infinity, 1e30, 2**31) instead of
     // `@intFromFloat` which panics in Debug/ReleaseSafe.
@@ -254,18 +254,18 @@ pub fn toStringMethod(rt: *core.JSRuntime, receiver: core.JSValue, args: []const
     }
 
     // qjs js_number_toString -> js_dtoa2(d, base, 0, JS_DTOA_FORMAT_FREE |
-    // JS_DTOA_EXP_DISABLED) (quickjs.c:44989). The same faithful js_dtoa port
+    // JS_DTOA_EXP_DISABLED). The same faithful js_dtoa port
     // that radix 10 goes through, with the radix actually passed: it emits
     // digits from the exact value, which is what makes the result identify the
     // double. The hand-rolled converter this replaces generated digits from an
     // approximation and lost the last significant digit — 829 of 1,000 random
     // doubles at radices 3/5/7/11/36 decoded back to a NEIGHBOURING double.
-    const flags = dtoa.JS_DTOA_FORMAT_FREE | dtoa.JS_DTOA_EXP_DISABLED;
-    const needed = try dtoa.radixMaxLen(number, @intCast(radix), 0, flags);
+    const options: dtoa.FormatOptions = .{ .exp = .disabled };
+    const needed = try dtoa.radixMaxLen(number, @intCast(radix), 0, options);
     var out = std.ArrayList(u8).empty;
     defer out.deinit(rt.memory.allocator);
     try out.resize(rt.memory.allocator, needed);
-    const text = dtoa.formatRadix(out.items, number, @intCast(radix), 0, flags) catch unreachable;
+    const text = dtoa.formatRadix(out.items, number, @intCast(radix), 0, options) catch unreachable;
     const string = try core.string.String.createAscii(rt, text);
     return string.value();
 }
@@ -277,9 +277,9 @@ fn numberStringValue(rt: *core.JSRuntime, number: f64) !core.JSValue {
     return string.value();
 }
 
-fn dtoaStringValue(rt: *core.JSRuntime, number: f64, n_digits: i32, flags: i32) !core.JSValue {
+fn dtoaStringValue(rt: *core.JSRuntime, number: f64, n_digits: i32, options: dtoa.FormatOptions) !core.JSValue {
     var buffer: [768]u8 = undefined;
-    const text = dtoa.formatDtoaChecked(&buffer, number, n_digits, flags) catch unreachable;
+    const text = dtoa.formatDtoaChecked(&buffer, number, n_digits, options) catch unreachable;
     const string = try core.string.String.createAscii(rt, text);
     return string.value();
 }

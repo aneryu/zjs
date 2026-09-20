@@ -39,14 +39,14 @@ test "gc stress deterministic tiny heap preserves live roots" {
             try objects[index - 1].?.defineOwnProperty(
                 &rt,
                 edge_key,
-                core.Descriptor.data(slot.*.?.value(), true, true, true),
+                core.Descriptor.data(slot.*.?.value(), .all),
             );
         }
     }
     try objects[count - 1].?.defineOwnProperty(
         &rt,
         edge_key,
-        core.Descriptor.data(objects[0].?.value(), true, true, true),
+        core.Descriptor.data(objects[0].?.value(), .all),
     );
     // Baseline after a sweep: shapes the objects transitioned away from are
     // tracer-owned garbage until collected, and must not count as "live".
@@ -93,7 +93,7 @@ test "gc stress deterministic object cycles are reclaimed" {
     for (objects) |obj| {
         const target_index = random.uintLessThan(usize, objects.len);
         const target = objects[target_index].?;
-        try obj.?.defineOwnProperty(rt, edge_key, core.Descriptor.data(target.value(), true, true, true));
+        try obj.?.defineOwnProperty(rt, edge_key, core.Descriptor.data(target.value(), .all));
     }
 
     for (&objects, 0..) |*slot, index| {
@@ -203,9 +203,9 @@ test "gc stress weak map dead cyclic keys clear values" {
     const peer_key = try rt.internAtom("stress-weak-dead-peer");
 
     for (keys, values) |key, value| {
-        try key.?.defineOwnProperty(rt, self_key, core.Descriptor.data(key.?.value(), true, true, true));
+        try key.?.defineOwnProperty(rt, self_key, core.Descriptor.data(key.?.value(), .all));
         const peer = keys[random.uintLessThan(usize, keys.len)].?;
-        try key.?.defineOwnProperty(rt, peer_key, core.Descriptor.data(peer.value(), true, true, true));
+        try key.?.defineOwnProperty(rt, peer_key, core.Descriptor.data(peer.value(), .all));
         try appendWeakCollectionEntry(rt, weakmap, key.?, value.?.value());
     }
     for (&values) |*slot| slot.* = null;
@@ -247,11 +247,11 @@ test "gc stress finalization registry dead target queues pending job" {
     var target = try core.Object.create(rt, core.class.ids.object, null);
     var target_value = target.value();
     const self_key = try rt.internAtom("stress-finalization-target-self");
-    try target.defineOwnProperty(rt, self_key, core.Descriptor.data(target_value, true, true, true));
+    try target.defineOwnProperty(rt, self_key, core.Descriptor.data(target_value, .all));
 
     var held = try core.Object.create(rt, core.class.ids.object, null);
     const held_key = try rt.internAtom("stress-finalization-held");
-    try held.defineOwnProperty(rt, held_key, core.Descriptor.data(core.JSValue.int32(@intCast(random.intRangeLessThan(i16, 1, 2048))), true, true, true));
+    try held.defineOwnProperty(rt, held_key, core.Descriptor.data(core.JSValue.int32(@intCast(random.intRangeLessThan(i16, 1, 2048))), .all));
 
     try registry.appendFinalizationRegistryCell(
         rt,
@@ -320,7 +320,7 @@ test "gc stress function bytecode constant pool object cycles are reclaimed" {
     const function_key = try rt.internAtom("stress-bytecode-function");
     for (captured, 0..) |captured_obj, index| {
         const target_index = (index + step) % count;
-        try captured_obj.?.defineOwnProperty(rt, function_key, core.Descriptor.data(functions[target_index].?.value(), true, true, true));
+        try captured_obj.?.defineOwnProperty(rt, function_key, core.Descriptor.data(functions[target_index].?.value(), .all));
     }
 
     for (&functions) |*slot| {

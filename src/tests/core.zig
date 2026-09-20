@@ -414,7 +414,7 @@ test "array target barrier: known append immediately shades the new target" {
     const target = try core.Object.createPlainObject(rt, null);
     const child = try core.Object.createPlainObject(rt, null);
     const key = try rt.internAtom("array_target_child");
-    try target.defineOwnProperty(rt, key, core.Descriptor.data(child.value(), true, true, true));
+    try target.defineOwnProperty(rt, key, core.Descriptor.data(child.value(), .all));
 
     // Only the array is a declared root. Keep the real incremental cycle
     // open after its initial graph has been fully scanned.
@@ -941,7 +941,7 @@ test "RealmContext participates in cycle collection through typed RealmRef edges
     try global.defineOwnProperty(
         rt,
         record_key,
-        core.Descriptor.data(realm_record.value(), true, true, true),
+        core.Descriptor.data(realm_record.value(), .all),
     );
     dropGcPtr(&realm_record);
 
@@ -995,7 +995,7 @@ test "FunctionBytecode RealmRef edge participates in realm-global cycle collecti
     try global.defineOwnProperty(
         rt,
         cycle_key,
-        core.Descriptor.data(fb_value, true, true, true),
+        core.Descriptor.data(fb_value, .all),
     );
     fb_value_alive = false;
 
@@ -1024,7 +1024,7 @@ test "FinalizationRegistry RealmRef edge participates in realm-global cycle coll
     try global.defineOwnProperty(
         rt,
         cycle_key,
-        core.Descriptor.data(registry.value(), true, true, true),
+        core.Descriptor.data(registry.value(), .all),
     );
 
     // Only the cycle remains: Context -> global -> registry -> RealmRef(Context).
@@ -1060,7 +1060,7 @@ test "auto_init slot to another realm retains it across JSContext.destroy and cy
         try obj.defineFunctionPrototypeAutoInit(
             rt,
             ctx_b,
-            core.property.Flags.data(true, false, true),
+            core.property.Flags.data(.method),
         );
         const proto_index = obj.findProperty(core.atom.ids.prototype) orelse
             return error.TestUnexpectedResult;
@@ -1184,8 +1184,18 @@ fn appendFinalizationRegistryCell(
     try registry.appendFinalizationRegistryCell(rt, target, held_value, unregister_token);
 }
 
+/// What the first registerBorrowedReferenceHolder allocates, measured on a
+/// scratch runtime so the OOM-injection tests below follow the holder list's
+/// growth policy instead of restating it.
 fn borrowedHolderInitialAllocationBytes() usize {
-    return @sizeOf(*core.Object) * 64;
+    const probe = core.JSRuntime.create(std.testing.allocator) catch unreachable;
+    defer probe.destroy();
+    const holder = core.Object.create(probe, core.class.ids.object, null) catch unreachable;
+    const before = probe.memory.allocated_bytes;
+    probe.registerBorrowedReferenceHolder(holder) catch unreachable;
+    const bytes = probe.memory.allocated_bytes - before;
+    probe.unregisterBorrowedReferenceHolder(holder);
+    return bytes;
 }
 
 test "context backtrace can borrow VM frame pc lazily" {
@@ -1230,7 +1240,7 @@ test "private brand property owns exactly one stored symbol value across replace
         try object.defineOwnProperty(
             rt,
             core.atom.ids.Private_brand,
-            core.Descriptor.data(initial, true, true, true),
+            core.Descriptor.data(initial, .all),
         );
     }
     try std.testing.expect(rt.atoms.name(brand) != null);
@@ -1425,7 +1435,7 @@ test "GC keeps context lexical object unique symbol atoms" {
     const property_name = try rt.internAtom("context-lexical-symbol-slot");
     const lexical_symbol = try rt.atoms.newValueSymbol("gc-context-lexical-object-symbol");
     const lexical_value = try rt.takeSymbolValue(lexical_symbol);
-    try env.defineOwnProperty(rt, property_name, core.Descriptor.data(lexical_value, true, true, true));
+    try env.defineOwnProperty(rt, property_name, core.Descriptor.data(lexical_value, .all));
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(lexical_symbol) != null);
@@ -1508,14 +1518,8 @@ test "GC keeps dequeued finalization job function bytecode symbol constants unti
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
-    const fb = try engine.bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
-    var fb_published = false;
-    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-finalization-job-bytecode-symbol");
-    const symbol_value = try rt.takeSymbolValue(symbol_atom);
-    fb.cpoolSlice()[0] = symbol_value;
-    fb.publishFixtureNoFail(rt);
-    fb_published = true;
+    const fb = try engine.bytecode.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
 
     const bytecode_value = core.JSValue.functionBytecode(&fb.header);
     try rt.enqueueFinalizationJobForRealm(ctx, bytecode_value, core.JSValue.undefinedValue());
@@ -1598,14 +1602,8 @@ test "GC keeps rooted function bytecode symbol constants" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const fb = try engine.bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
-    var fb_published = false;
-    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-bytecode-symbol-constant");
-    const symbol_value = try rt.takeSymbolValue(symbol_atom);
-    fb.cpoolSlice()[0] = symbol_value;
-    fb.publishFixtureNoFail(rt);
-    fb_published = true;
+    const fb = try engine.bytecode.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
 
     var rooted_value = core.JSValue.functionBytecode(&fb.header);
     var root_values = [_]core.runtime.ValueRootValue{.{ .value = &rooted_value }};
@@ -1631,7 +1629,7 @@ test "GC keeps object-held and registered symbol atoms" {
 
     const object_symbol = try rt.atoms.newValueSymbol("gc-object-held-symbol");
     const object_symbol_value = try rt.takeSymbolValue(object_symbol);
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(object_symbol_value, true, true, true));
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(object_symbol_value, .all));
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(object_symbol) != null);
 
@@ -1658,7 +1656,7 @@ test "runtime teardown keeps unique symbol property keys live through shape dest
     try object.defineOwnProperty(
         rt,
         symbol_atom,
-        core.Descriptor.data(core.JSValue.boolean(true), true, true, true),
+        core.Descriptor.data(core.JSValue.boolean(true), .all),
     );
 
     // Keep the object alive until JSRuntime.deinit. The shape is held for GC
@@ -2331,7 +2329,7 @@ fn reentrantMappedArgumentsFinalizer(runtime: *anyopaque, _: *anyopaque, payload
     arguments.defineOwnProperty(
         rt,
         reentrant_mapped_arguments_key,
-        core.Descriptor.data(core.JSValue.int32(99), true, true, true),
+        core.Descriptor.data(core.JSValue.int32(99), .all),
     ) catch {};
 }
 
@@ -2513,7 +2511,7 @@ test "inline class finalizer reentry keeps definition pinned while growing the t
     const object = try core.Object.create(rt, target_id, null);
     const property_atom = try rt.internAtom("owned-before-inline-finalizer");
     InlineClassFinalizerReentry.property_atom = property_atom;
-    try object.defineOwnProperty(rt, property_atom, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
+    try object.defineOwnProperty(rt, property_atom, core.Descriptor.data(core.JSValue.int32(1), .all));
     try std.testing.expect(object.hasPropertyStorage());
     helpers.reclaimNow(rt);
 
@@ -2785,7 +2783,7 @@ test "standalone inline object resolves from a conservative interior candidate" 
     const exact = try rt.gc.resolveExact(
         exact_handle,
         .object,
-        core.gc.CarrierStateMask.publishedOnly(),
+        core.gc.carrier_state_masks.published_only,
     );
     try std.testing.expectEqual(object.gcHeader(), exact.tracing);
     const current_key: core.gc.CurrentMembershipKey = .{ .base = @intFromPtr(object.gcHeader()) };
@@ -2805,7 +2803,7 @@ test "standalone inline object resolves from a conservative interior candidate" 
     const incomplete_exact = try rt.gc.resolveExact(
         incomplete_handle,
         .object,
-        core.gc.CarrierStateMask.publishedOnly(),
+        core.gc.carrier_state_masks.published_only,
     );
     try std.testing.expectEqual(object.gcHeader(), incomplete_exact.tracing);
     try std.testing.expectError(error.NotFound, rt.gc.resolveCurrentMember(current_key, .object));
@@ -2883,8 +2881,8 @@ test "external class finalizers run synchronously with original object identity 
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     const first_atom = try rt.internAtom("first-finalized");
     const second_atom = try rt.internAtom("second-finalized");
-    try holder.defineOwnProperty(rt, first_atom, core.Descriptor.data(first.value(), true, true, true));
-    try holder.defineOwnProperty(rt, second_atom, core.Descriptor.data(second.value(), true, true, true));
+    try holder.defineOwnProperty(rt, first_atom, core.Descriptor.data(first.value(), .all));
+    try holder.defineOwnProperty(rt, second_atom, core.Descriptor.data(second.value(), .all));
 
     helpers.reclaimNow(rt);
 
@@ -3166,7 +3164,7 @@ test "ordinary property delete publishes absence before synchronous finalizer re
     defer object_roots.deactivate(rt);
     const value = try core.Object.create(rt, reentrant_id, null);
     const key = try rt.internAtom("reentrant_property_delete");
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(value.value(), true, true, true));
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(value.value(), .all));
 
     payload_finalizer_calls = 0;
     reentrant_property_delete_target = object;
@@ -3196,7 +3194,7 @@ test "IC-R1: in-place delete mutates the shape Property word" {
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("ic_r1_field");
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), .all));
 
     const index = object.findProperty(key) orelse return error.TestUnexpectedResult;
     const shape_before = object.shape_ref;
@@ -3294,7 +3292,7 @@ test "regexp lastIndex define publishes replacement before synchronous finalizer
     try regexp.defineOwnProperty(
         rt,
         core.atom.ids.lastIndex,
-        core.Descriptor.data(core.JSValue.int32(7), true, false, false),
+        core.Descriptor.data(core.JSValue.int32(7), .{ .writable = true }),
     );
     helpers.reclaimNow(rt);
 
@@ -3340,7 +3338,7 @@ test "mapped arguments binding update publishes value before synchronous finaliz
     arguments_roots.activate(rt);
     defer arguments_roots.deactivate(rt);
 
-    try arguments.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(7), true, true, true));
+    try arguments.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(7), .all));
     helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
@@ -3384,7 +3382,7 @@ test "mapped arguments var-ref update publishes value before synchronous finaliz
     arguments_roots.activate(rt);
     defer arguments_roots.deactivate(rt);
 
-    try arguments.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(7), true, true, true));
+    try arguments.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(7), .all));
     helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 1), payload_finalizer_calls);
@@ -3406,7 +3404,7 @@ test "mapped arguments binding delete publishes disconnection before synchronous
     const arguments = try core.Object.create(rt, core.class.ids.mapped_arguments, null);
     const key = core.Atom.taggedInt(0);
     const refs = try arguments.allocateMappedArgumentsVarRefsAssumingEmpty(rt, 1);
-    try arguments.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
+    try arguments.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), .all));
 
     const value = try core.Object.create(rt, reentrant_id, null);
     const cell = try core.VarRef.createClosed(rt, value.value());
@@ -3528,7 +3526,7 @@ test "array iterator target clear publishes null before synchronous finalizer re
     const target = try core.Object.createArray(rt, null);
     const held = try core.Object.create(rt, reentrant_id, null);
     const held_key = try rt.internAtom("held");
-    try target.defineOwnProperty(rt, held_key, core.Descriptor.data(held.value(), true, true, true));
+    try target.defineOwnProperty(rt, held_key, core.Descriptor.data(held.value(), .all));
     iterator.iteratorTargetSlot().* = target.value();
 
     payload_finalizer_calls = 0;
@@ -3582,7 +3580,7 @@ test "runtime cycle removal follows class payload mark hooks" {
     external.payloadArm().* = @ptrCast(payload);
 
     const key = try rt.internAtom("external");
-    try payloadless.defineOwnProperty(rt, key, core.Descriptor.data(external.value(), true, true, true));
+    try payloadless.defineOwnProperty(rt, key, core.Descriptor.data(external.value(), .all));
 
     payload_finalizer_calls = 0;
     payload_mark_calls = 0;
@@ -3705,7 +3703,7 @@ test "runtime cycle removal synchronously finalizes class payload object slots o
     external.payloadArm().* = @ptrCast(payload);
 
     const key = try rt.internAtom("external");
-    try child.defineOwnProperty(rt, key, core.Descriptor.data(external.value(), true, true, true));
+    try child.defineOwnProperty(rt, key, core.Descriptor.data(external.value(), .all));
 
     payload_finalizer_calls = 0;
     payload_mark_calls = 0;
@@ -3742,11 +3740,11 @@ test "array buffer view list republishes cached typed array count and data" {
 
     const fixed = try core.Object.create(rt, core.class.ids.object, null);
     _ = fixed.value();
-    try fixed.initTypedArrayView(rt, buffer_value, 4, 4, 2, 6);
+    try fixed.initTypedArrayView(rt, buffer_value, 4, 4, 2, .int32);
 
     const tracking = try core.Object.create(rt, core.class.ids.object, null);
     _ = tracking.value();
-    try tracking.initTypedArrayView(rt, buffer_value, 2, 2, null, 5);
+    try tracking.initTypedArrayView(rt, buffer_value, 2, 2, null, .uint16);
 
     const fixed_payload = fixed.typedArrayPayloadFast().?;
     const tracking_payload = tracking.typedArrayPayloadFast().?;
@@ -3780,7 +3778,7 @@ test "shared array buffer grow refreshes length-tracking typed array state" {
 
     const buffer_value = try engine.exec.buffer_ops.sharedArrayBufferConstructLength(rt, 2, 8, null);
     const view = try core.Object.create(rt, core.class.ids.object, null);
-    try view.initTypedArrayView(rt, buffer_value, 0, 1, null, 2);
+    try view.initTypedArrayView(rt, buffer_value, 0, 1, null, .uint8);
 
     const payload = view.typedArrayPayloadFast().?;
     try std.testing.expectEqual(@as(u32, 2), payload.live_length);
@@ -4060,13 +4058,13 @@ test "generator completion eagerly releases the resident execution owners" {
     const delegate = try core.Object.create(rt, core.class.ids.object, null);
     const generator = try core.Object.create(rt, core.class.ids.generator, null);
 
-    generator.setGeneratorCurrentFunction(rt, current_function.value());
-    generator.setGeneratorThis(rt, this_object.value());
-    generator.setGeneratorYieldStarIterator(rt, delegate.value());
+    generator.setGeneratorCurrentFunction(current_function.value());
+    generator.setGeneratorThis(this_object.value());
+    generator.setGeneratorYieldStarIterator(delegate.value());
     generator.generatorActualArgCountSlot().* = 1;
     generator.generatorJustYieldedSlot().* = true;
     generator.generatorYieldStarSuspendedSlot().* = true;
-    generator.generatorResumeCompletionTypeSlot().* = 1;
+    generator.generatorResumeCompletionSlot().* = .return_;
 
     const args = try rt.memory.alloc(core.JSValue, 1);
     args[0] = core.JSValue.int32(11);
@@ -4094,7 +4092,7 @@ test "generator completion eagerly releases the resident execution owners" {
     try std.testing.expect(generator.generatorYieldStarIterator() == null);
     try std.testing.expect(!generator.generatorJustYielded());
     try std.testing.expect(!generator.generatorYieldStarSuspended());
-    try std.testing.expectEqual(@as(i32, 0), generator.generatorResumeCompletionType());
+    try std.testing.expectEqual(core.generator_state.ResumeCompletion.next, generator.generatorResumeCompletion());
     try std.testing.expect(generator.generatorFunctionRealmGlobalPtr() == null);
     try std.testing.expect(!rt.borrowedReferenceHolderRegistered(generator));
 
@@ -4195,7 +4193,7 @@ test "native function state uses payload storage" {
     (try function.functionRealmGlobalSlot(rt)).* = home.value();
 
     try std.testing.expect(function.functionSource() != null);
-    try std.testing.expectEqual(@as(i32, 11), function.hostFunctionKind());
+    try std.testing.expectEqual(@as(?i32, 11), function.hostFunctionKind());
     try std.testing.expectEqual(@as(i32, 22), function.nativeFunctionId());
     try std.testing.expect(function.functionBytecode() == null);
     try std.testing.expectEqual(@as(usize, 0), function.functionCaptures().len);
@@ -4280,7 +4278,7 @@ test "bytecode function state uses the inline qjs function arm" {
     function.mutableCaptureSlots()[0] = try core.VarRef.createClosed(rt, core.JSValue.int32(55));
     try function.setFunctionHomeObject(rt, home);
 
-    try std.testing.expectEqual(@as(i32, 0), function.hostFunctionKind());
+    try std.testing.expectEqual(@as(?i32, null), function.hostFunctionKind());
     try std.testing.expectEqual(@as(i32, 0), function.nativeFunctionId());
     try std.testing.expect(function.functionBytecode() != null);
     try std.testing.expectEqual(@as(?i32, 55), function.functionCaptures()[0].varRefValue().as(.int));
@@ -4312,10 +4310,10 @@ test "module namespace uses shape-only live-binding storage" {
     try std.testing.expectEqual(@as(?i32, 17), desc.value.as(.int));
 
     try std.testing.expectError(error.ReadOnly, namespace.setProperty(rt, export_name, core.JSValue.int32(18)));
-    try namespace.defineOwnProperty(rt, export_name, core.Descriptor.data(core.JSValue.int32(17), true, true, false));
+    try namespace.defineOwnProperty(rt, export_name, core.Descriptor.data(core.JSValue.int32(17), .{ .writable = true, .enumerable = true }));
     try std.testing.expectError(
         error.ReadOnly,
-        namespace.defineOwnProperty(rt, export_name, core.Descriptor.data(core.JSValue.int32(18), true, true, false)),
+        namespace.defineOwnProperty(rt, export_name, core.Descriptor.data(core.JSValue.int32(18), .{ .writable = true, .enumerable = true })),
     );
     try std.testing.expect(!namespace.deleteProperty(rt, export_name));
 }
@@ -4338,7 +4336,7 @@ test "trace object shape summary follows append kind delete and compaction" {
     try object.defineOwnProperty(
         rt,
         atoms[0],
-        core.Descriptor.data(core.JSValue.int32(1), true, true, true),
+        core.Descriptor.data(core.JSValue.int32(1), .all),
     );
     var summary = object.traceShapeSummary();
     try std.testing.expect(core.Object.traceShapeSummaryIsExact(summary));
@@ -4348,7 +4346,7 @@ test "trace object shape summary follows append kind delete and compaction" {
     try object.defineOwnProperty(
         rt,
         atoms[0],
-        core.Descriptor.accessor(core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), true, true),
+        core.Descriptor.accessor(core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), .{ .enumerable = true, .configurable = true }),
     );
     summary = object.traceShapeSummary();
     try std.testing.expectEqual(core.property.Kind.accessor, core.Object.traceShapeSummaryFlagsAt(summary, 0).kind);
@@ -4370,7 +4368,7 @@ test "trace object shape summary follows append kind delete and compaction" {
     try object.defineOwnProperty(
         rt,
         atoms[1],
-        core.Descriptor.data(core.JSValue.int32(2), true, true, true),
+        core.Descriptor.data(core.JSValue.int32(2), .all),
     );
     summary = object.traceShapeSummary();
     try std.testing.expectEqual(@as(usize, 2), core.Object.traceShapeSummaryCount(summary));
@@ -4389,7 +4387,7 @@ test "trace object shape summary follows append kind delete and compaction" {
     try object.defineOwnProperty(
         rt,
         atoms[1],
-        core.Descriptor.accessor(core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), true, true),
+        core.Descriptor.accessor(core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), .{ .enumerable = true, .configurable = true }),
     );
     summary = object.traceShapeSummary();
     try std.testing.expectEqual(core.property.Kind.accessor, core.Object.traceShapeSummaryFlagsAt(summary, 0).kind);
@@ -4397,7 +4395,7 @@ test "trace object shape summary follows append kind delete and compaction" {
     try object.defineOwnProperty(
         rt,
         atoms[1],
-        core.Descriptor.data(core.JSValue.int32(2), true, true, true),
+        core.Descriptor.data(core.JSValue.int32(2), .all),
     );
     try std.testing.expect(object.deleteProperty(rt, atoms[0]));
     summary = object.traceShapeSummary();
@@ -4411,7 +4409,7 @@ test "trace object shape summary follows append kind delete and compaction" {
         try object.defineOwnProperty(
             rt,
             name,
-            core.Descriptor.data(core.JSValue.int32(3), true, true, true),
+            core.Descriptor.data(core.JSValue.int32(3), .all),
         );
     }
     try std.testing.expect(!core.Object.traceShapeSummaryIsExact(object.traceShapeSummary()));
@@ -4470,14 +4468,14 @@ test "pure property value replacement preserves a shared shape until flags chang
 
     const key = try rt.internAtom("shared_replace");
 
-    try first.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, false, true));
-    try second.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(2), true, false, true));
+    try first.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), .method));
+    try second.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(2), .method));
     const shared_shape = first.shape_ref;
     try std.testing.expectEqual(shared_shape, second.shape_ref);
 
     // QuickJS updates only the per-object JSProperty value when the metadata
     // flags are unchanged. The shared JSShape remains valid for both owners.
-    try first.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(3), true, false, true));
+    try first.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(3), .method));
     try std.testing.expectEqual(shared_shape, first.shape_ref);
     try std.testing.expectEqual(shared_shape, second.shape_ref);
     try std.testing.expectEqual(@as(?i32, 3), (try first.getProperty(key)).as(.int));
@@ -4485,7 +4483,7 @@ test "pure property value replacement preserves a shared shape until flags chang
 
     // Metadata mutation still requires clone-before-write so the peer keeps
     // the original writable shape.
-    try first.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(4), false, false, true));
+    try first.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(4), .{ .configurable = true }));
     try std.testing.expect(first.shape_ref != second.shape_ref);
     const first_desc = (try first.getOwnProperty(rt, key)).?;
     const second_desc = (try second.getOwnProperty(rt, key)).?;
@@ -4513,7 +4511,7 @@ test "unique transition shape appends in place across FAM relocation" {
         try object.defineOwnProperty(
             rt,
             name,
-            core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true),
+            core.Descriptor.data(core.JSValue.int32(@intCast(index)), .all),
         );
         try std.testing.expectEqual(initial_shape, object.shape_ref);
     }
@@ -4525,7 +4523,7 @@ test "unique transition shape appends in place across FAM relocation" {
     try object.defineOwnProperty(
         rt,
         atoms[in_place],
-        core.Descriptor.data(core.JSValue.int32(@intCast(in_place)), true, true, true),
+        core.Descriptor.data(core.JSValue.int32(@intCast(in_place)), .all),
     );
     try std.testing.expect(before_relocation != object.shape_ref);
     try std.testing.expectEqual(initial_hashed_count, rt.shapes.shape_hash_count);
@@ -4557,7 +4555,7 @@ test "first property append OOM restores the no-storage sentinel" {
     rt.setMemoryLimit(rt.memory.allocated_bytes + initial_value_bytes);
     try std.testing.expectError(
         error.OutOfMemory,
-        object.defineOwnProperty(rt, name, core.Descriptor.data(core.JSValue.int32(1), true, true, true)),
+        object.defineOwnProperty(rt, name, core.Descriptor.data(core.JSValue.int32(1), .all)),
     );
     rt.setMemoryLimit(null);
 
@@ -4567,7 +4565,7 @@ test "first property append OOM restores the no-storage sentinel" {
 
     // Retrying the same mutation proves the failed append restored a valid
     // empty-object state rather than leaving a dangling pseudo-allocation.
-    try object.defineOwnProperty(rt, name, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
+    try object.defineOwnProperty(rt, name, core.Descriptor.data(core.JSValue.int32(2), .all));
     try std.testing.expectEqual(@as(?i32, 2), (try object.getProperty(name)).as(.int));
 }
 
@@ -4584,16 +4582,16 @@ test "failed new property definition rolls back retained entry" {
     const d = try rt.internAtom("rollback_d");
     const e = try rt.internAtom("rollback_e");
 
-    try object.defineOwnProperty(rt, a, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
-    try object.defineOwnProperty(rt, b, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
-    try object.defineOwnProperty(rt, c, core.Descriptor.data(core.JSValue.int32(3), true, true, true));
-    try object.defineOwnProperty(rt, d, core.Descriptor.data(core.JSValue.int32(4), true, true, true));
+    try object.defineOwnProperty(rt, a, core.Descriptor.data(core.JSValue.int32(1), .all));
+    try object.defineOwnProperty(rt, b, core.Descriptor.data(core.JSValue.int32(2), .all));
+    try object.defineOwnProperty(rt, c, core.Descriptor.data(core.JSValue.int32(3), .all));
+    try object.defineOwnProperty(rt, d, core.Descriptor.data(core.JSValue.int32(4), .all));
 
     try std.testing.expectEqual(@as(usize, 4), object.shape_ref.prop_count);
     try std.testing.expectEqual(@as(usize, 4), object.shape_ref.props().len);
 
     rt.setMemoryLimit(rt.memory.allocated_bytes);
-    try std.testing.expectError(error.OutOfMemory, object.defineOwnProperty(rt, e, core.Descriptor.data(retained.value(), true, true, true)));
+    try std.testing.expectError(error.OutOfMemory, object.defineOwnProperty(rt, e, core.Descriptor.data(retained.value(), .all)));
     rt.setMemoryLimit(null);
 
     try std.testing.expectEqual(@as(usize, 4), object.shape_ref.prop_count);
@@ -4626,7 +4624,7 @@ test "unique shape append OOM rolls back shape and value storage together" {
     defer atom_roots.deactivate(rt);
 
     for (atoms[0..4], 0..) |name, index| {
-        try object.defineOwnProperty(rt, name, core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true));
+        try object.defineOwnProperty(rt, name, core.Descriptor.data(core.JSValue.int32(@intCast(index)), .all));
     }
     for (atoms[0..4]) |name| try std.testing.expect(object.deleteProperty(rt, name));
 
@@ -4646,7 +4644,7 @@ test "unique shape append OOM rolls back shape and value storage together" {
     defer rt.setMemoryLimit(null);
     try std.testing.expectError(
         error.OutOfMemory,
-        object.defineOwnProperty(rt, atoms[4], core.Descriptor.data(core.JSValue.int32(4), true, true, true)),
+        object.defineOwnProperty(rt, atoms[4], core.Descriptor.data(core.JSValue.int32(4), .all)),
     );
     rt.setMemoryLimit(null);
 
@@ -4656,7 +4654,7 @@ test "unique shape append OOM rolls back shape and value storage together" {
 
     // A retry on the same object proves its value buffer still agrees with the
     // shape capacity and catches the former out-of-bounds write on index four.
-    try object.defineOwnProperty(rt, atoms[4], core.Descriptor.data(core.JSValue.int32(5), true, true, true));
+    try object.defineOwnProperty(rt, atoms[4], core.Descriptor.data(core.JSValue.int32(5), .all));
     try std.testing.expectEqual(@as(?i32, 5), (try object.getProperty(atoms[4])).as(.int));
 }
 
@@ -4675,7 +4673,7 @@ test "property compaction removes tombstones without mutating shared sibling sha
 
     const template = try core.Object.create(rt, core.class.ids.object, null);
     for (atoms, 0..) |name, index| {
-        try template.defineOwnProperty(rt, name, core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true));
+        try template.defineOwnProperty(rt, name, core.Descriptor.data(core.JSValue.int32(@intCast(index)), .all));
     }
     const sibling = try core.Object.createFromPropertyTemplate(rt, template);
     const victim = try core.Object.createFromPropertyTemplate(rt, template);
@@ -4729,7 +4727,7 @@ test "context lexicals property alias releases context strong reference" {
     ctx.lexicals = env;
 
     const env_key = try rt.internAtom("env");
-    try global.defineOwnProperty(rt, env_key, core.Descriptor.data(env.value(), true, true, true));
+    try global.defineOwnProperty(rt, env_key, core.Descriptor.data(env.value(), .all));
 
     ctx.destroy();
     helpers.reclaimNow(rt);
@@ -4754,10 +4752,10 @@ test "failed auto-init property definition rolls back retained entry" {
     const d = try rt.internAtom("auto_rollback_d");
     const e = try rt.internAtom("auto_rollback_e");
 
-    try object.defineOwnProperty(rt, a, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
-    try object.defineOwnProperty(rt, b, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
-    try object.defineOwnProperty(rt, c, core.Descriptor.data(core.JSValue.int32(3), true, true, true));
-    try object.defineOwnProperty(rt, d, core.Descriptor.data(core.JSValue.int32(4), true, true, true));
+    try object.defineOwnProperty(rt, a, core.Descriptor.data(core.JSValue.int32(1), .all));
+    try object.defineOwnProperty(rt, b, core.Descriptor.data(core.JSValue.int32(2), .all));
+    try object.defineOwnProperty(rt, c, core.Descriptor.data(core.JSValue.int32(3), .all));
+    try object.defineOwnProperty(rt, d, core.Descriptor.data(core.JSValue.int32(4), .all));
 
     try std.testing.expectEqual(@as(usize, 4), object.shape_ref.prop_count);
     try std.testing.expectEqual(@as(usize, 4), object.shape_ref.props().len);
@@ -4765,7 +4763,7 @@ test "failed auto-init property definition rolls back retained entry" {
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     try std.testing.expectError(
         error.OutOfMemory,
-        object.defineAutoInitPropertyWithRealm(rt, e, "auto_rollback_e", 0, core.property.Flags.data(true, false, true), global),
+        object.defineAutoInitPropertyWithRealm(rt, e, "auto_rollback_e", 0, core.property.Flags.data(.method), global),
     );
     rt.setMemoryLimit(null);
 
@@ -4792,20 +4790,20 @@ test "failed realm auto-init property definition rolls back borrowed holder regi
     const d = try rt.internAtom("realm_auto_rollback_d");
     const e = try rt.internAtom("realm_auto_rollback_e");
 
-    try object.defineOwnProperty(rt, a, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
-    try object.defineOwnProperty(rt, b, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
-    try object.defineOwnProperty(rt, c, core.Descriptor.data(core.JSValue.int32(3), true, true, true));
-    try object.defineOwnProperty(rt, d, core.Descriptor.data(core.JSValue.int32(4), true, true, true));
+    try object.defineOwnProperty(rt, a, core.Descriptor.data(core.JSValue.int32(1), .all));
+    try object.defineOwnProperty(rt, b, core.Descriptor.data(core.JSValue.int32(2), .all));
+    try object.defineOwnProperty(rt, c, core.Descriptor.data(core.JSValue.int32(3), .all));
+    try object.defineOwnProperty(rt, d, core.Descriptor.data(core.JSValue.int32(4), .all));
 
-    const old_holder_count = rt.borrowed_reference_holders.len;
+    const old_holder_count = rt.borrowed_reference_holders.items.len;
     rt.setMemoryLimit(rt.memory.allocated_bytes + borrowedHolderInitialAllocationBytes());
     try std.testing.expectError(
         error.OutOfMemory,
-        object.definePerformanceAutoInitProperty(rt, e, core.property.Flags.data(true, false, true), global),
+        object.definePerformanceAutoInitProperty(rt, e, core.property.Flags.data(.method), global),
     );
     rt.setMemoryLimit(null);
 
-    try std.testing.expectEqual(old_holder_count, rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(old_holder_count, rt.borrowed_reference_holders.items.len);
     try std.testing.expectEqual(@as(usize, 4), object.shape_ref.prop_count);
     try std.testing.expect(!object.hasOwnProperty(e));
 
@@ -4824,12 +4822,12 @@ test "property replacement preserves references under memory cap" {
 
     const key = try rt.internAtom("rollback_replace");
 
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(old_value.value(), true, true, true));
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(old_value.value(), .all));
     try std.testing.expectEqual(@as(usize, 1), object.shape_ref.prop_count);
     try std.testing.expectEqual(@as(usize, 1), object.shape_ref.prop_count);
 
     rt.setMemoryLimit(rt.memory.allocated_bytes);
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(replacement.value(), true, true, true));
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(replacement.value(), .all));
     rt.setMemoryLimit(null);
 
     try std.testing.expectEqual(@as(usize, 1), object.shape_ref.prop_count);
@@ -4840,7 +4838,7 @@ test "property replacement preserves references under memory cap" {
 }
 
 // OP_define_field refcounted literal fields (qjs CASE(OP_define_field),
-// quickjs.c:19269, has no value-form gate): definePlainDataPropertyKnownFast
+// quickjs.c, has no value-form gate): definePlainDataPropertyKnownFast
 // must CONSUME the value on success (append moves it; duplicate-key replace
 // dups into the slot and retires the caller's ref) and must NOT consume it on
 // any failure (the VM's cold-shell re-execution still owns it on the stack).
@@ -4944,8 +4942,8 @@ test "definePlainDataPropertyKnownFast refcounted define survives forced GC at e
     var key_roots = core.runtime.rootAtoms(.{ &key, &partner_key });
     key_roots.activate(rt);
     defer key_roots.deactivate(rt);
-    try cyclic.defineOwnProperty(rt, partner_key, core.Descriptor.data(partner.value(), true, true, true));
-    try partner.defineOwnProperty(rt, partner_key, core.Descriptor.data(cyclic.value(), true, true, true));
+    try cyclic.defineOwnProperty(rt, partner_key, core.Descriptor.data(partner.value(), .all));
+    try partner.defineOwnProperty(rt, partner_key, core.Descriptor.data(cyclic.value(), .all));
     dropGcPtr(&partner);
 
     const replacement = try core.Object.create(rt, core.class.ids.object, null);
@@ -5052,7 +5050,7 @@ test "object data property self-assignment keeps stored object alive" {
     const stored = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("self_assign");
 
-    try holder.defineOwnProperty(rt, key, core.Descriptor.data(stored.value(), true, true, true));
+    try holder.defineOwnProperty(rt, key, core.Descriptor.data(stored.value(), .all));
 
     const own_value = holder.propertyEntry(0).*.slot.data;
     try std.testing.expect(try holder.setOwnWritableDataProperty(rt, key, own_value));
@@ -5130,8 +5128,8 @@ test "prototype replacement clones shared transition shape" {
 
     const key = try rt.internAtom("shared_proto_key");
 
-    try first.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
-    try second.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
+    try first.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), .all));
+    try second.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(2), .all));
     const shared_shape = first.shape_ref;
     try std.testing.expectEqual(shared_shape, second.shape_ref);
 
@@ -5152,8 +5150,8 @@ test "failed prototype replacement preserves prototype and refcounts" {
 
     const key = try rt.internAtom("failed_proto_key");
 
-    try first.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
-    try second.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
+    try first.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), .all));
+    try second.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(2), .all));
     const shared_shape = first.shape_ref;
     try std.testing.expectEqual(shared_shape, second.shape_ref);
     try std.testing.expect(first.getPrototype() == null);
@@ -5206,9 +5204,9 @@ test "shape transition cache releases chained shapes" {
     var objects: [32]*core.Object = undefined;
     for (&objects, 0..) |*slot, index| {
         const obj = try core.Object.create(rt, core.class.ids.object, null);
-        try obj.defineOwnProperty(rt, a, core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true));
-        try obj.defineOwnProperty(rt, b, core.Descriptor.data(core.JSValue.int32(@intCast(index + 1)), true, true, true));
-        try obj.defineOwnProperty(rt, c, core.Descriptor.data(core.JSValue.int32(@intCast(index + 2)), true, true, true));
+        try obj.defineOwnProperty(rt, a, core.Descriptor.data(core.JSValue.int32(@intCast(index)), .all));
+        try obj.defineOwnProperty(rt, b, core.Descriptor.data(core.JSValue.int32(@intCast(index + 1)), .all));
+        try obj.defineOwnProperty(rt, c, core.Descriptor.data(core.JSValue.int32(@intCast(index + 2)), .all));
         slot.* = obj;
     }
 
@@ -5232,7 +5230,7 @@ test "large object property lookup uses shape hash across delete and re-add" {
     while (i < 1024) : (i += 1) {
         const name = try std.fmt.bufPrint(&name_buf, "prop_{d}", .{i});
         const key = try rt.internAtom(name);
-        try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(@intCast(i)), true, true, true));
+        try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(@intCast(i)), .all));
     }
 
     try std.testing.expect(obj.shape_ref.hasPropertyHash());
@@ -5244,7 +5242,7 @@ test "large object property lookup uses shape hash across delete and re-add" {
     try std.testing.expect(obj.deleteProperty(rt, target));
     try std.testing.expect(!obj.hasOwnProperty(target));
 
-    try obj.defineOwnProperty(rt, target, core.Descriptor.data(core.JSValue.int32(777), true, true, true));
+    try obj.defineOwnProperty(rt, target, core.Descriptor.data(core.JSValue.int32(777), .all));
     const after = try obj.getProperty(target);
     try std.testing.expectEqual(@as(?i32, 777), after.as(.int));
 }
@@ -5501,7 +5499,7 @@ test "runtime exposes stable gc stats snapshot" {
     defer token.release();
 
     const key = try rt.internAtom("statsChild");
-    try owner.defineOwnProperty(&rt, key, core.Descriptor.data(child.value(), true, true, true));
+    try owner.defineOwnProperty(&rt, key, core.Descriptor.data(child.value(), .all));
 
     const snapshot = rt.gcStats();
     const expected_gc_bytes =
@@ -5578,7 +5576,7 @@ test "external memory token registry audits duplicate releases and leaks" {
     try std.testing.expectEqual(@as(usize, 1), stats.external_token_count);
     try std.testing.expectEqual(@as(usize, 64), stats.external_token_bytes);
     try rt.gc.verifyHeapAccounting(&rt);
-    try std.testing.expect(rt.gc.external.entries.len != 0);
+    try std.testing.expect(rt.gc.external.count() != 0);
 
     token.release();
     stats = rt.gcStats();
@@ -5586,7 +5584,7 @@ test "external memory token registry audits duplicate releases and leaks" {
     try std.testing.expectEqual(@as(usize, 0), stats.external_token_count);
     try std.testing.expectEqual(@as(usize, 1), stats.external_free_count);
     try rt.gc.verifyHeapAccounting(&rt);
-    try std.testing.expectEqual(@as(usize, 0), rt.gc.external.entries.len);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.external.count());
 
     duplicate_token.release();
     stats = rt.gcStats();
@@ -5707,7 +5705,7 @@ test "object child edge tracing exposes mutable value slots" {
     const array_obj = try core.Object.createArray(rt, null);
 
     const key = try rt.internAtom("traceSlot");
-    try array_obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(401), true, true, true));
+    try array_obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(401), .all));
     try std.testing.expect(try array_obj.appendDenseArrayIndex(rt, 0, core.Atom.taggedInt(0), core.JSValue.int32(402)));
 
     const Rewriter = struct {
@@ -5836,13 +5834,9 @@ test "gc heap accounting verifier catches pinned header flag drift" {
     defer pin.deinit();
 
     try rt.gc.verifyHeapAccounting(rt);
-    // TGC S4-e: the pin is spelled once, in the ledger, with `pins.set` as
-    // its membership index. Drift now means "entry present, index missing",
-    // which is exactly what the verifier still names.
-    try std.testing.expect(rt.gc.pins.set.remove(@intFromPtr(obj.gcHeader())));
-    try std.testing.expectError(error.PinnedHeaderFlagMismatch, rt.gc.verifyHeapAccounting(rt));
-    try rt.gc.pins.set.put(rt.memory.persistent_allocator, @intFromPtr(obj.gcHeader()), {});
-    try rt.gc.verifyHeapAccounting(rt);
+    // The ledger is one map: membership and count cannot disagree, so the
+    // audit only has to see the pinned header as live.
+    try std.testing.expect(rt.gc.pins.contains(obj.gcHeader()));
 }
 
 test "gc invariant negative: block candidate index audit rejects bloom and exact-set drift" {
@@ -5924,7 +5918,7 @@ test "gc invariant negative: block heap rejects geometry free-chain and doomed-l
             heap.doomed_blocks = saved_doomed_head;
             block.doomed_link = saved_doomed_link;
         }
-        block.doomed_link = 1;
+        block.doomed_link = .tail;
         heap.doomed_blocks = block;
         try std.testing.expectError(error.DoomedListMembershipMismatch, heap.verify());
     }
@@ -6080,8 +6074,8 @@ test "trace shape summary: incremental writers track the Shape projection" {
     const key_c = try rt.internAtom("trace-summary-c");
 
     const undef = core.JSValue.undefinedValue();
-    const data_desc = core.Descriptor.data(undef, true, true, true);
-    const accessor_desc = core.Descriptor.accessor(undef, undef, true, true);
+    const data_desc = core.Descriptor.data(undef, .all);
+    const accessor_desc = core.Descriptor.accessor(undef, undef, .{ .enumerable = true, .configurable = true });
 
     // Canonical all-live-data summaries are literally their own count. That is
     // the property the marker's `summary <= trailing_property_capacity` fast
@@ -6193,7 +6187,7 @@ test "trace shape summary: appends preserve the leased remembered bit" {
             try target.defineOwnProperty(
                 runtime,
                 key,
-                core.Descriptor.data(child.value(), true, true, true),
+                core.Descriptor.data(child.value(), .all),
             );
         }
     };
@@ -6288,7 +6282,7 @@ test "representation audit cross-checks the remembered object cache and map" {
 
     const edge_key = try rt.internAtom("remembered-representation-audit");
     const owner = try core.Object.createPlainObject(rt, null);
-    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), .all));
     var owner_slot: ?*core.Object = owner;
     var roots = core.runtime.rootObjects(.{&owner_slot});
     roots.activate(rt);
@@ -6296,7 +6290,7 @@ test "representation audit cross-checks the remembered object cache and map" {
 
     _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
     const child = try core.Object.createPlainObject(rt, null);
-    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(child.value(), true, true, true));
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(child.value(), .all));
 
     // Establish the legal state through the real barrier. This is also the
     // Shape-summary mask positive arm: bit 7 is live GC state, not a low-seven
@@ -6430,7 +6424,7 @@ test "forget fuses the remembered map removal with its own cache bit" {
 
     const edge_key = try rt.internAtom("remembered-forget-fusion");
     const owner = try core.Object.createPlainObject(rt, null);
-    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), .all));
     var owner_slot: ?*core.Object = owner;
     var roots = core.runtime.rootObjects(.{&owner_slot});
     roots.activate(rt);
@@ -6438,7 +6432,7 @@ test "forget fuses the remembered map removal with its own cache bit" {
 
     _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
     const child = try core.Object.createPlainObject(rt, null);
-    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(child.value(), true, true, true));
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(child.value(), .all));
 
     const bit = core.gc.trace_remembered_mask;
     try std.testing.expectEqual(@as(usize, 1), rt.gc.generation.remembered.count());
@@ -6663,20 +6657,6 @@ test "gc invariant negative: address index audit rejects canonical page drift" {
     try rt.gc.address_registry.verifyIndex(false);
 }
 
-test "gc invariant negative: heap accounting audit rejects a pin without an entry" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-    const obj = try core.Object.createPlainObject(rt, null);
-    try rt.gc.verifyHeapAccounting(rt);
-
-    {
-        defer _ = rt.gc.pins.set.remove(@intFromPtr(obj.gcHeader()));
-        try rt.gc.pins.set.put(rt.memory.persistent_allocator, @intFromPtr(obj.gcHeader()), {});
-        try std.testing.expectError(error.PinnedHeaderMissingEntry, rt.gc.verifyHeapAccounting(rt));
-    }
-    try rt.gc.verifyHeapAccounting(rt);
-}
-
 test "gc invariant negative: generation audit rejects census and stale remembered drift" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
@@ -6731,7 +6711,7 @@ test "object traceChildEdgesFallible propagates visitor errors" {
     const child = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("trace-error-child");
 
-    try obj.defineOwnProperty(rt, key, core.Descriptor.data(child.value(), true, true, true));
+    try obj.defineOwnProperty(rt, key, core.Descriptor.data(child.value(), .all));
 
     const Visitor = struct {
         pub fn visitValue(_: *@This(), _: *core.JSValue) !void {
@@ -6757,8 +6737,8 @@ test "ordinary object trace visits data slots and TMASK accessor edges" {
     const data_key = try rt.internAtom("ordinary-data");
     const acc_key = try rt.internAtom("ordinary-acc");
 
-    try obj.defineOwnProperty(rt, data_key, core.Descriptor.data(data_child.value(), true, true, true));
-    try obj.defineOwnProperty(rt, acc_key, core.Descriptor.accessor(getter.value(), core.JSValue.undefinedValue(), true, true));
+    try obj.defineOwnProperty(rt, data_key, core.Descriptor.data(data_child.value(), .all));
+    try obj.defineOwnProperty(rt, acc_key, core.Descriptor.accessor(getter.value(), core.JSValue.undefinedValue(), .{ .enumerable = true, .configurable = true }));
 
     const Visitor = struct {
         data_hits: usize = 0,
@@ -6842,7 +6822,7 @@ fn createDeepOwnedPropertyChain(rt: *core.JSRuntime, key: core.Atom, length: usi
         tail.defineOwnProperty(
             rt,
             key,
-            core.Descriptor.data(child.value(), true, true, true),
+            core.Descriptor.data(child.value(), .all),
         ) catch |err| {
             return err;
         };
@@ -6956,8 +6936,8 @@ test "closed object property cycle is released by runtime cycle removal" {
     const left_key = try rt.internAtom("left");
     const right_key = try rt.internAtom("right");
 
-    try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), true, true, true));
-    try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
+    try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), .all));
+    try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), .all));
 
     dropGcPtr(&left);
     dropGcPtr(&right);
@@ -6973,7 +6953,7 @@ test "fast array iterator-next cache cycle is released by runtime cycle removal"
     var next_obj = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("iterator");
 
-    try next_obj.defineOwnProperty(rt, key, core.Descriptor.data(it.value(), true, true, true));
+    try next_obj.defineOwnProperty(rt, key, core.Descriptor.data(it.value(), .all));
     const slot = try it.cachedIteratorNextSlot(rt);
     slot.* = next_obj.value();
 
@@ -7172,17 +7152,13 @@ test "strong Map and Set entry cycles are released by runtime cycle removal" {
     const set = try core.Object.create(rt, core.class.ids.set, null);
     const set_value = try core.Object.create(rt, core.class.ids.object, null);
     const back_key = try rt.internAtom("collection");
-    try map_key.defineOwnProperty(rt, back_key, core.Descriptor.data(map.value(), true, true, true));
-    try map_value.defineOwnProperty(rt, back_key, core.Descriptor.data(map.value(), true, true, true));
-    try set_value.defineOwnProperty(rt, back_key, core.Descriptor.data(set.value(), true, true, true));
+    try map_key.defineOwnProperty(rt, back_key, core.Descriptor.data(map.value(), .all));
+    try map_value.defineOwnProperty(rt, back_key, core.Descriptor.data(map.value(), .all));
+    try set_value.defineOwnProperty(rt, back_key, core.Descriptor.data(set.value(), .all));
 
     // Pins CollectionPayload strong key/value entry edges, object.zig:8580-8584.
-    const map_entries = try rt.memory.alloc(core.object.CollectionEntry, 1);
-    map_entries[0] = .{ .key = map_key.value(), .value = map_value.value() };
-    map.collectionEntriesSlot().* = map_entries;
-    const set_entries = try rt.memory.alloc(core.object.CollectionEntry, 1);
-    set_entries[0] = .{ .key = set_value.value(), .value = core.JSValue.undefinedValue() };
-    set.collectionEntriesSlot().* = set_entries;
+    try map.collectionEntriesSlot().append(rt.memory.persistent_allocator, .{ .key = map_key.value(), .value = map_value.value() });
+    try set.collectionEntriesSlot().append(rt.memory.persistent_allocator, .{ .key = set_value.value(), .value = core.JSValue.undefinedValue() });
 
     const expected = rt.gc.liveCount();
     try std.testing.expect(expected != 0);
@@ -7197,8 +7173,8 @@ test "ordinary error stack and callsite cycles are released by runtime cycle rem
     const stack = try core.Object.create(rt, core.class.ids.object, null);
     const callsite = try core.Object.create(rt, core.class.ids.object, null);
     const back_key = try rt.internAtom("owner");
-    try stack.defineOwnProperty(rt, back_key, core.Descriptor.data(owner.value(), true, true, true));
-    try callsite.defineOwnProperty(rt, back_key, core.Descriptor.data(owner.value(), true, true, true));
+    try stack.defineOwnProperty(rt, back_key, core.Descriptor.data(owner.value(), .all));
+    try callsite.defineOwnProperty(rt, back_key, core.Descriptor.data(owner.value(), .all));
 
     // Pins OrdinaryPayload callsite_file/error_stack edges, object.zig:8488-8502.
     try owner.setCallSiteMetadata(rt, callsite.value(), core.JSValue.undefinedValue(), 1, 1, false);
@@ -7217,7 +7193,7 @@ test "accessor getter and setter self-cycle is released by runtime cycle removal
     const key = try rt.internAtom("accessor");
 
     // Pins accessor getter/setter property slots, object.zig:8399-8408.
-    try object.defineOwnProperty(rt, key, core.Descriptor.accessor(object.value(), object.value(), true, true));
+    try object.defineOwnProperty(rt, key, core.Descriptor.accessor(object.value(), object.value(), .{ .enumerable = true, .configurable = true }));
 
     const expected = rt.gc.liveCount();
     try std.testing.expect(expected != 0);
@@ -7259,7 +7235,7 @@ test "arguments payload value-slice cycle is released by runtime cycle removal" 
     // TGC S4-c: subordinate `.payload` cell (see `createPayloadSliceCell`).
     payload.var_refs = try core.Object.createPayloadSliceCell(rt, core.JSValue, 1);
     payload.var_refs[0] = target.value();
-    try target.defineOwnProperty(rt, key, core.Descriptor.data(arguments.value(), true, true, true));
+    try target.defineOwnProperty(rt, key, core.Descriptor.data(arguments.value(), .all));
 
     const expected = rt.gc.liveCount();
     try std.testing.expect(expected != 0);
@@ -7289,8 +7265,8 @@ test "fallible GC API reports reclaimed objects and no failure" {
     const left_key = try rt.internAtom("gc-result-left");
     const right_key = try rt.internAtom("gc-result-right");
 
-    try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), true, true, true));
-    try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
+    try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), .all));
+    try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), .all));
 
     const before_collections = rt.gc.stats.collections;
     const result = try rt.tryRunObjectCycleRemoval();
@@ -7309,8 +7285,8 @@ test "trace_stw collects a closed property cycle" {
     const right = try core.Object.create(rt, core.class.ids.object, null);
     const left_key = try rt.internAtom("left");
     const right_key = try rt.internAtom("right");
-    try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), true, true, true));
-    try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
+    try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), .all));
+    try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), .all));
     try expectClosedPropertyCycleReclaimed(rt, rt.runObjectCycleRemoval());
 }
 
@@ -7330,13 +7306,13 @@ test "trace_stw ephemeron keeps value only when table and key are live" {
 
     const map_atom = try rt.internAtom("wm");
     const key_atom = try rt.internAtom("wk");
-    try global.defineOwnProperty(rt, map_atom, core.Descriptor.data(weakmap.value(), true, true, true));
-    try global.defineOwnProperty(rt, key_atom, core.Descriptor.data(key.value(), true, true, true));
+    try global.defineOwnProperty(rt, map_atom, core.Descriptor.data(weakmap.value(), .all));
+    try global.defineOwnProperty(rt, key_atom, core.Descriptor.data(key.value(), .all));
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 1), weakmap.weakCollectionEntries().len);
     try std.testing.expect(rt.gc.containsHeader(value.gcHeader()));
-    try std.testing.expect(core.gc_trace_stw.last_report.ephemeron_values_shaded >= 1);
+    try std.testing.expect(rt.gc.last_report.ephemeron_values_shaded >= 1);
 
     try std.testing.expect(global.deleteProperty(rt, key_atom));
     _ = rt.runObjectCycleRemoval();
@@ -7359,10 +7335,10 @@ test "trace_stw ephemeron value does not keep its key alive" {
     try appendWeakCollectionEntry(rt, weakmap, key, value.value());
 
     const map_atom = try rt.internAtom("wm");
-    try global.defineOwnProperty(rt, map_atom, core.Descriptor.data(weakmap.value(), true, true, true));
+    try global.defineOwnProperty(rt, map_atom, core.Descriptor.data(weakmap.value(), .all));
 
     const back = try rt.internAtom("key");
-    try value.defineOwnProperty(rt, back, core.Descriptor.data(key.value(), true, true, true));
+    try value.defineOwnProperty(rt, back, core.Descriptor.data(key.value(), .all));
     dropGcPtr(&key);
 
     _ = rt.runObjectCycleRemoval();
@@ -7383,7 +7359,7 @@ test "trace_stw WeakRef deref keep-alive lasts until job end" {
     const target_header = target.gcHeader();
     try weak_ref.setWeakRefTarget(rt, target.value());
     const wr_atom = try rt.internAtom("wr");
-    try global.defineOwnProperty(rt, wr_atom, core.Descriptor.data(weak_ref.value(), true, true, true));
+    try global.defineOwnProperty(rt, wr_atom, core.Descriptor.data(weak_ref.value(), .all));
 
     _ = weak_ref.weakRefDeref(rt);
     dropGcPtr(&target);
@@ -7604,8 +7580,8 @@ test "trace_stw survivor classes on a known graph" {
     var right = try core.Object.create(rt, core.class.ids.object, null);
     const left_key = try rt.internAtom("surv-left");
     const right_key = try rt.internAtom("surv-right");
-    try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), true, true, true));
-    try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
+    try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), .all));
+    try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), .all));
     dropGcPtr(&left);
     dropGcPtr(&right);
 
@@ -7624,7 +7600,7 @@ test "trace_stw survivor classes on a known graph" {
     const swept = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(closed_property_cycle_root_kept_reclaimed_count, swept);
     try std.testing.expect(rt.gc.containsHeader(live_header));
-    try std.testing.expectEqual(@as(usize, 0), core.gc_trace_stw.last_report.marked_conservative_extra);
+    try std.testing.expectEqual(@as(usize, 0), rt.gc.last_report.marked_conservative_extra);
 
     live_slot = null;
     dropGcPtr(&live);
@@ -8357,8 +8333,8 @@ test "pollGC runs pending collection and clears pending flag" {
     const left_key = try rt.internAtom("poll-left");
     const right_key = try rt.internAtom("poll-right");
 
-    try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), true, true, true));
-    try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
+    try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), .all));
+    try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), .all));
     dropGcPtr(&left);
     dropGcPtr(&right);
 
@@ -8491,7 +8467,7 @@ test "a pure rope-concat loop reaches the allocation-threshold boundary" {
 }
 
 // Production builds record no allocation-threshold request at all: qjs's
-// `js_malloc_rt` / `__js_malloc` (quickjs.c:1799-1812, 1566) never read
+// `js_malloc_rt` / `__js_malloc` never read
 // `malloc_gc_threshold`, so `memory.allocation_gc_trigger_enabled` compiles the
 // per-allocation trigger out of everything except test and force-GC builds.
 // The mechanism that makes that safe is that the threshold condition is
@@ -8558,7 +8534,7 @@ test "persistent value handle keeps object and nested symbols alive" {
     const object = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.atoms.newValueSymbol("persistent-handle-symbol-key");
     const value = object.value();
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.boolean(true), true, true, true));
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.boolean(true), .all));
 
     const handle = try rt.createPersistentValue(value);
 
@@ -8704,7 +8680,7 @@ test "weak persistent value clears object cycle target during gc" {
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
     const self_key = try rt.internAtom("weak-persistent-cycle-self");
-    try target.defineOwnProperty(rt, self_key, core.Descriptor.data(target.value(), true, true, true));
+    try target.defineOwnProperty(rt, self_key, core.Descriptor.data(target.value(), .all));
 
     var clear_count: usize = 0;
     var weak = try rt.createWeakPersistentValue(target.value(), weakPersistentCounterCallback, &clear_count);
@@ -8753,7 +8729,7 @@ test "function home object cycle is released by runtime cycle removal" {
     const method_key = try rt.internAtom("method");
 
     try function.setFunctionHomeObject(rt, home);
-    try home.defineOwnProperty(rt, method_key, core.Descriptor.data(function.value(), true, true, true));
+    try home.defineOwnProperty(rt, method_key, core.Descriptor.data(function.value(), .all));
 
     try expectCycleReclaimedIncludingShapes(rt, 5, rt.runObjectCycleRemoval());
 }
@@ -8767,7 +8743,7 @@ test "async continuation function cycle is released by runtime cycle removal" {
     const key = try rt.internAtom("continuation");
 
     (try continuation.functionAsyncContinuationSlot(rt)).* = promise.value();
-    try promise.defineOwnProperty(rt, key, core.Descriptor.data(continuation.value(), true, true, true));
+    try promise.defineOwnProperty(rt, key, core.Descriptor.data(continuation.value(), .all));
 
     // Two objects, their two shapes and the property storage; Promise state
     // is part of its owner and no longer contributes a sixth GC cell.
@@ -8785,7 +8761,7 @@ test "async generator promise cycle is released by runtime cycle removal" {
     const key = try rt.internAtom("generator");
 
     generator.generatorAsyncPromiseSlot().* = promise.value();
-    try promise.defineOwnProperty(rt, key, core.Descriptor.data(generator.value(), true, true, true));
+    try promise.defineOwnProperty(rt, key, core.Descriptor.data(generator.value(), .all));
 
     // Two objects, their two shapes and the property storage; Promise state
     // is part of its owner and no longer contributes a sixth GC cell.
@@ -8815,14 +8791,14 @@ test "materialized native function cycle is released by runtime cycle removal" {
         cached_key,
         "cached",
         0,
-        core.property.Flags.data(true, false, true),
+        core.property.Flags.data(.method),
         global,
         0,
     );
 
     const cached_value = try global.getProperty(cached_key);
     const cached_function = core.Object.fromHeader(cached_value.refHeader().?);
-    try cached_function.defineOwnProperty(rt, global_key, core.Descriptor.data(global.value(), true, true, true));
+    try cached_function.defineOwnProperty(rt, global_key, core.Descriptor.data(global.value(), .all));
 
     ctx.destroy();
 
@@ -8849,7 +8825,7 @@ test "function bytecode constant object cycle is released by runtime cycle remov
     fb.publishFixtureNoFail(rt);
 
     try function.setFunctionBytecodeValue(rt, core.JSValue.functionBytecode(&fb.header));
-    try captured.defineOwnProperty(rt, function_key, core.Descriptor.data(function.value(), true, true, true));
+    try captured.defineOwnProperty(rt, function_key, core.Descriptor.data(function.value(), .all));
 
     try expectCycleReclaimedIncludingShapes(rt, 5, rt.runObjectCycleRemoval());
 }
@@ -8987,8 +8963,8 @@ test "shared function bytecode constant object cycle is released by runtime cycl
     const bytecode_value = core.JSValue.functionBytecode(&fb.header);
     try first.setFunctionBytecodeValue(rt, bytecode_value);
     try second.setFunctionBytecodeValue(rt, bytecode_value);
-    try captured.defineOwnProperty(rt, first_key, core.Descriptor.data(first.value(), true, true, true));
-    try captured.defineOwnProperty(rt, second_key, core.Descriptor.data(second.value(), true, true, true));
+    try captured.defineOwnProperty(rt, first_key, core.Descriptor.data(first.value(), .all));
+    try captured.defineOwnProperty(rt, second_key, core.Descriptor.data(second.value(), .all));
 
     try expectCycleReclaimedIncludingShapes(rt, 6, rt.runObjectCycleRemoval());
 }
@@ -9012,7 +8988,7 @@ test "cycle teardown frees bytecode function captures before FB metadata" {
     try function.setFunctionBytecodeValue(rt, core.JSValue.functionBytecode(&fb.header));
     try function.allocateNullCaptureSlots(rt, 1);
     function.mutableCaptureSlots()[0] = try core.VarRef.createClosed(rt, core.JSValue.int32(1));
-    try global.defineOwnProperty(rt, function_key, core.Descriptor.data(function.value(), true, true, true));
+    try global.defineOwnProperty(rt, function_key, core.Descriptor.data(function.value(), .all));
 
     _ = rt.runObjectCycleRemoval();
     try expectNoLiveGc(rt);
@@ -9049,7 +9025,7 @@ test "nested function bytecode constant object cycle is released by runtime cycl
     inner_published = true;
 
     try function.setFunctionBytecodeValue(rt, core.JSValue.functionBytecode(&outer.header));
-    try captured.defineOwnProperty(rt, function_key, core.Descriptor.data(function.value(), true, true, true));
+    try captured.defineOwnProperty(rt, function_key, core.Descriptor.data(function.value(), .all));
 
     try expectCycleReclaimedIncludingShapes(rt, 5, rt.runObjectCycleRemoval());
 }
@@ -9086,7 +9062,7 @@ test "cyclic internal function bytecode references are released by runtime cycle
     inner.cpoolSlice()[0] = core.JSValue.functionBytecode(&outer.header);
 
     try function.setFunctionBytecodeValue(rt, core.JSValue.functionBytecode(&outer.header));
-    try captured.defineOwnProperty(rt, function_key, core.Descriptor.data(function.value(), true, true, true));
+    try captured.defineOwnProperty(rt, function_key, core.Descriptor.data(function.value(), .all));
 
     try expectCycleReclaimedIncludingShapes(rt, 5, rt.runObjectCycleRemoval());
 }
@@ -9119,7 +9095,7 @@ test "class payload function bytecode constant object cycle is released by runti
     external.payloadArm().* = @ptrCast(payload);
     fb.publishFixtureNoFail(rt);
     fb_published = true;
-    try captured.defineOwnProperty(rt, external_key, core.Descriptor.data(external.value(), true, true, true));
+    try captured.defineOwnProperty(rt, external_key, core.Descriptor.data(external.value(), .all));
 
     payload_finalizer_calls = 0;
     payload_mark_calls = 0;
@@ -9146,8 +9122,8 @@ test "realm context owns cached prototype references" {
 
     try global.setCachedFunctionProto(rt, function_proto);
     try global.setCachedPromiseProto(rt, promise_proto);
-    try function_proto.defineOwnProperty(rt, global_key, core.Descriptor.data(global.value(), true, true, true));
-    try promise_proto.defineOwnProperty(rt, global_key, core.Descriptor.data(global.value(), true, true, true));
+    try function_proto.defineOwnProperty(rt, global_key, core.Descriptor.data(global.value(), .all));
+    try promise_proto.defineOwnProperty(rt, global_key, core.Descriptor.data(global.value(), .all));
 
     ctx.destroy();
     helpers.reclaimNow(rt);
@@ -9174,7 +9150,7 @@ test "auto-init slot owns its Realm until the property is deleted" {
         lazy_key,
         "lazy",
         0,
-        core.property.Flags.data(true, false, true),
+        core.property.Flags.data(.method),
         global,
         0,
     );
@@ -9213,7 +9189,7 @@ test "typed MODULE_NS auto-init publishes a normal value or the same VarRef cell
     const cell_holder = try core.Object.create(rt, core.class.ids.object, null);
     const value_key = try rt.internAtom("module_namespace_value");
     const cell_key = try rt.internAtom("module_namespace_cell");
-    const flags = core.property.Flags.data(true, false, true);
+    const flags = core.property.Flags.data(.method);
 
     var value_fixture = ModuleAutoInitFixture{
         .expected_realm = &ctx.header,
@@ -9257,7 +9233,7 @@ test "MODULE_NS auto-init failure retains its slot Realm and retries once per re
         .result = .{ .fail_once = core.JSValue.int32(88) },
     };
 
-    try holder.defineModuleAutoInitPropertyForFixture(rt, key, core.property.Flags.data(true, false, true), ctx, &fixture.owner);
+    try holder.defineModuleAutoInitPropertyForFixture(rt, key, core.property.Flags.data(.method), ctx, &fixture.owner);
     try std.testing.expectError(error.OutOfMemory, holder.getProperty(key));
     try std.testing.expectEqual(@as(usize, 1), fixture.calls);
     try std.testing.expectEqual(core.property.Kind.auto_init, holder.propKindAt(0));
@@ -9288,7 +9264,7 @@ test "MODULE_NS auto-init reentry cannot overwrite the replacement property" {
         } },
     };
 
-    try holder.defineModuleAutoInitPropertyForFixture(rt, key, core.property.Flags.data(true, false, true), ctx, &fixture.owner);
+    try holder.defineModuleAutoInitPropertyForFixture(rt, key, core.property.Flags.data(.method), ctx, &fixture.owner);
     try std.testing.expectError(error.IncompatibleDescriptor, holder.getProperty(key));
     try std.testing.expectEqual(@as(usize, 1), fixture.calls);
     try std.testing.expectEqual(core.property.Kind.data, holder.propKindAt(0));
@@ -9310,7 +9286,7 @@ test "auto-init slot exposes the typed Realm and module owner edges" {
         .result = .{ .value = core.JSValue.int32(1) },
     };
 
-    try holder.defineModuleAutoInitPropertyForFixture(rt, key, core.property.Flags.data(true, false, true), ctx, &fixture.owner);
+    try holder.defineModuleAutoInitPropertyForFixture(rt, key, core.property.Flags.data(.method), ctx, &fixture.owner);
     const slot = holder.propertyEntry(0).*.slot.auto_init;
     try std.testing.expectEqual(&ctx.header, slot.realm_and_id.realmHeader().?);
     try std.testing.expectEqual(&fixture.owner, slot.moduleOwner().?);
@@ -9333,8 +9309,8 @@ test "unmaterialized MODULE_NS slot participates in Realm cycle marking" {
         .result = .{ .value = core.JSValue.int32(1) },
     };
 
-    try holder.defineModuleAutoInitPropertyForFixture(rt, lazy_key, core.property.Flags.data(true, false, true), ctx, &fixture.owner);
-    try global.defineOwnProperty(rt, holder_key, core.Descriptor.data(holder.value(), true, true, true));
+    try holder.defineModuleAutoInitPropertyForFixture(rt, lazy_key, core.property.Flags.data(.method), ctx, &fixture.owner);
+    try global.defineOwnProperty(rt, holder_key, core.Descriptor.data(holder.value(), .all));
     ctx.destroy();
 
     // Realm -> global -> holder -> typed AUTOINIT Realm, plus the two
@@ -9359,7 +9335,7 @@ test "ordinary and object-data payloads ignore generic realm assignment" {
         try std.testing.expect(!rt.borrowedReferenceHolderRegistered(holder));
         try std.testing.expect(holder.borrowedReferenceHolderIndex() == null);
     }
-    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.items.len);
 }
 
 test "native call carriers do not enter borrowed realm bookkeeping" {
@@ -9384,7 +9360,7 @@ test "native call carriers do not enter borrowed realm bookkeeping" {
     try std.testing.expect(data_object.nativeFunctionRealm() == null);
     try std.testing.expect(native_object.borrowedReferenceHolderIndex() == null);
     try std.testing.expect(data_object.borrowedReferenceHolderIndex() == null);
-    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.items.len);
 }
 
 test "generator noncarriers never enter borrowed realm bookkeeping" {
@@ -9406,7 +9382,7 @@ test "generator noncarriers never enter borrowed realm bookkeeping" {
         try std.testing.expect(generator.borrowedReferenceHolderIndex() == null);
         try std.testing.expect(!rt.borrowedReferenceHolderRegistered(generator));
     }
-    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.items.len);
 }
 
 test "leaf payload noncarriers ignore generic realm assignment" {
@@ -9445,7 +9421,7 @@ test "leaf payload noncarriers ignore generic realm assignment" {
         try std.testing.expect(object.borrowedReferenceHolderIndex() == null);
         try std.testing.expect(!rt.borrowedReferenceHolderRegistered(object));
     }
-    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.items.len);
 }
 
 test "promise weak-ref regexp and typed-array payloads ignore generic realm assignment" {
@@ -9467,7 +9443,7 @@ test "promise weak-ref regexp and typed-array payloads ignore generic realm assi
         try std.testing.expect(object.borrowedReferenceHolderIndex() == null);
         try std.testing.expect(!rt.borrowedReferenceHolderRegistered(object));
     }
-    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.items.len);
 
     // WeakRef's payload-resident lifetime list is real weak-edge machinery and
     // remains independent from the retired generic realm registry entries.
@@ -9495,7 +9471,7 @@ test "iterator collection and disposable payloads ignore generic realm assignmen
         try std.testing.expect(object.borrowedReferenceHolderIndex() == null);
         try std.testing.expect(!rt.borrowedReferenceHolderRegistered(object));
     }
-    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.items.len);
 }
 
 test "collection iterator prototype follows explicit active realm, never receiver" {
@@ -9647,7 +9623,7 @@ test "weak collection borrowed holder cache supports reverse teardown" {
         _ = holders[remaining].?;
         holders[remaining] = null;
         helpers.reclaimNow(rt);
-        try std.testing.expectEqual(remaining, rt.borrowed_reference_holders.len);
+        try std.testing.expectEqual(remaining, rt.borrowed_reference_holders.items.len);
     }
 }
 
@@ -9705,12 +9681,12 @@ test "data to auto-init replacement stays traceable across allocation GC" {
     ctx.global = global;
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("allocation-gc-auto-init-replacement");
-    const flags = core.property.Flags.data(true, true, true);
+    const flags = core.property.Flags.data(.all);
 
     try holder.defineOwnProperty(
         rt,
         key,
-        core.Descriptor.data(core.JSValue.int32(1), true, true, true),
+        core.Descriptor.data(core.JSValue.int32(1), .all),
     );
 
     var probe = ForceCollectionProbe{ .rt = rt };
@@ -9745,12 +9721,12 @@ test "data to auto-init replacement rolls back descriptor OOM and retries in sam
     try global.setCachedRealmValue(rt, .array_prototype, array_prototype.value());
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("oom-auto-init-replacement");
-    const flags = core.property.Flags.data(true, true, true);
+    const flags = core.property.Flags.data(.all);
 
     try holder.defineOwnProperty(
         rt,
         key,
-        core.Descriptor.data(core.JSValue.int32(1), true, true, true),
+        core.Descriptor.data(core.JSValue.int32(1), .all),
     );
     try std.testing.expect(!holder.shape_ref.isShared());
 
@@ -9803,7 +9779,7 @@ test "replacing auto-init transfers the owned Realm edge" {
         key,
         "lazy_replace_realm",
         0,
-        core.property.Flags.data(true, false, true),
+        core.property.Flags.data(.method),
         first_global,
         0,
     );
@@ -9814,7 +9790,7 @@ test "replacing auto-init transfers the owned Realm edge" {
         key,
         "lazy_replace_realm",
         0,
-        core.property.Flags.data(true, false, true),
+        core.property.Flags.data(.method),
         second_global,
         0,
     );
@@ -9844,7 +9820,7 @@ test "replacing auto-init rolls back descriptor OOM and retries in same runtime"
         key,
         "oom-replace-realm",
         0,
-        core.property.Flags.data(true, false, true),
+        core.property.Flags.data(.method),
         first_global,
         0,
     );
@@ -9855,7 +9831,7 @@ test "replacing auto-init rolls back descriptor OOM and retries in same runtime"
 
     const original_flags = holder.propFlagsAt(0);
     const baseline_allocated_bytes = rt.memory.allocated_bytes;
-    const next_flags = core.property.Flags.data(false, true, true);
+    const next_flags = core.property.Flags.data(.{ .enumerable = true, .configurable = true });
     rt.setMemoryLimit(baseline_allocated_bytes);
     defer rt.setMemoryLimit(null);
     try std.testing.expectError(
@@ -9885,7 +9861,7 @@ test "deleting auto-init releases its owned Realm edge" {
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("lazy_delete_realm");
 
-    try holder.definePerformanceAutoInitProperty(rt, key, core.property.Flags.data(true, false, true), global);
+    try holder.definePerformanceAutoInitProperty(rt, key, core.property.Flags.data(.method), global);
 
     try std.testing.expect(holder.deleteProperty(rt, key));
 }
@@ -9918,22 +9894,22 @@ test "ordinary auto-init replacement releases each owned Realm edge" {
     key_roots.activate(rt);
     defer key_roots.deactivate(rt);
 
-    try holder.definePerformanceAutoInitProperty(rt, define_key, core.property.Flags.data(true, false, true), global);
+    try holder.definePerformanceAutoInitProperty(rt, define_key, core.property.Flags.data(.method), global);
 
-    try holder.defineOwnProperty(rt, define_key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
+    try holder.defineOwnProperty(rt, define_key, core.Descriptor.data(core.JSValue.int32(1), .all));
     helpers.reclaimNow(rt);
 
-    try holder.definePerformanceAutoInitProperty(rt, set_key, core.property.Flags.data(true, false, true), global);
+    try holder.definePerformanceAutoInitProperty(rt, set_key, core.property.Flags.data(.method), global);
 
     try holder.setProperty(rt, set_key, core.JSValue.int32(2));
     helpers.reclaimNow(rt);
 
-    try holder.definePerformanceAutoInitProperty(rt, own_set_key, core.property.Flags.data(true, false, true), global);
+    try holder.definePerformanceAutoInitProperty(rt, own_set_key, core.property.Flags.data(.method), global);
 
     try std.testing.expect(try holder.setOwnWritableDataProperty(rt, own_set_key, core.JSValue.int32(3)));
     helpers.reclaimNow(rt);
 
-    try holder.definePerformanceAutoInitProperty(rt, simple_set_key, core.property.Flags.data(true, false, true), global);
+    try holder.definePerformanceAutoInitProperty(rt, simple_set_key, core.property.Flags.data(.method), global);
 
     try std.testing.expect(try holder.setOrDefineOwnDataPropertyForSimpleSet(rt, simple_set_key, core.JSValue.int32(4)));
     helpers.reclaimNow(rt);
@@ -9961,7 +9937,7 @@ test "specialized auto-init producers retain the same typed Realm owner" {
     const host_key = try rt.internAtom("gc");
     const replace_key = try rt.internAtom("replace");
 
-    const flags = core.property.Flags.data(true, false, true);
+    const flags = core.property.Flags.data(.method);
     try navigator_holder.defineNavigatorAutoInitProperty(rt, navigator_key, flags, global);
     try performance_holder.definePerformanceAutoInitProperty(rt, performance_key, flags, global);
     try namespace_holder.defineBuiltinNamespaceAutoInitProperty(rt, namespace_key, "Math", flags, global, .math_namespace);
@@ -10025,7 +10001,7 @@ test "materialized auto-init true C function owns its construction realm" {
         host_key,
         "gc",
         0,
-        core.property.Flags.data(true, false, true),
+        core.property.Flags.data(.method),
         core.host_function.ids.output,
         false,
         global,
@@ -10192,12 +10168,12 @@ test "weak collection capacity failure leaves empty holder unregistered" {
 
     const weakmap = try core.Object.create(rt, core.class.ids.weakmap, null);
 
-    const old_holder_count = rt.borrowed_reference_holders.len;
+    const old_holder_count = rt.borrowed_reference_holders.items.len;
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     try std.testing.expectError(error.OutOfMemory, weakmap.ensureWeakCollectionEntryCapacity(rt, 1));
     rt.setMemoryLimit(null);
 
-    try std.testing.expectEqual(old_holder_count, rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(old_holder_count, rt.borrowed_reference_holders.items.len);
     try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
 }
 
@@ -10209,12 +10185,12 @@ test "weak collection append failure rolls back borrowed holder registration" {
     const key = try core.Object.create(rt, core.class.ids.object, null);
     const value = try core.Object.create(rt, core.class.ids.object, null);
 
-    const old_holder_count = rt.borrowed_reference_holders.len;
+    const old_holder_count = rt.borrowed_reference_holders.items.len;
     rt.setMemoryLimit(rt.memory.allocated_bytes + borrowedHolderInitialAllocationBytes());
     try std.testing.expectError(error.OutOfMemory, appendWeakCollectionEntry(rt, weakmap, key, value.value()));
     rt.setMemoryLimit(null);
 
-    try std.testing.expectEqual(old_holder_count, rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(old_holder_count, rt.borrowed_reference_holders.items.len);
     try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
 }
 
@@ -10227,7 +10203,7 @@ test "weak collection capacity reservation keeps empty holder unregistered" {
     try weakmap.ensureWeakCollectionEntryCapacity(rt, 1);
 
     try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
-    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.items.len);
 }
 
 test "finalization registry capacity failure leaves empty holder unregistered" {
@@ -10236,12 +10212,12 @@ test "finalization registry capacity failure leaves empty holder unregistered" {
 
     const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
 
-    const old_holder_count = rt.borrowed_reference_holders.len;
+    const old_holder_count = rt.borrowed_reference_holders.items.len;
     rt.setMemoryLimit(rt.memory.allocated_bytes);
     try std.testing.expectError(error.OutOfMemory, registry.ensureFinalizationRegistryCellCapacity(rt, 1));
     rt.setMemoryLimit(null);
 
-    try std.testing.expectEqual(old_holder_count, rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(old_holder_count, rt.borrowed_reference_holders.items.len);
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
 }
 
@@ -10252,7 +10228,7 @@ test "finalization registry append failure rolls back borrowed holder registrati
     const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
     const target = try core.Object.create(rt, core.class.ids.object, null);
 
-    const old_holder_count = rt.borrowed_reference_holders.len;
+    const old_holder_count = rt.borrowed_reference_holders.items.len;
     rt.setMemoryLimit(rt.memory.allocated_bytes + borrowedHolderInitialAllocationBytes());
     try std.testing.expectError(
         error.OutOfMemory,
@@ -10260,7 +10236,7 @@ test "finalization registry append failure rolls back borrowed holder registrati
     );
     rt.setMemoryLimit(null);
 
-    try std.testing.expectEqual(old_holder_count, rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(old_holder_count, rt.borrowed_reference_holders.items.len);
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
 }
 
@@ -10278,7 +10254,7 @@ test "finalization registry job-queue reserve OOM rolls back the cell" {
     try rt.job_queue.reserveEntries(4);
     defer rt.job_queue.releaseReservedEntries(rt.job_queue.reserved_entries);
 
-    const old_holder_count = rt.borrowed_reference_holders.len;
+    const old_holder_count = rt.borrowed_reference_holders.items.len;
     const reserved_before = rt.job_queue.reserved_entries;
     rt.setMemoryLimit(rt.memory.allocated_bytes + borrowedHolderInitialAllocationBytes());
     try std.testing.expectError(
@@ -10287,7 +10263,7 @@ test "finalization registry job-queue reserve OOM rolls back the cell" {
     );
     rt.setMemoryLimit(null);
 
-    try std.testing.expectEqual(old_holder_count, rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(old_holder_count, rt.borrowed_reference_holders.items.len);
     try std.testing.expectEqual(reserved_before, rt.job_queue.reserved_entries);
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
 }
@@ -10301,7 +10277,7 @@ test "finalization registry capacity reservation keeps empty holder unregistered
     try registry.ensureFinalizationRegistryCellCapacity(rt, 1);
 
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
-    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.items.len);
 }
 
 test "weak collection delete and clear unregister empty borrowed holder" {
@@ -10312,23 +10288,23 @@ test "weak collection delete and clear unregister empty borrowed holder" {
     const map_key = try core.Object.create(rt, core.class.ids.object, null);
 
     _ = try engine.exec.collection_ops.methodCall(rt, weakmap.value(), 1, &.{ map_key.value(), core.JSValue.int32(1) });
-    try std.testing.expectEqual(@as(usize, 1), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(@as(usize, 1), rt.borrowed_reference_holders.items.len);
 
     const delete_result = try engine.exec.collection_ops.methodCall(rt, weakmap.value(), 4, &.{map_key.value()});
     try std.testing.expectEqual(@as(?bool, true), delete_result.as(.boolean));
     try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
-    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.items.len);
 
     const weakset = try core.Object.create(rt, core.class.ids.weakset, null);
     const set_key = try core.Object.create(rt, core.class.ids.object, null);
 
     _ = try engine.exec.collection_ops.methodCall(rt, weakset.value(), 6, &.{set_key.value()});
-    try std.testing.expectEqual(@as(usize, 1), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(@as(usize, 1), rt.borrowed_reference_holders.items.len);
 
     const clear_result = try engine.exec.collection_ops.methodCall(rt, weakset.value(), 5, &.{});
     try std.testing.expect(clear_result.is(.undefined_value));
     try std.testing.expectEqual(@as(usize, 0), weakset.weakCollectionEntries().len);
-    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.items.len);
 }
 
 test "finalization registry unregister unregisters empty borrowed holder" {
@@ -10341,11 +10317,11 @@ test "finalization registry unregister unregisters empty borrowed holder" {
 
     try appendFinalizationRegistryCell(rt, registry, target.value(), core.JSValue.undefinedValue(), token.value());
     try std.testing.expectEqual(@as(usize, 1), registry.finalizationRegistryCells().len);
-    try std.testing.expectEqual(@as(usize, 1), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(@as(usize, 1), rt.borrowed_reference_holders.items.len);
 
     try std.testing.expect(registry.unregisterFinalizationRegistryCells(rt, token.value()));
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
-    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.items.len);
 }
 
 test "finalization registry unregister handles token equal to target" {
@@ -10366,7 +10342,7 @@ test "finalization registry unregister handles token equal to target" {
 
     try std.testing.expect(registry.unregisterFinalizationRegistryCells(rt, target_and_token_value));
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
-    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.items.len);
 }
 
 test "finalization registry dead target cleanup tolerates held value reentry" {
@@ -10407,7 +10383,7 @@ test "finalization registry dead target cleanup tolerates held value reentry" {
     helpers.reclaimNow(rt);
 
     try std.testing.expectEqual(@as(usize, 0), registry.finalizationRegistryCells().len);
-    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.items.len);
 }
 
 test "weak collection delete tolerates value cleanup reentry" {
@@ -10423,7 +10399,7 @@ test "weak collection delete tolerates value cleanup reentry" {
 
     try std.testing.expectEqual(@as(?bool, true), delete_result.as(.boolean));
     try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
-    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.items.len);
 }
 
 test "weak collection clear tolerates value cleanup reentry" {
@@ -10442,7 +10418,7 @@ test "weak collection clear tolerates value cleanup reentry" {
 
     try std.testing.expect(clear_result.is(.undefined_value));
     try std.testing.expectEqual(@as(usize, 0), weakmap.weakCollectionEntries().len);
-    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.len);
+    try std.testing.expectEqual(@as(usize, 0), rt.borrowed_reference_holders.items.len);
 }
 
 test "weak map deep value chain releases without recursive destruction" {
@@ -10506,7 +10482,7 @@ test "weak map cycle sweep clears index after removing dead keys" {
         slot.* = key;
         key_count += 1;
         if (index == 0) {
-            try key.defineOwnProperty(rt, self_key, core.Descriptor.data(key.value(), true, true, true));
+            try key.defineOwnProperty(rt, self_key, core.Descriptor.data(key.value(), .all));
         }
         _ = try engine.exec.collection_ops.methodCall(rt, map.value(), 1, &.{ key.value(), core.JSValue.int32(@intCast(index)) });
     }
@@ -10607,7 +10583,7 @@ test "finalization registry unregister cannot remove queued cleanup cell" {
     defer target_roots.deactivate(rt);
     var target_value = target.value();
     const self_key = try rt.internAtom("gc-finalization-unregister-pending-self");
-    try target.defineOwnProperty(rt, self_key, core.Descriptor.data(target_value, true, true, true));
+    try target.defineOwnProperty(rt, self_key, core.Descriptor.data(target_value, .all));
     try registry.appendFinalizationRegistryCell(
         rt,
         target_value,
@@ -10711,8 +10687,8 @@ test "object allocation threshold triggers runtime cycle removal" {
     const left_key = try rt.internAtom("left");
     const right_key = try rt.internAtom("right");
 
-    try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), true, true, true));
-    try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
+    try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), .all));
+    try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), .all));
     dropGcPtr(&left);
     dropGcPtr(&right);
 
@@ -10749,7 +10725,7 @@ test "object allocation collects reclaimable cycles before memory-limit rejectio
 
     var object = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("gc-before-limit-self");
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(object.value(), true, true, true));
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(object.value(), .all));
     dropGcPtr(&object);
 
     // Exactly the current logical heap leaves no room for a replacement object
@@ -10780,7 +10756,7 @@ test "cache-miss root shape is owned before the object allocation GC boundary" {
 
     const key = try rt.internAtom("cache-miss-shape-before-object-gc");
     const garbage = try core.Object.create(rt, core.class.ids.object, null);
-    try garbage.defineOwnProperty(rt, key, core.Descriptor.data(garbage.value(), true, true, true));
+    try garbage.defineOwnProperty(rt, key, core.Descriptor.data(garbage.value(), .all));
 
     const object_bytes = @sizeOf(core.Object);
     const root_shape_bytes = emptyRootShapeAllocationBytes();
@@ -10924,7 +10900,7 @@ test "gc threshold API resets after scheduled collection and survives force-GC i
         // QJS resets malloc_gc_threshold immediately after its pre-object GC,
         // after its Shape is owned but before the triggering JSObject body is
         // charged. The body is a slab class (usable+MALLOC_OVERHEAD), not the
-        // request length (quickjs.c:2168/1795).
+        // request length.
         // The threshold is never tighter than one nursery above the live set.
         // A threshold below that is one the young generation can never reach,
         // since it is tested before a minor is offered, so every collection
@@ -10953,7 +10929,7 @@ test "proxy target handler cycle is released by runtime cycle removal" {
 
     proxy.proxyTargetSlot().* = target.value();
     proxy.proxyHandlerSlot().* = target.value();
-    try target.defineOwnProperty(rt, key, core.Descriptor.data(proxy.value(), true, true, true));
+    try target.defineOwnProperty(rt, key, core.Descriptor.data(proxy.value(), .all));
 
     try expectCycleReclaimedIncludingShapes(rt, 6, rt.runObjectCycleRemoval());
 }
@@ -10973,9 +10949,9 @@ test "runtime cycle removal preserves externally rooted outgoing objects" {
     const right_key = try rt.internAtom("right");
     const external_key = try rt.internAtom("external");
 
-    try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), true, true, true));
-    try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
-    try left.defineOwnProperty(rt, external_key, core.Descriptor.data(external.value(), true, true, true));
+    try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), .all));
+    try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), .all));
+    try left.defineOwnProperty(rt, external_key, core.Descriptor.data(external.value(), .all));
 
     dropGcPtr(&left);
     dropGcPtr(&right);
@@ -10995,7 +10971,7 @@ test "module namespace shape VarRef cycle is released by runtime cycle removal" 
     const key = try rt.internAtom("namespace");
     const export_name = try rt.internAtom("value");
 
-    try target.defineOwnProperty(rt, key, core.Descriptor.data(namespace.value(), true, true, true));
+    try target.defineOwnProperty(rt, key, core.Descriptor.data(namespace.value(), .all));
     const cell = try core.VarRef.createClosed(rt, target.value());
     try namespace.defineModuleVarRefProperty(rt, export_name, cell);
 
@@ -11013,7 +10989,7 @@ test "mapped arguments var-ref cycle is released by runtime cycle removal" {
 
     const refs = try arguments.allocateMappedArgumentsVarRefsAssumingEmpty(rt, 1);
     refs[0] = try core.VarRef.createClosed(rt, target.value());
-    try target.defineOwnProperty(rt, key, core.Descriptor.data(arguments.value(), true, true, true));
+    try target.defineOwnProperty(rt, key, core.Descriptor.data(arguments.value(), .all));
 
     // arguments -> VarRef -> target -> arguments, plus the two object shapes.
     try expectCycleReclaimedIncludingShapes(rt, 7, rt.runObjectCycleRemoval());
@@ -11052,9 +11028,9 @@ test "array buffer and linked typed array cycle survives arbitrary finalizer ord
     try buffer.installByteStorage(rt, bytes);
 
     const view = try core.Object.create(rt, core.class.ids.object, null);
-    try view.initTypedArrayView(rt, buffer_value, 0, 4, 2, 6);
+    try view.initTypedArrayView(rt, buffer_value, 0, 4, 2, .int32);
     const view_key = try rt.internAtom("linked-view");
-    try buffer.defineOwnProperty(rt, view_key, core.Descriptor.data(view.value(), true, true, true));
+    try buffer.defineOwnProperty(rt, view_key, core.Descriptor.data(view.value(), .all));
 
     // buffer -> view through the property, view -> buffer through the owned
     // TypedArray slot. The raw buffer-view list is weak and must be safely
@@ -11838,7 +11814,7 @@ test "ordinary objects define own data properties and descriptors" {
 
     const key = try rt.internAtom("answer");
 
-    try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(42), true, true, true));
+    try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(42), .all));
     const desc = (try obj.getOwnProperty(rt, key)).?;
     try std.testing.expectEqual(core.descriptor.Kind.data, desc.kind);
     try std.testing.expectEqual(@as(?i32, 42), desc.value.as(.int));
@@ -11858,10 +11834,10 @@ test "define property enforces non-configurable and non-writable invariants" {
 
     const key = try rt.internAtom("locked");
 
-    try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), false, false, false));
+    try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), .none));
     try std.testing.expectError(
         error.IncompatibleDescriptor,
-        obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(2), false, false, false)),
+        obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(2), .none)),
     );
     try std.testing.expectError(
         error.IncompatibleDescriptor,
@@ -11884,7 +11860,7 @@ test "accessor descriptors store getter setter placeholders" {
     // JSValue accessor cell that L2 replaced with object-header pointers).
     const getter = try core.Object.create(rt, core.class.ids.object, null);
     const setter = try core.Object.create(rt, core.class.ids.object, null);
-    try obj.defineOwnProperty(rt, key, core.Descriptor.accessor(getter.value(), setter.value(), true, true));
+    try obj.defineOwnProperty(rt, key, core.Descriptor.accessor(getter.value(), setter.value(), .{ .enumerable = true, .configurable = true }));
 
     const desc = (try obj.getOwnProperty(rt, key)).?;
     try std.testing.expectEqual(core.descriptor.Kind.accessor, desc.kind);
@@ -11900,7 +11876,7 @@ test "prototype traversal and cycle checks are enforced" {
     const child = try core.Object.create(rt, core.class.ids.object, proto);
 
     const key = try rt.internAtom("inherited");
-    try proto.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(11), true, true, true));
+    try proto.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(11), .all));
 
     try std.testing.expect(!child.hasOwnProperty(key));
     try std.testing.expect(child.hasProperty(key));
@@ -11919,10 +11895,10 @@ test "own keys follow index string symbol ordering" {
     const index_1 = try rt.internAtom("1");
     const sym = try rt.atoms.newSymbol("sym", .symbol);
 
-    try obj.defineOwnProperty(rt, str_b, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
-    try obj.defineOwnProperty(rt, index_2, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
-    try obj.defineOwnProperty(rt, sym, core.Descriptor.data(core.JSValue.int32(3), true, true, true));
-    try obj.defineOwnProperty(rt, index_1, core.Descriptor.data(core.JSValue.int32(4), true, true, true));
+    try obj.defineOwnProperty(rt, str_b, core.Descriptor.data(core.JSValue.int32(1), .all));
+    try obj.defineOwnProperty(rt, index_2, core.Descriptor.data(core.JSValue.int32(2), .all));
+    try obj.defineOwnProperty(rt, sym, core.Descriptor.data(core.JSValue.int32(3), .all));
+    try obj.defineOwnProperty(rt, index_1, core.Descriptor.data(core.JSValue.int32(4), .all));
 
     const keys = try obj.ownKeys(rt);
     defer core.Object.freeKeys(rt, keys);
@@ -11942,10 +11918,10 @@ test "extensibility seal and freeze update descriptor flags" {
     const key = try rt.internAtom("x");
     const other = try rt.internAtom("y");
 
-    try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
+    try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), .all));
     obj.preventExtensions();
     try std.testing.expect(!obj.isExtensible());
-    try std.testing.expectError(error.NotExtensible, obj.defineOwnProperty(rt, other, core.Descriptor.data(core.JSValue.int32(2), true, true, true)));
+    try std.testing.expectError(error.NotExtensible, obj.defineOwnProperty(rt, other, core.Descriptor.data(core.JSValue.int32(2), .all)));
 
     try obj.freeze(rt);
     const desc = (try obj.getOwnProperty(rt, key)).?;
@@ -11962,16 +11938,16 @@ test "array length tracks sparse indices and truncation" {
     const index_5 = try rt.internAtom("5");
     const index_1 = try rt.internAtom("1");
 
-    try array_obj.defineOwnProperty(rt, index_5, core.Descriptor.data(core.JSValue.int32(5), true, true, true));
+    try array_obj.defineOwnProperty(rt, index_5, core.Descriptor.data(core.JSValue.int32(5), .all));
     try std.testing.expectEqual(@as(u32, 6), array_obj.arrayLength());
-    try array_obj.defineOwnProperty(rt, index_1, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
+    try array_obj.defineOwnProperty(rt, index_1, core.Descriptor.data(core.JSValue.int32(1), .all));
     try std.testing.expectEqual(@as(u32, 6), array_obj.arrayLength());
 
-    try array_obj.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(2), false, false, false));
+    try array_obj.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(2), .none));
     try std.testing.expectEqual(@as(u32, 2), array_obj.arrayLength());
     try std.testing.expect(!array_obj.hasOwnProperty(index_5));
     try std.testing.expect(array_obj.hasOwnProperty(index_1));
-    try std.testing.expectError(error.ReadOnly, array_obj.defineOwnProperty(rt, index_5, core.Descriptor.data(core.JSValue.int32(5), true, true, true)));
+    try std.testing.expectError(error.ReadOnly, array_obj.defineOwnProperty(rt, index_5, core.Descriptor.data(core.JSValue.int32(5), .all)));
 }
 
 test "array indexed delete does not let dense holes mask ordinary properties" {
@@ -11982,7 +11958,7 @@ test "array indexed delete does not let dense holes mask ordinary properties" {
 
     const index_0 = core.Atom.taggedInt(0);
     try std.testing.expect(try array_obj.appendDenseArrayIndex(rt, 0, index_0, core.JSValue.int32(1)));
-    try array_obj.defineOwnProperty(rt, index_0, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
+    try array_obj.defineOwnProperty(rt, index_0, core.Descriptor.data(core.JSValue.int32(2), .all));
     try std.testing.expectEqual(@as(?i32, 2), (try array_obj.getProperty(index_0)).as(.int));
 
     try std.testing.expect(array_obj.deleteProperty(rt, index_0));
@@ -12000,9 +11976,9 @@ test "array element storage mode moves between dense and sparse" {
 
     try std.testing.expect(try array_obj.appendDenseArrayIndex(rt, 0, index_0, core.JSValue.int32(0)));
     try std.testing.expectEqual(core.object.ArrayStorageMode.dense, array_obj.arrayElementStorageMode());
-    try array_obj.defineOwnProperty(rt, index_100, core.Descriptor.data(core.JSValue.int32(100), true, true, true));
+    try array_obj.defineOwnProperty(rt, index_100, core.Descriptor.data(core.JSValue.int32(100), .all));
     try std.testing.expectEqual(core.object.ArrayStorageMode.sparse, array_obj.arrayElementStorageMode());
-    try array_obj.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(1), true, false, false));
+    try array_obj.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(1), .{ .writable = true }));
     try std.testing.expectEqual(core.object.ArrayStorageMode.sparse, array_obj.arrayElementStorageMode());
 }
 
@@ -12010,7 +11986,7 @@ var exotic_define_calls: usize = 0;
 var exotic_delete_calls: usize = 0;
 
 fn exoticGet(_: *core.Object, _: core.Atom) ?core.Descriptor {
-    return core.Descriptor.data(core.JSValue.int32(99), false, false, true);
+    return core.Descriptor.data(core.JSValue.int32(99), .{ .configurable = true });
 }
 
 fn exoticDefine(_: *core.Object, _: core.Atom, _: core.Descriptor) bool {
@@ -12057,16 +12033,16 @@ test "exotic dispatch hooks are called without builtin shortcuts" {
     // JS_CreateProperty exotic hook. Seed one with dispatch disabled, then
     // prove redefining it bypasses the hook while a miss still calls it.
     obj.flags.has_exotic_methods = false;
-    try obj.defineOwnProperty(rt, real_key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
+    try obj.defineOwnProperty(rt, real_key, core.Descriptor.data(core.JSValue.int32(1), .all));
     obj.flags.has_exotic_methods = true;
-    try obj.defineOwnProperty(rt, real_key, core.Descriptor.data(core.JSValue.int32(2), true, true, true));
+    try obj.defineOwnProperty(rt, real_key, core.Descriptor.data(core.JSValue.int32(2), .all));
     try std.testing.expectEqual(@as(usize, 0), exotic_define_calls);
     obj.flags.has_exotic_methods = false;
     const real_desc = (try obj.getOwnProperty(rt, real_key)).?;
     try std.testing.expectEqual(@as(?i32, 2), real_desc.value.as(.int));
     obj.flags.has_exotic_methods = true;
 
-    try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
+    try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), .all));
     try std.testing.expectEqual(@as(usize, 1), exotic_define_calls);
     try std.testing.expect(obj.deleteProperty(rt, key));
     try std.testing.expectEqual(@as(usize, 1), exotic_delete_calls);
@@ -12111,7 +12087,7 @@ test "finalization registry pending jobs preserve callback and held symbols" {
     var target_val = target_obj.value();
 
     const target_sym = try rt.atoms.newValueSymbol("finalization-target-symbol");
-    try target_obj.defineOwnProperty(rt, target_sym, core.Descriptor.data(core.JSValue.boolean(true), true, true, true));
+    try target_obj.defineOwnProperty(rt, target_sym, core.Descriptor.data(core.JSValue.boolean(true), .all));
 
     const registry = try core.Object.createFinalizationRegistry(rt, ctx, null);
     registry.finalizationRegistryCleanupCallbackSlot().* = cleanup_val;
@@ -12215,8 +12191,8 @@ test "the minor reclaims young cycles and parks no deferred frees" {
     while (pairs < 500) : (pairs += 1) {
         const left = try core.Object.create(rt, core.class.ids.object, null);
         const right = try core.Object.create(rt, core.class.ids.object, null);
-        try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), true, true, true));
-        try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), true, true, true));
+        try left.defineOwnProperty(rt, right_key, core.Descriptor.data(right.value(), .all));
+        try right.defineOwnProperty(rt, left_key, core.Descriptor.data(left.value(), .all));
     }
     try std.testing.expect(rt.memory.allocated_bytes > bytes_before);
 
@@ -12281,7 +12257,7 @@ test "old-to-young edge survives a minor only because the barrier remembered it"
     // also changes its Shape, whose independent barrier remembers the same
     // owner and would mask a missing value-store barrier.
     const owner = try core.Object.createPlainObject(rt, null);
-    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), .all));
 
     // Age an owner: after one minor everything that survived counts as old.
     // The trace is the liveness authority now, so a Zig-local owner has to be
@@ -12304,7 +12280,7 @@ test "old-to-young edge survives a minor only because the barrier remembered it"
     // the remembered edge rather than merely prove a hash-map insertion.
     const child = try core.Object.createPlainObject(rt, null);
     try std.testing.expect(child.gcHeader().metaConst().flags.young);
-    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(child.value(), true, true, true));
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(child.value(), .all));
 
     _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
     try std.testing.expect(rt.ownsObject(child));
@@ -12316,8 +12292,8 @@ test "old-to-young edge survives a minor only because the barrier remembered it"
     // deleted before the minor. Re-tracing the owner must observe the current
     // slot and reclaim the now-unreachable young child.
     const removed_child = try core.Object.createPlainObject(rt, null);
-    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(removed_child.value(), true, true, true));
-    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(removed_child.value(), .all));
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), .all));
     try std.testing.expectEqual(@as(usize, 1), rt.gc.generation.remembered.count());
     _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
     try std.testing.expect(!rt.ownsObject(removed_child));
@@ -12336,7 +12312,7 @@ test "object remembered bit is consumed and rebuilt across consecutive minors" {
 
     const edge_key = try rt.internAtom("remembered-bit-two-minors");
     const owner = try core.Object.createPlainObject(rt, null);
-    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), .all));
     var owner_slot: ?*core.Object = owner;
     var roots = core.runtime.rootObjects(.{&owner_slot});
     roots.activate(rt);
@@ -12352,9 +12328,9 @@ test "object remembered bit is consumed and rebuilt across consecutive minors" {
         // child becomes young garbage; the replacement is live only through
         // the old owner when the minor starts.
         const first = try core.Object.createPlainObject(rt, null);
-        try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(first.value(), true, true, true));
+        try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(first.value(), .all));
         const replacement = try core.Object.createPlainObject(rt, null);
-        try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(replacement.value(), true, true, true));
+        try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(replacement.value(), .all));
 
         try std.testing.expect(owner.gcHeader().metaConst().lifetime.object_shape_summary & core.gc.trace_remembered_mask != 0);
         try std.testing.expectEqual(@as(usize, 1), rt.gc.generation.remembered.count());
@@ -12383,7 +12359,7 @@ test "incremental retirement clears remembered cache before the next generation"
 
     const edge_key = try rt.internAtom("remembered-bit-cycle-retirement");
     const owner = try core.Object.createPlainObject(rt, null);
-    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), .all));
     var owner_slot: ?*core.Object = owner;
     var roots = core.runtime.rootObjects(.{&owner_slot});
     roots.activate(rt);
@@ -12393,7 +12369,7 @@ test "incremental retirement clears remembered cache before the next generation"
     try std.testing.expect(!owner.gcHeader().metaConst().flags.young);
 
     const before_major = try core.Object.createPlainObject(rt, null);
-    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(before_major.value(), true, true, true));
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(before_major.value(), .all));
     try std.testing.expectEqual(@as(usize, 1), rt.gc.generation.remembered.count());
     try std.testing.expect(owner.gcHeader().metaConst().lifetime.object_shape_summary & core.gc.trace_remembered_mask != 0);
 
@@ -12415,7 +12391,7 @@ test "incremental retirement clears remembered cache before the next generation"
     // During an open major the Dijkstra arm shades the exact target and does
     // not populate either generational representation. The marker masks bit7,
     // so no active-only cache seam or second markingActive load is needed.
-    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(during_major.value(), true, true, true));
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(during_major.value(), .all));
     try std.testing.expectEqual(@as(usize, 0), rt.gc.generation.remembered.count());
     try std.testing.expectEqual(@as(u8, 0), owner.gcHeader().metaConst().lifetime.object_shape_summary & core.gc.trace_remembered_mask);
 
@@ -12429,7 +12405,7 @@ test "incremental retirement clears remembered cache before the next generation"
     try std.testing.expectEqual(@as(u8, 0), owner.gcHeader().metaConst().lifetime.object_shape_summary & core.gc.trace_remembered_mask);
 
     const after_major = try core.Object.createPlainObject(rt, null);
-    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(after_major.value(), true, true, true));
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(after_major.value(), .all));
     try std.testing.expectEqual(@as(usize, 1), rt.gc.generation.remembered.count());
     try std.testing.expect(owner.gcHeader().metaConst().lifetime.object_shape_summary & core.gc.trace_remembered_mask != 0);
     _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
@@ -12546,7 +12522,7 @@ test "the folded barrier gate skips exactly the two owner facts" {
 
     const edge_key = try rt.internAtom("barrier-gate-fold");
     const owner = try core.Object.createPlainObject(rt, null);
-    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(core.JSValue.undefinedValue(), .all));
     var owner_slot: ?*core.Object = owner;
     var roots = core.runtime.rootObjects(.{&owner_slot});
     roots.activate(rt);
@@ -12576,7 +12552,7 @@ test "the folded barrier gate skips exactly the two owner facts" {
     // `RememberedCacheWithoutOwner` enforces at every collection boundary) and
     // a remembered owner is re-traced whole.
     const first = try core.Object.createPlainObject(rt, null);
-    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(first.value(), true, true, true));
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(first.value(), .all));
     try std.testing.expect(owner.gcHeader().metaConst().lifetime.object_shape_summary & core.gc.trace_remembered_mask != 0);
     try std.testing.expectEqual(@as(usize, 1), rt.gc.generation.remembered.count());
     try std.testing.expect(rt.gc.barrierOwnerSkips(owner.gcHeader()));
@@ -12833,7 +12809,7 @@ test "G-Shape indexed adoption shades the Shape once without requeueing the arra
         rt.gc.marking.queue.reset();
     }
     for (0..128) |i| {
-        try owner.defineOwnProperty(rt, core.Atom.taggedInt(@intCast(i)), core.Descriptor.data(core.JSValue.int32(7), true, true, true));
+        try owner.defineOwnProperty(rt, core.Atom.taggedInt(@intCast(i)), core.Descriptor.data(core.JSValue.int32(7), .all));
         try std.testing.expect(rt.gc.headerMarked(&owner.shape_ref.header));
         try std.testing.expect(rt.gc.marking.queue.isEmpty());
     }
@@ -12847,11 +12823,11 @@ test "G-Shape adoption traces prototype children and symbol keys but skips white
     const prototype = try core.Object.createPlainObject(rt, null);
     const child = try core.Object.createPlainObject(rt, null);
     const key = try rt.internAtom("child");
-    try prototype.defineOwnProperty(rt, key, core.Descriptor.data(child.value(), true, true, true));
+    try prototype.defineOwnProperty(rt, key, core.Descriptor.data(child.value(), .all));
     const owner = try core.Object.createPlainObject(rt, prototype);
     const symbol = try rt.atoms.newValueSymbol("G-Shape existing key");
     _ = try rt.symbolValue(symbol);
-    try owner.defineOwnProperty(rt, symbol, core.Descriptor.data(core.JSValue.int32(9), true, true, true));
+    try owner.defineOwnProperty(rt, symbol, core.Descriptor.data(core.JSValue.int32(9), .all));
     const body = s3AtomEntry(rt, symbol).str.?.header();
     const target = &owner.shape_ref.header;
     for ([_]*core.gc.Header{ owner.gcHeader(), target, prototype.gcHeader(), child.gcHeader(), body }) |h|
@@ -12882,7 +12858,7 @@ test "G-Shape adoption traces prototype children and symbol keys but skips white
     _ = try rt.symbolValue(later_symbol);
     const later_body = s3AtomEntry(rt, later_symbol).str.?.header();
     rt.gc.setHeaderUnmarked(later_body);
-    try owner.defineOwnProperty(rt, later_symbol, core.Descriptor.data(core.JSValue.int32(10), true, true, true));
+    try owner.defineOwnProperty(rt, later_symbol, core.Descriptor.data(core.JSValue.int32(10), .all));
     try std.testing.expect(rt.gc.headerMarked(later_body));
 }
 
@@ -12926,7 +12902,7 @@ test "G-Shape relocation leaves no raw Shape queued and survives declared major 
     var relocations: usize = 0;
     for (0..64) |i| {
         const before = @intFromPtr(owner.shape_ref);
-        try owner.defineOwnProperty(rt, core.Atom.taggedInt(@intCast(i)), core.Descriptor.data(core.JSValue.int32(@intCast(i)), true, true, true));
+        try owner.defineOwnProperty(rt, core.Atom.taggedInt(@intCast(i)), core.Descriptor.data(core.JSValue.int32(@intCast(i)), .all));
         if (@intFromPtr(owner.shape_ref) != before) relocations += 1;
         try std.testing.expect(rt.gc.incremental.markingActive());
         try std.testing.expect(rt.gc.headerMarked(&owner.shape_ref.header));
@@ -13317,7 +13293,7 @@ test "a rooted or remembered young string extent survives the minor" {
     // Old owner -> young extent. The write barrier is the only thing that can
     // make this edge visible to a young trace, and it fires for the string
     // tags because `cycleMarkHeader` accepts them.
-    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(held.value(), true, true, true));
+    try owner.defineOwnProperty(rt, edge_key, core.Descriptor.data(held.value(), .all));
     try std.testing.expectEqual(@as(usize, 1), rt.gc.generation.remembered.count());
     dropGcPtr(&held);
 
@@ -13420,7 +13396,7 @@ test "the full-reachable verifier restores extent marks and atom epoch stamps" {
     var kept = try core.string.String.createLatin1(rt, "k" ** extent_latin1_len);
     const kept_header = kept.header();
     const kept_base = @intFromPtr(kept_header) - core.gc.metadata_prefix_size;
-    try owner.defineOwnProperty(rt, key, core.Descriptor.data(kept.value(), true, true, true));
+    try owner.defineOwnProperty(rt, key, core.Descriptor.data(kept.value(), .all));
 
     var kept_value = kept.value();
     var root_values = [_]core.runtime.ValueRootValue{.{ .value = &kept_value }};
@@ -13699,7 +13675,7 @@ test "ten thousand plain object deaths reach no destructor" {
         try object.defineOwnProperty(
             rt,
             core.atom.ids.length,
-            core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true),
+            core.Descriptor.data(core.JSValue.int32(@intCast(index)), .all),
         );
     }
     helpers.finishGcCycles(rt);
@@ -14030,12 +14006,12 @@ test "carrier exact handles reject stale block-cell generations" {
 
     try std.testing.expectError(
         error.GenerationMismatch,
-        rt.gc.resolveExact(old_handle, .object, core.gc.CarrierStateMask.publishedOnly()),
+        rt.gc.resolveExact(old_handle, .object, core.gc.carrier_state_masks.published_only),
     );
     const resolved = try rt.gc.resolveExact(
         new_handle,
         .object,
-        core.gc.CarrierStateMask.publishedOnly(),
+        core.gc.carrier_state_masks.published_only,
     );
     try std.testing.expectEqual(replacement.gcHeader(), resolved.tracing);
     // This deliberately exercises the production contract even though the
@@ -14052,11 +14028,11 @@ test "carrier exact handles reject stale block-cell generations" {
         rt.gc.resolveExact(.{
             .base = new_handle.base + 8,
             .generation = new_handle.generation,
-        }, .object, core.gc.CarrierStateMask.publishedOnly()),
+        }, .object, core.gc.carrier_state_masks.published_only),
     );
     try std.testing.expectError(
         error.KindMismatch,
-        rt.gc.resolveExact(new_handle, .shape, core.gc.CarrierStateMask.publishedOnly()),
+        rt.gc.resolveExact(new_handle, .shape, core.gc.carrier_state_masks.published_only),
     );
 
     // Current membership deliberately has no state-mask parameter.  It still
@@ -14067,7 +14043,7 @@ test "carrier exact handles reject stale block-cell generations" {
     try std.testing.expectEqual(replacement.gcHeader(), doomed_current.tracing);
     try std.testing.expectError(
         error.StateMismatch,
-        rt.gc.resolveExact(new_handle, .object, core.gc.CarrierStateMask.publishedOnly()),
+        rt.gc.resolveExact(new_handle, .object, core.gc.carrier_state_masks.published_only),
     );
     try rt.memory.carrierTransition(new_handle.base, .published);
 }
@@ -14144,7 +14120,7 @@ test "marking barrier shades grey, not black: the stored object's children survi
     const b = try core.Object.create(rt, core.class.ids.object, null);
     const c = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("edge");
-    try b.defineOwnProperty(rt, key, core.Descriptor.data(c.value(), true, true, true));
+    try b.defineOwnProperty(rt, key, core.Descriptor.data(c.value(), .all));
 
     // The interleaving a one-call STW major cannot express, constructed by
     // hand: initial mark has traced A and blackened it; B and C were reachable
@@ -14234,7 +14210,7 @@ test "runtime recovers a frontier OOM through allocation-boundary full GC" {
     try std.testing.expectEqual(core.gc.FailureKind.out_of_memory, rt.gc.stats.last_failure);
     try std.testing.expectEqual(core.gc.generation.MajorRetirement.needs_major, rt.gc.generation.major_retirement);
     const request = rt.gc.scheduler.pendingMajorRequest().?;
-    try std.testing.expectEqual(core.gc.RequestReason.collection_failed, request.reason.?);
+    try std.testing.expectEqual(core.gc.RequestReason.collection_failed, request.reason);
     try std.testing.expect(rt.gc.marking.queue.stats().pool.allocation_failures >= 2);
 
     // This is the ordinary allocation boundary that swallowed the failed
@@ -14445,7 +14421,7 @@ test "incremental destruction credit funds safe assists from actual native backi
     try std.testing.expect(rt.gc.morgue.pending);
     // Condemnation already delisted these from the live registry. The
     // morgue's own bucket, not liveCountKind, proves the partial route.
-    try std.testing.expect(!core.gc.listEmpty(&rt.gc.morgue.by_kind[@intFromEnum(core.gc.GcKind.var_ref)]));
+    try std.testing.expect(!rt.gc.morgue.by_kind[@intFromEnum(core.gc.GcKind.var_ref)].isEmpty());
     const reclaimed = before - rt.memory.allocated_bytes;
     try std.testing.expect(reclaimed >= 2 * interval);
     // The native allocation was NOT in the seed. Reconcile it once, then
@@ -14793,14 +14769,14 @@ test "the incremental finish reports a remark segment net of its census walk" {
 
     // The census ran, so there is something to deduct; a zero here would make
     // the equality below hold for a build that deducts nothing.
-    const census_ns = core.gc_trace_stw.last_report.census_ns;
+    const census_ns = rt.gc.last_report.census_ns;
     try std.testing.expect(census_ns > 0);
     // Exactly the census, no more and no less. The raw witness is what makes
     // this an equality instead of an inequality that "reported is small"
     // would satisfy by accident.
     try std.testing.expectEqual(
         census_ns,
-        core.gc_trace_stw.last_finish_remark_raw_ns - reported,
+        rt.gc.last_finish_remark_raw_ns - reported,
     );
 }
 
@@ -15050,7 +15026,7 @@ test "a store during an incremental cycle keeps the stored subgraph alive to the
     const b = try core.Object.create(rt, core.class.ids.object, null);
     const c = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("edge");
-    try b.defineOwnProperty(rt, key, core.Descriptor.data(c.value(), true, true, true));
+    try b.defineOwnProperty(rt, key, core.Descriptor.data(c.value(), .all));
 
     rt.setGCThreshold(rt.memory.allocated_bytes - 1);
     _ = try rt.pollGC(null, .safepoint);
@@ -15064,9 +15040,9 @@ test "a store during an incremental cycle keeps the stored subgraph alive to the
     // shade the barrier gave it at the store. Surviving the cycle is the
     // floating-garbage guarantee -- the strong form of barrier evidence,
     // since a holder that still referenced B would keep it trivially.
-    try holder.defineOwnProperty(rt, key, core.Descriptor.data(b.value(), true, true, true));
+    try holder.defineOwnProperty(rt, key, core.Descriptor.data(b.value(), .all));
     try std.testing.expect(rt.gc.incremental.markingActive());
-    try holder.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
+    try holder.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.undefinedValue(), .all));
 
     rt.setGCThreshold(rt.memory.allocated_bytes - 1);
     var polls: usize = 0;
@@ -15178,7 +15154,7 @@ test "TGC S3: a shape property key is an atom trace edge" {
     const object = try core.Object.createPlainObject(rt, null);
     try rt.gc.pinHeader(object.gcHeader());
     defer rt.gc.unpinHeader(object.gcHeader());
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), .all));
     // Hand the id over: from here the entry is reachable only through the
     // shape's property array.
 
@@ -15240,7 +15216,7 @@ test "TGC S3: an id-held value symbol keeps its body marked" {
     const object = try core.Object.createPlainObject(rt, null);
     try rt.gc.pinHeader(object.gcHeader());
     defer rt.gc.unpinHeader(object.gcHeader());
-    try object.defineOwnProperty(rt, symbol_atom, core.Descriptor.data(core.JSValue.int32(7), true, true, true));
+    try object.defineOwnProperty(rt, symbol_atom, core.Descriptor.data(core.JSValue.int32(7), .all));
 
     try s3RunMajor(rt);
     try std.testing.expectEqual(s3MarkEpoch(rt), s3AtomEntry(rt, symbol_atom).mark_epoch);
@@ -15382,7 +15358,7 @@ test "TGC S3-c: a young symbol body a shape names by id survives a minor" {
     // reads. Without the young-body root the minor sweeps the body and the
     // destroy handshake retires a live holder's entry.
     _ = try rt.symbolValue(symbol_atom);
-    try object.?.defineOwnProperty(rt, symbol_atom, core.Descriptor.data(core.JSValue.int32(7), true, true, true));
+    try object.?.defineOwnProperty(rt, symbol_atom, core.Descriptor.data(core.JSValue.int32(7), .all));
 
     _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
     try std.testing.expect(entry.slotOccupied());
@@ -15428,7 +15404,7 @@ test "TGC S3-c: a thousand fresh symbol keys survive the minors taken while they
         const name = try std.fmt.bufPrint(&buffer, "zjsS3SymbolKey{d}", .{index});
         slot.* = try rt.atoms.newValueSymbol(name);
         _ = try rt.symbolValue(slot.*);
-        try object.?.defineOwnProperty(rt, slot.*, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
+        try object.?.defineOwnProperty(rt, slot.*, core.Descriptor.data(core.JSValue.int32(1), .all));
         if (index % 64 == 63) _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
     }
 
@@ -15461,7 +15437,7 @@ test "TGC S3-c: a symbol interned inside a marking window keeps its body" {
     const symbol_atom = try rt.atoms.newValueSymbol("zjsS3BlackAllocSymbolBody");
     try std.testing.expectEqual(epoch, s3AtomEntry(rt, symbol_atom).mark_epoch);
     _ = try rt.symbolValue(symbol_atom);
-    try object.defineOwnProperty(rt, symbol_atom, core.Descriptor.data(core.JSValue.int32(5), true, true, true));
+    try object.defineOwnProperty(rt, symbol_atom, core.Descriptor.data(core.JSValue.int32(5), .all));
 
     helpers.finishGcCycles(rt);
     try std.testing.expect(!rt.atoms.symbolValueIfLive(rt, symbol_atom).is(.undefined_value));
@@ -15480,7 +15456,7 @@ test "TGC S3-c: a shape key keeps its atom, and the next major after the shape d
     var object_roots = core.runtime.rootObjects(.{&object});
     object_roots.activate(rt);
     defer object_roots.deactivate(rt);
-    try object.?.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), true, true, true));
+    try object.?.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(1), .all));
 
     // The shape's property array is the only thing naming the id now.
     try s3RunMajor(rt);
@@ -15553,7 +15529,7 @@ test "TGC S3: the insertion barrier shades an atom stored during marking" {
     const epoch = s3MarkEpoch(rt);
     try std.testing.expect(s3AtomEntry(rt, key).mark_epoch != epoch);
 
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(3), true, true, true));
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(3), .all));
     try std.testing.expectEqual(epoch, s3AtomEntry(rt, key).mark_epoch);
 
     helpers.finishGcCycles(rt);
@@ -15594,7 +15570,7 @@ test "TGC S3-c: the atom verdict is applied in the pause that took it, not after
     var object_roots = core.runtime.rootObjects(.{&object});
     object_roots.activate(rt);
     defer object_roots.deactivate(rt);
-    try object.?.defineOwnProperty(rt, reborn, core.Descriptor.data(core.JSValue.int32(9), true, true, true));
+    try object.?.defineOwnProperty(rt, reborn, core.Descriptor.data(core.JSValue.int32(9), .all));
 
     helpers.finishGcCycles(rt);
     try std.testing.expect(rt.atoms.name(reborn) != null);
@@ -15652,12 +15628,7 @@ fn defineS4bNamedProperties(rt: *core.JSRuntime, obj: *core.Object, prefix: []co
     while (index < count) : (index += 1) {
         const name = try std.fmt.bufPrint(&buf, "{s}{d}", .{ prefix, index });
         const key = try rt.internAtom(name);
-        try obj.defineOwnProperty(rt, key, core.Descriptor.data(
-            core.JSValue.int32(@intCast(index)),
-            true,
-            true,
-            true,
-        ));
+        try obj.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(@intCast(index)), .all));
     }
 }
 

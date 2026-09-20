@@ -1,28 +1,28 @@
 //! Async-generator request queue + state machine.
 //!
 //! Mirrors the qjs AsyncGenerator machinery (quickjs.c @ 04be246):
-//!   - JSAsyncGeneratorStateEnum        quickjs.c:21345
-//!   - JSAsyncGeneratorRequest/Data     quickjs.c:21354-21370 (zjs: GeneratorPayload
+//! - JSAsyncGeneratorStateEnum quickjs.c
+//! - JSAsyncGeneratorRequest/Data quickjs.c (zjs: GeneratorPayload
 //!     async_queue/async_state — the side data lives in the generator object's
 //!     payload instead of an opaque struct; GC tracing in object.zig mirrors
-//!     js_async_generator_mark quickjs.c:21400)
-//!   - js_async_generator_next          quickjs.c:21706 (asyncGeneratorEnqueue)
-//!   - js_async_generator_resume_next   quickjs.c:21568 (resumeNext + execBody)
-//!   - js_async_generator_await         quickjs.c:21446 (asyncGeneratorAwait)
-//!   - js_async_generator_resolve_function quickjs.c:21670 (asyncGeneratorResolveFunctionCall)
-//!   - js_async_generator_complete      quickjs.c:21520 (complete)
-//!   - js_async_generator_completed_return quickjs.c:21532 (completedReturn)
+//! js_async_generator_mark quickjs.c)
+//! - js_async_generator_next quickjs.c (asyncGeneratorEnqueue)
+//! - js_async_generator_resume_next quickjs.c (resumeNext + execBody)
+//! - js_async_generator_await quickjs.c (asyncGeneratorAwait)
+//! - js_async_generator_resolve_function quickjs.c (asyncGeneratorResolveFunctionCall)
+//! - js_async_generator_complete quickjs.c (complete)
+//! - js_async_generator_completed_return quickjs.c (completedReturn)
 //!
 //! Frame-model adaptation: qjs resumes a
 //! heap-saved JSAsyncFunctionState in-place; zjs re-enters the body via
 //! callFunctionBytecodeModeState with the generator object's preserved
 //! buffers. The parser compiles the return-path awaits and cleanup into the
 //! body; the yield-operand await remains a driver trampoline:
-//!   - OP_await before OP_yield (quickjs.c:28134): carried here by the
+//! - OP_await before OP_yield: carried here by the
 //!     `.yield_operand` trampoline action — the yield operand is awaited
 //!     driver-side, the request settles with the awaited value.
 //!   - emit_return's OP_await of a return completion before finally unwinding
-//!     (quickjs.c:28404) executes in bytecode.
+//! executes in bytecode.
 //! yield* needs no extra action: the parser's expanded lowering already
 //! contains the qjs-shaped in-bytecode awaits (parser.zig emitYieldStarDelegation).
 
@@ -40,18 +40,11 @@ const builtin_glue = @import("builtin_glue.zig");
 const HostError = exceptions.HostError;
 const AsyncGeneratorRequest = core.object.AsyncGeneratorRequest;
 
-/// Mirrors JSAsyncGeneratorStateEnum (quickjs.c:21345).
-pub const State = enum(u8) {
-    suspended_start = 0,
-    suspended_yield = 1,
-    suspended_yield_star = 2,
-    executing = 3,
-    awaiting_return = 4,
-    completed = 5,
-};
+pub const State = core.generator_state.AsyncGeneratorState;
+const ResumeCompletion = core.generator_state.ResumeCompletion;
 
 /// Trampoline discriminator. `.await_resume` and `.awaiting_return` are the
-/// qjs magic 0/1 and 2/3 cases (quickjs.c:21670); `.yield_operand` carries
+/// qjs magic 0/1 and 2/3 cases; `.yield_operand` carries
 /// the yield-operand await described above.
 pub const ResolveAction = enum(u8) {
     none = 0,
@@ -61,11 +54,11 @@ pub const ResolveAction = enum(u8) {
 };
 
 fn state(gen: *core.Object) State {
-    return @enumFromInt(gen.asyncGeneratorStateSlot().*);
+    return gen.asyncGeneratorStateSlot().*;
 }
 
 fn setState(gen: *core.Object, s: State) void {
-    gen.asyncGeneratorStateSlot().* = @intFromEnum(s);
+    gen.asyncGeneratorStateSlot().* = s;
 }
 
 // ---------------------------------------------------------------------------
@@ -73,19 +66,7 @@ fn setState(gen: *core.Object, s: State) void {
 // ---------------------------------------------------------------------------
 
 fn pushRequest(rt: *core.JSRuntime, gen: *core.Object, req: AsyncGeneratorRequest) !void {
-    const queue = gen.asyncGeneratorQueue();
-    const capacity = gen.asyncGeneratorQueueCapacitySlot().*;
-    if (queue.len == capacity) {
-        const next_capacity: usize = if (capacity == 0) 4 else capacity * 2;
-        const next = try rt.memory.alloc(AsyncGeneratorRequest, next_capacity);
-        @memcpy(next[0..queue.len], queue);
-        if (capacity != 0) rt.memory.free(AsyncGeneratorRequest, queue.ptr[0..capacity]);
-        gen.asyncGeneratorQueueSlot().* = next[0..queue.len];
-        gen.asyncGeneratorQueueCapacitySlot().* = next_capacity;
-    }
-    const slot = gen.asyncGeneratorQueueSlot();
-    slot.*.ptr[slot.len] = req;
-    slot.* = slot.*.ptr[0 .. slot.len + 1];
+    try gen.asyncGeneratorQueueSlot().append(rt.memory.persistent_allocator, req);
     // The request's four values live in the generator's payload queue, so the
     // generator owns them: a long-lived async generator queuing a freshly made
     // promise and its resolving functions is an old-to-young edge.
@@ -96,21 +77,17 @@ fn pushRequest(rt: *core.JSRuntime, gen: *core.Object, req: AsyncGeneratorReques
 }
 
 /// Pop the queue head (mirrors list_del in js_async_generator_resolve_or_reject,
-/// quickjs.c:21489 — the head leaves the queue BEFORE its resolving function
+/// quickjs.c — the head leaves the queue BEFORE its resolving function
 /// runs, so reentrant next() during settlement sees the shortened queue).
 fn takeHeadRequest(gen: *core.Object) ?AsyncGeneratorRequest {
-    const queue = gen.asyncGeneratorQueue();
-    if (queue.len == 0) return null;
-    const head = queue[0];
-    const slot = gen.asyncGeneratorQueueSlot();
-    std.mem.copyForwards(AsyncGeneratorRequest, queue[0 .. queue.len - 1], queue[1..]);
-    slot.* = slot.*.ptr[0 .. queue.len - 1];
-    return head;
+    const queue = gen.asyncGeneratorQueueSlot();
+    if (queue.items.len == 0) return null;
+    return queue.orderedRemove(0);
 }
 
 // ---------------------------------------------------------------------------
 // Settlement (mirrors js_async_generator_resolve_or_reject / _resolve / _reject,
-// quickjs.c:21481-21518)
+// quickjs.c)
 // ---------------------------------------------------------------------------
 
 fn settleHead(
@@ -140,7 +117,7 @@ fn settleHead(
 }
 
 /// resolve with a fresh {value, done} iterator result per request
-/// (js_async_generator_resolve, quickjs.c:21503).
+/// (js_async_generator_resolve, quickjs.c).
 fn resolveHead(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -154,7 +131,7 @@ fn resolveHead(
 }
 
 // ---------------------------------------------------------------------------
-// Completion (mirrors js_async_generator_complete, quickjs.c:21520: state to
+// Completion (mirrors js_async_generator_complete, quickjs.c: state to
 // COMPLETED and the saved frame freed eagerly — async_func_free)
 // ---------------------------------------------------------------------------
 
@@ -165,7 +142,7 @@ fn complete(ctx: *core.JSContext, gen: *core.Object) void {
 }
 
 // ---------------------------------------------------------------------------
-// Await plumbing (mirrors js_async_generator_await, quickjs.c:21446:
+// Await plumbing (mirrors js_async_generator_await, quickjs.c:
 // PromiseResolve(%Promise%, value) + perform_promise_then onto trampolines
 // with the qjs UNDEFINED-capability extension)
 // ---------------------------------------------------------------------------
@@ -198,11 +175,11 @@ fn asyncGeneratorAwait(
     const promise = try promise_ops.promiseStaticCall(ctx, output, global, promise_constructor, &.{value}, .resolve, null, null);
     const on_fulfilled = try resolveFunction(ctx.runtime, global, gen, action, false);
     const on_rejected = try resolveFunction(ctx.runtime, global, gen, action, true);
-    // "no need to create 'thrownawayCapability' as in the spec" (quickjs.c:21464)
+    // "no need to create 'thrownawayCapability' as in the spec"
     try promise_ops.performPromiseThen(ctx, output, global, promise, on_fulfilled, on_rejected, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
 }
 
-/// Mirrors js_async_generator_completed_return (quickjs.c:21532), including
+/// Mirrors js_async_generator_completed_return, including
 /// the poisoned-Promise.constructor edge: if PromiseResolve throws, the error
 /// travels to the request promise as a rejection through the magic-3 path.
 fn completedReturn(
@@ -228,24 +205,24 @@ fn completedReturn(
 
 // ---------------------------------------------------------------------------
 // Body execution (mirrors the resume_exec block of
-// js_async_generator_resume_next, quickjs.c:21621-21660)
+// js_async_generator_resume_next, quickjs.c)
 // ---------------------------------------------------------------------------
 
 const ResumeArg = union(enum) {
     /// SUSPENDED_START + NEXT: run from the initial pc, nothing pushed
-    /// (exec_no_arg, quickjs.c:21585).
+    /// (exec_no_arg, quickjs.c).
     start,
     /// One-slot value resume at a yield/await suspension.
     next: core.JSValue,
-    /// Throw-into-frame (qjs throw_flag=TRUE + JS_Throw, quickjs.c:21596).
+    /// Throw-into-frame (qjs throw_flag=TRUE + JS_Throw, quickjs.c).
     throw_: core.JSValue,
     /// Return completion injected at a plain yield. The parser's `if_false`
     /// continuation consumes completion magic 1 and runs bytecode-level
     /// iterator/finally cleanup before OP_return_async.
     return_: core.JSValue,
     /// Two-slot resume at a yield* suspension: value + completion int
-    /// (quickjs.c:21611-21614); the compiled yield* loop dispatches on it.
-    yield_star: struct { value: core.JSValue, completion: i32 },
+    ///; the compiled yield* loop dispatches on it.
+    yield_star: struct { value: core.JSValue, completion: ResumeCompletion },
 };
 
 const ExecOutcome = enum { parked, settled };
@@ -281,7 +258,7 @@ fn resumeBodyValue(
 }
 
 /// Resume the body once and dispatch the outcome (settle / park / recurse for
-/// the qjs `throw_flag=TRUE; goto resume_exec` retry, quickjs.c:21651).
+/// the qjs `throw_flag=TRUE; goto resume_exec` retry, quickjs.c).
 ///
 /// Completion values and gosub return PCs remain on the suspended operand
 /// stack, so yields inside a finalizer need no driver-side pending state.
@@ -292,26 +269,24 @@ fn execBody(
     gen: *core.Object,
     arg: ResumeArg,
 ) HostError!ExecOutcome {
-    const rt = ctx.runtime;
-
     setState(gen, .executing);
     var resume_value: ?core.JSValue = null;
     switch (arg) {
         .start => {},
         .next => |value| {
-            try call_runtime.setGeneratorResumeCompletionType(rt, gen, 0);
+            call_runtime.setGeneratorResumeCompletion(gen, .next);
             resume_value = value;
         },
         .throw_ => |value| {
-            try call_runtime.setGeneratorResumeCompletionType(rt, gen, 2);
+            call_runtime.setGeneratorResumeCompletion(gen, .throw);
             resume_value = value;
         },
         .return_ => |value| {
-            try call_runtime.setGeneratorResumeCompletionType(rt, gen, 1);
+            call_runtime.setGeneratorResumeCompletion(gen, .return_);
             resume_value = value;
         },
         .yield_star => |ys| {
-            try call_runtime.setGeneratorResumeCompletionType(rt, gen, ys.completion);
+            call_runtime.setGeneratorResumeCompletion(gen, ys.completion);
             resume_value = ys.value;
         },
     }
@@ -321,7 +296,7 @@ fn execBody(
             else => {},
         }
         // exception completion: complete then reject with the pending
-        // exception (quickjs.c:21624-21628)
+        // exception
         const reason = try exception_ops.promiseErrorValue(ctx, global, err);
         complete(ctx, gen);
         try settleHead(ctx, output, global, gen, reason, true);
@@ -337,7 +312,7 @@ fn execBody(
 
     switch (gen.generatorSuspendKind()) {
         .await_op => {
-            // FUNC_RET_AWAIT (quickjs.c:21646-21654)
+            // FUNC_RET_AWAIT
             asyncGeneratorAwait(ctx, output, global, gen, result, .await_resume) catch |err| {
                 switch (err) {
                     error.OutOfMemory, error.ProcessExit => return err,
@@ -351,7 +326,7 @@ fn execBody(
         },
         .yield => {
             // zjs adaptation of the compiler-emitted OP_await before OP_yield
-            // (quickjs.c:28134): await the yield operand; the fulfilled value
+            //: await the yield operand; the fulfilled value
             // settles the head request as {value, done:false}.
             asyncGeneratorAwait(ctx, output, global, gen, result, .yield_operand) catch |err| {
                 switch (err) {
@@ -364,7 +339,7 @@ fn execBody(
             return .parked;
         },
         .yield_star => {
-            // FUNC_RET_YIELD_STAR (quickjs.c:21638-21645): the value was
+            // FUNC_RET_YIELD_STAR: the value was
             // already awaited by the compiled yield* loop; resolve directly.
             setState(gen, .suspended_yield_star);
             try resolveHead(ctx, output, global, gen, result, false);
@@ -380,7 +355,7 @@ fn execBody(
 }
 
 // ---------------------------------------------------------------------------
-// The FIFO drain loop (mirrors js_async_generator_resume_next, quickjs.c:21568)
+// The FIFO drain loop (mirrors js_async_generator_resume_next, quickjs.c)
 // ---------------------------------------------------------------------------
 
 pub fn resumeNext(
@@ -392,16 +367,16 @@ pub fn resumeNext(
     while (true) {
         const queue = gen.asyncGeneratorQueue();
         if (queue.len == 0) return;
-        const head_completion = queue[0].completion_type;
+        const head_completion = queue[0].completion;
         const head_result = queue[0].result;
         switch (state(gen)) {
             // Parked at an await: only the resume trampoline re-enters
-            // (quickjs.c:21580 resume_exec is trampoline-driven; enqueue
+            // (quickjs.c resume_exec is trampoline-driven; enqueue
             // guards on state != EXECUTING).
             .executing => return,
             .awaiting_return => return,
             .suspended_start => {
-                if (head_completion == 0) {
+                if (head_completion == .next) {
                     switch (try execBody(ctx, output, global, gen, .start)) {
                         .parked => return,
                         .settled => continue,
@@ -409,33 +384,32 @@ pub fn resumeNext(
                 } else {
                     // return/throw before start: complete, then the same
                     // request re-dispatches in the COMPLETED state
-                    // (quickjs.c:21588-21590).
                     complete(ctx, gen);
                     continue;
                 }
             },
             .completed => {
-                if (head_completion == 0) {
+                if (head_completion == .next) {
                     try resolveHead(ctx, output, global, gen, core.JSValue.undefinedValue(), true);
-                } else if (head_completion == 1) {
+                } else if (head_completion == .return_) {
                     setState(gen, .awaiting_return);
                     try completedReturn(ctx, output, global, gen, head_result);
                 } else {
                     try settleHead(ctx, output, global, gen, head_result, true);
                 }
-                // quickjs.c:21607 `goto done`: exactly one request is
+                // quickjs.c `goto done`: exactly one request is
                 // processed per resume_next entry in the COMPLETED state
                 // (verified against the qjs binary; remaining requests drain
                 // on later next()/return()/throw() calls).
                 return;
             },
             .suspended_yield => {
-                if (head_completion == 2) {
+                if (head_completion == .throw) {
                     switch (try execBody(ctx, output, global, gen, .{ .throw_ = head_result })) {
                         .parked => return,
                         .settled => continue,
                     }
-                } else if (head_completion == 1) {
+                } else if (head_completion == .return_) {
                     switch (try execBody(ctx, output, global, gen, .{ .return_ = head_result })) {
                         .parked => return,
                         .settled => continue,
@@ -449,7 +423,7 @@ pub fn resumeNext(
             },
             .suspended_yield_star => {
                 // All three completions resume the compiled yield* loop with
-                // the two-slot (value, completion) push (quickjs.c:21611).
+                // the two-slot (value, completion) push.
                 switch (try execBody(ctx, output, global, gen, .{ .yield_star = .{ .value = head_result, .completion = head_completion } })) {
                     .parked => return,
                     .settled => continue,
@@ -460,7 +434,7 @@ pub fn resumeNext(
 }
 
 // ---------------------------------------------------------------------------
-// Enqueue (mirrors js_async_generator_next, quickjs.c:21706; magic:
+// Enqueue (mirrors js_async_generator_next, quickjs.c; magic:
 // next=0 / return=1 / throw=2)
 // ---------------------------------------------------------------------------
 
@@ -470,16 +444,16 @@ pub fn asyncGeneratorEnqueue(
     global: *core.Object,
     gen: *core.Object,
     args: []const core.JSValue,
-    magic: i32,
+    completion: ResumeCompletion,
 ) HostError!core.JSValue {
     const rt = ctx.runtime;
     const gen_global = gen.generatorFunctionRealmGlobalPtr() orelse global;
-    // Capability FIRST (observable via then-getter ticks; quickjs.c:21713).
+    // Capability FIRST (observable via then-getter ticks; quickjs.c).
     const promise = try core.promise.constructWithPrototype(ctx, promise_ops.promisePrototypeFromGlobal(rt, gen_global));
     const resolving = try promise_ops.createPromiseResolvingPair(rt, gen_global, promise);
     const arg = if (args.len > 0) args[0] else core.JSValue.undefinedValue();
     const req = AsyncGeneratorRequest{
-        .completion_type = magic,
+        .completion = completion,
         .result = arg,
         .promise = promise,
         .resolve = resolving.resolve,
@@ -496,7 +470,7 @@ pub fn asyncGeneratorEnqueue(
 
 // ---------------------------------------------------------------------------
 // Trampoline dispatch (mirrors js_async_generator_resolve_function,
-// quickjs.c:21670)
+// quickjs.c)
 // ---------------------------------------------------------------------------
 
 pub fn asyncGeneratorResolveFunctionCall(
@@ -515,7 +489,7 @@ pub fn asyncGeneratorResolveFunctionCall(
     switch (action) {
         .none => return null,
         .awaiting_return => {
-            // magic >= 2 (quickjs.c:21681-21689): settle the head, state to
+            // magic >= 2: settle the head, state to
             // COMPLETED, and — verified qjs divergence from the spec's
             // AsyncGeneratorDrainQueue — NO resume_next afterwards.
             const st = state(gen);
@@ -529,7 +503,7 @@ pub fn asyncGeneratorResolveFunctionCall(
             return core.JSValue.undefinedValue();
         },
         .await_resume => {
-            // magic 0/1 (quickjs.c:21690-21701), stale-trampoline guard.
+            // magic 0/1, stale-trampoline guard.
             if (state(gen) != .executing) return core.JSValue.undefinedValue();
             if (is_reject) {
                 _ = try execBody(ctx, output, gen_global, gen, .{ .throw_ = arg });

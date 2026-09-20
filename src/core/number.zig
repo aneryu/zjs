@@ -27,7 +27,7 @@ pub fn parseIntValue(rt: *core.JSRuntime, input: core.JSValue, radix_value: ?cor
     try core.value_string.appendValueString(rt, &bytes, input, .{ .unwrap_wrappers = true });
 
     const radix = if (radix_value) |value| toInt32(try toNumber(rt, value)) else 0;
-    // appendValueString emits UTF-8 (qjs JS_ToCStringLen2, quickjs.c:4458);
+    // appendValueString emits UTF-8 (qjs JS_ToCStringLen2, quickjs.c);
     // trim UTF-8 whitespace first, then scan the remainder as already-decoded
     // code units. parseIntLatin1Bytes itself treats each byte as a latin1
     // code point and must not re-decode UTF-8 whitespace sequences.
@@ -89,7 +89,7 @@ pub fn toNumber(rt: *core.JSRuntime, value: core.JSValue) !f64 {
 /// the ASCII hot path is a single switch match; 0xA0 is NBSP (U+00A0).
 /// Multi-byte UTF-8 sequences are NOT whitespace here — those bytes are
 /// independent latin1 code points. qjs skip_spaces (qjs:11230) + lre_is_space
-/// (libunicode.h:162) classify by CODE POINT.
+/// classify by CODE POINT.
 fn jsWhitespacePrefixLen(bytes: []const u8) ?usize {
     if (bytes.len == 0) return null;
     switch (bytes[0]) {

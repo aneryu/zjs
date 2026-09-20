@@ -465,7 +465,7 @@ pub const JSValue = extern struct {
         return ptrFromPayload(gc.Header, self.payloadBits());
     }
 
-    /// `JS_MarkValue` filter (quickjs.c:6553-6566) widened by one tag: OBJECT /
+    /// `JS_MarkValue` filter widened by one tag: OBJECT /
     /// FUNCTION_BYTECODE / MODULE plus heap BIG_INT, which is a leaf on
     /// `lists.objects` since S1-c (qjs keeps BigInt refcounted; zjs traces it).
     /// Boxed prefixes 0xFFF1..0xFFF7 are that tag set; one unsigned range on

@@ -5,7 +5,7 @@
 //! views are cleared so resume or teardown releases each value exactly once.
 //! Await paths distinguish raw suspension from settled completion, including
 //! top-level module evaluation. The transition shape follows QuickJS's async
-//! opcode handling around quickjs.c:20592.
+//! opcode handling around quickjs.c.
 
 const std = @import("std");
 const iterator_ops = @import("iterator_ops.zig");
@@ -37,7 +37,7 @@ const AwaitSuspendMode = enum {
     settled,
     /// Async functions and async generators yield the raw awaited value; the
     /// caller wires it through Promise.resolve(...).then(resume, reject),
-    /// matching QuickJS OP_await (quickjs.c:20592: save frame, return
+    /// matching QuickJS OP_await (quickjs.c: save frame, return
     /// FUNC_RET_AWAIT with the operand at cur_sp[-1]).
     raw,
 };
@@ -315,7 +315,7 @@ noinline fn resumeExecutionStateRaw(
     const resume_pc = state.pc;
     const generator_started = payload.started;
     const was_yield_star_suspended = generator_started and payload.yield_star_suspended;
-    const completion_type = if (generator_started) payload.resume_completion_type else 0;
+    const completion: core.generator_state.ResumeCompletion = if (generator_started) payload.resume_completion else .next;
     const resume_needs_branch_false = generator_started and
         resume_pc > 0 and
         resume_pc <= function.byteCode().len and
@@ -327,7 +327,7 @@ noinline fn resumeExecutionStateRaw(
         0
     else if (was_yield_star_suspended)
         2
-    else if (completion_type == 2)
+    else if (completion == .throw)
         0
     else
         1;
@@ -355,26 +355,26 @@ noinline fn resumeExecutionStateRaw(
     if (!generator_started) return .{ .catch_target = catch_target };
     if (was_yield_star_suspended) {
         payload.yield_star_suspended = false;
-        payload.resume_completion_type = 0;
+        payload.resume_completion = .next;
         stack.pushAssumeCapacity(resume_value orelse core.JSValue.undefinedValue());
-        stack.pushOwnedAssumeCapacity(core.JSValue.int32(completion_type));
+        stack.pushOwnedAssumeCapacity(core.JSValue.int32(@intFromEnum(completion)));
     } else {
-        if (completion_type == 2) {
-            payload.resume_completion_type = 0;
+        if (completion == .throw) {
+            payload.resume_completion = .next;
             if (resume_needs_branch_false) {
                 stack.pushOwnedAssumeCapacity(core.JSValue.boolean(false));
             }
             return .{ .throw_on_entry = true, .catch_target = catch_target };
         }
         stack.pushAssumeCapacity(resume_value orelse core.JSValue.undefinedValue());
-        if (completion_type != 0) payload.resume_completion_type = 0;
+        if (completion != .next) payload.resume_completion = .next;
     }
     if (resume_needs_branch_false) {
         // A plain `yield` resumes with the QuickJS two-slot protocol:
         // `[resume_value, completion_magic]`.  The parser lowers the magic
         // test to `if_false normal_resume`; NEXT is false while RETURN must
         // fall through to the compiled return/iterator/finally cleanup path.
-        stack.pushOwnedAssumeCapacity(core.JSValue.boolean(completion_type == 1));
+        stack.pushOwnedAssumeCapacity(core.JSValue.boolean(completion == .return_));
     }
     return .{ .catch_target = catch_target };
 }
@@ -567,14 +567,14 @@ fn yieldStarRaw(
     if (step.done) {
         try stack.reserveAdditional(1);
         if (generator) |generator_object| {
-            generator_object.clearGeneratorYieldStarIterator(ctx.runtime);
+            generator_object.clearGeneratorYieldStarIterator();
         }
         stack.pushAssumeCapacity(step.value);
         return .continue_loop;
     }
     if (stop_on_yield) {
         if (generator) |generator_object| {
-            if (!using_stored_iterator) generator_object.setGeneratorYieldStarIterator(ctx.runtime, iterator_value);
+            if (!using_stored_iterator) generator_object.setGeneratorYieldStarIterator(iterator_value);
             try saveGeneratorExecutionState(ctx, stack, frame, generator_object, opcode_pc, catch_target);
             generator_object.generatorSuspendKindSlot().* = @intFromEnum(core.object.GeneratorSuspendKind.yield_star);
             generator_object.generatorStartedSlot().* = true;
@@ -683,7 +683,7 @@ fn awaitSuspendMode(function: *const bytecode.FunctionBytecode, suspend_on_modul
     // Async-generator bodies genuinely suspend at every await; the queue
     // machine (exec/async_generator.zig) resumes them via promise-reaction
     // jobs (mirrors js_async_generator_await + resume trampolines,
-    // quickjs.c:21446/21670).
+    // quickjs.c).
     if (stop_on_yield and function.isAsync()) return .raw;
     return .none;
 }
@@ -699,10 +699,10 @@ fn closeIteratorForPendingError(
     if (frame.pc < function.byteCode().len and function.byteCode()[frame.pc] == bytecode.opcode.op.iterator_get_value_done) {
         // for-await-of: qjs js_for_await_of_next DISABLES the catch offset for
         // the await between OP_for_await_of_next and
-        // OP_iterator_get_value_done (quickjs.c:16713-16726) — a rejection
+        // OP_iterator_get_value_done — a rejection
         // while awaiting the step result must NOT close the iterator from the
         // unwind path; the AsyncFromSyncIterator close-wrap reaction
-        // (quickjs.c:54468) is the only closer.
+        // is the only closer.
         return;
     }
     try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);

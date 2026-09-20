@@ -31,7 +31,7 @@ pub const oracle_report_enabled = cfg.audit_oracles;
 /// slice when the counters are comptime-erased (ReleaseFast).
 pub fn formatOracleReport(buffer: []u8) []const u8 {
     if (comptime !cfg.audit_oracles) return "";
-    return cfg.formatOracleReport(buffer, cfg.oracleReportSnapshot());
+    return cfg.formatInto(buffer, cfg.writeOracleReport, cfg.oracleReportSnapshot());
 }
 
 /// Per-function lowering: resolve_variables then resolve_labels, installing
@@ -100,7 +100,7 @@ fn releaseConsumedBuilder(fd: *bytecode.function_def.FunctionDef) void {
 fn emitIdentityHealth() void {
     if (std.c.getenv("ZJS_V2_IDENTITY_HEALTH") == null) return;
     var buffer: [512]u8 = undefined;
-    const health = cfg.formatIdentityHealth(&buffer, cfg.fanoutCensusSnapshot());
+    const health = cfg.formatInto(&buffer, cfg.writeIdentityHealth, cfg.fanoutCensusSnapshot());
     std.debug.print("{s}\n", .{health});
 }
 
@@ -117,12 +117,12 @@ fn emitAnchorSplit() void {
             var line_buffer: [512]u8 = undefined;
             const exemplar = cfg.anchor_exemplars[reported_anchor_exemplars];
             reported_anchor_exemplars += 1;
-            std.debug.print("{s}\n", .{cfg.formatAnchorExemplar(&line_buffer, exemplar)});
+            std.debug.print("{s}\n", .{cfg.formatInto(&line_buffer, cfg.writeAnchorExemplar, exemplar)});
         }
     }
     if (std.c.getenv("ZJS_V2_ANCHOR_SPLIT") == null) return;
     var buffer: [1024]u8 = undefined;
-    std.debug.print("{s}\n", .{cfg.formatAnchorSplit(&buffer, cfg.anchorSplitSnapshot())});
+    std.debug.print("{s}\n", .{cfg.formatInto(&buffer, cfg.writeAnchorSplit, cfg.anchorSplitSnapshot())});
 }
 
 test {

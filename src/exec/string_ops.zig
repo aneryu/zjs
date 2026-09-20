@@ -7,9 +7,10 @@
 //! Preserve the measured `ctx`/`output`/`global`/caller-function/caller-frame
 //! ABI and keep benchmark-hot string/RegExp arms out of shared cold bodies.
 //! Algorithm coordinates live beside each implementation, including QuickJS
-//! concatenation at quickjs.c:4646-5042 and replacement at quickjs.c:46012.
+//! concatenation at quickjs.c and replacement at quickjs.c.
 
 const std = @import("std");
+const iterator_slots = @import("iterator_slots.zig");
 
 const bytecode = @import("../bytecode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
@@ -114,7 +115,7 @@ pub fn toStringForAnnexB(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     // qjs `JS_ToString` on a symbol throws TypeError "cannot convert symbol to
-    // string" (JS_ToStringInternal quickjs.c:13632).
+    // string" (JS_ToStringInternal quickjs.c).
     if (value.is(.symbol)) return throwTypeErrorMessage(ctx, global, "cannot convert symbol to string");
     if (value.isString()) return value;
     const primitive = if (value.is(.object))
@@ -126,11 +127,11 @@ pub fn toStringForAnnexB(
     return value_ops.toStringValue(ctx.runtime, primitive);
 }
 
-/// qjs `JS_ToStringCheckObject` (quickjs.c:13670): a null/undefined receiver
+/// qjs `JS_ToStringCheckObject`: a null/undefined receiver
 /// throws TypeError "null or undefined are forbidden" in the callee realm;
 /// everything else is `JS_ToString`d. This is the exact `this`-coercion the
 /// String.prototype method bodies open with (`js_string_charCodeAt` etc.,
-/// quickjs.c:45453). Exposed so the self-contained builtin bodies can perform
+/// quickjs.c). Exposed so the self-contained builtin bodies can perform
 /// it inline and be reached directly by the record — mirroring qjs's per-method
 /// dispatch — instead of routing through the exec `stringPrototypeMethod`
 /// coercion tower.
@@ -160,9 +161,9 @@ pub fn toPrimitiveForString(
         return toOrdinaryPrimitiveString(ctx, output, global, value, caller_function, caller_frame);
     const method = try getValueProperty(ctx, output, global, value, symbol_to_primitive, caller_function, caller_frame);
     if (!method.is(.undefined_value) and !method.is(.null_value)) {
-        // JS_ToPrimitiveInternal (quickjs.c:11096 JS_CallFree): a non-callable
+        // JS_ToPrimitiveInternal (quickjs.c JS_CallFree): a non-callable
         // Symbol.toPrimitive is still called and reports "not a function"; an
-        // object return value throws "toPrimitive" (quickjs.c:11104).
+        // object return value throws "toPrimitive".
         if (!isCallableValue(method)) return throwTypeErrorMessage(ctx, global, "not a function");
         const hint = try value_ops.createStringValue(ctx.runtime, "string");
         const primitive = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, value, method, &.{hint}, caller_function, caller_frame);
@@ -184,7 +185,7 @@ pub fn toOrdinaryPrimitiveString(
 ) !core.JSValue {
     if (try callObjectToPrimitiveMethod(ctx, output, global, value, core.atom.ids.toString, caller_function, caller_frame)) |primitive| return primitive;
     if (try callObjectToPrimitiveMethod(ctx, output, global, value, core.atom.ids.valueOf, caller_function, caller_frame)) |primitive| return primitive;
-    // JS_ToPrimitiveInternal (quickjs.c:11131): no primitive from toString/valueOf.
+    // JS_ToPrimitiveInternal: no primitive from toString/valueOf.
     return throwTypeErrorMessage(ctx, global, "toPrimitive");
 }
 
@@ -280,7 +281,7 @@ pub fn stringConcat(
 
             var byte_parts: [qjs_concat_direct_part_limit][]const u8 = undefined;
             for (parts[0..part_count], 0..) |part, index| byte_parts[index] = part.latin1;
-            // qjs `JS_ConcatString` -> `JS_ConcatString1` (quickjs.c:5042,
+            // qjs `JS_ConcatString` -> `JS_ConcatString1` (quickjs.c,
             // 4646): ToString first, measure, allocate one result, memcpy
             // each flat latin1 part directly into that result.
             return (try core.string.String.createLatin1Parts(ctx.runtime, byte_parts[0..part_count], total_len)).value();
@@ -351,7 +352,7 @@ fn stringConcatSlow(
 /// implementation appended each part's RAW latin1 bytes into a byte buffer and
 /// re-decoded the buffer as UTF-8, so any high-latin1 part (code points
 /// 0x80-0xFF) reaching this leg produced a corrupt decode. Mirror qjs
-/// `JS_ConcatString1` (quickjs.c:4646) instead: flatten + measure each part
+/// `JS_ConcatString1` instead: flatten + measure each part
 /// (result wide iff any part is wide), then copy with per-unit widening.
 fn stringConcatFromConverted(ctx: *core.JSContext, parts: []const QjsConcatPart) !core.JSValue {
     const rt = ctx.runtime;
@@ -398,7 +399,7 @@ pub fn stringReplace(
     return stringReplaceCore(ctx, output, global, this_value, args, false, caller_function, caller_frame);
 }
 
-/// js_string_replace (quickjs.c:46012, magic: 0 = replace / 1 = replaceAll).
+/// js_string_replace (quickjs.c, magic: 0 = replace / 1 = replaceAll).
 /// After the @@replace delegation, works directly on the flat string
 /// representations: string_indexof over the source, the narrow-first
 /// StringBuffer accumulator, and the string-search GetSubstitution shape.
@@ -417,7 +418,7 @@ noinline fn stringReplaceCore(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    // js_string_replace (quickjs.c:46021): nullish receiver -> "cannot convert to object".
+    // js_string_replace: nullish receiver -> "cannot convert to object".
     if (this_value.is(.null_value) or this_value.is(.undefined_value)) {
         return throwTypeErrorMessage(ctx, global, "cannot convert to object");
     }
@@ -426,7 +427,7 @@ noinline fn stringReplaceCore(
 
     if (search_input.is(.object)) {
         if (is_replace_all) {
-            // check_regexp_g_flag (quickjs.c:45807): undefined/null flags throw
+            // check_regexp_g_flag: undefined/null flags throw
             // TypeError "cannot convert to object"; a flags string without 'g'
             // throws TypeError "regexp must have the 'g' flag".
             if (try isRegExpObservable(ctx, output, global, search_input, caller_function, caller_frame)) {
@@ -516,7 +517,7 @@ fn resolvedCodeUnitAt(data: core.string.String.ResolvedData, index: usize) u16 {
     };
 }
 
-/// string_indexof_char (quickjs.c:45553): first index of code unit `c` at or
+/// string_indexof_char: first index of code unit `c` at or
 /// after `from`; a narrow string can never contain a unit > 0xFF.
 fn stringIndexOfCharData(data: core.string.String.ResolvedData, c: u16, from: usize) ?usize {
     return switch (data) {
@@ -528,7 +529,7 @@ fn stringIndexOfCharData(data: core.string.String.ResolvedData, c: u16, from: us
     };
 }
 
-/// string_indexof (quickjs.c:45573): naive first-char scan plus tail compare.
+/// string_indexof: naive first-char scan plus tail compare.
 fn stringIndexOfData(
     haystack: core.string.String.ResolvedData,
     needle: core.string.String.ResolvedData,
@@ -552,7 +553,7 @@ fn stringIndexOfData(
     return null;
 }
 
-/// js_string_GetSubstitution (quickjs.c:45888) in its string-search shape:
+/// js_string_GetSubstitution in its string-search shape:
 /// captures == NULL, captures_val/namedCaptures == undefined, so `$N` and
 /// `$<name>` take the norep path verbatim and only $$ $& $` $' substitute.
 fn appendSubstitutionStringSearch(
@@ -697,8 +698,7 @@ noinline fn errorStackStringValue(
             const sites = objectFromValue(sites_value) orelse return value_ops.createStringValue(ctx.runtime, "");
             const current_length: usize = if (sites.isArray()) @intCast(sites.arrayLength()) else 0;
             const length = @min(current_length, site_count);
-            var index: usize = 0;
-            while (index < length) : (index += 1) {
+            for (0..length) |index| {
                 if (index > std.math.maxInt(u32)) break;
                 const site_value = try sites.getProperty(core.Atom.taggedInt(@intCast(index)));
                 const site = objectFromValue(site_value) orelse continue;
@@ -750,7 +750,7 @@ pub fn stringFromCodePoint(
         const primitive = try toPrimitiveForNumber(ctx, output, global, value);
         const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
         const number = value_ops.numberValue(number_value) orelse std.math.nan(f64);
-        // js_string_fromCodePoint (quickjs.c:45361): out-of-range/non-integer
+        // js_string_fromCodePoint: out-of-range/non-integer
         // code point -> RangeError "invalid code point".
         if (std.math.isNan(number) or !std.math.isFinite(number) or number < 0 or number > 0x10ffff or @trunc(number) != number) {
             return throwRangeErrorMessage(ctx, global, "invalid code point");
@@ -782,8 +782,7 @@ pub fn stringRaw(
     var out = std.ArrayList(u16).empty;
     defer out.deinit(ctx.runtime.memory.allocator);
 
-    var index: usize = 0;
-    while (index < length) : (index += 1) {
+    for (0..length) |index| {
         if (index > std.math.maxInt(u32)) return error.RangeError;
         const raw_part = try getValueProperty(ctx, output, global, raw, core.Atom.taggedInt(@intCast(index)), caller_function, caller_frame);
         const raw_string = try toStringForAnnexB(ctx, output, global, raw_part, caller_function, caller_frame);
@@ -799,7 +798,7 @@ pub fn stringRaw(
 }
 
 pub fn toObjectForStringRaw(ctx: *core.JSContext, global: *core.Object, value: core.JSValue) !core.JSValue {
-    // JS_ToObject on undefined/null (js_string_raw -> quickjs.c:39916) throws
+    // JS_ToObject on undefined/null (js_string_raw -> quickjs.c) throws
     // TypeError "cannot convert to object".
     if (value.is(.null_value) or value.is(.undefined_value)) return throwTypeErrorMessage(ctx, global, "cannot convert to object");
     if (objectFromValue(value)) |_| return value;
@@ -952,7 +951,7 @@ pub fn regExpSymbolMatchAll(
     try iterator.setOptionalValueSlot(ctx.runtime, iterator.iteratorDataSlot(), string_value);
     const global_flag = try stringValueContainsByte(ctx.runtime, flags_string, 'g');
     const unicode_flag = try regExpFlagsAreFullUnicode(ctx.runtime, flags_string);
-    iterator.iteratorKindSlot().* = (if (global_flag) @as(u8, 1) else 0) | (if (unicode_flag) @as(u8, 2) else 0);
+    iterator_slots.setRegExpStringIteratorFlags(iterator, .{ .global = global_flag, .unicode = unicode_flag });
     iterator.iteratorIndexSlot().* = 0;
     return iterator.value();
 }
@@ -966,7 +965,7 @@ pub fn stringMatchAll(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    // js_string_match (quickjs.c:45846): nullish receiver -> "cannot convert to object".
+    // js_string_match: nullish receiver -> "cannot convert to object".
     if (this_value.is(.null_value) or this_value.is(.undefined_value)) return throwTypeErrorMessage(ctx, global, "cannot convert to object");
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
 
@@ -975,7 +974,7 @@ pub fn stringMatchAll(
     if (!regexp.is(.undefined_value) and !regexp.is(.null_value) and regexp.is(.object)) {
         const matcher = try getValueProperty(ctx, output, global, regexp, match_all_atom, caller_function, caller_frame);
         if (try isRegExpObservable(ctx, output, global, regexp, caller_function, caller_frame)) {
-            // check_regexp_g_flag (quickjs.c:45819/45829): undefined/null flags
+            // check_regexp_g_flag: undefined/null flags
             // -> "cannot convert to object"; missing 'g' -> "regexp must have the 'g' flag".
             const flags_atom = (comptime core.atom.predefinedId("flags", .string)) orelse return error.TypeError;
             const flags_value = try getValueProperty(ctx, output, global, regexp, flags_atom, caller_function, caller_frame);
@@ -1002,7 +1001,7 @@ pub fn regExpStringIteratorPrototype(rt: *core.JSRuntime, global: *core.Object) 
     const proto = try iteratorPrototype(rt, global, "RegExp String Iterator");
     errdefer core.Object.destroyFromHeader(rt, proto.gcHeader());
     const next = try core.function.nativeFunctionForGlobal(rt, global, "next", 0);
-    try proto.defineOwnProperty(rt, (comptime core.atom.predefinedId("next", .string)).?, core.Descriptor.data(next, true, false, true));
+    try proto.defineOwnProperty(rt, (comptime core.atom.predefinedId("next", .string)).?, core.Descriptor.data(next, .method));
     return proto;
 }
 
@@ -1460,15 +1459,15 @@ pub fn regExpReplaceFast(
     const cached_bytecode = rx_object.regexpCompiledBytecode();
     if (cached_bytecode.len == 0) return null;
     const compiled = regexp_adapter.Compiled{ .bytecode = @constCast(cached_bytecode) };
-    const bits = compiled.flagBits();
+    const re_flags = compiled.flags();
     // QuickJS bails on group names (the generic driver handles `$<name>`).
-    if ((bits & regexp_adapter.flag_bits.named_groups) != 0) return null;
+    if (re_flags.named_groups) return null;
     // Read flags straight from the compiled bytecode -- like QuickJS's
     // js_regexp_replace -- instead of observing the (potentially overridden)
     // flags getter. Safe because the caller already confirmed `exec` is default.
-    const is_global = (bits & regexp_adapter.flag_bits.global) != 0;
-    const is_sticky = (bits & regexp_adapter.flag_bits.sticky) != 0;
-    const full_unicode = (bits & (regexp_adapter.flag_bits.unicode | regexp_adapter.flag_bits.unicode_sets)) != 0;
+    const is_global = re_flags.global;
+    const is_sticky = re_flags.sticky;
+    const full_unicode = re_flags.fullUnicode();
     // QuickJS resets lastIndex to 0 up front for global regexps.
     if (is_global) try setRegExpLastIndexZero(ctx.runtime, rx_object);
 
@@ -1541,7 +1540,7 @@ pub fn regExpReplaceFast(
     return try b.finish(ctx.runtime);
 }
 
-/// string_advance_index (quickjs.c:45589) over a resolved flat body: a narrow
+/// string_advance_index over a resolved flat body: a narrow
 /// string can hold no surrogate pair, so only wide data consults the pair.
 fn advanceStringIndexData(data: core.string.String.ResolvedData, index: usize, unicode: bool) usize {
     return switch (data) {
@@ -1836,7 +1835,7 @@ fn parseSlotCaptureRefData(rep_data: core.string.String.ResolvedData, index: usi
 // to empty. Group-name (`$<name>`) substitution is intentionally NOT handled
 // here -- the fast path bails to the generic driver when the pattern has named
 // groups, exactly as QuickJS does.
-/// js_string_GetSubstitution (quickjs.c:45888) in its raw-capture shape
+/// js_string_GetSubstitution in its raw-capture shape
 /// (`captures != NULL`): `$&`/`$\``/`$'`/`$N` substitute directly from the
 /// source body slices held by the reused capture-slot buffer; no per-capture
 /// string materialization.
@@ -1988,7 +1987,7 @@ pub fn stringPrototypeMethod(
 ) !core.JSValue {
     // The RegExp-coupled methods (search/match/split/replaceAll/matchAll) start
     // with `JS_ThrowTypeError(ctx, "cannot convert to object")` on a nullish
-    // receiver (quickjs.c:45846/46021/46133/45846), not the
+    // receiver, not the
     // `JS_ToStringCheckObject` "null or undefined are forbidden" used by the
     // remaining bodies. They therefore run their own nullish check below and are
     // dispatched before the coarse check.
@@ -2084,7 +2083,7 @@ pub fn stringSearchPositionMethod(
 
     const search_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     if (method_id == 5 or method_id == 6 or method_id == 7) {
-        // js_string_includes (quickjs.c:45757): a regexp search argument to
+        // js_string_includes: a regexp search argument to
         // includes/startsWith/endsWith throws TypeError "regexp not supported".
         if (try isRegExpForStringSearch(ctx, output, global, search_input, caller_function, caller_frame))
             return throwTypeErrorMessage(ctx, global, "regexp not supported");
@@ -2140,7 +2139,7 @@ pub fn stringSearch(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    // js_string_match (quickjs.c:45846): nullish receiver -> "cannot convert to object".
+    // js_string_match: nullish receiver -> "cannot convert to object".
     if (this_value.is(.null_value) or this_value.is(.undefined_value)) return throwTypeErrorMessage(ctx, global, "cannot convert to object");
     const regexp = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
@@ -2170,7 +2169,7 @@ pub fn stringIteratorPrototypeFromContext(ctx: *core.JSContext, global: *core.Ob
     const slot: usize = core.class.ids.string_iterator;
     if (slot < ctx.class_prototypes.len) {
         const stored = ctx.class_prototypes[slot];
-        if (stored.is(.object)) return property_ops.expectObject(stored) catch return error.TypeError;
+        if (stored.is(.object)) return try property_ops.expectObject(stored);
     }
 
     const object = try iteratorPrototype(ctx.runtime, global, "String Iterator");
@@ -2199,7 +2198,7 @@ pub fn stringMatch(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    // js_string_match (quickjs.c:45846): nullish receiver -> "cannot convert to object".
+    // js_string_match: nullish receiver -> "cannot convert to object".
     if (this_value.is(.null_value) or this_value.is(.undefined_value)) return throwTypeErrorMessage(ctx, global, "cannot convert to object");
     const regexp = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     // QuickJS calls an existing @@match method with the original receiver and
@@ -2240,7 +2239,7 @@ pub fn stringRegExpCreateAndInvoke(
     }
     const rx = try regExpConstructCall(ctx, output, global, objectFromValue(constructor), constructor, &.{pattern}, caller_function, caller_frame);
     if (try callStringWellKnownMethod(ctx, output, global, string_value, rx, symbol_name, caller_function, caller_frame)) |value| return value;
-    // Mirrors js_string_match (quickjs.c:45881): the tail is
+    // Mirrors js_string_match: the tail is
     // JS_InvokeFree(ctx, rx, atom, 1, &S) which throws TypeError when the
     // freshly constructed rx has no callable @@match/@@search; there is no
     // silent builtin-match fallback.
@@ -2276,7 +2275,7 @@ pub fn stringSplit(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    // js_string_split (quickjs.c:46133): nullish receiver -> "cannot convert to object".
+    // js_string_split: nullish receiver -> "cannot convert to object".
     if (this_value.is(.null_value) or this_value.is(.undefined_value)) return throwTypeErrorMessage(ctx, global, "cannot convert to object");
     const separator = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     if (separator.is(.object)) {
@@ -2317,7 +2316,7 @@ pub fn stringSplit(
         count = 2;
     }
 
-    // Mirrors js_string_split (quickjs.c:46139-46165): once the @@split lookup
+    // Mirrors js_string_split: once the @@split lookup
     // above yielded undefined/null, even a regexp separator takes the string
     // path via R = JS_ToString(ctx, separator) — no builtin regexp split.
     if (args[0].is(.undefined_value)) {
@@ -2412,14 +2411,14 @@ pub fn defineSplitSliceElement(rt: *core.JSRuntime, object: *core.Object, index:
 pub fn defineSplitValueElement(rt: *core.JSRuntime, object: *core.Object, index: u32, value: core.JSValue) !void {
     const atom_id = core.Atom.taggedInt(index);
     if (try object.appendDenseArrayDefineIndex(rt, index, atom_id, value)) return;
-    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, true, true, true));
+    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, .all));
 }
 
 pub fn defineSplitValueElementOwned(rt: *core.JSRuntime, object: *core.Object, index: u32, value: core.JSValue) !void {
     const atom_id = core.Atom.taggedInt(index);
     const appended = try object.appendDenseArrayDefineIndexOwned(rt, index, atom_id, value);
     if (appended) return;
-    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, true, true, true));
+    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, .all));
 }
 
 // Standard bootstrap creates all five initial shapes together. Keep this
@@ -2466,7 +2465,7 @@ pub noinline fn createRegExpMatchArrayFromValue(
     if (has_indices) {
         const indices = try createRegExpIndicesArray(rt, global, found);
         const indices_atom = (comptime core.atom.predefinedId("indices", .string)) orelse return error.TypeError;
-        try defineFreshNonIndexDataProperty(rt, out, indices_atom, indices, true, true, true);
+        try defineFreshNonIndexDataProperty(rt, out, indices_atom, indices, .all);
     }
     return out.value();
 }
@@ -2868,10 +2867,10 @@ pub fn consumePendingExceptionIfMatchesConstructor(ctx: *core.JSContext, expecte
 
 pub fn thrownValueMatchesConstructor(rt: *core.JSRuntime, thrown_value: core.JSValue, expected_name: []const u8) !bool {
     if (!thrown_value.is(.object)) return false;
-    const thrown_object = property_ops.expectObject(thrown_value) catch return false;
+    const thrown_object = core.value_semantics.objectFromValue(thrown_value) orelse return false;
     const ctor_value = try thrown_object.getProperty(core.atom.ids.constructor);
     if (ctor_value.is(.object)) {
-        const ctor = property_ops.expectObject(ctor_value) catch null;
+        const ctor = core.value_semantics.objectFromValue(ctor_value);
         if (ctor) |ctor_object| {
             const dispatch_name = try call_mod.nativeFunctionNameForVmBorrowed(rt, ctor_object);
             defer dispatch_name.deinit(rt);
@@ -2948,7 +2947,7 @@ pub fn arraySearchCall(
 
     const search_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     // Typed arrays: raw-buffer per-class scan (qjs js_typed_array_indexOf,
-    // quickjs.c:58072 / :58179-58245). Normalize the search value once with an
+    // quickjs.c /:58179-58245). Normalize the search value once with an
     // early can't-fit short-circuit, then scan the backing buffer per element
     // kind instead of boxing each element through typedArrayGetIndex. The
     // fromIndex coercion below mirrors what the generic loop already ran.
@@ -2971,7 +2970,7 @@ pub fn arraySearchCall(
     // Unique dense paths stay separate. lastIndexOf requires a full-density
     // fast array and returns -1 if the dense scan misses. indexOf/includes
     // scan the dense PREFIX then fall through to the generic tail (qjs
-    // js_array_indexOf/includes, quickjs.c:42426-42483).
+    // js_array_indexOf/includes, quickjs.c).
     const from_right = mode == .last_index_of;
     var cursor = if (from_right)
         try arrayLastIndexStart(ctx, output, global, args, length)
@@ -3069,8 +3068,7 @@ pub fn concatAppendValue(
             const length_value = try concatSpreadLengthValue(ctx, output, global, value, object, caller_function, caller_frame);
             const length = try toLengthIndex(ctx, output, global, length_value);
             if (next_index.* > max_safe_length or length > max_safe_length - next_index.*) return error.TypeError;
-            var index: usize = 0;
-            while (index < length) : (index += 1) {
+            for (0..length) |index| {
                 if (next_index.* > core.array.max_array_length) return error.RangeError;
                 try arrayCopyPresentIndex(
                     ctx,
@@ -3171,7 +3169,7 @@ pub fn regExpStringIteratorNext(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    const iterator = property_ops.expectObject(receiver) catch return null;
+    const iterator = core.value_semantics.objectFromValue(receiver) orelse return null;
     if (iterator.class_id != core.class.ids.regexp_string_iterator) return null;
     if ((iterator.iteratorIndexSlot().*) != 0) return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
     const regexp = (iterator.iteratorTargetSlot().*) orelse {
@@ -3192,9 +3190,10 @@ pub fn regExpStringIteratorNext(
         iterator.clearOptionalValueSlot(ctx.runtime, iterator.iteratorDataSlot());
         return done_result;
     }
-    const is_global = ((iterator.iteratorKindSlot().*) & 1) != 0;
+    const flags = iterator_slots.regExpStringIteratorFlags(iterator);
+    const is_global = flags.global;
     if (!is_global) iterator.iteratorIndexSlot().* = 1;
-    const unicode = ((iterator.iteratorKindSlot().*) & 2) != 0;
+    const unicode = flags.unicode;
     const zero_value = try getValueProperty(ctx, output, global, result, core.Atom.taggedInt(0), caller_function, caller_frame);
     const match_string = try toStringForAnnexB(ctx, output, global, zero_value, caller_function, caller_frame);
     if (is_global and isEmptyStringValue(ctx.runtime, match_string)) {
@@ -3227,7 +3226,7 @@ pub fn getFastStringPrimitiveDataProperty(
     if (atom_id == core.atom.ids.length) return null;
 
     // Primitive method lookup uses the realm intrinsic `%String.prototype%`,
-    // mirroring QuickJS JS_GetPrototypePrimitive (quickjs.c:7995-8011). If a bare
+    // mirroring QuickJS JS_GetPrototypePrimitive. If a bare
     // runtime has no realm slot, fall back to the old global constructor walk.
     const string_ctor_atom = comptime (core.atom.predefinedId("String", .string)).?;
     const proto = object_ops.primitivePrototypeFromRealmOrGlobal(ctx.runtime, global, .string_prototype, string_ctor_atom) orelse return null;
@@ -3235,7 +3234,7 @@ pub fn getFastStringPrimitiveDataProperty(
     // `findOwnDataValueFast` — the SAME primitive the ordinary object get_field path
     // uses — instead of the defensive out-of-line `findProperty`. Mirrors qjs
     // `find_own_property` returning prs+pr in one force_inline pass, then the TMASK
-    // switch reading the already-loaded flags (quickjs.c:6135/8271): no out-of-line
+    // switch reading the already-loaded flags: no out-of-line
     // call/frame, no FAM-base re-derivation, no flags re-read. The rare non-data
     // (accessor / auto-init) property falls back to the full resolver.
     if (proto.hasExoticMethods()) return null;
@@ -3252,7 +3251,7 @@ pub fn defineStringWrapperIndexProperty(rt: *core.JSRuntime, object: *core.Objec
         const units: [1]u16 = .{unit};
         break :blk (try core.string.String.createUtf16(rt, &units)).value();
     };
-    try object.defineOwnProperty(rt, core.Atom.taggedInt(index), core.Descriptor.data(value, false, true, false));
+    try object.defineOwnProperty(rt, core.Atom.taggedInt(index), core.Descriptor.data(value, .{ .enumerable = true }));
 }
 
 pub fn getStringIndexValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) !?core.JSValue {
@@ -3309,7 +3308,7 @@ pub fn arrayToLocaleStringCall(
     }
     if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.TypeError;
     const object_value = if (this_value.is(.object)) this_value else try primitiveObjectForAccess(ctx.runtime, global, this_value);
-    const object = property_ops.expectObject(object_value) catch return null;
+    const object = core.value_semantics.objectFromValue(object_value) orelse return null;
     const is_typed_method = isTypedArrayPrototypeMethod(ctx.runtime, function_object);
     const is_typed_array = core.object.isTypedArrayObject(object);
     if (is_typed_method and !is_typed_array) return error.TypeError;
@@ -3323,8 +3322,7 @@ pub fn arrayToLocaleStringCall(
 
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(ctx.runtime.memory.allocator);
-    var index: usize = 0;
-    while (index < length) : (index += 1) {
+    for (0..length) |index| {
         if (index != 0) try bytes.append(ctx.runtime.memory.allocator, ',');
         const item = if (is_typed_array) blk: {
             if (!is_typed_method and index >= try arrayMethodTypedArrayLength(ctx.runtime, object, false)) break :blk core.JSValue.undefinedValue();
@@ -3530,8 +3528,8 @@ pub fn isLowSurrogateUnit(unit: u16) bool {
 // record table via `callStringBody`/`callStringCharAtBody` (Phase 6b-3 STEP 5),
 // so exec no longer names them directly.
 
-// qjs JS_STRING_LEN_MAX (quickjs.c:212): js_string_pad throws RangeError when the
-// requested length exceeds it (quickjs.c:46331).
+// qjs JS_STRING_LEN_MAX: js_string_pad throws RangeError when the
+// requested length exceeds it.
 const js_string_len_max: usize = core.string.max_length;
 
 /// A narrow-first accumulator mirroring qjs's StringBuffer (string_buffer_init,
@@ -3597,8 +3595,7 @@ const StringBuffer = struct {
             .utf16 => |units| {
                 const chunk = units[start .. start + count];
                 try self.ensureCapacity(count);
-                var i: usize = 0;
-                while (i < chunk.len) : (i += 1) {
+                for (0..chunk.len) |i| {
                     const unit = chunk[i];
                     if (!self.is_wide) {
                         if (unit <= 0xff) {
@@ -3640,7 +3637,7 @@ pub fn stringPad(
 
     // Resolve the source to its flat code-unit slice ONCE (no per-char UTF-16
     // copy of the whole source — qjs reads p->len from the JSString directly,
-    // quickjs.c:46313-46314).
+    // quickjs.c).
     const source = string_value.asStringBody() orelse return error.TypeError;
     const source_data = source.resolveData();
     const source_len = source_data.len();
@@ -3658,7 +3655,7 @@ pub fn stringPad(
     const fill_len = fill_data.len();
     if (fill_len == 0) return string_value;
 
-    // qjs caps the result at JS_STRING_LEN_MAX (quickjs.c:46331-46334); without
+    // qjs caps the result at JS_STRING_LEN_MAX; without
     // this an out-of-range maxLength would attempt a multi-GiB allocation instead
     // of the spec/qjs RangeError.
     if (target_length > js_string_len_max) return throwRangeErrorMessage(ctx, global, "invalid string length");
@@ -3669,7 +3666,7 @@ pub fn stringPad(
     try buffer.ensureCapacity(target_length);
 
     // padEnd: source first, then fill. padStart: fill first, then source.
-    // (quickjs.c:46338-46356, magic 0 = padStart / 1 = padEnd; here 34 = start.)
+    // (quickjs.c, magic 0 = padStart / 1 = padEnd; here 34 = start.)
     if (method_id == 35) try buffer.appendUnits(source_data, 0, source_len);
 
     var remaining = pad_count;
@@ -3705,7 +3702,7 @@ pub fn stringNormalize(
         if (std.mem.eql(u8, form_bytes.items, "NFD")) break :blk unicode_lib.NormalizationForm.nfd;
         if (std.mem.eql(u8, form_bytes.items, "NFKC")) break :blk unicode_lib.NormalizationForm.nfkc;
         if (std.mem.eql(u8, form_bytes.items, "NFKD")) break :blk unicode_lib.NormalizationForm.nfkd;
-        // js_string_normalize (quickjs.c:46635): unknown form -> RangeError
+        // js_string_normalize: unknown form -> RangeError
         // "bad normalization form".
         return throwRangeErrorMessage(ctx, global, "bad normalization form");
     };

@@ -5,7 +5,7 @@
 //! through its originating Runtime's `AtomTable`. Value-symbol atoms also root
 //! their refcounted name storage. Predefined ids are process-stable and need no
 //! release. QuickJS source map: the shared JSString/JSAtom representation at
-//! quickjs.c:583-599 and atom-table operations nearby. This core module may be
+//! quickjs.c and atom-table operations nearby. This core module may be
 //! consumed by higher layers but never imports exec or binding.
 
 const std = @import("std");
@@ -1016,12 +1016,12 @@ pub const DynamicAtom = struct {
     /// Link in the table's free-slot list, only meaningful while the entry
     /// is dead (`occupied == false`). `no_free_slot` terminates the list.
     next_free: EntryIndex = no_free_slot,
-    /// qjs `JSString.hash` (set at quickjs.c:3314): the full spelling hash of
+    /// qjs `JSString.hash` (set at quickjs.c): the full spelling hash of
     /// this atom, stored so a chain walk rejects a non-match without reading
     /// the bytes and so the unlink never has to re-hash the spelling. Only
     /// meaningful for the chained kinds (`.string` / `.global_symbol`).
     hash: u32 = 0,
-    /// qjs `JSString.hash_next` (spliced at quickjs.c:3318): next atom id in
+    /// qjs `JSString.hash_next` (spliced at quickjs.c): next atom id in
     /// this atom's bucket, `null_atom` at the end of the chain.
     hash_next: Atom = null_atom,
     kind: AtomKind,
@@ -1080,14 +1080,14 @@ const no_free_slot: EntryIndex = std.math.maxInt(EntryIndex);
 // the bucket heads (atom indices), each atom stores the full spelling hash in
 // `JSString.hash` and the next atom of its bucket in `JSString.hash_next`:
 //
-//   lookup  quickjs.c:3196-3212 (`__JS_NewAtom`) and 3348-3375 (`__JS_FindAtom`)
-//   insert  quickjs.c:3317-3322 (splice at the bucket head, then resize check)
-//   unlink  quickjs.c:3387-3409 (`JS_FreeAtomStruct`)
-//   resize  quickjs.c:3055-3072 (`JS_ResizeAtomHash`)
+// lookup quickjs.c (`__JS_NewAtom`) and 3348-3375 (`__JS_FindAtom`)
+// insert quickjs.c (splice at the bucket head, then resize check)
+// unlink quickjs.c (`JS_FreeAtomStruct`)
+// resize quickjs.c (`JS_ResizeAtomHash`)
 //
 // Two properties matter and are reproduced exactly:
 //   * the *stored full hash* gates the byte comparison, so a chain step that is
-//     not the answer never reads the spelling (quickjs.c:3363 `p->hash == h`);
+// not the answer never reads the spelling (quickjs.c `p->hash == h`);
 //   * insert and unlink are O(1)/O(chain) pointer splices, never a probe to a
 //     free slot, so intern/free churn cannot degrade the table.
 //
@@ -1099,12 +1099,12 @@ const no_free_slot: EntryIndex = std.math.maxInt(EntryIndex);
 // entry record.
 // ---------------------------------------------------------------------------
 
-/// qjs seeds the spelling hash with the atom type (quickjs.c:3200
+/// qjs seeds the spelling hash with the atom type (quickjs.c
 /// `hash_string(str, atom_type)`), so one table can hold the same spelling
 /// interned as a string and as a global symbol without them colliding, and the
-/// kind check at quickjs.c:3364 stays a cheap confirmation rather than the
+/// kind check at quickjs.c stays a cheap confirmation rather than the
 /// separator. Unique symbols and private names are never chained (qjs keeps
-/// `JS_ATOM_TYPE_SYMBOL` out of `atom_hash`, quickjs.c:3316).
+/// `JS_ATOM_TYPE_SYMBOL` out of `atom_hash`, quickjs.c).
 fn atomHashSeed(kind: AtomKind) u64 {
     return switch (kind) {
         .string => 0,
@@ -1114,10 +1114,10 @@ fn atomHashSeed(kind: AtomKind) u64 {
 }
 
 /// The spelling hash stored in the atom. qjs keeps 30 bits (`JS_ATOM_HASH_MASK`,
-/// quickjs.c:580) because it packs `hash` into a bitfield next to `atom_type`;
+/// quickjs.c) because it packs `hash` into a bitfield next to `atom_type`;
 /// zjs has a whole word, so it keeps all 32.
 fn spellingHash(bytes: []const u8, kind: AtomKind) u32 {
-    // qjs `hash_string8` (quickjs.c:2941): `h = h * 263 + c`, seeded with the
+    // qjs `hash_string8`: `h = h * 263 + c`, seeded with the
     // atom type and `static inline`, so the lookup never pays a call to hash
     // its own key.
     var h: u32 = @intCast(atomHashSeed(kind));
@@ -1135,9 +1135,9 @@ const predefined_hash = blk: {
 };
 
 /// qjs sizes the bucket array once for the predefined set — `JS_ResizeAtomHash(rt, 512)`
-/// with the comment "there are at least 504 predefined atoms" (quickjs.c:3089) —
+/// with the comment "there are at least 504 predefined atoms" —
 /// and doubles it whenever the atom count reaches `JS_ATOM_COUNT_RESIZE`
-/// (quickjs.c:2875, `2 * size`). zjs has 640 predefined string atoms, so the
+/// (quickjs.c, `2 * size`). zjs has 640 predefined string atoms, so the
 /// same rule ("next power of two that holds the predefined set") gives 1024.
 const atom_hash_initial_size: u32 = 1024;
 
@@ -1193,16 +1193,16 @@ pub const AtomTable = struct {
     /// is the live count; the backing buffer extends to `entries_capacity`.
     entries_capacity: usize = 0,
     next_id: Atom = Atom.fromRaw(first_dynamic_atom),
-    /// qjs `JSRuntime.atom_hash` (quickjs.c:3067): bucket heads of the chained
+    /// qjs `JSRuntime.atom_hash`: bucket heads of the chained
     /// atom hash, a power-of-two array shared by string and global-symbol
     /// atoms. `null_atom` terminates a bucket. Empty until the first intern;
     /// `AtomTable.init` stays infallible for the allocation-free callers.
     atom_hash: []Atom = &.{},
-    /// qjs `JSRuntime.atom_count` (quickjs.c:3322), restricted to the atoms
+    /// qjs `JSRuntime.atom_count`, restricted to the atoms
     /// that are actually chained — qjs also counts its unchained unique
     /// symbols, but only the chained population drives the resize rule.
     atom_hash_count: u32 = 0,
-    /// qjs `JSRuntime.atom_count_resize` (quickjs.c:3073) = 2 * bucket count.
+    /// qjs `JSRuntime.atom_count_resize` = 2 * bucket count.
     atom_count_resize: u32 = 0,
     /// Chain links for the predefined atoms. QuickJS keeps predefined atoms in
     /// `atom_array` next to the dynamic ones and threads them through the same
@@ -1382,7 +1382,7 @@ pub const AtomTable = struct {
         }
     }
 
-    /// Mutable chain link of any atom id, the `p->hash_next` of quickjs.c:3318.
+    /// Mutable chain link of any atom id, the `p->hash_next` of quickjs.c.
     /// Predefined ids read from the table-owned side array, dynamic ids from
     /// their entry; both are plain `Atom` slots, so this is an address select.
     inline fn hashNextPtr(self: *AtomTable, id: Atom) *Atom {
@@ -1392,7 +1392,7 @@ pub const AtomTable = struct {
             &self.entries[id.raw() - first_dynamic_atom].hash_next;
     }
 
-    /// Stored spelling hash of any atom id, the `p->hash` of quickjs.c:3363.
+    /// Stored spelling hash of any atom id, the `p->hash` of quickjs.c.
     inline fn storedHash(self: *const AtomTable, id: Atom) u32 {
         return if (id.raw() < first_dynamic_atom)
             predefined_hash[id.raw() - 1]
@@ -1400,10 +1400,10 @@ pub const AtomTable = struct {
             self.entries[id.raw() - first_dynamic_atom].hash;
     }
 
-    /// qjs `JS_InitAtoms` (quickjs.c:3078-3089): size the bucket array once and
+    /// qjs `JS_InitAtoms`: size the bucket array once and
     /// enter every predefined *string* atom into the chain the dynamic atoms
     /// share. Predefined unique symbols and private names stay out, exactly as
-    /// qjs keeps `JS_ATOM_TYPE_SYMBOL` out of `atom_hash` (quickjs.c:3316).
+    /// qjs keeps `JS_ATOM_TYPE_SYMBOL` out of `atom_hash`.
     fn initAtomHash(self: *AtomTable) !void {
         std.debug.assert(self.atom_hash.len == 0);
         const buckets = try self.memory.alloc(Atom, atom_hash_initial_size);
@@ -1426,7 +1426,7 @@ pub const AtomTable = struct {
         if (self.atom_hash.len == 0) try self.initAtomHash();
     }
 
-    /// qjs `JS_ResizeAtomHash` (quickjs.c:3055-3072): allocate the new bucket
+    /// qjs `JS_ResizeAtomHash`: allocate the new bucket
     /// array and re-splice every chain into it using the stored hashes — no
     /// spelling is re-hashed and no atom moves.
     fn resizeAtomHash(self: *AtomTable, new_size: u32) !void {
@@ -1451,8 +1451,8 @@ pub const AtomTable = struct {
         self.atom_count_resize = new_size *| 2;
     }
 
-    /// qjs `__JS_FindAtom` (quickjs.c:3348-3375) and the lookup arm of
-    /// `__JS_NewAtom` (quickjs.c:3196-3212). The stored hash, the atom kind and
+    /// qjs `__JS_FindAtom` and the lookup arm of
+    /// `__JS_NewAtom`. The stored hash, the atom kind and
     /// the length gate the byte comparison, so a chain step that is not the
     /// answer never touches the spelling.
     inline fn findAtom(self: *const AtomTable, bytes: []const u8, atom_kind: AtomKind, h: u32) Atom {
@@ -1480,7 +1480,7 @@ pub const AtomTable = struct {
         return null_atom;
     }
 
-    /// qjs `__JS_NewAtom` insert (quickjs.c:3317-3322): splice the atom at the
+    /// qjs `__JS_NewAtom` insert: splice the atom at the
     /// head of its bucket, then double the table once the chained population
     /// reaches `atom_count_resize`. A failed resize is ignored exactly as qjs
     /// ignores `JS_ResizeAtomHash`'s return value — the table stays correct,
@@ -1498,7 +1498,7 @@ pub const AtomTable = struct {
         }
     }
 
-    /// qjs `JS_FreeAtomStruct`'s unlink (quickjs.c:3387-3409): walk the bucket
+    /// qjs `JS_FreeAtomStruct`'s unlink: walk the bucket
     /// from its head and splice the atom out. The stored hash means the dying
     /// atom's spelling is never re-hashed and never compared.
     fn chainUnlink(self: *AtomTable, id: Atom, h: u32) void {
@@ -1532,7 +1532,7 @@ pub const AtomTable = struct {
 
     fn internStringInner(self: *AtomTable, bytes: []const u8) !Atom {
         // Match JS_NewAtomLen's digit gate: integer atoms do not need a
-        // string hash at all (quickjs.c:3465 `is_digit(*str)`).
+        // string hash at all (quickjs.c `is_digit(*str)`).
         if (parseArrayIndex(bytes)) |n| return Atom.taggedInt(n);
         try self.ensureAtomHash();
         const hash = spellingHash(bytes, .string);
@@ -1859,7 +1859,7 @@ pub const AtomTable = struct {
 
     /// Fast "is this atom an array index?" predicate for the property-define hot
     /// path, where only the boolean is needed (the caller never uses the index
-    /// value). Mirrors qjs `add_property` (quickjs.c:9184), which pays only
+    /// value). Mirrors qjs `add_property`, which pays only
     /// `__JS_AtomIsTaggedInt` for a named key and treats the string-atom index
     /// range through the ordinary shape add. zjs `internString` already tags every
     /// numeric-form string in `[0, max_int_atom]` as an integer atom, so the only
@@ -1992,7 +1992,7 @@ pub const AtomTable = struct {
         const text = entry.bytes;
         if (text.len == 1 and text[0] <= 0x7f) {
             const cached = try rt.singleByteString(text[0]);
-            // QJS `__JS_AtomToValue` (quickjs.c:3595) is a single
+            // QJS `__JS_AtomToValue` is a single
             // `atom_array[atom]` load + refcount bump because the atom entry
             // IS the string. Bind the shared single-byte body into the
             // entry's materialized-string slot so `toStringValueForPush`'s
@@ -2209,7 +2209,7 @@ pub const AtomTable = struct {
     /// missing in the chain; it is only read for the chained kinds. Every
     /// `index_entry` caller has just proved the atom is absent, mirroring
     /// `__JS_NewAtom`, where the create path is the fall-through of the same
-    /// function that did the chain walk (quickjs.c:3196-3320).
+    /// function that did the chain walk.
     fn internDynamic(self: *AtomTable, bytes: []const u8, atom_kind: AtomKind, index_entry: bool, no_symbol_description: bool, lookup_hash: u32) !Atom {
         const id = try self.internDynamicInner(bytes, atom_kind, index_entry, no_symbol_description, lookup_hash);
         self.noteCompileScope(id);
@@ -2309,7 +2309,7 @@ pub const AtomTable = struct {
 
     /// Store the spelling hash in the new atom and splice it into its bucket —
     /// the `p->hash = h; p->hash_next = atom_hash[h1]; atom_hash[h1] = i;` of
-    /// quickjs.c:3314-3319. Unlike the open-addressed table it replaces this
+    /// quickjs.c. Unlike the open-addressed table it replaces this
     /// cannot fail and cannot probe: a create is one head splice.
     fn indexEntry(self: *AtomTable, idx: EntryIndex, hash: u32) void {
         const entry = &self.entries[idx];
@@ -2318,8 +2318,8 @@ pub const AtomTable = struct {
         self.chainInsert(entry.id, hash);
     }
 
-    /// qjs `JS_FreeAtomStruct` (quickjs.c:3387-3409). Symbols and private names
-    /// were never chained, so they have nothing to unlink (quickjs.c:3385).
+    /// qjs `JS_FreeAtomStruct`. Symbols and private names
+    /// were never chained, so they have nothing to unlink.
     fn unindexEntry(self: *AtomTable, idx: EntryIndex) void {
         const entry = &self.entries[idx];
         switch (entry.kind) {
@@ -2559,23 +2559,6 @@ pub const CompileAtomScope = struct {
     }
 };
 
-/// TGC S3 §2.2: the comptime shell every `traceChildEdges` uses to report an
-/// atom edge. A visitor without a `visitAtom` decl (the cycle-collector mark
-/// visitor, the census walkers, the minor audit) skips silently, exactly like
-/// `callVisitShape` does.
-pub inline fn callVisitAtom(vis: anytype, id: Atom) !void {
-    const VisType = @TypeOf(vis);
-    const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
-    if (comptime @hasDecl(CleanType, "visitAtom")) {
-        const ReturnType = @typeInfo(@TypeOf(CleanType.visitAtom)).@"fn".return_type.?;
-        if (comptime @typeInfo(ReturnType) == .error_union) {
-            try vis.visitAtom(id);
-        } else {
-            vis.visitAtom(id);
-        }
-    }
-}
-
 fn dynamicEntryIndex(atom_id: Atom) ?usize {
     if (atom_id.isConst() or atom_id.isTaggedInt()) return null;
     return atom_id.raw() - first_dynamic_atom;
@@ -2608,7 +2591,7 @@ pub fn predefinedId(bytes: []const u8, kind: AtomKind) ?Atom {
 
 fn parseArrayIndex(bytes: []const u8) ?u32 {
     // Leading-digit gate before any scan work, mirroring qjs JS_NewAtomLen
-    // (quickjs.c:3465 `is_digit(*str)`): identifier spellings bail here.
+    // (quickjs.c `is_digit(*str)`): identifier spellings bail here.
     if (bytes.len == 0 or bytes[0] < '0' or bytes[0] > '9') return null;
     if (bytes.len > 1 and bytes[0] == '0') return null;
     var n: u64 = 0;

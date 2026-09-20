@@ -23,7 +23,7 @@ pub fn enqueueFinalizationCleanup(
         if (rt.job_queue.capacity != 0) rt.job_queue.releaseReservedEntries(1);
         return;
     };
-    const realm = payload.realm.borrow() orelse unreachable;
+    const realm = payload.realm.borrow().?;
     // Normal collections consume the slot reserved at register. Runtime
     // teardown deinits the queue first, then cycle-removes leftover
     // objects; fall back to an allocating enqueue so that path can

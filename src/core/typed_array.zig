@@ -35,6 +35,7 @@ const std = @import("std");
 const atom = @import("atom.zig");
 const bigint = @import("bigint.zig");
 const class = @import("class.zig");
+const Kind = @import("typed_array_names.zig").Kind;
 const descriptor = @import("descriptor.zig");
 const object = @import("object.zig");
 const string = @import("string.zig");
@@ -70,7 +71,7 @@ pub fn sharedArrayBufferConstructLength(rt: *JSRuntime, byte_length: usize, max_
     errdefer Object.destroyFromHeader(rt, obj.gcHeader());
     try validateArrayBufferLength(byte_length);
     if (max_byte_length) |max| try validateArrayBufferLength(max);
-    // Mirrors js_array_buffer_constructor3 (quickjs.c:56777-56786): a growable
+    // Mirrors js_array_buffer_constructor3: a growable
     // SharedArrayBuffer commits maxByteLength bytes upfront, and the visible
     // byte length is a prefix of that committed block, so grow never moves or
     // re-identifies the backing store.
@@ -181,7 +182,7 @@ pub fn arrayBufferTransferLength(rt: *JSRuntime, buffer_value: JSValue, new_leng
     if (object.arrayBufferIsImmutable(rt, buffer)) return error.TypeError;
     if (!fixed_length) {
         if (buffer.arrayBufferMaxByteLength()) |max| {
-            // Mirrors js_array_buffer_transfer (quickjs.c:57141-57142):
+            // Mirrors js_array_buffer_transfer:
             // "invalid array buffer length" is a TypeError in qjs when the
             // preserved-resizability transfer target exceeds maxByteLength
             // (spec AllocateArrayBuffer says RangeError; the conformance suite has no
@@ -234,7 +235,7 @@ pub fn sharedArrayBufferSliceRange(rt: *JSRuntime, buffer_value: JSValue, start:
 }
 
 pub fn sharedArrayBufferGrow(rt: *JSRuntime, buffer_value: JSValue, new_length_value: JSValue) !JSValue {
-    // Mirrors js_array_buffer_resize check order (quickjs.c:57216-57237): the
+    // Mirrors js_array_buffer_resize check order: the
     // not-growable TypeError fires before the length range RangeError (qjs's
     // JS_ToInt64 coercion never range-throws), so grow(-1) on a non-growable
     // SAB is a TypeError.
@@ -249,7 +250,7 @@ pub fn sharedArrayBufferGrowLength(rt: *JSRuntime, buffer_value: JSValue, new_le
     const max = buffer.arrayBufferMaxByteLength() orelse return error.TypeError;
     if (new_length < buffer.byteStorage().len) return error.RangeError;
     if (new_length > max) return error.RangeError;
-    // Mirrors js_array_buffer_resize shared branch (quickjs.c:57243-57253):
+    // Mirrors js_array_buffer_resize shared branch:
     // memory was committed upfront at maxByteLength by the constructor, so
     // grow only bumps the visible byte length (`abuf->byte_length = len`).
     // The store identity stays stable, keeping cross-runtime sharers and
@@ -272,7 +273,7 @@ pub fn sharedArrayBufferGrowLength(rt: *JSRuntime, buffer_value: JSValue, new_le
 }
 
 pub fn arrayBufferResize(rt: *JSRuntime, buffer_value: JSValue, new_length_value: JSValue) !JSValue {
-    // Mirrors js_array_buffer_resize check order (quickjs.c:57216-57237):
+    // Mirrors js_array_buffer_resize check order:
     // detached TypeError, then not-resizable TypeError, then the length range
     // RangeError (qjs's JS_ToInt64 coercion never range-throws), so
     // resize(-1) on a non-resizable buffer is a TypeError. This narrow entry
@@ -319,25 +320,25 @@ pub fn detachArrayBuffer(rt: *JSRuntime, buffer_value: JSValue) !JSValue {
 // which reads the `maxByteLength` option off a user object, stays one level up
 // in exec (`exec/typed_array_construct.zig`).
 
-fn typedArrayClassIdForKind(kind: u8) ?class.ClassId {
+pub fn typedArrayClassIdForKind(kind: Kind) ?class.ClassId {
     return switch (kind) {
-        1 => class.ids.int8_array,
-        2 => class.ids.uint8_array,
-        3 => class.ids.uint8c_array,
-        4 => class.ids.int16_array,
-        5 => class.ids.uint16_array,
-        6 => class.ids.int32_array,
-        7 => class.ids.uint32_array,
-        8 => class.ids.float16_array,
-        9 => class.ids.float32_array,
-        10 => class.ids.float64_array,
-        11 => class.ids.big_int64_array,
-        12 => class.ids.big_uint64_array,
-        else => null,
+        .int8 => class.ids.int8_array,
+        .uint8 => class.ids.uint8_array,
+        .uint8_clamped => class.ids.uint8c_array,
+        .int16 => class.ids.int16_array,
+        .uint16 => class.ids.uint16_array,
+        .int32 => class.ids.int32_array,
+        .uint32 => class.ids.uint32_array,
+        .float16 => class.ids.float16_array,
+        .float32 => class.ids.float32_array,
+        .float64 => class.ids.float64_array,
+        .bigint64 => class.ids.big_int64_array,
+        .biguint64 => class.ids.big_uint64_array,
+        .none, .data_view_length_tracking => null,
     };
 }
 
-fn createTypedArrayInstance(rt: *JSRuntime, kind: u8, prototype: ?*Object) !*Object {
+fn createTypedArrayInstance(rt: *JSRuntime, kind: Kind, prototype: ?*Object) !*Object {
     const class_id = typedArrayClassIdForKind(kind) orelse class.ids.object;
     const obj = try Object.create(rt, class_id, prototype);
     errdefer Object.destroyFromHeader(rt, obj.gcHeader());
@@ -349,10 +350,10 @@ fn createTypedArrayInstance(rt: *JSRuntime, kind: u8, prototype: ?*Object) !*Obj
 /// element access, species, and prototype methods are handled by the VM
 /// builtins; this helper owns the internal slot shape used by those paths.
 pub fn typedArrayConstruct(rt: *JSRuntime, element_size: u32, buffer_value: JSValue) !JSValue {
-    return typedArrayConstructWithOptions(rt, element_size, 2, buffer_value, &.{buffer_value}, null);
+    return typedArrayConstructWithOptions(rt, element_size, .uint8, buffer_value, &.{buffer_value}, null);
 }
 
-pub fn typedArrayConstructWithOptions(rt: *JSRuntime, element_size: u32, kind: u8, buffer_value: JSValue, args: []const JSValue, prototype: ?*Object) !JSValue {
+pub fn typedArrayConstructWithOptions(rt: *JSRuntime, element_size: u32, kind: Kind, buffer_value: JSValue, args: []const JSValue, prototype: ?*Object) !JSValue {
     if (element_size == 0) return error.TypeError;
     const buffer = try expectArrayBufferObject(buffer_value);
     if (buffer.arrayBufferDetached()) return error.TypeError;
@@ -383,7 +384,7 @@ pub fn typedArrayConstructWithOptions(rt: *JSRuntime, element_size: u32, kind: u
 /// consume anything -- so this is the same function.
 pub const typedArrayConstructFullBuffer = typedArrayConstructFullBufferOwned;
 
-pub fn typedArrayConstructFullBufferOwned(rt: *JSRuntime, element_size: u32, kind: u8, buffer_value: JSValue, buffer: *Object, prototype: ?*Object) !JSValue {
+pub fn typedArrayConstructFullBufferOwned(rt: *JSRuntime, element_size: u32, kind: Kind, buffer_value: JSValue, buffer: *Object, prototype: ?*Object) !JSValue {
     if (element_size == 0) return error.TypeError;
     if (buffer.arrayBufferDetached()) return error.TypeError;
     if (buffer.arrayBufferMaxByteLength() != null) return error.TypeError;
@@ -423,7 +424,7 @@ pub fn dataViewConstruct(rt: *JSRuntime, args: []const JSValue, prototype: ?*Obj
         byte_offset,
         0,
         @intCast(view_length),
-        if (auto_length) 1 else 0,
+        if (auto_length) .data_view_length_tracking else .none,
     );
     return obj.value();
 }
@@ -473,7 +474,7 @@ pub fn typedArraySetIndex(rt: *JSRuntime, obj: *Object, index: u32, value: JSVal
     return true;
 }
 
-/// QuickJS source map: js_typed_array_fill (quickjs.c:57979-58002).
+/// QuickJS source map: js_typed_array_fill.
 /// `value` has already been coerced to the target element type once by the
 /// caller; coerce it to raw element bytes ONCE here, then fill the contiguous
 /// byte range directly (memset for 1-byte kinds, tight typed-store loop for
@@ -505,7 +506,7 @@ pub fn typedArrayFillRange(rt: *JSRuntime, obj: *Object, start: u32, final: u32,
 pub fn typedArraySetInt32IndexFast(rt: *JSRuntime, obj: *Object, index: u32, value: i32) !bool {
     _ = rt;
     const payload = obj.typedArrayPayloadFast() orelse return error.TypeError;
-    if (payload.kind != 6) return false;
+    if (payload.kind != .int32) return false;
     const backing = payload.backing_payload orelse return error.TypeError;
     if (backing.immutable) return false;
     if (index >= payload.live_length) return true;
@@ -648,7 +649,7 @@ pub fn dataViewRequireArrayBuffer(buffer_value: JSValue) !void {
 fn checkDataViewBounds(rt: *JSRuntime, view: *Object, index: usize, width: usize) !void {
     _ = rt;
     // Mirrors js_dataview_getValue / js_dataview_setValue
-    // (quickjs.c:60299-60306 and 60440-60446, "order matters"): the
+    // (quickjs.c, "order matters"): the
     // (pos + size) > ta->length RangeError runs BEFORE the
     // offset + length > byte_length TypeError. qjs recomputes ta->length for
     // length-tracking views on resize as the saturating
@@ -659,7 +660,7 @@ fn checkDataViewBounds(rt: *JSRuntime, view: *Object, index: usize, width: usize
     if (buffer.arrayBufferDetached()) return error.TypeError;
     const byte_offset = view.typedArrayByteOffset();
     const stored_length: usize = view.typedArrayFixedLength() orelse return error.TypeError;
-    const tracking = view.typedArrayKind() == 1 and buffer.arrayBufferMaxByteLength() != null;
+    const tracking = view.typedArrayKind() == .data_view_length_tracking and buffer.arrayBufferMaxByteLength() != null;
     const ta_length = if (tracking)
         (if (buffer.byteStorage().len >= byte_offset) buffer.byteStorage().len - byte_offset else 0)
     else
@@ -682,7 +683,7 @@ fn dataViewEffectiveByteLength(rt: *JSRuntime, view: *Object) !usize {
     const stored_length = view.typedArrayFixedLength() orelse return error.TypeError;
     if (buffer.arrayBufferMaxByteLength() == null) return stored_length;
 
-    if (view.typedArrayKind() == 1) {
+    if (view.typedArrayKind() == .data_view_length_tracking) {
         if (buffer.byteStorage().len < byte_offset) return error.TypeError;
         return buffer.byteStorage().len - byte_offset;
     }
@@ -767,17 +768,17 @@ inline fn decodeUint32(bits: u32) JSValue {
 /// JS_NewUint32 (one high-bit test), floats are a bare float64 tag
 /// (`__JS_NewFloat64`). Do not scan "can this float be an int32" — that
 /// canonicalizer is the helper tax on zlib's HEAPF64/HEAP32 path.
-pub inline fn decodeNumericElement(kind: u8, bytes: [*]const u8) JSValue {
+pub inline fn decodeNumericElement(kind: Kind, bytes: [*]const u8) JSValue {
     return switch (kind) {
-        1 => JSValue.int32(@as(i8, @bitCast(bytes[0]))),
-        2, 3 => JSValue.int32(bytes[0]),
-        4 => JSValue.int32(std.mem.readInt(i16, bytes[0..2], .little)),
-        5 => JSValue.int32(std.mem.readInt(u16, bytes[0..2], .little)),
-        6 => JSValue.int32(std.mem.readInt(i32, bytes[0..4], .little)),
-        7 => decodeUint32(std.mem.readInt(u32, bytes[0..4], .little)),
-        8 => JSValue.float64(float16ToF64(std.mem.readInt(u16, bytes[0..2], .little))),
-        9 => JSValue.float64(@floatCast(@as(f32, @bitCast(std.mem.readInt(u32, bytes[0..4], .little))))),
-        10 => JSValue.float64(@bitCast(std.mem.readInt(u64, bytes[0..8], .little))),
+        .int8 => JSValue.int32(@as(i8, @bitCast(bytes[0]))),
+        .uint8, .uint8_clamped => JSValue.int32(bytes[0]),
+        .int16 => JSValue.int32(std.mem.readInt(i16, bytes[0..2], .little)),
+        .uint16 => JSValue.int32(std.mem.readInt(u16, bytes[0..2], .little)),
+        .int32 => JSValue.int32(std.mem.readInt(i32, bytes[0..4], .little)),
+        .uint32 => decodeUint32(std.mem.readInt(u32, bytes[0..4], .little)),
+        .float16 => JSValue.float64(float16ToF64(std.mem.readInt(u16, bytes[0..2], .little))),
+        .float32 => JSValue.float64(@floatCast(@as(f32, @bitCast(std.mem.readInt(u32, bytes[0..4], .little))))),
+        .float64 => JSValue.float64(@bitCast(std.mem.readInt(u64, bytes[0..8], .little))),
         else => unreachable,
     };
 }
@@ -898,15 +899,15 @@ fn f64ToFloat16(value: f64) u16 {
 ///
 /// This is also the single source of truth for numeric decoding: readElement
 /// delegates kinds 1..10 here before handling the allocating BigInt kinds.
-pub noinline fn readNumericElement(kind: u8, bytes: [*]const u8) callconv(.c) JSValue {
+pub noinline fn readNumericElement(kind: Kind, bytes: [*]const u8) callconv(.c) JSValue {
     return decodeNumericElement(kind, bytes);
 }
 
-pub fn readElement(rt: *JSRuntime, kind: u8, bytes: []const u8) !JSValue {
-    if (kind >= 1 and kind <= 10) return readNumericElement(kind, bytes.ptr);
+pub fn readElement(rt: *JSRuntime, kind: Kind, bytes: []const u8) !JSValue {
+    if (kind.isNumeric()) return readNumericElement(kind, bytes.ptr);
     return switch (kind) {
-        11 => bigIntResult(rt, std.mem.readInt(i64, bytes[0..8], .little)),
-        12 => bigIntResult(rt, @intCast(std.mem.readInt(u64, bytes[0..8], .little))),
+        .bigint64 => bigIntResult(rt, std.mem.readInt(i64, bytes[0..8], .little)),
+        .biguint64 => bigIntResult(rt, @intCast(std.mem.readInt(u64, bytes[0..8], .little))),
         else => error.TypeError,
     };
 }
@@ -920,24 +921,21 @@ pub fn readElement(rt: *JSRuntime, kind: u8, bytes: []const u8) !JSValue {
 ///
 /// The VM's numeric element fast path calls this directly; writeElement also
 /// delegates kinds 1..10 here so the encoding remains canonical.
-pub inline fn writeNumericElement(rt: *JSRuntime, kind: u8, bytes: []u8, value: JSValue) !void {
+pub inline fn writeNumericElement(rt: *JSRuntime, kind: Kind, bytes: []u8, value: JSValue) !void {
     if (value.isBigInt()) return error.TypeError;
     switch (kind) {
-        1, 2, 4, 5, 6, 7 => return writeTruncatingIntegerElement(rt, kind, bytes, value),
-        3 => return writeClampedElement(rt, bytes, value),
-        8 => return writeFloatingElement(8, rt, bytes, value),
-        9 => return writeFloatingElement(9, rt, bytes, value),
-        10 => return writeFloatingElement(10, rt, bytes, value),
+        .int8, .uint8, .int16, .uint16, .int32, .uint32 => return writeTruncatingIntegerElement(rt, kind, bytes, value),
+        .uint8_clamped => return writeClampedElement(rt, bytes, value),
+        .float16 => return writeFloatingElement(.float16, rt, bytes, value),
+        .float32 => return writeFloatingElement(.float32, rt, bytes, value),
+        .float64 => return writeFloatingElement(.float64, rt, bytes, value),
         else => unreachable,
     }
 }
 
 /// Whether a concrete TypedArray kind uses an integer element representation.
-pub inline fn isIntegerNumericKind(kind: u8) bool {
-    return switch (kind) {
-        1, 2, 3, 4, 5, 6, 7 => true,
-        else => false,
-    };
+pub inline fn isIntegerNumericKind(kind: Kind) bool {
+    return kind.isInteger();
 }
 
 /// Store an already-decoded int32 into one of the integer TypedArray kinds.
@@ -947,32 +945,32 @@ pub inline fn isIntegerNumericKind(kind: u8) bool {
 /// that have already validated the typed-array payload can keep that common
 /// path out of the scratch-buffer/error-union writer below. Float and BigInt
 /// kinds return false and continue through their canonical converters.
-pub inline fn writeInt32NumericElement(kind: u8, bytes: [*]u8, integer: i32) bool {
+pub inline fn writeInt32NumericElement(kind: Kind, bytes: [*]u8, integer: i32) bool {
     const bits: u32 = @bitCast(integer);
     switch (kind) {
-        1, 2 => bytes[0] = @truncate(bits),
-        3 => bytes[0] = if (integer <= 0)
+        .int8, .uint8 => bytes[0] = @truncate(bits),
+        .uint8_clamped => bytes[0] = if (integer <= 0)
             0
         else if (integer >= 255)
             255
         else
             @intCast(integer),
-        4, 5 => std.mem.writeInt(u16, bytes[0..2], @truncate(bits), .little),
-        6, 7 => std.mem.writeInt(u32, bytes[0..4], bits, .little),
+        .int16, .uint16 => std.mem.writeInt(u16, bytes[0..2], @truncate(bits), .little),
+        .int32, .uint32 => std.mem.writeInt(u32, bytes[0..4], bits, .little),
         else => return false,
     }
     return true;
 }
 
-noinline fn writeTruncatingIntegerElement(rt: *JSRuntime, kind: u8, bytes: []u8, value: JSValue) !void {
+noinline fn writeTruncatingIntegerElement(rt: *JSRuntime, kind: Kind, bytes: []u8, value: JSValue) !void {
     const bits: u32 = if (value.as(.int)) |integer|
         @bitCast(integer)
     else
         numberToUint32(try coerceNumber(rt, value));
     switch (kind) {
-        1, 2 => bytes[0] = @truncate(bits),
-        4, 5 => std.mem.writeInt(u16, bytes[0..2], @truncate(bits), .little),
-        6, 7 => std.mem.writeInt(u32, bytes[0..4], bits, .little),
+        .int8, .uint8 => bytes[0] = @truncate(bits),
+        .int16, .uint16 => std.mem.writeInt(u16, bytes[0..2], @truncate(bits), .little),
+        .int32, .uint32 => std.mem.writeInt(u32, bytes[0..4], bits, .little),
         else => unreachable,
     }
 }
@@ -989,23 +987,20 @@ noinline fn writeClampedElement(rt: *JSRuntime, bytes: []u8, value: JSValue) !vo
         numberToUint8Clamp(try coerceNumber(rt, value));
 }
 
-noinline fn writeFloatingElement(comptime kind: u8, rt: *JSRuntime, bytes: []u8, value: JSValue) !void {
+noinline fn writeFloatingElement(comptime kind: Kind, rt: *JSRuntime, bytes: []u8, value: JSValue) !void {
     const number = try coerceNumber(rt, value);
-    if (kind == 8) {
-        std.mem.writeInt(u16, bytes[0..2], f64ToFloat16(number), .little);
-    } else if (kind == 9) {
-        std.mem.writeInt(u32, bytes[0..4], @bitCast(@as(f32, @floatCast(number))), .little);
-    } else if (kind == 10) {
-        std.mem.writeInt(u64, bytes[0..8], @bitCast(number), .little);
-    } else {
-        unreachable;
+    switch (kind) {
+        .float16 => std.mem.writeInt(u16, bytes[0..2], f64ToFloat16(number), .little),
+        .float32 => std.mem.writeInt(u32, bytes[0..4], @bitCast(@as(f32, @floatCast(number))), .little),
+        .float64 => std.mem.writeInt(u64, bytes[0..8], @bitCast(number), .little),
+        else => comptime unreachable,
     }
 }
 
-pub fn writeElement(rt: *JSRuntime, kind: u8, bytes: []u8, value: JSValue) !void {
-    if (kind >= 1 and kind <= 10) return writeNumericElement(rt, kind, bytes, value);
+pub fn writeElement(rt: *JSRuntime, kind: Kind, bytes: []u8, value: JSValue) !void {
+    if (kind.isNumeric()) return writeNumericElement(rt, kind, bytes, value);
     switch (kind) {
-        11, 12 => std.mem.writeInt(u64, bytes[0..8], try valueToBigInt64Bits(rt, value), .little),
+        .bigint64, .biguint64 => std.mem.writeInt(u64, bytes[0..8], try valueToBigInt64Bits(rt, value), .little),
         else => return error.TypeError,
     }
 }
@@ -1026,12 +1021,12 @@ fn toBigIntValue(rt: *JSRuntime, value: JSValue) !bignum.BigInt {
     defer buffer.deinit(rt.memory.allocator);
     if (value.isString() or value.is(.object)) {
         try appendValueString(rt, &buffer, value);
-        // qjs JS_StringToBigInt (quickjs.c:14609) + skip_spaces (quickjs.c:11230).
+        // qjs JS_StringToBigInt + skip_spaces.
         const trimmed = value_format.trimJsWhitespace(buffer.items);
         if (trimmed.len == 0) return bignum.BigInt.fromIntAlloc(rt.memory.allocator, 0);
         return bignum.parseAutoAlloc(rt.memory.allocator, trimmed) catch |err| switch (err) {
             // qjs js_atobigint throws its RangeError through js_atof rather
-            // than folding it into the bad-literal SyntaxError (quickjs.c:12471).
+            // than folding it into the bad-literal SyntaxError.
             error.BigIntTooLarge => error.BigIntTooLarge,
             else => error.SyntaxError,
         };

@@ -3,7 +3,7 @@
 //! Encoded builtin domains are stable dispatch metadata shared with exec, not
 //! VM state.
 //! QuickJS map: `JSFunctionBytecode` and function object data around
-//! quickjs.c:619-713. Higher layers may consume this core module; it may not
+//! quickjs.c. Higher layers may consume this core module; it may not
 //! import parser/exec/runtime/binding.
 
 const atom = @import("atom.zig");
@@ -39,8 +39,8 @@ pub const NativeBuiltinDomain = enum(i32) {
     host = 19,
     promise = 20,
     /// WeakRef.prototype / FinalizationRegistry.prototype. qjs declares these
-    /// as their own function lists (`js_weakref_proto_funcs` quickjs.c:61197,
-    /// `js_finrec_proto_funcs` quickjs.c:61376) rather than folding them into
+    /// as their own function lists (`js_weakref_proto_funcs` quickjs.c,
+    /// `js_finrec_proto_funcs` quickjs.c) rather than folding them into
     /// the Map/Set lists, so they get their own id namespace here too.
     weak_ref = 21,
 };
@@ -78,42 +78,70 @@ pub const NativeBuiltinRef = struct {
     id: u32,
 };
 
-const native_builtin_domain_stride: i32 = 1024;
+/// One native builtin addressed by domain and per-domain id, in the 32-bit
+/// form the function payload and the method tables store: the id in the low
+/// ten bits, the domain code above it, all-zero for "no builtin".  Storage
+/// stays an `i32` (`Object.nativeFunctionId`); this is the layout of it.
+pub const NativeBuiltinId = packed struct(i32) {
+    id: u10 = 0,
+    domain: u22 = 0,
+
+    pub const none: NativeBuiltinId = .{};
+
+    pub fn init(domain: NativeBuiltinDomain, id: u32) NativeBuiltinId {
+        std.debug.assert(id != 0 and id <= std.math.maxInt(u10));
+        return .{ .id = @intCast(id), .domain = @intCast(@intFromEnum(domain)) };
+    }
+
+    pub fn fromRaw(encoded: i32) NativeBuiltinId {
+        return @bitCast(encoded);
+    }
+
+    pub fn raw(self: NativeBuiltinId) i32 {
+        return @bitCast(self);
+    }
+
+    /// Null for the zero id and for any domain code the enum does not name
+    /// (which covers every negative raw value: its sign bit lands in
+    /// `domain`).
+    pub fn decode(self: NativeBuiltinId) ?NativeBuiltinRef {
+        if (self.id == 0) return null;
+        const domain = domainFromCode(self.domain) orelse return null;
+        return .{ .domain = domain, .id = self.id };
+    }
+
+    /// The domain codes are contiguous, so membership is one range check
+    /// (`std.enums.fromInt` would expand to a 21-way jump table on the
+    /// property-fast-path callers).
+    fn domainFromCode(code: u22) ?NativeBuiltinDomain {
+        const domains = comptime std.enums.values(NativeBuiltinDomain);
+        const first = comptime @intFromEnum(domains[0]);
+        const last = comptime @intFromEnum(domains[domains.len - 1]);
+        comptime std.debug.assert(last - first + 1 == domains.len);
+        if (code < first or code > last) return null;
+        return @enumFromInt(code);
+    }
+};
 
 pub fn nativeBuiltinId(domain: NativeBuiltinDomain, id: u32) i32 {
-    return @intFromEnum(domain) * native_builtin_domain_stride + @as(i32, @intCast(id));
+    return NativeBuiltinId.init(domain, id).raw();
 }
 
 pub fn decodeNativeBuiltinId(encoded: i32) ?NativeBuiltinRef {
-    if (encoded <= 0) return null;
-    const domain_code = @divTrunc(encoded, native_builtin_domain_stride);
-    const local_id = @mod(encoded, native_builtin_domain_stride);
-    if (local_id <= 0) return null;
-    const domain: NativeBuiltinDomain = switch (domain_code) {
-        1 => .math,
-        2 => .number,
-        3 => .string,
-        4 => .date,
-        5 => .array,
-        6 => .regexp,
-        7 => .collection,
-        8 => .buffer,
-        9 => .uri,
-        10 => .performance,
-        11 => .json,
-        12 => .atomics,
-        13 => .reflect,
-        14 => .object,
-        15 => .primitive,
-        16 => .function,
-        17 => .error_object,
-        18 => .iterator,
-        19 => .host,
-        20 => .promise,
-        21 => .weak_ref,
-        else => return null,
-    };
-    return .{ .domain = domain, .id = @intCast(local_id) };
+    return NativeBuiltinId.fromRaw(encoded).decode();
+}
+
+test "native builtin ids round-trip and reject the zero id, unknown domains and negatives" {
+    const encoded = nativeBuiltinId(.regexp, 17);
+    try std.testing.expectEqual(@as(i32, 6 * 1024 + 17), encoded);
+    const ref = decodeNativeBuiltinId(encoded).?;
+    try std.testing.expectEqual(NativeBuiltinDomain.regexp, ref.domain);
+    try std.testing.expectEqual(@as(u32, 17), ref.id);
+    try std.testing.expectEqual(@as(?NativeBuiltinRef, null), decodeNativeBuiltinId(0));
+    try std.testing.expectEqual(@as(?NativeBuiltinRef, null), decodeNativeBuiltinId(6 * 1024));
+    try std.testing.expectEqual(@as(?NativeBuiltinRef, null), decodeNativeBuiltinId(22 * 1024 + 1));
+    try std.testing.expectEqual(@as(?NativeBuiltinRef, null), decodeNativeBuiltinId(-5));
+    try std.testing.expectEqual(@as(?NativeBuiltinRef, null), decodeNativeBuiltinId(std.math.minInt(i32)));
 }
 
 fn isAsciiBuiltinName(bytes: []const u8) bool {
@@ -189,7 +217,7 @@ fn publishNativeFunctionMetadataWork(
     length: i32,
 ) !void {
     const length_key = atom.predefinedId("length", .string).?;
-    try function_object.defineOwnPropertyAssumingNew(rt, length_key, Descriptor.data(JSValue.int32(length), false, false, true));
+    try function_object.defineOwnPropertyAssumingNew(rt, length_key, Descriptor.data(JSValue.int32(length), .{ .configurable = true }));
 
     const name_string = if (name.len == 0)
         try rt.emptyString()
@@ -200,7 +228,7 @@ fn publishNativeFunctionMetadataWork(
     const name_value = name_string.value();
 
     const name_key = atom.predefinedId("name", .string).?;
-    try function_object.defineOwnPropertyAssumingNew(rt, name_key, Descriptor.data(name_value, false, false, true));
+    try function_object.defineOwnPropertyAssumingNew(rt, name_key, Descriptor.data(name_value, .{ .configurable = true }));
 
     const dispatch_atom = try rt.internAtom(name);
     // TGC S3 §2.3: this stores an atom id into a published function payload.
@@ -265,5 +293,5 @@ fn defineMethodData(
     var key_roots = runtime.rootAtoms(.{&key});
     key_roots.activate(rt);
     defer key_roots.deactivate(rt);
-    try target.defineOwnProperty(rt, key, Descriptor.data(rooted_value, writable, enumerable, configurable));
+    try target.defineOwnProperty(rt, key, Descriptor.data(rooted_value, .{ .writable = writable, .enumerable = enumerable, .configurable = configurable }));
 }

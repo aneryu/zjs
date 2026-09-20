@@ -23,8 +23,7 @@ const ExternalTokenEntry = gc.ExternalTokenEntry;
 const Header = gc.Header;
 
 pub const Tokens = struct {
-    entries: []ExternalTokenEntry = &.{},
-    entries_capacity: usize = 0,
+    entries: std.ArrayListUnmanaged(ExternalTokenEntry) = .empty,
     /// Ids are never reused while an entry is live and never zero: zero is
     /// the "no token" spelling of `ExternalMemoryToken`.
     next_id: u64 = 1,
@@ -32,22 +31,17 @@ pub const Tokens = struct {
     /// Idempotent: a Registry rolled back halfway through construction can
     /// reach this twice.
     pub fn deinit(self: *Tokens, account: *memory.MemoryAccount) void {
-        if (self.entries_capacity != 0) {
-            account.free(ExternalTokenEntry, self.entries.ptr[0..self.entries_capacity]);
-        } else if (self.entries.len != 0) {
-            account.free(ExternalTokenEntry, self.entries);
-        }
-        self.entries = &.{};
-        self.entries_capacity = 0;
+        self.entries.deinit(account.persistent_allocator);
+        self.entries = .empty;
     }
 
     pub fn count(self: Tokens) usize {
-        return self.entries.len;
+        return self.entries.items.len;
     }
 
     pub fn totalBytes(self: Tokens) usize {
         var total: usize = 0;
-        for (self.entries) |entry| {
+        for (self.entries.items) |entry| {
             total = std.math.add(usize, total, entry.bytes) catch std.math.maxInt(usize);
         }
         return total;
@@ -55,10 +49,9 @@ pub const Tokens = struct {
 
     /// Record `bytes` and return the id that discharges them.
     pub fn add(self: *Tokens, account: *memory.MemoryAccount, bytes: usize) !u64 {
-        try self.ensureCapacity(account, self.entries.len + 1);
+        try self.entries.ensureUnusedCapacity(account.persistent_allocator, 1);
         const id = self.takeId();
-        self.entries.ptr[self.entries.len] = .{ .id = id, .bytes = bytes };
-        self.entries = self.entries.ptr[0 .. self.entries.len + 1];
+        self.entries.appendAssumeCapacity(.{ .id = id, .bytes = bytes });
         return id;
     }
 
@@ -80,21 +73,14 @@ pub const Tokens = struct {
             return .{ .released = 0 };
         }
         const index = self.indexOf(id) orelse return .unknown_id;
-        const entry = self.entries[index];
+        const entry = self.entries.items[index];
         if (entry.bytes != bytes) return .byte_mismatch;
-        if (index + 1 < self.entries.len) {
-            std.mem.copyForwards(
-                ExternalTokenEntry,
-                self.entries[index .. self.entries.len - 1],
-                self.entries[index + 1 ..],
-            );
-        }
-        self.entries = self.entries[0 .. self.entries.len - 1];
+        _ = self.entries.orderedRemove(index);
         return .{ .released = entry.bytes };
     }
 
     fn indexOf(self: Tokens, id: u64) ?usize {
-        for (self.entries, 0..) |entry, index| {
+        for (self.entries.items, 0..) |entry, index| {
             if (entry.id == id) return index;
         }
         return null;
@@ -105,22 +91,6 @@ pub const Tokens = struct {
         self.next_id +%= 1;
         if (self.next_id == 0) self.next_id = 1;
         return id;
-    }
-
-    fn ensureCapacity(self: *Tokens, account: *memory.MemoryAccount, required: usize) !void {
-        if (required <= self.entries_capacity) return;
-        var new_capacity = if (self.entries_capacity == 0) @as(usize, 8) else self.entries_capacity * 2;
-        while (new_capacity < required) new_capacity *= 2;
-        const next = try account.alloc(ExternalTokenEntry, new_capacity);
-        errdefer account.free(ExternalTokenEntry, next);
-        @memcpy(next[0..self.entries.len], self.entries);
-        if (self.entries_capacity != 0) {
-            account.free(ExternalTokenEntry, self.entries.ptr[0..self.entries_capacity]);
-        } else if (self.entries.len != 0) {
-            account.free(ExternalTokenEntry, self.entries);
-        }
-        self.entries = next[0..self.entries.len];
-        self.entries_capacity = new_capacity;
     }
 };
 
@@ -167,7 +137,7 @@ pub const NonBlockObjectAuthority = struct {
     }
 
     pub fn condemn(self: *NonBlockObjectAuthority, header: *Header) void {
-        const index = self.indexOf(header) orelse unreachable;
+        const index = self.indexOf(header).?;
         _ = self.items.swapRemove(index);
         self.doomed.appendAssumeCapacity(header);
     }

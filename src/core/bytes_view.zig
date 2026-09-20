@@ -6,7 +6,7 @@
 //! its explicit deinitializer and owns or shares the backing bytes according
 //! to its constructor. The generic Value parameter avoids a core import cycle
 //! and exposes this type as `JSValue.Bytes` to higher layers. QuickJS source
-//! map: `JSArrayBuffer`/`JSTypedArray` at quickjs.c:760-778.
+//! map: `JSArrayBuffer`/`JSTypedArray` at quickjs.c.
 
 const std = @import("std");
 
@@ -206,7 +206,7 @@ pub fn JSBytes(comptime Value: type) type {
             const byte_offset = object.typedArrayByteOffset();
             const buffer_bytes = buffer.byteStorage();
             if (byte_offset > buffer_bytes.len) return error.OutOfBounds;
-            const len = if (object.typedArrayKind() == 1)
+            const len = if (object.typedArrayKind() == .data_view_length_tracking)
                 buffer_bytes.len - byte_offset
             else
                 object.typedArrayFixedLength() orelse return error.TypeError;
@@ -524,7 +524,7 @@ test "JSBytes views TypedArray byte range without copying" {
 
     const view = try Object.create(rt, class_ids.object, null);
     const view_value = view.value();
-    try view.initTypedArrayView(rt, buffer_value, 2, 2, 2, 2);
+    try view.initTypedArrayView(rt, buffer_value, 2, 2, 2, .uint8);
 
     const bytes = try view_value.asBytes();
     try std.testing.expectEqualSlices(u8, &.{ 2, 3, 4, 5 }, bytes.slice());
@@ -555,7 +555,7 @@ test "JSBytes floors length-tracking Uint16Array byteLength to element size" {
 
     const view = try Object.create(rt, class_ids.object, null);
     const view_value = view.value();
-    try view.initTypedArrayView(rt, buffer_value, 1, 2, null, 5);
+    try view.initTypedArrayView(rt, buffer_value, 1, 2, null, .uint16);
 
     const bytes = try view_value.asBytes();
     // 6 bytes (3 elements), floored from the 6 trailing bytes — already aligned
@@ -582,7 +582,7 @@ test "JSBytes drops trailing partial element for odd-remaining length-tracking v
 
     const view = try Object.create(rt, class_ids.object, null);
     const view_value = view.value();
-    try view.initTypedArrayView(rt, buffer_value, 0, 2, null, 5);
+    try view.initTypedArrayView(rt, buffer_value, 0, 2, null, .uint16);
 
     const bytes = try view_value.asBytes();
     try std.testing.expectEqual(@as(usize, 4), bytes.len);
@@ -605,7 +605,7 @@ test "JSBytes views DataView byte range without copying" {
 
     const view = try Object.create(rt, class_ids.dataview, null);
     const view_value = view.value();
-    try view.initTypedArrayView(rt, buffer_value, 1, 0, 3, 0);
+    try view.initTypedArrayView(rt, buffer_value, 1, 0, 3, .none);
 
     const bytes = try view_value.asBytes();
     try std.testing.expectEqualSlices(u8, &.{ 11, 12, 13 }, bytes.slice());
@@ -627,7 +627,7 @@ test "JSBytes views length-tracking DataView to end of buffer" {
 
     const view = try Object.create(rt, class_ids.dataview, null);
     const view_value = view.value();
-    try view.initTypedArrayView(rt, buffer_value, 2, 0, null, 1);
+    try view.initTypedArrayView(rt, buffer_value, 2, 0, null, .data_view_length_tracking);
 
     // A length-tracking DataView spans to the end of the buffer (byte-addressed,
     // so no element-size flooring): 5 - 2 = 3 trailing bytes.

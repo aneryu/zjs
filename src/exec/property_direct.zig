@@ -398,7 +398,7 @@ test "fast own data property replacement retains private brand atom" {
         try object.defineOwnProperty(
             rt,
             core.atom.ids.Private_brand,
-            core.Descriptor.data(initial, true, true, true),
+            core.Descriptor.data(initial, .all),
         );
     }
     try std.testing.expect(rt.atoms.name(brand) != null);
@@ -426,7 +426,7 @@ test "global own data slot helpers preserve lookup and write ownership" {
     const other_key = try rt.internAtom("globalSlotOther");
 
     const initial = try core.string.String.createAscii(rt, "initial");
-    try global.defineOwnProperty(rt, key, core.Descriptor.data(initial.value(), true, true, true));
+    try global.defineOwnProperty(rt, key, core.Descriptor.data(initial.value(), .all));
 
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer function.deinit(rt);
@@ -463,7 +463,7 @@ test "global own data slot helpers preserve lookup and write ownership" {
     try std.testing.expect(globalDataPropertyValueForFastPath(rt, global, execution_function, 0, other_key) == null);
 
     const lexicals = try core.Object.create(rt, core.class.ids.object, null);
-    try lexicals.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(7), true, true, true));
+    try lexicals.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(7), .all));
     try std.testing.expect(globalWritableDataStoreIndexForFastPath(rt, lexicals, global, execution_function, 0, key) == null);
     try std.testing.expect(globalWritableDataStoreLookupForFastPath(rt, lexicals, global, execution_function, 0, key) == null);
     const shadowed_owned = try core.string.String.createAscii(rt, "shadowed-owned");
@@ -508,7 +508,7 @@ test "global own data slot helpers reject readonly and accessor writes" {
     const readonly_key = try rt.internAtom("readonlyGlobalSlot");
     const accessor_key = try rt.internAtom("accessorGlobalSlot");
 
-    try global.defineOwnProperty(rt, readonly_key, core.Descriptor.data(core.JSValue.int32(1), false, true, true));
+    try global.defineOwnProperty(rt, readonly_key, core.Descriptor.data(core.JSValue.int32(1), .{ .enumerable = true, .configurable = true }));
     const readonly_lookup = globalOwnDataPropertyBorrowedLookup(global, readonly_key).?;
     try std.testing.expectEqual(@as(?i32, 1), readonly_lookup.value.as(.int));
     try std.testing.expect(globalOwnWritableDataPropertyLookup(global, readonly_key) == null);
@@ -522,7 +522,7 @@ test "global own data slot helpers reject readonly and accessor writes" {
     // placeholders was replaced by L2's object-header pointers).
     const getter = try core.Object.create(rt, core.class.ids.object, null);
     const setter = try core.Object.create(rt, core.class.ids.object, null);
-    try global.defineOwnProperty(rt, accessor_key, core.Descriptor.accessor(getter.value(), setter.value(), true, true));
+    try global.defineOwnProperty(rt, accessor_key, core.Descriptor.accessor(getter.value(), setter.value(), .{ .enumerable = true, .configurable = true }));
 
     const accessor_index = accessor_index: {
         for (global.shapeProps(), 0..) |prop, index| {

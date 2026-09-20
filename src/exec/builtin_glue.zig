@@ -15,6 +15,7 @@ const collection_id_lookup = core.host_function.builtin_method_id_lookup.collect
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
 const std = @import("std");
+const iterator_slots = @import("iterator_slots.zig");
 const value_ops = @import("value_ops.zig");
 
 const call_runtime = @import("call_runtime.zig");
@@ -70,7 +71,7 @@ pub fn bigIntFunctionCall(
     global: *core.Object,
     args: []const core.JSValue,
 ) !core.JSValue {
-    // qjs js_bigint_constructor (quickjs.c:56232) passes argv[0] — undefined
+    // qjs js_bigint_constructor passes argv[0] — undefined
     // when absent — into JS_ToBigIntCtorFree; ToBigInt(undefined) throws.
     const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const primitive = try toPrimitiveForNumber(ctx, output, global, input);
@@ -78,7 +79,7 @@ pub fn bigIntFunctionCall(
     if (primitive.as(.float64)) |float_value| {
         return value_ops.integerNumberToBigIntValue(ctx.runtime, float_value);
     }
-    // qjs JS_ToBigIntCtorFree null/undefined/default arm (quickjs.c:56223-56227):
+    // qjs JS_ToBigIntCtorFree null/undefined/default arm:
     // symbols fall into the same default arm and share the message.
     if (primitive.is(.undefined_value) or primitive.is(.null_value) or primitive.is(.symbol)) {
         return exception_ops.throwTypeErrorMessage(ctx, global, "cannot convert to BigInt");
@@ -407,8 +408,8 @@ pub fn errorIsError(args: []const core.JSValue) core.JSValue {
 const WeakRefPrototypeMethod = method_ids.weak_ref.PrototypeMethod;
 
 /// Declaration + dispatch table for the `.weak_ref` native-builtin domain:
-/// qjs `js_weakref_proto_funcs` (quickjs.c:61197) and `js_finrec_proto_funcs`
-/// (quickjs.c:61376). In qjs these are ordinary `JS_CFUNC_DEF` entries reached
+/// qjs `js_weakref_proto_funcs` and `js_finrec_proto_funcs`
+///. In qjs these are ordinary `JS_CFUNC_DEF` entries reached
 /// by `js_call_c_function` like any other builtin method; without records here
 /// they were the only weak-collection methods left on zjs's compatibility
 /// name-cascade (`call_runtime.callNativeCallableByName`), which made
@@ -435,7 +436,7 @@ fn weakRefEntry(comptime name: []const u8, comptime length: u8, comptime id: u32
 /// Shared record handler for the `.weak_ref` domain. The bodies below keep
 /// their existing receiver-class checks, so a stolen method applied to a
 /// foreign receiver still throws TypeError exactly as the name cascade did
-/// (qjs `JS_GetOpaque2`, quickjs.c:61188).
+/// (qjs `JS_GetOpaque2`, quickjs.c).
 fn weakRefCall(
     native_ctx: *core.JSContext,
     native_this: core.JSValue,
@@ -469,7 +470,7 @@ pub fn finalizationRegistryRegister(ctx: *core.JSContext, receiver: core.JSValue
     if (!core.symbol.canBeHeldWeakly(ctx.runtime, target)) return error.TypeError;
     if (target.sameValue(held_value)) return error.TypeError;
     if (!unregister_token.is(.undefined_value) and !core.symbol.canBeHeldWeakly(ctx.runtime, unregister_token)) return error.TypeError;
-    // No self-target exclusion: qjs js_finrec_register (quickjs.c:61318) appends
+    // No self-target exclusion: qjs js_finrec_register appends
     // the entry unconditionally after the three checks above — a registry may
     // register itself as target (the cell holds only a weak ref to it).
     try finalizationRegistryAppendCell(ctx.runtime, object, target, held_value, unregister_token);
@@ -572,7 +573,7 @@ pub fn addCollectionEntriesFromIterator(
         const next_obj = objectFromValue(next_method) orelse break :fast;
         if (!next_obj.isArrayIteratorNextFunction()) break :fast;
         if (iterator.class_id != core.class.ids.array_iterator) break :fast;
-        if (iterator.iteratorKindSlot().* != 2) break :fast; // 2 == value kind
+        if (iterator_slots.arrayIteratorKind(iterator) != .value) break :fast;
         if (iterator.iteratorIndexSlot().* != 0) break :fast; // partially drained
         const adder_obj = objectFromValue(adder) orelse break :fast;
         const adder_ref = core.function.decodeNativeBuiltinId(adder_obj.nativeFunctionId()) orelse break :fast;
@@ -601,7 +602,7 @@ pub fn addCollectionEntriesFromIterator(
         if (step.done) return;
 
         if (kind == 1 or kind == 3) {
-            const entry = property_ops.expectObject(step.value) catch {
+            const entry = core.value_semantics.objectFromValue(step.value) orelse {
                 return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator_value, error.TypeError, null, null);
             };
             const key = getValueProperty(ctx, output, global, entry.value(), core.Atom.taggedInt(0), null, null) catch |err| {
@@ -675,10 +676,10 @@ noinline fn defineNativeDataMethodMaybeId(
 ) !void {
     const method = try core.function.nativeFunctionForGlobal(rt, global, core.atom.predefinedName(atom_id), length);
     if (native_builtin_id) |id| {
-        const method_object = property_ops.expectObject(method) catch return error.TypeError;
+        const method_object = try property_ops.expectObject(method);
         method_object.setNativeBuiltinIdAndRecord(rt, id);
     }
-    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, true, false, true));
+    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, .method));
 }
 
 /// Rare-payload stamp after minting a native data method. This is a
@@ -699,7 +700,7 @@ pub noinline fn defineStampedNativeDataMethod(
     helper_id: i32,
 ) !void {
     const method = try core.function.nativeFunctionForGlobal(rt, global, core.atom.predefinedName(atom_id), length);
-    const method_object = property_ops.expectObject(method) catch return error.TypeError;
+    const method_object = try property_ops.expectObject(method);
     switch (stamp) {
         .async_generator => {
             if (!try method_object.addAsyncGeneratorPrototypeMethod(rt)) return error.TypeError;
@@ -709,7 +710,7 @@ pub noinline fn defineStampedNativeDataMethod(
             if (!try method_object.addIteratorHelperMethod(rt, @intCast(helper_id))) return error.TypeError;
         },
     }
-    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, true, false, true));
+    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, .method));
 }
 
 /// Bytes-taking form for the one caller whose method name comes out of a table
@@ -724,9 +725,9 @@ pub fn defineNativeDataMethodNamedWithNativeId(rt: *core.JSRuntime, global: *cor
     rt.atoms.pinForHost(atom_id);
     defer rt.atoms.unpinForHost(atom_id);
     const method = try core.function.nativeFunctionForGlobal(rt, global, name, length);
-    const method_object = property_ops.expectObject(method) catch return error.TypeError;
+    const method_object = try property_ops.expectObject(method);
     method_object.setNativeBuiltinIdAndRecord(rt, native_builtin_id);
-    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, true, false, true));
+    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, .method));
 }
 
 // --- Primitive coercion moved to coercion_ops.zig ---

@@ -273,7 +273,7 @@ pub const object = struct {
             bytes_owned = false;
 
             const typed_array_proto = try constructorPrototypeObjectByAtom(rt, global, zjs_core.atom.ids.Uint8Array);
-            return zjs_exec.buffer_ops.typedArrayConstructFullBufferOwned(rt, 1, 2, buffer_value, buffer_core, optionalToCore(typed_array_proto));
+            return zjs_exec.buffer_ops.typedArrayConstructFullBufferOwned(rt, 1, .uint8, buffer_value, buffer_core, optionalToCore(typed_array_proto));
         }
 
         fn bufferViewError(err: value.Bytes.Error) anyerror {
@@ -574,7 +574,9 @@ pub const object = struct {
         buffer: *Object,
         prototype: ?*Object,
     ) !value.Value {
-        return zjs_exec.buffer_ops.typedArrayConstructFullBufferOwned(rt, @intCast(element_size), kind, buffer_value, toCore(buffer), optionalToCore(prototype));
+        const element_kind = std.enums.fromInt(zjs_core.typed_array_names.Kind, kind) orelse return error.TypeError;
+        if (!element_kind.isElement()) return error.TypeError;
+        return zjs_exec.buffer_ops.typedArrayConstructFullBufferOwned(rt, @intCast(element_size), element_kind, buffer_value, toCore(buffer), optionalToCore(prototype));
     }
 
     fn atomFromUInt32(index: u32) zjs_core.Atom {
@@ -596,12 +598,12 @@ pub const object = struct {
 
     pub fn defineValueProperty(rt: *JSRuntime, obj: *Object, name: []const u8, v: value.Value) !void {
         const key = try rt.internAtom(name);
-        try toCore(obj).defineOwnProperty(rt, key, zjs_core.Descriptor.data(v, true, true, true));
+        try toCore(obj).defineOwnProperty(rt, key, zjs_core.Descriptor.data(v, .all));
     }
 
     pub fn defineHiddenValueProperty(rt: *JSRuntime, obj: *Object, name: []const u8, v: value.Value) !void {
         const key = try rt.internAtom(name);
-        try toCore(obj).defineOwnProperty(rt, key, zjs_core.Descriptor.data(v, false, false, false));
+        try toCore(obj).defineOwnProperty(rt, key, zjs_core.Descriptor.data(v, .none));
     }
 
     pub fn defineAccessorProperty(
@@ -612,7 +614,7 @@ pub const object = struct {
         setter: value.Value,
     ) !void {
         const key = try rt.internAtom(name);
-        try toCore(obj).defineOwnProperty(rt, key, zjs_core.Descriptor.accessor(getter, setter, true, true));
+        try toCore(obj).defineOwnProperty(rt, key, zjs_core.Descriptor.accessor(getter, setter, .{ .enumerable = true, .configurable = true }));
     }
 
     pub fn defineStringProperty(rt: *JSRuntime, obj: *Object, name: []const u8, bytes: []const u8) !void {
@@ -647,7 +649,7 @@ pub const object = struct {
         const array_core = toCore(array);
         for (items, 0..) |item, index| {
             const item_value = try value.createString(rt, item);
-            try array_core.defineOwnProperty(rt, atomFromUInt32(@intCast(index)), zjs_core.Descriptor.data(item_value, true, true, true));
+            try array_core.defineOwnProperty(rt, atomFromUInt32(@intCast(index)), zjs_core.Descriptor.data(item_value, .all));
         }
         array_core.setArrayLength(@intCast(items.len));
         try defineValueProperty(rt, global, name, array_value);
@@ -662,7 +664,7 @@ pub const object = struct {
         const rt = ctx.runtimePtr();
         const global = fromCore(try ctx.globalObject());
         const key = try rt.internAtom(name);
-        const flags = zjs_core.property.Flags.data(true, true, true);
+        const flags = zjs_core.property.Flags.data(.all);
         try toCore(global).defineEmptyArrayAutoInitProperty(rt, key, flags, toCore(global));
     }
 
@@ -687,7 +689,7 @@ pub const object = struct {
         try array_core.defineOwnProperty(
             rt,
             atomFromUInt32(array_core.arrayLength()),
-            zjs_core.Descriptor.data(v, true, true, true),
+            zjs_core.Descriptor.data(v, .all),
         );
     }
 };
@@ -843,7 +845,7 @@ test "public Buffer borrowBytes carries TypedArray byte offset and length" {
 
     const view = try Object.create(rt, class_ids.object, null);
     _ = view.value();
-    try view.initTypedArrayView(rt, buffer_value, 2, 2, 2, 2);
+    try view.initTypedArrayView(rt, buffer_value, 2, 2, 2, .uint8);
 
     const borrow = try object.Buffer.borrowBytes(rt, object.fromCore(view));
     try std.testing.expectEqual(object.Buffer.BorrowKind.typed_array, borrow.kind);

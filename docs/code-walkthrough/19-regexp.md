@@ -12,7 +12,7 @@ ECMAScript 正则编译器 + QuickJS `libregexp.c` 风格回溯执行器。上�
 
 **opcode** `REOPCodeEnum`：`char/char32`（及 `_i`）、`dot/any/space`、`line_start(_m)`、`goto_/split_*`、`match/lookahead*`、`save_start/end/reset`、`loop*`、`word_boundary*`、`back_reference*`、`range/range32`、`class8`、`scan_until_char8`、`prev`。
 
-**执行**：`CbufType` latin1 / utf16_units / utf16_unicode（`u|v` 才合代理）。`ExecSafety` checked vs trusted。回溯帧 `REBTFrame{pc_off,cptr,undo_top,typ}`；undo `REUndo{old_value:u32,slot:u16}`。未捕获哨兵 `no_slot_value`，压缩到帧里是 `u32::MAX`。
+**执行**：`CbufType` latin1 / utf16_units / utf16_unicode（`u|v` 才合代理）。执行器只信任本编译器产出的头（Debug 断言）。回溯帧 `REBTFrame{pc_off,cptr,undo_top,typ}`；undo `REUndo{old_value:u32,slot:u16}`。未捕获哨兵 `no_slot_value`，压缩到帧里是 `u32::MAX`。
 
 **CompileError**：OOM / `InvalidPattern` / `Unsupported` / `StackOverflow`（qjs `re_parse_error "stack overflow"`）。
 
@@ -229,33 +229,9 @@ ECMAScript 正则编译器 + QuickJS `libregexp.c` 风格回溯执行器。上�
 - **实现**：转 `regexp_properties.isSupportedUnicodePropertyExpression`。
 - **所有权 / 错误 / 调用**：只有本文件调用，`pub` 已收窄；引擎侧的同名校验走 `core/regexp.zig` → `unicode.isSupportedUnicodePropertyExpression`。
 
-### `exec` (`src/libs/regexp.zig:455`)
 
-- **签名**：`pub fn exec(allocator: std.mem.Allocator, bytecode: []const u8, input: Input, start_index: usize) !ExecStatus`。
-- **作用**：checked 执行，返回带 Match 的状态。
-- **实现**：`execWithOptions(..., .{})`。
-- **所有权 / 错误 / 调用**：树内无调用方，作为嵌入者/fuzzer 的安全 API 保留（文件头注释已写明）；生产路径走 trusted 入口 + `regexp_adapter`。
 
-### `execWithOptions` (`src/libs/regexp.zig:459`)
 
-- **签名**：`pub fn execWithOptions(allocator: std.mem.Allocator, bytecode: []const u8, input: Input, start_index: usize, options: ExecOptions) !ExecStatus`。
-- **作用**：把 `ExecResult` 升成 `ExecStatus`。
-- **实现**：match 时拷 `Match`。
-- **所有权 / 错误 / 调用**：`Timeout` / `BytecodeCorrupt` / OOM。
-
-### `execIntoMatchWithOptions` (`src/libs/regexp.zig:469`)
-
-- **签名**：`pub fn execIntoMatchWithOptions( allocator: std.mem.Allocator, bytecode: []const u8, input: Input, start_index: usize, options: ExecOptions, out_match: *Match, ) !ExecResult`。
-- **作用**：checked：验头、分配 slot、执行、写 Match。
-- **实现**：`parseHeader` + `checkedAllocCount` + `.checked`。
-- **所有权 / 错误 / 调用**：slot 缓冲 defer。
-
-### `execIntoMatchTrustedWithOptions` (`src/libs/regexp.zig:492`)
-
-- **签名**：`pub fn execIntoMatchTrustedWithOptions( allocator: std.mem.Allocator, bytecode: []const u8, input: Input, start_index: usize, options: ExecOptions, out_match: *Match, ) !ExecResult`。
-- **作用**：本编译器字节码的 release 快路径，对齐 `lre_exec`。
-- **实现**：`parseHeaderTrusted`，slot 数不走 checked 乘法溢出。
-- **所有权 / 错误 / 调用**：Debug 仍 assert 头。
 
 ### `execCaptureSlotsSliceTrustedWithOptions` (`src/libs/regexp.zig:514`)
 
@@ -266,7 +242,7 @@ ECMAScript 正则编译器 + QuickJS `libregexp.c` 风格回溯执行器。上�
 
 ### `execCaptureSlotsParsed` (`src/libs/regexp.zig:526`)
 
-- **签名**：`fn execCaptureSlotsParsed( comptime safety: ExecSafety, allocator: std.mem.Allocator, bytecode: []const u8, input: Input, start_index: usize, options: ExecOptions, header: REBytecodeHeader, capture: []usize, ) !ExecResult`。
+- **签名**：`fn execCaptureSlotsParsed( allocator: std.mem.Allocator, bytecode: []const u8, input: Input, start_index: usize, options: ExecOptions, header: REBytecodeHeader, capture: []usize, ) !ExecResult`。
 - **作用**：真正启动回溯：选宽度、规范化 start、memset 哨兵、按 `CbufType` 单态 `lreExecBacktrack`。
 - **实现**：`start_index > len` → `out_of_range`。checked 拒超大输入（压不进 u32）。`u|v` → utf16_unicode。
 - **所有权 / 错误 / 调用**：ctx 用 static 栈；overflow realloc。
@@ -282,7 +258,7 @@ ECMAScript 正则编译器 + QuickJS `libregexp.c` 风格回溯执行器。上�
 
 ### `ExecState.init` (`src/libs/regexp.zig:622`)
 
-- **签名**：`fn init( s: *REExecContext, capture: [*]usize, bytecode: []const u8, bytecode_end: usize, initial_pc: usize, initial_cptr: usize, comptime safety: ExecSafety, ) !ExecState`。
+- **签名**：`fn init( s: *REExecContext, capture: [*]usize, bytecode: []const u8, bytecode_end: usize, initial_pc: usize, initial_cptr: usize, ) !ExecState`。
 - **作用**：把 ctx/字节码收成热路径状态。
 - **实现**：checked 验 `initial_pc ≤ bytecode_end`。指针从 slice 抽出。
 - **所有权 / 错误 / 调用**：`BytecodeCorrupt`。
@@ -296,49 +272,43 @@ ECMAScript 正则编译器 + QuickJS `libregexp.c` 风格回溯执行器。上�
 
 ### `ExecState.checkFrameSpace` (`src/libs/regexp.zig:659`)
 
-- **签名**：`inline fn checkFrameSpace(self: *ExecState, comptime safety: ExecSafety, n: usize) !void`。
+- **签名**：`inline fn checkFrameSpace(self: *ExecState, n: usize) !void`。
 - **作用**：保证还能压 n 帧。
 - **实现**：不够则 `btFrameRealloc` 并刷新指针。`@branchHint(.unlikely)`。
 - **所有权 / 错误 / 调用**：自身不持有内存：回溯帧栈归 `REExecContext`（`self.s`），首次扩容时 `btFrameRealloc` 从内联 `static_bt_frames` 切到堆并由 context 负责释放；本函数只在扩容后把 `bt_frames`/`bt_end` 重新指向新缓冲。推导 error set 只含 `std.mem.Allocator.Error`，OOM 沿匹配循环上抛。树内唯一调用方 `pushExecState`（`src/libs/regexp.zig:798`）。
 
 ### `ExecState.checkUndoSpace` (`src/libs/regexp.zig:672`)
 
-- **签名**：`inline fn checkUndoSpace(self: *ExecState, comptime safety: ExecSafety, n: usize) !void`。
+- **签名**：`inline fn checkUndoSpace(self: *ExecState, n: usize) !void`。
 - **作用**：undo 容量。
 - **实现**：同帧。
 - **所有权 / 错误 / 调用**：`save_reset` 可一次要很多。
 
-### `ExecState.ensurePc` (`src/libs/regexp.zig:685`)
-
-- **签名**：`inline fn ensurePc(self: *const ExecState, comptime safety: ExecSafety, ptr: [*]const u8, n: usize) !void`。
-- **作用**：checked 下保证 `[ptr, ptr+n)` 在 bytecode 内。
-- **实现**：trusted 直接 return。
-- **所有权 / 错误 / 调用**：每个立即数读取。
 
 ### `ExecState.pcWithOffset` (`src/libs/regexp.zig:693`)
 
-- **签名**：`inline fn pcWithOffset(self: *const ExecState, comptime safety: ExecSafety, offset: i32) ![*]const u8`。
+- **签名**：`inline fn pcWithOffset(self: *const ExecState, offset: i32) ![*]const u8`。
 - **作用**：相对跳转。
 - **实现**：trusted wrapping 加；checked 防出界。
 - **所有权 / 错误 / 调用**：goto/split。
 
 ### `ExecState.getU8` (`src/libs/regexp.zig:714`)
 
-- **签名**：`inline fn getU8(self: *ExecState, comptime safety: ExecSafety) !u8`。
+- **签名**：`inline fn getU8(self: *ExecState) !u8`。
 - **作用**：读 opcode/立即数并前进 PC。
 - **实现**：`ensurePc` 1。
 - **所有权 / 错误 / 调用**：主循环。
 
 ### `ExecState.readU8At` (`src/libs/regexp.zig:721`)
 
-- **签名**：`inline fn readU8At(self: *const ExecState, comptime safety: ExecSafety, ptr: [*]const u8) !u8`。
+- **签名**：`inline fn readU8At(self: *const ExecState, ptr: [*]const u8) !u8`。
 - **作用**：不前进 PC。
 - **实现**：`ensurePc`。
 - **所有权 / 错误 / 调用**：`save_reset` 两个端点。
 
 ### `ExecState.getU16` (`src/libs/regexp.zig:726`)
 
-- **签名**：`inline fn getU16(self: *ExecState, comptime safety: ExecSafety) !u16`。
+- **签名**：`inline fn getU16(self: *ExecState) !u16`。
 - **作用**：小端 u16。
 - **实现**：读 2 字节。
 - **所有权 / 错误 / 调用**：`char`、range 个数。
@@ -352,14 +322,14 @@ ECMAScript 正则编译器 + QuickJS `libregexp.c` 风格回溯执行器。上�
 
 ### `ExecState.getU32` (`src/libs/regexp.zig:737`)
 
-- **签名**：`inline fn getU32(self: *ExecState, comptime safety: ExecSafety) !u32`。
+- **签名**：`inline fn getU32(self: *ExecState) !u32`。
 - **作用**：小端 u32。
 - **实现**：读 4。
 - **所有权 / 错误 / 调用**：`char32`、偏移。
 
 ### `ExecState.readU32At` (`src/libs/regexp.zig:744`)
 
-- **签名**：`inline fn readU32At(self: *const ExecState, comptime safety: ExecSafety, ptr: [*]const u8) !u32`。
+- **签名**：`inline fn readU32At(self: *const ExecState, ptr: [*]const u8) !u32`。
 - **作用**：定点 u32。
 - **实现**：`ensurePc` 4。
 - **所有权 / 错误 / 调用**：`set_i32`/`loop` 操作数。
@@ -373,21 +343,21 @@ ECMAScript 正则编译器 + QuickJS `libregexp.c` 风格回溯执行器。上�
 
 ### `ExecState.getI32` (`src/libs/regexp.zig:753`)
 
-- **签名**：`inline fn getI32(self: *ExecState, comptime safety: ExecSafety) !i32`。
+- **签名**：`inline fn getI32(self: *ExecState) !i32`。
 - **作用**：有符号偏移。
 - **实现**：`@bitCast(getU32)`。
 - **所有权 / 错误 / 调用**：goto/split/lookahead。
 
 ### `ExecState.compactIndex` (`src/libs/regexp.zig:757`)
 
-- **签名**：`inline fn compactIndex(comptime safety: ExecSafety, value: usize) !u32`。
+- **签名**：`inline fn compactIndex(value: usize) !u32`。
 - **作用**：把 PC/cptr 压进帧的 u32。
 - **实现**：checked：`>= u32::MAX` corrupt。
 - **所有权 / 错误 / 调用**：与 `compact_no_slot_value` 共用上限。
 
 ### `ExecState.compactCaptureValue` (`src/libs/regexp.zig:764`)
 
-- **签名**：`inline fn compactCaptureValue(comptime safety: ExecSafety, value: usize) !u32`。
+- **签名**：`inline fn compactCaptureValue(value: usize) !u32`。
 - **作用**：slot 值压进 undo；哨兵 → `u32::MAX`。
 - **实现**：其它值 `intCast`。
 - **所有权 / 错误 / 调用**：`pushUndoAssumeSpace`。
@@ -401,70 +371,70 @@ ECMAScript 正则编译器 + QuickJS `libregexp.c` 风格回溯执行器。上�
 
 ### `ExecState.pcOffset` (`src/libs/regexp.zig:776`)
 
-- **签名**：`inline fn pcOffset(self: *const ExecState, comptime safety: ExecSafety, pc: [*]const u8) !u32`。
+- **签名**：`inline fn pcOffset(self: *const ExecState, pc: [*]const u8) !u32`。
 - **作用**：PC → 相对 `bc_base` 的偏移。
 - **实现**：`compactIndex(pc - base)`。
 - **所有权 / 错误 / 调用**：压帧。
 
 ### `ExecState.pcFromOffset` (`src/libs/regexp.zig:783`)
 
-- **签名**：`inline fn pcFromOffset(self: *const ExecState, comptime safety: ExecSafety, offset: u32) ![*]const u8`。
+- **签名**：`inline fn pcFromOffset(self: *const ExecState, offset: u32) ![*]const u8`。
 - **作用**：偏移 → PC。
 - **实现**：checked 比 end。
 - **所有权 / 错误 / 调用**：弹帧。
 
 ### `ExecState.frameType` (`src/libs/regexp.zig:792`)
 
-- **签名**：`inline fn frameType(comptime safety: ExecSafety, frame: REBTFrame) !REExecStateEnum`。
+- **签名**：`inline fn frameType(frame: REBTFrame) !REExecStateEnum`。
 - **作用**：解码 split/lookahead/negative_lookahead。
 - **实现**：checked 拒未知 typ。
 - **所有权 / 错误 / 调用**：失败路径要跳过 lookahead 帧。
 
 ### `ExecState.pushExecState` (`src/libs/regexp.zig:799`)
 
-- **签名**：`inline fn pushExecState(self: *ExecState, comptime safety: ExecSafety, pc: [*]const u8, typ: REExecStateEnum) !void`。
+- **签名**：`inline fn pushExecState(self: *ExecState, pc: [*]const u8, typ: REExecStateEnum) !void`。
 - **作用**：压回溯点（另一条路的 PC、当前 cptr、undo 顶）。
 - **实现**：`checkFrameSpace(1)`。
 - **所有权 / 错误 / 调用**：split、lookahead、贪心 class8 的较短候选。
 
 ### `ExecState.saveCapture` (`src/libs/regexp.zig:811`)
 
-- **签名**：`inline fn saveCapture(self: *ExecState, comptime safety: ExecSafety, idx: usize, value: usize) !void`。
+- **签名**：`inline fn saveCapture(self: *ExecState, idx: usize, value: usize) !void`。
 - **作用**：写 slot 并记 undo。
 - **实现**：checked 验 idx；`pushUndo`。
 - **所有权 / 错误 / 调用**：`save_start/end`。
 
 ### `ExecState.pushUndo` (`src/libs/regexp.zig:818`)
 
-- **签名**：`inline fn pushUndo(self: *ExecState, comptime safety: ExecSafety, idx: usize, value: usize) !void`。
+- **签名**：`inline fn pushUndo(self: *ExecState, idx: usize, value: usize) !void`。
 - **作用**：确保空间后写 undo。
 - **实现**：`checkUndoSpace(1)` + `pushUndoAssumeSpace`。
 - **所有权 / 错误 / 调用**：普通保存。
 
 ### `ExecState.pushUndoAssumeSpace` (`src/libs/regexp.zig:823`)
 
-- **签名**：`inline fn pushUndoAssumeSpace(self: *ExecState, comptime safety: ExecSafety, idx: usize, value: usize) !void`。
+- **签名**：`inline fn pushUndoAssumeSpace(self: *ExecState, idx: usize, value: usize) !void`。
 - **作用**：已保证空间时写旧值并更新 slot。
 - **实现**：idx 必须拟合 u16。
 - **所有权 / 错误 / 调用**：`save_reset` 批量。
 
 ### `ExecState.saveCaptureCheck` (`src/libs/regexp.zig:835`)
 
-- **签名**：`inline fn saveCaptureCheck(self: *ExecState, comptime safety: ExecSafety, idx: usize, value: usize) !void`。
+- **签名**：`inline fn saveCaptureCheck(self: *ExecState, idx: usize, value: usize) !void`。
 - **作用**：同一回溯层已 undo 过该 slot 则只改值，不再压栈。
 - **实现**：从 `undo_len` 扫到 `currentUndoBase`。
 - **所有权 / 错误 / 调用**：loop 寄存器反复减 1。
 
 ### `ExecState.restoreOneUndo` (`src/libs/regexp.zig:854`)
 
-- **签名**：`inline fn restoreOneUndo(self: *ExecState, comptime safety: ExecSafety) !void`。
+- **签名**：`inline fn restoreOneUndo(self: *ExecState) !void`。
 - **作用**：弹一条 undo。
 - **实现**：还原 `capture[slot]`。
 - **所有权 / 错误 / 调用**：失败回溯。
 
 ### `ExecState.restoreUndoTo` (`src/libs/regexp.zig:867`)
 
-- **签名**：`inline fn restoreUndoTo(self: *ExecState, comptime safety: ExecSafety, undo_top: usize) !void`。
+- **签名**：`inline fn restoreUndoTo(self: *ExecState, undo_top: usize) !void`。
 - **作用**：恢复到某帧的 undo 顶。
 - **实现**：while 弹。
 - **所有权 / 错误 / 调用**：`popFrameRestore`。
@@ -478,14 +448,14 @@ ECMAScript 正则编译器 + QuickJS `libregexp.c` 风格回溯执行器。上�
 
 ### `ExecState.popFrameRestore` (`src/libs/regexp.zig:880`)
 
-- **签名**：`inline fn popFrameRestore(self: *ExecState, comptime safety: ExecSafety) !REBTFrame`。
+- **签名**：`inline fn popFrameRestore(self: *ExecState) !REBTFrame`。
 - **作用**：失败：还原 capture、PC、cptr。
 - **实现**：`restoreUndoTo` 再弹。
 - **所有权 / 错误 / 调用**：主循环 `dispatch_once` 失败臂。
 
 ### `ExecState.popFrameKeepUndo` (`src/libs/regexp.zig:892`)
 
-- **签名**：`inline fn popFrameKeepUndo(self: *ExecState, comptime safety: ExecSafety) !REBTFrame`。
+- **签名**：`inline fn popFrameKeepUndo(self: *ExecState) !REBTFrame`。
 - **作用**：lookahead 成功：保留内侧 capture，只恢复 PC/cptr。
 - **实现**：不 `restoreUndoTo`。
 - **所有权 / 错误 / 调用**：`lookahead_match` 一路弹到 lookahead 帧。
@@ -499,21 +469,21 @@ ECMAScript 正则编译器 + QuickJS `libregexp.c` 风格回溯执行器。上�
 
 ### `ExecState.readRegisterValue` (`src/libs/regexp.zig:907`)
 
-- **签名**：`inline fn readRegisterValue(self: *const ExecState, comptime safety: ExecSafety, register: usize) !usize`。
+- **签名**：`inline fn readRegisterValue(self: *const ExecState, register: usize) !usize`。
 - **作用**：读寄存器；哨兵在 checked 下 corrupt。
 - **实现**：走 `registerSlot`。
 - **所有权 / 错误 / 调用**：loop 减一前。
 
 ### `ExecState.getCharAtBounded` (`src/libs/regexp.zig:919`)
 
-- **签名**：`inline fn getCharAtBounded(self: *const ExecState, comptime safety: ExecSafety, comptime cbuf_type: CbufType, pos: *usize, end: usize) ?u21`。
+- **签名**：`inline fn getCharAtBounded(self: *const ExecState, comptime cbuf_type: CbufType, pos: *usize, end: usize) ?u21`。
 - **作用**：从 `*pos` 读一码点，不越 `end`。
 - **实现**：utf16_unicode 合代理。失败 null（当 corrupt）。
 - **所有权 / 错误 / 调用**：只服务正向 backref：utf16_unicode 下的 `back_reference`（:1435）与各宽度的 `back_reference_i`（:1454）；反向由 `getPrevCharAtBounded` 负责。
 
 ### `ExecState.getPrevCharAtBounded` (`src/libs/regexp.zig:947`)
 
-- **签名**：`inline fn getPrevCharAtBounded(self: *const ExecState, comptime safety: ExecSafety, comptime cbuf_type: CbufType, pos: *usize, start: usize) ?u21`。
+- **签名**：`inline fn getPrevCharAtBounded(self: *const ExecState, comptime cbuf_type: CbufType, pos: *usize, start: usize) ?u21`。
 - **作用**：向后读一码点。
 - **实现**：低代理则并高代理。
 - **所有权 / 错误 / 调用**：lookbehind backref。
@@ -555,21 +525,21 @@ ECMAScript 正则编译器 + QuickJS `libregexp.c` 风格回溯执行器。上�
 
 ### `ExecState.scanGreedyClass8` (`src/libs/regexp.zig:1070`)
 
-- **签名**：`inline fn scanGreedyClass8( self: *ExecState, comptime safety: ExecSafety, comptime cbuf_type: CbufType, bitmap: [*]const u8, inverted: bool, min: u8, continuation_pc: [*]const u8, ) !bool`。
+- **签名**：`inline fn scanGreedyClass8( self: *ExecState, comptime cbuf_type: CbufType, bitmap: [*]const u8, inverted: bool, min: u8, continuation_pc: [*]const u8, ) !bool`。
 - **作用**：贪心 `*`/`+` 的 class8：尽量吃，每过 min 压一个较短候选。
 - **实现**：不匹配则回退；`pollTimeout`。
 - **所有权 / 错误 / 调用**：`tryFoldGreedyClass8Loop` 的 opcode。
 
 ### `ExecState.matchRawForward` (`src/libs/regexp.zig:1108`)
 
-- **签名**：`inline fn matchRawForward(self: *ExecState, comptime safety: ExecSafety, comptime cbuf_type: CbufType, start: usize, end: usize) bool`。
+- **签名**：`inline fn matchRawForward(self: *ExecState, comptime cbuf_type: CbufType, start: usize, end: usize) bool`。
 - **作用**：按代码单元 memcmp 前向 backref（非 unicode）。
 - **实现**：长度不够 false。
 - **所有权 / 错误 / 调用**：`back_reference` latin1/utf16_units。
 
 ### `ExecState.matchRawBackward` (`src/libs/regexp.zig:1126`)
 
-- **签名**：`inline fn matchRawBackward(self: *ExecState, comptime safety: ExecSafety, comptime cbuf_type: CbufType, start: usize, end: usize) bool`。
+- **签名**：`inline fn matchRawBackward(self: *ExecState, comptime cbuf_type: CbufType, start: usize, end: usize) bool`。
 - **作用**：单元 memcmp 后向。
 - **实现**：`cptr < len` false。
 - **所有权 / 错误 / 调用**：`backward_back_reference`。
@@ -578,17 +548,11 @@ ECMAScript 正则编译器 + QuickJS `libregexp.c` 风格回溯执行器。上�
 
 ### `lreExecBacktrack` (`src/libs/regexp.zig:1143`)
 
-- **签名**：`fn lreExecBacktrack( comptime safety: ExecSafety, comptime cbuf_type: CbufType, ctx: *REExecContext, capture: [*]usize, bytecode: []const u8, bytecode_end: usize, initial_pc: usize, initial_cptr: usize, ) !bool`。
+- **签名**：`fn lreExecBacktrack( comptime cbuf_type: CbufType, ctx: *REExecContext, capture: [*]usize, bytecode: []const u8, bytecode_end: usize, initial_pc: usize, initial_cptr: usize, ) !bool`。
 - **作用**：opcode 解释器。true 匹配。
 - **实现**：`main` 循环读 opcode。失败进 `dispatch_once` 外：弹帧直到非 lookahead，再继续。要点：`match` 成功返回；`lookahead_match` 弹到 lookahead 且 **keep undo**；`negative_lookahead_match` restore 后当失败。`char*` 比较（可 canonicalize）。split 压另一条。lookahead 压帧继续。`^$` 看行终止符。`class8` 16 字节位图。`range/range32` 二分闭区间。backref 按捕获槽；unicode 走码点，否则 memcmp；`_i` 两边 canonicalize。word boundary 对 ≥256 只在 ignore-case unicode 认 U+017F/U+212A。loop 系列减寄存器，可选 `check_advance` 防零宽死循环。
 - **所有权 / 错误 / 调用**：`Timeout`/`BytecodeCorrupt`。trusted 用 `@enumFromInt`。
 
-### `writeMatch` (`src/libs/regexp.zig:1564`)
-
-- **签名**：`fn writeMatch(bytecode: []const u8, total_capture_count: usize, captures: [*]const usize, result: *Match) void`。
-- **作用**：slot → `Match`（捕获 1..n，0 是整场）。
-- **实现**：slot 0 缺省当 0，slot 1 缺省取 start。有 named_groups 再扫尾部填 `name`。
-- **所有权 / 错误 / 调用**：名字借 bytecode。
 
 ### `parseHeader` (`src/libs/regexp.zig:1598`)
 
@@ -604,12 +568,6 @@ ECMAScript 正则编译器 + QuickJS `libregexp.c` 风格回溯执行器。上�
 - **实现**：`debug.assert` 长度。
 - **所有权 / 错误 / 调用**：本编译器产出。
 
-### `checkedAllocCount` (`src/libs/regexp.zig:1622`)
-
-- **签名**：`fn checkedAllocCount(header: REBytecodeHeader) !usize`。
-- **作用**：带溢出检查的 slot 数。
-- **实现**：capture 0 或 >255、register>255、mul/add 溢出 → corrupt。
-- **所有权 / 错误 / 调用**：checked exec。
 
 ### `decodeOp` (`src/libs/regexp.zig:1629`)
 

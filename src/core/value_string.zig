@@ -133,7 +133,7 @@ fn unsupportedValue(rt: *JSRuntime, buffer: *std.ArrayList(u8), policy: Policy) 
     return switch (policy.unsupported) {
         .object_tag => buffer.appendSlice(rt.memory.allocator, "[object Object]"),
         // qjs `JS_ToString` throws for Symbols rather than tagging them; the
-        // RegExp constructor legs (quickjs.c:47578,47627,47789) rely on it.
+        // RegExp constructor legs rely on it.
         .type_error => error.TypeError,
     };
 }

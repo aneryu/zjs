@@ -52,6 +52,7 @@
 | `src/core/gc_block_heap.zig` | 153 | [09-gc-block-heap.md](09-gc-block-heap.md) |
 | `src/core/gc_carrier.zig` | 28 | [09-gc-block-heap.md](09-gc-block-heap.md) |
 | `src/core/gc_conservative.zig` | 53 | [09-gc-conservative.md](09-gc-conservative.md) |
+| `src/core/gc_conservative_diag.zig` | 0 | [09-gc-conservative.md](09-gc-conservative.md) |
 | `src/core/gc_generation.zig` | 25 | [09-gc-trace.md](09-gc-trace.md) |
 | `src/core/gc_incremental.zig` | 8 | [09-gc-trace.md](09-gc-trace.md) |
 | `src/core/gc_mark_queue.zig` | 29 | [09-gc-trace.md](09-gc-trace.md) |
@@ -63,12 +64,12 @@
 | `src/core/gc_representation_constants.zig` | 0 | [09-gc-block-heap.md](09-gc-block-heap.md) |
 | `src/core/gc_space.zig` | 9 | [09-gc-block-heap.md](09-gc-block-heap.md) |
 | `src/core/gc_trace_stw.zig` | 91 | [09-gc-trace.md](09-gc-trace.md) |
+| `src/core/gc_visit.zig` | 0 | [09-gc-trace.md](09-gc-trace.md) |
 | `src/core/generator_state.zig` | 30 | [08-core-regexp-promise-varref.md](08-core-regexp-promise-varref.md) |
 | `src/core/global_slots.zig` | 3 | [10-core-runtime-containers.md](10-core-runtime-containers.md) |
 | `src/core/host_function.zig` | 40 | [08-core-function-native.md](08-core-function-native.md) |
 | `src/core/jobs.zig` | 51 | [10-core-runtime-jobs-module.md](10-core-runtime-jobs-module.md) |
 | `src/core/json.zig` | 10 | [06-core-value-number-bigint.md](06-core-value-number-bigint.md) |
-| `src/core/list.zig` | 7 | [10-core-runtime-containers.md](10-core-runtime-containers.md) |
 | `src/core/memory.zig` | 123 | [09-gc-memory.md](09-gc-memory.md) |
 | `src/core/module.zig` | 57 | [10-core-runtime-jobs-module.md](10-core-runtime-jobs-module.md) |
 | `src/core/module_auto_init.zig` | 0 | [08-core-property.md](08-core-property.md) |
@@ -133,6 +134,7 @@
 | `src/exec/internal_builtins.zig` | 3 | [17-globals-dispatch.md](17-globals-dispatch.md) |
 | `src/exec/iterator_builtin_ops.zig` | 4 | [15-iterator-builtin.md](15-iterator-builtin.md) |
 | `src/exec/iterator_ops.zig` | 114 | [15-iterator-ops-helpers.md](15-iterator-ops-helpers.md), [15-iterator-ops-protocol.md](15-iterator-ops-protocol.md) |
+| `src/exec/iterator_slots.zig` | 12 | [15-array-string-iterator.md](15-array-string-iterator.md) |
 | `src/exec/json_ops.zig` | 100 | [17-json-date-math.md](17-json-date-math.md) |
 | `src/exec/math_ops.zig` | 40 | [17-json-date-math.md](17-json-date-math.md) |
 | `src/exec/module.zig` | 60 | [16-module.md](16-module.md) |
@@ -171,7 +173,6 @@
 | `src/exec/vm_call.zig` | 40 | [12-vm-opcodes-call.md](12-vm-opcodes-call.md) |
 | `src/exec/vm_control.zig` | 20 | [12-vm-opcodes-control.md](12-vm-opcodes-control.md) |
 | `src/exec/vm_eval_module.zig` | 4 | [12-vm-opcodes-eval-module.md](12-vm-opcodes-eval-module.md) |
-| `src/exec/vm_exec_state.zig` | 0 | [11-vm-kernel.md](11-vm-kernel.md) |
 | `src/exec/vm_gen_async.zig` | 23 | [12-vm-opcodes-gen-async.md](12-vm-opcodes-gen-async.md) |
 | `src/exec/vm_literal.zig` | 18 | [12-vm-opcodes-literal.md](12-vm-opcodes-literal.md) |
 | `src/exec/vm_native.zig` | 5 | [12-vm-opcodes-native.md](12-vm-opcodes-native.md) |
@@ -188,6 +189,7 @@
 | `src/internal_root.zig` | 1 | [01-public-api-companions.md](01-public-api-companions.md) |
 | `src/js_context.zig` | 104 | [01-public-api-context.md](01-public-api-context.md) |
 | `src/lexer.zig` | 169 | [02-lexer.md](02-lexer.md) |
+| `src/token.zig` | 0 | [02-lexer.md](02-lexer.md) |
 | `src/libs/bigint.zig` | 79 | [19-bigint.md](19-bigint.md) |
 | `src/libs/number_format.zig` | 64 | [19-number-format.md](19-number-format.md) |
 | `src/libs/regexp.zig` | 217 | [19-regexp.md](19-regexp.md) |

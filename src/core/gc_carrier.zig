@@ -42,26 +42,10 @@ pub const LifecycleState = enum(u4) {
     raw_free_in_progress,
 };
 
-pub const StateMask = packed struct {
-    bits: u16 = 0,
+pub const StateMask = std.EnumSet(LifecycleState);
 
-    pub fn of(states: []const LifecycleState) StateMask {
-        var mask: u16 = 0;
-        for (states) |state| mask |= @as(u16, 1) << @intFromEnum(state);
-        return .{ .bits = mask };
-    }
-
-    pub fn publishedOnly() StateMask {
-        return of(&.{.published});
-    }
-
-    pub fn owned() StateMask {
-        return .{ .bits = ~@as(u16, 1) };
-    }
-
-    pub fn contains(self: StateMask, state: LifecycleState) bool {
-        return self.bits & (@as(u16, 1) << @intFromEnum(state)) != 0;
-    }
+pub const state_masks = struct {
+    pub const published_only: StateMask = .initOne(.published);
 };
 
 pub const ResolveError = error{

@@ -20,8 +20,7 @@ fn tableBytes(comptime name: []const u8, comptime elem_size: u32) []const u8 {
         }
         if (blobU32(4) != 1) @compileError("unicode tables.bin version mismatch");
         const n_tables = blobU32(8);
-        var i: usize = 0;
-        while (i < n_tables) : (i += 1) {
+        for (0..n_tables) |i| {
             const base = 12 + i * 16;
             const name_off = blobU32(base);
             const data_off = blobU32(base + 4);
@@ -539,8 +538,7 @@ fn validateNameTable(comptime label: []const u8, comptime table: []const u8, com
         for (entries, 0..) |entry, i| {
             if (entry[0].len == 0) @compileError(label ++ " name table has an empty alias");
             if (entry[1] >= group_count) @compileError(label ++ " alias points past the declared value count");
-            var j: usize = 0;
-            while (j < i) : (j += 1) {
+            for (0..i) |j| {
                 if (std.mem.eql(u8, entries[j][0], entry[0]) and entries[j][1] != entry[1]) {
                     @compileError(label ++ " name table has a duplicate alias for different values");
                 }
@@ -987,23 +985,18 @@ fn matchPropTable(code_point: u21, prop: Prop) bool {
 
 fn matchCaseMask(code_point: u21, case_mask: u32) bool {
     if (case_mask == 0) return false;
-    const tab_run_mask = [_]u32{
-        (1 << RUN_TYPE_U) | (1 << RUN_TYPE_UF) | (1 << RUN_TYPE_UL) | (1 << RUN_TYPE_LSU) | (1 << RUN_TYPE_U2L_399_EXT2) | (1 << RUN_TYPE_UF_D20) | (1 << RUN_TYPE_UF_D1_EXT) | (1 << RUN_TYPE_U_EXT) | (1 << RUN_TYPE_UF_EXT2) | (1 << RUN_TYPE_UF_EXT3),
-        (1 << RUN_TYPE_L) | (1 << RUN_TYPE_LF) | (1 << RUN_TYPE_UL) | (1 << RUN_TYPE_LSU) | (1 << RUN_TYPE_U2L_399_EXT2) | (1 << RUN_TYPE_LF_EXT) | (1 << RUN_TYPE_LF_EXT2),
-        (1 << RUN_TYPE_UF) | (1 << RUN_TYPE_LF) | (1 << RUN_TYPE_UL) | (1 << RUN_TYPE_LSU) | (1 << RUN_TYPE_U2L_399_EXT2) | (1 << RUN_TYPE_LF_EXT) | (1 << RUN_TYPE_LF_EXT2) | (1 << RUN_TYPE_UF_D20) | (1 << RUN_TYPE_UF_D1_EXT) | (1 << RUN_TYPE_UF_EXT2) | (1 << RUN_TYPE_UF_EXT3),
-    };
-    var mask: u32 = 0;
-    for (tab_run_mask, 0..) |run_mask, i| {
-        if (((case_mask >> @intCast(i)) & 1) != 0) mask |= run_mask;
+    var mask = std.EnumSet(RunType).initEmpty();
+    for (run_types_by_case, 0..) |run_types, i| {
+        if (((case_mask >> @intCast(i)) & 1) != 0) mask.setUnion(run_types);
     }
     for (case_conv_table1) |v| {
-        const typ = (v >> (32 - 17 - 7 - 4)) & 0xf;
-        const code = v >> (32 - 17);
-        const len = (v >> (32 - 17 - 7)) & 0x7f;
-        if (((mask >> @intCast(typ)) & 1) == 0) continue;
+        const run: CaseRun = @bitCast(v);
+        const code: u32 = run.code;
+        const len: u32 = run.len;
+        if (!mask.contains(run.typ)) continue;
         if (code_point >= code and code_point < code + len) {
-            switch (typ) {
-                RUN_TYPE_UL => {
+            switch (run.typ) {
+                .ul => {
                     if ((case_mask & CASE_U) != 0 and (case_mask & (CASE_L | CASE_F)) != 0) {
                         return true;
                     } else {
@@ -1011,7 +1004,7 @@ fn matchCaseMask(code_point: u21, case_mask: u32) bool {
                         return ((code_point - code) % 2) == offset;
                     }
                 },
-                RUN_TYPE_LSU => {
+                .lsu => {
                     if ((case_mask & CASE_U) != 0 and (case_mask & (CASE_L | CASE_F)) != 0) {
                         return true;
                     } else {
@@ -1339,7 +1332,7 @@ pub fn isIdentifierContinue(c: u21) bool {
 }
 
 pub fn caseConvert(c: u21, to_lower: bool) CaseMapping {
-    const raw = caseConv(c, if (to_lower) 1 else 0);
+    const raw = caseConv(c, if (to_lower) .lower else .upper);
     var codepoints: [case_mapping_max_len]u21 = undefined;
     for (raw.codepoints[0..raw.len], 0..) |cp, i| codepoints[i] = @intCast(cp);
     return .{ .codepoints = codepoints, .len = raw.len };
@@ -1355,14 +1348,14 @@ pub fn regexpCanonicalize(c: u21, is_unicode: bool) u21 {
         return c;
     }
 
-    if (findCaseEntry(c)) |entry| {
-        return @intCast(caseFoldingEntry(c, entry.idx, entry.value, is_unicode));
+    if (findRun(CaseRun, case_conv_table1, c)) |idx| {
+        return @intCast(caseFoldingEntry(c, idx, case_conv_table1[idx], is_unicode));
     }
     return c;
 }
 
 pub fn isCased(c: u21) bool {
-    if (findCaseEntry(c) != null) return true;
+    if (findRun(CaseRun, case_conv_table1, c) != null) return true;
     return isInTable(c, unicode_prop_Cased1_table[0..], unicode_prop_Cased1_index[0..]);
 }
 
@@ -1700,62 +1693,87 @@ const RawCaseMapping = struct {
     len: usize,
 };
 
-const CaseEntry = struct {
-    idx: usize,
-    value: u32,
+/// How a case-conversion run maps its code points (libunicode `RUN_TYPE_*`).
+const RunType = enum(u4) {
+    u = 0,
+    l = 1,
+    uf = 2,
+    lf = 3,
+    ul = 4,
+    lsu = 5,
+    u2l_399_ext2 = 6,
+    uf_d20 = 7,
+    uf_d1_ext = 8,
+    u_ext = 9,
+    lf_ext = 10,
+    uf_ext2 = 11,
+    lf_ext2 = 12,
+    uf_ext3 = 13,
 };
 
-const RUN_TYPE_U = 0;
-const RUN_TYPE_L = 1;
-const RUN_TYPE_UF = 2;
-const RUN_TYPE_LF = 3;
-const RUN_TYPE_UL = 4;
-const RUN_TYPE_LSU = 5;
-const RUN_TYPE_U2L_399_EXT2 = 6;
-const RUN_TYPE_UF_D20 = 7;
-const RUN_TYPE_UF_D1_EXT = 8;
-const RUN_TYPE_U_EXT = 9;
-const RUN_TYPE_LF_EXT = 10;
-const RUN_TYPE_UF_EXT2 = 11;
-const RUN_TYPE_LF_EXT2 = 12;
-const RUN_TYPE_UF_EXT3 = 13;
+/// One `case_conv_table1` entry: a run of `len` code points starting at
+/// `code`, mapped by `typ` with `data` as the high bits of its operand.
+const CaseRun = packed struct(u32) {
+    data: u4,
+    typ: RunType,
+    len: u7,
+    code: u17,
+};
 
-fn caseConv1(c: u32, conv_type: u32) u32 {
-    return caseConv(@intCast(c), conv_type).codepoints[0];
+/// The run types that can produce a match for, in order, CASE_U / CASE_L /
+/// CASE_F (the bits of a `case_mask`).
+const run_types_by_case = [3]std.EnumSet(RunType){
+    .initMany(&.{ .u, .uf, .ul, .lsu, .u2l_399_ext2, .uf_d20, .uf_d1_ext, .u_ext, .uf_ext2, .uf_ext3 }),
+    .initMany(&.{ .l, .lf, .ul, .lsu, .u2l_399_ext2, .lf_ext, .lf_ext2 }),
+    .initMany(&.{ .uf, .lf, .ul, .lsu, .u2l_399_ext2, .lf_ext, .lf_ext2, .uf_d20, .uf_d1_ext, .uf_ext2, .uf_ext3 }),
+};
+
+/// The three conversions libunicode's `lre_case_conv` selects with 0/1/2.
+pub const CaseConv = enum {
+    upper,
+    lower,
+    fold,
+};
+
+fn caseConv1(c: u32, conv: CaseConv) u32 {
+    return caseConv(@intCast(c), conv).codepoints[0];
 }
 
-fn caseConv(c_in: u21, conv_type: u32) RawCaseMapping {
+fn caseConv(c_in: u21, conv: CaseConv) RawCaseMapping {
     var c: u32 = c_in;
     if (c < 128) {
-        if (conv_type != 0) {
+        if (conv != .upper) {
             if (c >= 'A' and c <= 'Z') c = c - 'A' + 'a';
         } else {
             if (c >= 'a' and c <= 'z') c = c - 'a' + 'A';
         }
-    } else if (findCaseEntry(c_in)) |entry| {
-        return caseConvEntry(c, conv_type, entry.idx, entry.value);
+    } else if (findRun(CaseRun, case_conv_table1, c_in)) |idx| {
+        return caseConvEntry(c, conv, idx, case_conv_table1[idx]);
     }
     return .{ .codepoints = .{ c, undefined, undefined }, .len = 1 };
 }
 
-fn caseConvEntry(c_in: u32, conv_type: u32, idx: usize, v: u32) RawCaseMapping {
+fn caseConvEntry(c_in: u32, conv: CaseConv, idx: usize, v: u32) RawCaseMapping {
     var c = c_in;
     var res: [case_mapping_max_len]u32 = undefined;
-    const is_lower = conv_type != 0;
-    const typ = (v >> (32 - 17 - 7 - 4)) & 0xf;
-    const data1 = ((v & 0xf) << 8) | case_conv_table2[idx];
-    const code = v >> (32 - 17);
+    const is_lower = conv != .upper;
+    const run: CaseRun = @bitCast(v);
+    const typ = run.typ;
+    const data1 = (@as(u32, run.data) << 8) | case_conv_table2[idx];
+    const code: u32 = run.code;
     switch (typ) {
-        RUN_TYPE_U, RUN_TYPE_L, RUN_TYPE_UF, RUN_TYPE_LF => {
-            if (conv_type == (typ & 1) or (typ >= RUN_TYPE_UF and conv_type == 2)) {
-                c = c - code + (case_conv_table1[@intCast(data1)] >> (32 - 17));
+        .u, .l, .uf, .lf => {
+            const run_lowers = typ == .l or typ == .lf;
+            const folds = typ == .uf or typ == .lf;
+            if (conv == (if (run_lowers) CaseConv.lower else CaseConv.upper) or (folds and conv == .fold)) {
+                c = c - code + @as(CaseRun, @bitCast(case_conv_table1[@intCast(data1)])).code;
             }
         },
-        RUN_TYPE_UL => {
+        .ul => {
             const a = c - code;
             if ((a & 1) == (if (is_lower) @as(u32, 0) else 1)) c = (a ^ 1) + code;
         },
-        RUN_TYPE_LSU => {
+        .lsu => {
             const a = c - code;
             if (a == 1) {
                 c = if (is_lower) c + 1 else c - 1;
@@ -1763,7 +1781,7 @@ fn caseConvEntry(c_in: u32, conv_type: u32, idx: usize, v: u32) RawCaseMapping {
                 c = if (is_lower) c + 2 else c - 2;
             }
         },
-        RUN_TYPE_U2L_399_EXT2 => {
+        .u2l_399_ext2 => {
             if (!is_lower) {
                 res[0] = c - code + case_conv_ext[data1 >> 6];
                 res[1] = 0x399;
@@ -1771,42 +1789,42 @@ fn caseConvEntry(c_in: u32, conv_type: u32, idx: usize, v: u32) RawCaseMapping {
             }
             c = c - code + case_conv_ext[data1 & 0x3f];
         },
-        RUN_TYPE_UF_D20 => {
-            if (conv_type != 1) c = data1 + if (conv_type == 2) @as(u32, 0x20) else 0;
+        .uf_d20 => {
+            if (conv != .lower) c = data1 + if (conv == .fold) @as(u32, 0x20) else 0;
         },
-        RUN_TYPE_UF_D1_EXT => {
-            if (conv_type != 1) c = case_conv_ext[@intCast(data1)] + if (conv_type == 2) @as(u32, 1) else 0;
+        .uf_d1_ext => {
+            if (conv != .lower) c = case_conv_ext[@intCast(data1)] + if (conv == .fold) @as(u32, 1) else 0;
         },
-        RUN_TYPE_U_EXT, RUN_TYPE_LF_EXT => {
-            if (is_lower == (typ == RUN_TYPE_LF_EXT)) c = case_conv_ext[@intCast(data1)];
+        .u_ext, .lf_ext => {
+            if (is_lower == (typ == .lf_ext)) c = case_conv_ext[@intCast(data1)];
         },
-        RUN_TYPE_LF_EXT2 => {
+        .lf_ext2 => {
             if (is_lower) {
                 res[0] = c - code + case_conv_ext[data1 >> 6];
                 res[1] = case_conv_ext[data1 & 0x3f];
                 return .{ .codepoints = res, .len = 2 };
             }
         },
-        RUN_TYPE_UF_EXT2 => {
-            if (conv_type != 1) {
+        .uf_ext2 => {
+            if (conv != .lower) {
                 res[0] = c - code + case_conv_ext[data1 >> 6];
                 res[1] = case_conv_ext[data1 & 0x3f];
-                if (conv_type == 2) {
-                    res[0] = caseConv1(res[0], 1);
-                    res[1] = caseConv1(res[1], 1);
+                if (conv == .fold) {
+                    res[0] = caseConv1(res[0], .lower);
+                    res[1] = caseConv1(res[1], .lower);
                 }
                 return .{ .codepoints = res, .len = 2 };
             }
         },
-        else => {
-            if (conv_type != 1) {
+        .uf_ext3 => {
+            if (conv != .lower) {
                 res[0] = case_conv_ext[data1 >> 8];
                 res[1] = case_conv_ext[(data1 >> 4) & 0xf];
                 res[2] = case_conv_ext[data1 & 0xf];
-                if (conv_type == 2) {
-                    res[0] = caseConv1(res[0], 1);
-                    res[1] = caseConv1(res[1], 1);
-                    res[2] = caseConv1(res[2], 1);
+                if (conv == .fold) {
+                    res[0] = caseConv1(res[0], .lower);
+                    res[1] = caseConv1(res[1], .lower);
+                    res[2] = caseConv1(res[2], .lower);
                 }
                 return .{ .codepoints = res, .len = 3 };
             }
@@ -1819,7 +1837,7 @@ fn caseConvEntry(c_in: u32, conv_type: u32, idx: usize, v: u32) RawCaseMapping {
 fn caseFoldingEntry(c_in: u21, idx: usize, v: u32, is_unicode: bool) u32 {
     var c: u32 = c_in;
     if (is_unicode) {
-        const folded = caseConvEntry(c, 2, idx, v);
+        const folded = caseConvEntry(c, .fold, idx, v);
         if (folded.len == 1) {
             c = folded.codepoints[0];
         } else if (c == 0xfb06) {
@@ -1832,26 +1850,26 @@ fn caseFoldingEntry(c_in: u21, idx: usize, v: u32, is_unicode: bool) u32 {
     } else if (c < 128) {
         if (c >= 'a' and c <= 'z') c = c - 'a' + 'A';
     } else {
-        const folded = caseConvEntry(c, 0, idx, v);
+        const folded = caseConvEntry(c, .upper, idx, v);
         if (folded.len == 1 and folded.codepoints[0] >= 128) c = folded.codepoints[0];
     }
     return c;
 }
 
-fn findCaseEntry(c: u21) ?CaseEntry {
-    var idx_min: isize = 0;
-    var idx_max: isize = @intCast(case_conv_table1.len - 1);
-    while (idx_min <= idx_max) {
-        const idx: usize = @intCast(@divTrunc(idx_max + idx_min, 2));
-        const v = case_conv_table1[idx];
-        const code = v >> (32 - 17);
-        const len = (v >> (32 - 17 - 7)) & 0x7f;
-        if (c < code) {
-            idx_max = @as(isize, @intCast(idx)) - 1;
-        } else if (c >= code + len) {
-            idx_min = @as(isize, @intCast(idx)) + 1;
+/// Binary search a run table (entries decode as `Run`, sorted by `code`) for
+/// the run containing `c`; returns its index.
+fn findRun(comptime Run: type, table: []const u32, c: u32) ?usize {
+    var lo: usize = 0;
+    var hi: usize = table.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        const run: Run = @bitCast(table[mid]);
+        if (c < run.code) {
+            hi = mid;
+        } else if (c >= @as(u32, run.code) + run.len) {
+            lo = mid + 1;
         } else {
-            return .{ .idx = idx, .value = v };
+            return mid;
         }
     }
     return null;
@@ -2097,26 +2115,20 @@ fn decompTypeB(res: *[unicode_decomp_len_max]u32, c: u32, code: u32, d: []const 
     return l;
 }
 
+/// One `unicode_decomp_table1` entry: a run of `len` code points from `code`
+/// decomposed by rule `typ`; `compat` marks compatibility decompositions.
+const DecompRun = packed struct(u32) {
+    compat: bool,
+    typ: u6,
+    len: u7,
+    code: u18,
+};
+
 fn decompChar(res: *[unicode_decomp_len_max]u32, c: u32, is_compat1: bool) usize {
-    var idx_min: isize = 0;
-    var idx_max: isize = @intCast(unicode_decomp_table1.len - 1);
-    while (idx_min <= idx_max) {
-        const idx: usize = @intCast(@divTrunc(idx_max + idx_min, 2));
-        const v = unicode_decomp_table1[idx];
-        const code = v >> (32 - 18);
-        const len = (v >> (32 - 18 - 7)) & 0x7f;
-        if (c < code) {
-            idx_max = @as(isize, @intCast(idx)) - 1;
-        } else if (c >= code + len) {
-            idx_min = @as(isize, @intCast(idx)) + 1;
-        } else {
-            const is_compat = (v & 1) != 0;
-            if (!is_compat1 and is_compat) break;
-            const typ = (v >> (32 - 18 - 7 - 6)) & 0x3f;
-            return decompEntry(res, c, idx, code, len, typ);
-        }
-    }
-    return 0;
+    const idx = findRun(DecompRun, unicode_decomp_table1, c) orelse return 0;
+    const run: DecompRun = @bitCast(unicode_decomp_table1[idx]);
+    if (!is_compat1 and run.compat) return 0;
+    return decompEntry(res, c, idx, run.code, run.len, run.typ);
 }
 
 fn unicodeComposePair(c0: u32, c1: u32) u32 {
@@ -2127,13 +2139,11 @@ fn unicodeComposePair(c0: u32, c1: u32) u32 {
         const idx1 = unicode_comp_table[idx];
         const d_idx: usize = idx1 >> 6;
         const d_offset = idx1 & 0x3f;
-        const v = unicode_decomp_table1[d_idx];
-        const code = v >> (32 - 18);
-        const len = (v >> (32 - 18 - 7)) & 0x7f;
-        const typ = (v >> (32 - 18 - 7 - 6)) & 0x3f;
+        const run: DecompRun = @bitCast(unicode_decomp_table1[d_idx]);
+        const code: u32 = run.code;
         const ch = code + d_offset;
         var pair: [unicode_decomp_len_max]u32 = undefined;
-        _ = decompEntry(&pair, ch, d_idx, code, len, typ);
+        _ = decompEntry(&pair, ch, d_idx, code, run.len, run.typ);
         var d: i64 = @as(i64, c0) - @as(i64, pair[0]);
         if (d == 0) d = @as(i64, c1) - @as(i64, pair[1]);
         if (d < 0) {
@@ -2605,22 +2615,17 @@ fn unicodeCase1(allocator: std.mem.Allocator, case_mask: u32) std.mem.Allocator.
     if (case_mask == 0) return cr;
     try cr.points.ensureTotalCapacity(allocator, case_conv_table1.len * 2);
 
-    const tab_run_mask = [_]u32{
-        (1 << RUN_TYPE_U) | (1 << RUN_TYPE_UF) | (1 << RUN_TYPE_UL) | (1 << RUN_TYPE_LSU) | (1 << RUN_TYPE_U2L_399_EXT2) | (1 << RUN_TYPE_UF_D20) | (1 << RUN_TYPE_UF_D1_EXT) | (1 << RUN_TYPE_U_EXT) | (1 << RUN_TYPE_UF_EXT2) | (1 << RUN_TYPE_UF_EXT3),
-        (1 << RUN_TYPE_L) | (1 << RUN_TYPE_LF) | (1 << RUN_TYPE_UL) | (1 << RUN_TYPE_LSU) | (1 << RUN_TYPE_U2L_399_EXT2) | (1 << RUN_TYPE_LF_EXT) | (1 << RUN_TYPE_LF_EXT2),
-        (1 << RUN_TYPE_UF) | (1 << RUN_TYPE_LF) | (1 << RUN_TYPE_UL) | (1 << RUN_TYPE_LSU) | (1 << RUN_TYPE_U2L_399_EXT2) | (1 << RUN_TYPE_LF_EXT) | (1 << RUN_TYPE_LF_EXT2) | (1 << RUN_TYPE_UF_D20) | (1 << RUN_TYPE_UF_D1_EXT) | (1 << RUN_TYPE_UF_EXT2) | (1 << RUN_TYPE_UF_EXT3),
-    };
-    var mask: u32 = 0;
-    for (tab_run_mask, 0..) |run_mask, i| {
-        if (((case_mask >> @intCast(i)) & 1) != 0) mask |= run_mask;
+    var mask = std.EnumSet(RunType).initEmpty();
+    for (run_types_by_case, 0..) |run_types, i| {
+        if (((case_mask >> @intCast(i)) & 1) != 0) mask.setUnion(run_types);
     }
     for (case_conv_table1) |v| {
-        const typ = (v >> (32 - 17 - 7 - 4)) & 0xf;
-        var code = v >> (32 - 17);
-        const len = (v >> (32 - 17 - 7)) & 0x7f;
-        if (((mask >> @intCast(typ)) & 1) == 0) continue;
-        switch (typ) {
-            RUN_TYPE_UL => {
+        const run: CaseRun = @bitCast(v);
+        var code: u32 = run.code;
+        const len: u32 = run.len;
+        if (!mask.contains(run.typ)) continue;
+        switch (run.typ) {
+            .ul => {
                 if ((case_mask & CASE_U) != 0 and (case_mask & (CASE_L | CASE_F)) != 0) {
                     try cr.addInterval(code, code + len);
                 } else {
@@ -2629,7 +2634,7 @@ fn unicodeCase1(allocator: std.mem.Allocator, case_mask: u32) std.mem.Allocator.
                     while (i < len) : (i += 2) try cr.addInterval(code + i, code + i + 1);
                 }
             },
-            RUN_TYPE_LSU => {
+            .lsu => {
                 if ((case_mask & CASE_U) != 0 and (case_mask & (CASE_L | CASE_F)) != 0) {
                     try cr.addInterval(code, code + len);
                 } else {
@@ -2944,8 +2949,7 @@ fn emitZwjSequences(
         var mod_count: usize = 0;
         var hc_pos: ?usize = null;
 
-        var j: usize = 0;
-        while (j < len) : (j += 1) {
+        for (0..len) |j| {
             var code = @as(u16, unicode_rgi_emoji_zwj_sequence[i]) |
                 (@as(u16, unicode_rgi_emoji_zwj_sequence[i + 1]) << 8);
             i += 2;

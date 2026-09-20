@@ -4,7 +4,7 @@
 //! registry, lexical state, pending exception, and class prototypes form one
 //! realm and must be read together; `RealmRef` is the retained cross-job/
 //! callback handle, while raw context pointers are borrowed. QuickJS source
-//! map: `JSContext` realm fields at quickjs.c:500-557. Core owns this type;
+//! map: `JSContext` realm fields at quickjs.c. Core owns this type;
 //! exec/runtime/binding may consume it, but context must not import those
 //! higher layers.
 
@@ -104,7 +104,7 @@ pub const ActiveBacktraceSnapshot = struct {
 /// whole VM invocation — its inline Machine Entry chain (innermost first) then
 /// the L0 frame — so the backtrace walk indexes the live Entry chain directly
 /// instead of a per-call parallel node, faithful to qjs's single prev_frame
-/// walk (quickjs.c:7571).
+/// walk.
 pub const ActiveBacktraceResolver = *const fn (?*const anyopaque, usize) ?ActiveBacktraceSnapshot;
 
 pub const BacktraceLocation = struct {
@@ -392,7 +392,7 @@ pub const JSContext = struct {
     /// CLI host tracker list (js_std_promise_rejection_tracker's
     /// rejected_promise_list, quickjs-libc.c:4240-4269, driven by the
     /// per-promise is_handled transitions in fulfill_or_reject_promise
-    /// quickjs.c:53451 and perform_promise_then quickjs.c:54224): one entry
+    /// quickjs.c and perform_promise_then quickjs.c): one entry
     /// per promise, appended when it rejects unhandled, removed when that
     /// same promise later gets handled; every remaining entry is reported.
     unhandled_rejections: []UnhandledRejectionEntry = &.{},
@@ -744,11 +744,11 @@ pub const JSContext = struct {
         std.debug.assert(self.regexp_shape == null);
         std.debug.assert(self.regexp_result_shape == null);
 
-        const data_hidden = property.Flags.data(true, false, true).bits();
+        const data_hidden = property.Flags.data(.method).bits();
         const arguments_properties = [_]shape.InitialProperty{
             .{ .atom_id = atom.ids.length, .flags = data_hidden },
             .{ .atom_id = comptime atom.predefinedId("Symbol.iterator", .symbol).?, .flags = data_hidden },
-            .{ .atom_id = comptime atom.predefinedId("callee", .string).?, .flags = property.Flags.accessorFlags(false, false).bits() },
+            .{ .atom_id = comptime atom.predefinedId("callee", .string).?, .flags = property.Flags.accessorFlags(.none).bits() },
         };
         const mapped_arguments_properties = [_]shape.InitialProperty{
             .{ .atom_id = atom.ids.length, .flags = data_hidden },
@@ -756,15 +756,15 @@ pub const JSContext = struct {
             .{ .atom_id = comptime atom.predefinedId("callee", .string).?, .flags = data_hidden },
         };
         const regexp_properties = [_]shape.InitialProperty{
-            .{ .atom_id = atom.ids.lastIndex, .flags = property.Flags.data(true, false, false).bits() },
+            .{ .atom_id = atom.ids.lastIndex, .flags = property.Flags.data(.{ .writable = true }).bits() },
         };
         // Array length is scalar storage in zjs, so the array and RegExp-result
         // shapes omit QuickJS's ordinary length cell while preserving the same
         // realm-owned shape identities and named-property order.
         const regexp_result_properties = [_]shape.InitialProperty{
-            .{ .atom_id = comptime atom.predefinedId("index", .string).?, .flags = property.Flags.data(true, true, true).bits() },
-            .{ .atom_id = comptime atom.predefinedId("input", .string).?, .flags = property.Flags.data(true, true, true).bits() },
-            .{ .atom_id = comptime atom.predefinedId("groups", .string).?, .flags = property.Flags.data(true, true, true).bits() },
+            .{ .atom_id = comptime atom.predefinedId("index", .string).?, .flags = property.Flags.data(.all).bits() },
+            .{ .atom_id = comptime atom.predefinedId("input", .string).?, .flags = property.Flags.data(.all).bits() },
+            .{ .atom_id = comptime atom.predefinedId("groups", .string).?, .flags = property.Flags.data(.all).bits() },
         };
 
         const array_shape = try self.runtime.shapes.createInitialShape(array_prototype, &.{});
@@ -862,7 +862,6 @@ pub const JSContext = struct {
         self.global = null;
         self.clearIntrinsicBootstrapValues();
         if (self.regexp_legacy_statics) |legacy| {
-            legacy.destroy(rt);
             rt.destroyRuntime(object_mod.RegExpLegacyStatics, legacy);
             self.regexp_legacy_statics = null;
         }

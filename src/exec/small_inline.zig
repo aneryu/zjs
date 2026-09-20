@@ -1512,7 +1512,7 @@ pub fn realmApplyBuiltin(rt: *JSRuntime, global: *Object) ?*Object {
 }
 
 /// v1.5 fused create-this. Caller must already have polled at
-/// JS_CallConstructorInternal entry (quickjs.c:20817).
+/// JS_CallConstructorInternal entry.
 pub fn tryFusedConstructor(rt: *JSRuntime, site: *const InlinedSite, func: JSValue) ?JSValue {
     if (site.kind != .constructor) return null;
     const expected_obj = site.callee_obj orelse return null;

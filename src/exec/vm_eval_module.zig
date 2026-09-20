@@ -110,15 +110,15 @@ pub noinline fn dynamicImport(
         return;
     };
 
-    // Mirror qjs js_dynamic_import (quickjs.c:31073): the specifier ToString
+    // Mirror qjs js_dynamic_import: the specifier ToString
     // (above) plus options/with-attribute validation run synchronously; the
     // load/link/evaluate work is deferred to an enqueued job (JS_EnqueueJob
-    // quickjs.c:31155) that settles the returned pending promise, so the
+    // quickjs.c) that settles the returned pending promise, so the
     // statement after import() runs before any module side effect. All
     // options validation, attribute-string enforcement, and attribute
     // threading live in module_graph.evaluateImportCall.
     // Referrer = the stable active ScriptOrModule identity (spec
-    // GetActiveScriptOrModule, qjs JS_GetScriptOrModuleName quickjs.c:30854).
+    // GetActiveScriptOrModule, qjs JS_GetScriptOrModuleName quickjs.c).
     // Direct eval retains this separately from its "<eval>" display filename,
     // so escaped eval-created functions do not depend on live caller frames.
     const referrer_path = ctx.runtime.atoms.name(function.scriptOrModule()) orelse "";

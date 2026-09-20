@@ -5,8 +5,7 @@
 //! addresses: it frees its buffers but never frees the caller-owned values.
 //! TypedArray/ArrayBuffer machinery and VM-generic array algorithms stay behind
 //! their existing module seams. QuickJS mappings include reverse at
-//! quickjs.c:42497-42547, sort at quickjs.c:43017-43144, and concat at
-//! quickjs.c:41684-41739.
+//! quickjs.c, sort at quickjs.c, and concat at
 
 const core = @import("../core/root.zig");
 const iterator_ops = @import("iterator_ops.zig");
@@ -14,6 +13,7 @@ const core_array = @import("../core/array.zig");
 const buffer_ops = @import("buffer_ops.zig");
 const bignum = @import("../libs/bigint.zig");
 const std = @import("std");
+const iterator_slots = @import("iterator_slots.zig");
 const builtin_glue = @import("builtin_glue.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const exception_ops = @import("exception_ops.zig");
@@ -195,7 +195,7 @@ fn arrayEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) 
 
 fn arrayPushEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
     var entry = arrayEntryWithHandler(name, length, id, &arrayPushCall);
-    // exec_direct: js_call_c_function (quickjs.c:17563) has no env
+    // exec_direct: js_call_c_function has no env
     // side-channel. The NMFD assume terminal then blr's this ABI and
     // skips TLS / typed-cproto / arrayPushCall (charCodeAt/apply shape).
     entry.managed = &arrayPushDirect;
@@ -532,7 +532,7 @@ pub fn constructConstructorWithPrototype(rt: *core.JSRuntime, args: []const core
         const object = try core.Object.createArray(rt, prototype);
         errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
         // new Array(n): fast array with count=0, length=n, slots [0,n) holes.
-        // Faithful to js_array_constructor -> set_array_length (quickjs.c:9447-9455);
+        // Faithful to js_array_constructor -> set_array_length;
         // no sparse conversion. This is the holey-prealloc unblock.
         object.setArrayLength(length);
         return object.value();
@@ -561,7 +561,7 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, values: []const core.JSValue,
         // Array constructor arguments are fresh own data properties;
         // inherited indexed setters do not participate.
         if (try object.appendDenseArrayDefineIndex(rt, @intCast(index), atom_id, value)) continue;
-        try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, true, true, true));
+        try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, .all));
     }
     return object.value();
 }
@@ -673,11 +673,7 @@ fn methodCallWithRealm(realm: ?*core.RealmContext, rt: *core.JSRuntime, receiver
     };
 }
 
-const ArrayIteratorKind = enum(u8) {
-    key = 1,
-    value = 2,
-    key_value = 3,
-};
+const ArrayIteratorKind = iterator_slots.ArrayIteratorKind;
 
 fn arrayIterator(realm: *core.RealmContext, receiver: core.JSValue, kind: ArrayIteratorKind) !core.JSValue {
     const rt = realm.runtime;
@@ -691,7 +687,7 @@ fn arrayIterator(realm: *core.RealmContext, receiver: core.JSValue, kind: ArrayI
     errdefer core.Object.destroyFromHeader(rt, iterator.gcHeader());
     try iterator.setOptionalValueSlot(rt, iterator.iteratorTargetSlot(), receiver);
     iterator.iteratorIndexSlot().* = 0;
-    iterator.iteratorKindSlot().* = @intFromEnum(kind);
+    iterator_slots.setArrayIteratorKind(iterator, kind);
     return iterator.value();
 }
 
@@ -728,7 +724,7 @@ fn arrayIteratorNext(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue 
 
     const index: u32 = @intCast((iterator.iteratorIndexSlot().*));
     iterator.iteratorIndexSlot().* += 1;
-    const value = try arrayIteratorValue(rt, target, index, @enumFromInt((iterator.iteratorKindSlot().*)));
+    const value = try arrayIteratorValue(rt, target, index, iterator_slots.arrayIteratorKind(iterator));
     return iteratorResult(rt, value, false);
 }
 
@@ -740,8 +736,8 @@ fn arrayIteratorValue(rt: *core.JSRuntime, target: *core.Object, index: u32, kin
             const pair = try core.Object.createArray(rt, null);
             errdefer core.Object.destroyFromHeader(rt, pair.gcHeader());
             const value = if (buffer_ops.isTypedArrayObject(target)) try buffer_ops.typedArrayGetIndex(rt, target, index) else try target.getProperty(core.Atom.taggedInt(index));
-            try pair.defineOwnProperty(rt, core.Atom.taggedInt(0), core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, true, true));
-            try pair.defineOwnProperty(rt, core.Atom.taggedInt(1), core.Descriptor.data(value, true, true, true));
+            try pair.defineOwnProperty(rt, core.Atom.taggedInt(0), core.Descriptor.data(core.JSValue.int32(@intCast(index)), .all));
+            try pair.defineOwnProperty(rt, core.Atom.taggedInt(1), core.Descriptor.data(value, .all));
             break :blk pair.value();
         },
     };
@@ -758,13 +754,8 @@ test "array iteratorResult roots direct function bytecode value while creating r
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
-    var fb_published = false;
-    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-iterator-result-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
-    fb.publishFixtureNoFail(rt);
-    fb_published = true;
+    const fb = try core.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
 
     const result_value = core.JSValue.functionBytecode(&fb.header);
 
@@ -792,23 +783,13 @@ test "array splice roots direct function bytecode insert values while creating r
     const array = try core.Object.createArray(rt, null);
     const array_value = array.value();
 
-    const first_fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
-    var first_fb_published = false;
-    errdefer if (!first_fb_published) first_fb.destroyUnpublishedFixture(rt);
     const first_symbol_value = try rt.newSymbolValue("gc-array-splice-first-bytecode-symbol");
     const first_symbol = first_symbol_value.asSymbolAtom().?;
-    first_fb.cpoolSlice()[0] = first_symbol_value;
-    first_fb.publishFixtureNoFail(rt);
-    first_fb_published = true;
+    const first_fb = try core.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{first_symbol_value});
 
-    const second_fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
-    var second_fb_published = false;
-    errdefer if (!second_fb_published) second_fb.destroyUnpublishedFixture(rt);
     const second_symbol_value = try rt.newSymbolValue("gc-array-splice-second-bytecode-symbol");
     const second_symbol = second_symbol_value.asSymbolAtom().?;
-    second_fb.cpoolSlice()[0] = second_symbol_value;
-    second_fb.publishFixtureNoFail(rt);
-    second_fb_published = true;
+    const second_fb = try core.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{second_symbol_value});
 
     const first_value = core.JSValue.functionBytecode(&first_fb.header);
     const second_value = core.JSValue.functionBytecode(&second_fb.header);
@@ -843,13 +824,8 @@ test "array constructWithPrototype roots direct function bytecode elements while
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
-    var fb_published = false;
-    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-construct-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
-    fb.publishFixtureNoFail(rt);
-    fb_published = true;
+    const fb = try core.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
 
     const element_value = core.JSValue.functionBytecode(&fb.header);
     const values = [_]core.JSValue{element_value};
@@ -878,13 +854,8 @@ test "array concat roots direct function bytecode argument while creating output
     const receiver = try core.Object.createArray(rt, null);
     const receiver_value = receiver.value();
 
-    const fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
-    var fb_published = false;
-    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-concat-arg-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
-    fb.publishFixtureNoFail(rt);
-    fb_published = true;
+    const fb = try core.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
 
     const arg_value = core.JSValue.functionBytecode(&fb.header);
     const args = [_]core.JSValue{arg_value};
@@ -916,7 +887,7 @@ fn filterEven(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
         const item = try array.getProperty(core.Atom.taggedInt(index));
         if (item.as(.int)) |n| {
             if (@mod(n, 2) == 0) {
-                try out.defineOwnProperty(rt, core.Atom.taggedInt(out_index), core.Descriptor.data(item, true, true, true));
+                try out.defineOwnProperty(rt, core.Atom.taggedInt(out_index), core.Descriptor.data(item, .all));
                 out_index += 1;
             }
         }
@@ -1038,7 +1009,7 @@ fn slice(rt: *core.JSRuntime, array_value: core.JSValue, start_value: core.JSVal
     var index: u32 = @intCast(start);
     while (index < array.arrayLength()) : (index += 1) {
         const item = try array.getProperty(core.Atom.taggedInt(index));
-        try out.defineOwnProperty(rt, core.Atom.taggedInt(out_index), core.Descriptor.data(item, true, true, true));
+        try out.defineOwnProperty(rt, core.Atom.taggedInt(out_index), core.Descriptor.data(item, .all));
         out_index += 1;
     }
     return out.value();
@@ -1059,19 +1030,19 @@ fn splice(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSV
     var i: u32 = 0;
     while (i < delete_count) : (i += 1) {
         const item = try array.getProperty(core.Atom.taggedInt(start + i));
-        try removed.defineOwnProperty(rt, core.Atom.taggedInt(i), core.Descriptor.data(item, true, true, true));
+        try removed.defineOwnProperty(rt, core.Atom.taggedInt(i), core.Descriptor.data(item, .all));
     }
     const tail = try array.getProperty(core.Atom.taggedInt(start + delete_count));
-    try array.defineOwnProperty(rt, core.Atom.taggedInt(start), core.Descriptor.data(insert_a, true, true, true));
-    try array.defineOwnProperty(rt, core.Atom.taggedInt(start + 1), core.Descriptor.data(insert_b, true, true, true));
-    if (!tail.is(.undefined_value)) try array.defineOwnProperty(rt, core.Atom.taggedInt(start + 2), core.Descriptor.data(tail, true, true, true));
+    try array.defineOwnProperty(rt, core.Atom.taggedInt(start), core.Descriptor.data(insert_a, .all));
+    try array.defineOwnProperty(rt, core.Atom.taggedInt(start + 1), core.Descriptor.data(insert_b, .all));
+    if (!tail.is(.undefined_value)) try array.defineOwnProperty(rt, core.Atom.taggedInt(start + 2), core.Descriptor.data(tail, .all));
     return removed.value();
 }
 
 fn push(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSValue) !core.JSValue {
     const array = try expectArray(array_value);
     for (args) |item| {
-        try array.defineOwnProperty(rt, core.Atom.taggedInt(array.arrayLength()), core.Descriptor.data(item, true, true, true));
+        try array.defineOwnProperty(rt, core.Atom.taggedInt(array.arrayLength()), core.Descriptor.data(item, .all));
     }
     return core.JSValue.int32(@intCast(array.arrayLength()));
 }
@@ -1083,7 +1054,7 @@ fn pop(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     const key = core.Atom.taggedInt(index);
     const value = try array.getProperty(key);
     _ = array.deleteProperty(rt, key);
-    try array.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(@intCast(index)), true, false, false));
+    try array.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(@intCast(index)), .{ .writable = true }));
     return value;
 }
 
@@ -1098,15 +1069,15 @@ fn rewriteReversedPair(
     _ = array.deleteProperty(rt, lower_key);
     _ = array.deleteProperty(rt, upper_key);
     if (!upper_value.is(.undefined_value)) {
-        try array.defineOwnProperty(rt, lower_key, core.Descriptor.data(upper_value, true, true, true));
+        try array.defineOwnProperty(rt, lower_key, core.Descriptor.data(upper_value, .all));
     }
     if (!lower_value.is(.undefined_value)) {
-        try array.defineOwnProperty(rt, upper_key, core.Descriptor.data(lower_value, true, true, true));
+        try array.defineOwnProperty(rt, upper_key, core.Descriptor.data(lower_value, .all));
     }
 }
 
 /// Mirrors the indexed-property swap shape of QuickJS `js_array_reverse`
-/// (`quickjs.c:42497-42547`) for ordinary arrays.
+/// for ordinary arrays.
 fn reverse(rt: *core.JSRuntime, array_value: core.JSValue) !core.JSValue {
     const array = try expectArray(array_value);
     if (array.arrayLength() <= 1) return array_value;
@@ -1144,7 +1115,7 @@ const SortEntry = struct {
 };
 
 /// Mirrors the default string-order branch of QuickJS `js_array_sort`
-/// (`quickjs.c:43017-43144`) for ordinary arrays. Custom comparators remain
+/// for ordinary arrays. Custom comparators remain
 /// outside this narrow transitional path.
 fn sort(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSValue) !core.JSValue {
     if (args.len >= 1 and !args[0].is(.undefined_value)) return error.TypeError;
@@ -1204,7 +1175,7 @@ fn rewriteSortedArray(rt: *core.JSRuntime, array: *core.Object, entries: []const
         _ = array.deleteProperty(rt, core.Atom.taggedInt(index));
     }
     for (entries, 0..) |entry, out_index| {
-        try array.defineOwnProperty(rt, core.Atom.taggedInt(@intCast(out_index)), core.Descriptor.data(entry.value, true, true, true));
+        try array.defineOwnProperty(rt, core.Atom.taggedInt(@intCast(out_index)), core.Descriptor.data(entry.value, .all));
     }
 }
 
@@ -1225,7 +1196,7 @@ fn rewriteSortedArrayRooted(rt: *core.JSRuntime, array: *core.Object, entries: [
 }
 
 /// Mirrors the core shape of QuickJS `js_array_concat`
-/// (`quickjs.c:41684-41739`) for ordinary arrays: create a fresh array, then
+/// for ordinary arrays: create a fresh array, then
 /// append `this` and each array argument element-by-element.
 fn concat(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     var rooted_receiver = receiver;
@@ -1249,20 +1220,20 @@ fn concat(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValu
     for (rooted_args.values) |arg| {
         try concatAppend(rt, out, &next_index, arg);
     }
-    try out.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(@intCast(next_index)), true, false, false));
+    try out.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(@intCast(next_index)), .{ .writable = true }));
     return out.value();
 }
 
 fn concatAppend(rt: *core.JSRuntime, out: *core.Object, next_index: *u32, value: core.JSValue) !void {
     if (value.is(.object)) {
-        const header = value.refHeader() orelse unreachable;
+        const header = value.refHeader().?;
         const object = core.Object.fromHeader(header);
         if (object.isArray()) {
             var index: u32 = 0;
             while (index < object.arrayLength()) : (index += 1) {
                 const item = try object.getProperty(core.Atom.taggedInt(index));
                 if (!item.is(.undefined_value)) {
-                    try out.defineOwnProperty(rt, core.Atom.taggedInt(next_index.*), core.Descriptor.data(item, true, true, true));
+                    try out.defineOwnProperty(rt, core.Atom.taggedInt(next_index.*), core.Descriptor.data(item, .all));
                 }
                 next_index.* += 1;
             }
@@ -1270,7 +1241,7 @@ fn concatAppend(rt: *core.JSRuntime, out: *core.Object, next_index: *u32, value:
         }
     }
 
-    try out.defineOwnProperty(rt, core.Atom.taggedInt(next_index.*), core.Descriptor.data(value, true, true, true));
+    try out.defineOwnProperty(rt, core.Atom.taggedInt(next_index.*), core.Descriptor.data(value, .all));
     next_index.* += 1;
 }
 

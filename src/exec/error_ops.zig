@@ -5,7 +5,6 @@
 //! Receiver and arguments are borrowed; returned JSValues are owned. Callable
 //! realm selection stays atomic through `builtin_dispatch`, matching the
 //! QuickJS Error prototype table and `js_error_toString` at
-//! quickjs.c:41515-41548.
 
 const core = @import("../core/root.zig");
 const error_stack_ops = @import("error_stack_ops.zig");

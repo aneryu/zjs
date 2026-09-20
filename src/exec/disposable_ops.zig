@@ -646,7 +646,7 @@ pub fn asyncDisposableStackAwaitValue(
     const on_rejected = try asyncDisposableStackContinuation(ctx.runtime, global, stack, true);
 
     // Same await-shaped internal attach as qjs js_async_function_resume
-    // (quickjs.c:21268-21290): perform_promise_then, never a .then read.
+    //: perform_promise_then, never a.then read.
     try performPromiseThen(ctx, output, global, awaited, on_fulfilled, on_rejected, core.JSValue.undefinedValue(), core.JSValue.undefinedValue());
 }
 

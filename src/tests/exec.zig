@@ -68,7 +68,7 @@ test "dense parameter arrays spread retains CreateDataProperty constraints" {
         switch (mode) {
             0 => target.flags.extensible = false,
             1 => target.flags.length_writable = false,
-            else => try target.defineOwnProperty(js.runtime, core.Atom.taggedInt(0), core.Descriptor.data(core.JSValue.int32(42), false, true, false)),
+            else => try target.defineOwnProperty(js.runtime, core.Atom.taggedInt(0), core.Descriptor.data(core.JSValue.int32(42), .{ .enumerable = true })),
         }
         try std.testing.expectError(error.TypeError, engine.exec.call_runtime.appendSpreadValuesEnumerate(js.context, null, js.context.global.?, target, source, 0));
         try std.testing.expectEqual(@as(u32, if (mode == 2) 1 else 0), target.arrayLength());
@@ -3209,7 +3209,7 @@ fn crossRealmNativeProbe(ptr: *anyopaque, call: core.host_function.ExternalCall)
     try global.defineOwnProperty(
         call.realm.runtime,
         key,
-        core.Descriptor.data(core.JSValue.int32(1), true, true, true),
+        core.Descriptor.data(core.JSValue.int32(1), .all),
     );
     return error.TypeError;
 }
@@ -3563,7 +3563,7 @@ test "ordinary global closure selector preserves QuickJS cell waterfall and owne
     try std.testing.expectEqual(core.VarRef.fromValue(global_varref).?, core.VarRef.fromValue(global_selected).?);
 
     const data_name = try rt.internAtom("__selectorDataParks");
-    try global.defineOwnProperty(rt, data_name, core.Descriptor.data(core.JSValue.int32(41), true, true, true));
+    try global.defineOwnProperty(rt, data_name, core.Descriptor.data(core.JSValue.int32(41), .all));
     const parked_first = try engine.exec.call_runtime.selectOrdinaryGlobalClosureCell(ctx, global, data_name);
     const parked_cell = core.VarRef.fromValue(parked_first) orelse return error.TestExpectedEqual;
     try std.testing.expect(parked_cell.varRefValue().is(.uninitialized));
@@ -3591,7 +3591,7 @@ test "ordinary global closure selector preserves QuickJS cell waterfall and owne
     try global.definePerformanceAutoInitProperty(
         rt,
         auto_name,
-        core.property.Flags.data(true, false, true),
+        core.property.Flags.data(.method),
         global,
     );
     const auto_index = global.findProperty(auto_name) orelse return error.TestExpectedEqual;
@@ -3873,7 +3873,7 @@ test "var-ref growth rejects an owned composite frame slab" {
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer function.deinit(rt);
 
-    const slab = try frame_mod.FrameSlab.allocHeap(&rt.memory, 0, 0, 0, 1, 1, 0);
+    const slab = try frame_mod.FrameSlab.allocHeap(&rt.memory, .{ .stack = 1, .var_refs = 1 });
     slab.stack[0] = core.JSValue.undefinedValue();
     slab.var_refs[0] = try core.VarRef.createClosed(rt, core.JSValue.int32(7));
     var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
@@ -3898,7 +3898,7 @@ test "local growth rejects an owned composite frame slab" {
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     defer function.deinit(rt);
 
-    const slab = try frame_mod.FrameSlab.allocHeap(&rt.memory, 0, 0, 1, 1, 0, 0);
+    const slab = try frame_mod.FrameSlab.allocHeap(&rt.memory, .{ .locals = 1, .stack = 1 });
     slab.locals[0] = core.JSValue.int32(3);
     slab.stack[0] = core.JSValue.undefinedValue();
     var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
@@ -4187,7 +4187,7 @@ test "heap bigint multiplication still compacts a short-representable product" {
     // range: the parser only folds literals inside the i32 range while short
     // BigInts cover all of i64, so both operands below are one-limb heap
     // BigInts whose product still fits a short. qjs compacts every
-    // multiplication result (JS_CompactBigInt, quickjs.c:15054), so the
+    // multiplication result (JS_CompactBigInt, quickjs.c), so the
     // single-allocation FAM path -- which does not collapse -- must decline
     // this shape. This is the regression guard for that gate: if a future
     // parser or literal-folding change makes the eligibility predicate
@@ -4887,7 +4887,7 @@ test "bound function call skips zero-length combined args allocation" {
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
-    const target = try engine.exec.closure.create(rt, 13, 0, 0, 0);
+    const target = try engine.exec.closure.create(rt, .returns_undefined);
     const bound = try core.Object.create(rt, core.class.ids.bound_function, null);
     bound.boundTargetSlot().* = target;
     bound.boundThisSlot().* = core.JSValue.undefinedValue();
@@ -5016,7 +5016,7 @@ test "closure helper stores closure state outside the VM" {
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const closure_value = try engine.exec.closure.create(rt, 2, 0, 0, 0);
+    const closure_value = try engine.exec.closure.create(rt, .counter);
     const first = try engine.exec.closure.call(rt, closure_value, &.{}, &.{});
     const second = try engine.exec.closure.call(rt, closure_value, &.{}, &.{});
 
@@ -5214,7 +5214,7 @@ test "typed array prototype chain get reads canonical numeric indices" {
     defer js.deinit();
 
     // S1: TA-as-proto [[Get]] (PROTO-WALK-EXOTIC-AUDIT). qjs
-    // JS_GetPropertyInternal (quickjs.c:8296-8303) consults is_exotic+fast_array
+    // JS_GetPropertyInternal consults is_exotic+fast_array
     // at every proto link, not only when the receiver is the TypedArray.
     const result = try js.eval(
         \\const ta = new Uint8Array([7, 8]);
@@ -5515,7 +5515,7 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
     try std.testing.expectEqual(@as(f64, 8.0), engine.exec.value_ops.numberValue(memo_result).?);
 
     const fake_key = try rt.internAtom("fake");
-    try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, true, false, true));
+    try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, .method));
 
     var parsed = try engine.parser.compile(.{ .realm = ctx }, "print(fake(-8));", .{ .mode = .script, .filename = "native-record-dispatch.js" });
     defer parsed.deinit();
@@ -5524,7 +5524,7 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
     var output_buffer: [16]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
     try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("8\n", output.buffered());
 }
@@ -7084,9 +7084,9 @@ test "number native builtin records cover static and prototype dispatch" {
     try std.testing.expect(proto_string.eqlBytes("1.25"));
 
     const fake_static_key = try rt.internAtom("fakeStatic");
-    try global.defineOwnProperty(rt, fake_static_key, core.Descriptor.data(fake_static, true, false, true));
+    try global.defineOwnProperty(rt, fake_static_key, core.Descriptor.data(fake_static, .method));
     const fake_proto_key = try rt.internAtom("fakeProto");
-    try global.defineOwnProperty(rt, fake_proto_key, core.Descriptor.data(fake_proto, true, false, true));
+    try global.defineOwnProperty(rt, fake_proto_key, core.Descriptor.data(fake_proto, .method));
 
     var parsed = try engine.parser.compile(.{ .realm = ctx }, "print(fakeStatic(3.5)); print(fakeProto.call(1.25, 2));", .{ .mode = .script, .filename = "number-native-record-dispatch.js" });
     defer parsed.deinit();
@@ -7095,7 +7095,7 @@ test "number native builtin records cover static and prototype dispatch" {
     var output_buffer: [32]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
     try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("false\n1.25\n", output.buffered());
 }
@@ -7129,7 +7129,7 @@ test "string static native builtin records ignore dispatch names" {
     try std.testing.expect(result_string.eqlBytes("A"));
 
     const fake_key = try rt.internAtom("fakeStringStatic");
-    try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, true, false, true));
+    try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, .method));
 
     var parsed = try engine.parser.compile(.{ .realm = ctx }, "print(fakeStringStatic({ valueOf: function(){ return 0x42; } }));", .{ .mode = .script, .filename = "string-static-native-record-dispatch.js" });
     defer parsed.deinit();
@@ -7138,7 +7138,7 @@ test "string static native builtin records ignore dispatch names" {
     var output_buffer: [8]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
     try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("B\n", output.buffered());
 }
@@ -7175,7 +7175,7 @@ test "string prototype native builtin records ignore dispatch names" {
     try std.testing.expectEqual(@as(i32, 4), direct_result.as(.int).?);
 
     const fake_key = try rt.internAtom("fakeStringIndexOf");
-    try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, true, false, true));
+    try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, .method));
 
     var parsed = try engine.parser.compile(.{ .realm = ctx }, "print(fakeStringIndexOf.call('banana', 'n', { valueOf: function(){ return 3; } }));", .{ .mode = .script, .filename = "string-prototype-native-record-dispatch.js" });
     defer parsed.deinit();
@@ -7184,7 +7184,7 @@ test "string prototype native builtin records ignore dispatch names" {
     var output_buffer: [8]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
     try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("4\n", output.buffered());
 }
@@ -7253,7 +7253,7 @@ test "date static native builtin records ignore dispatch names" {
     try std.testing.expectEqual(@as(f64, 1704067200000), engine.exec.value_ops.numberValue(result).?);
 
     const fake_key = try rt.internAtom("fakeDateUTC");
-    try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, true, false, true));
+    try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, .method));
 
     var parsed = try engine.parser.compile(.{ .realm = ctx }, "print(fakeDateUTC({ valueOf: function(){ return 2024; } }, 0, 1));", .{ .mode = .script, .filename = "date-static-native-record-dispatch.js" });
     defer parsed.deinit();
@@ -7262,7 +7262,7 @@ test "date static native builtin records ignore dispatch names" {
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
     try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("1704067200000\n", output.buffered());
 }
@@ -7288,7 +7288,7 @@ test "date constructor native builtin records ignore dispatch names" {
     try std.testing.expectEqualStrings("notDateConstructor", dispatch_name);
 
     const prototype_value = try date_object.getProperty(core.atom.ids.prototype);
-    try fake_object.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(prototype_value, true, false, true));
+    try fake_object.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(prototype_value, .method));
 
     const call_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, core.JSValue.undefinedValue(), fake, &.{});
     var call_buffer = std.ArrayList(u8).empty;
@@ -7299,11 +7299,11 @@ test "date constructor native builtin records ignore dispatch names" {
         std.mem.indexOf(u8, call_buffer.items, "GMT-") != null);
 
     const construct_result = try engine.exec.construct.constructValue(ctx, fake, &.{core.JSValue.int32(1)}, &.{});
-    const construct_ms = try engine.exec.date_ops.methodCall(rt, construct_result, 1);
+    const construct_ms = try engine.exec.date_ops.methodCall(rt, construct_result, .get_time);
     try std.testing.expectEqual(@as(f64, 1), engine.exec.value_ops.numberValue(construct_ms).?);
 
     const fake_key = try rt.internAtom("fakeDateConstructor");
-    try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, true, false, true));
+    try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, .method));
 
     var parsed = try engine.parser.compile(.{ .realm = ctx },
         \\const d = new fakeDateConstructor({ valueOf: function(){ return 2; } });
@@ -7318,7 +7318,7 @@ test "date constructor native builtin records ignore dispatch names" {
     var output_buffer: [64]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
     try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("true\n2\ntrue\n3\n", output.buffered());
 }
@@ -7340,10 +7340,10 @@ test "constructValue AggregateError releases copied errors array owner" {
     const constructor = try engine.exec.construct.functionObject(ctx, name);
 
     const source = try core.Object.createArray(rt, null);
-    try source.defineOwnProperty(rt, core.Atom.taggedInt(0), core.Descriptor.data(core.JSValue.int32(1), true, true, true));
-    try source.defineOwnProperty(rt, core.Atom.taggedInt(1), core.Descriptor.data(core.JSValue.int32(2), true, true, true));
+    try source.defineOwnProperty(rt, core.Atom.taggedInt(0), core.Descriptor.data(core.JSValue.int32(1), .all));
+    try source.defineOwnProperty(rt, core.Atom.taggedInt(1), core.Descriptor.data(core.JSValue.int32(2), .all));
     source.setArrayLength(2);
-    try source.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(2), true, false, false));
+    try source.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(2), .{ .writable = true }));
 
     // `constructor` and `source` are held only by Zig locals (no heap edge).
     // RC's cycle removal never touched rc-held stack objects, but the tracing
@@ -7393,7 +7393,7 @@ test "date prototype native builtin records ignore dispatch names" {
     try std.testing.expectEqual(@as(f64, 1), engine.exec.value_ops.numberValue(direct_result).?);
 
     const fake_key = try rt.internAtom("fakeDateSetTime");
-    try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, true, false, true));
+    try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, .method));
 
     var parsed = try engine.parser.compile(.{ .realm = ctx }, "const d = new Date(0); print(fakeDateSetTime.call(d, { valueOf: function(){ return 1704067200000; } })); print(d.getTime());", .{ .mode = .script, .filename = "date-prototype-native-record-dispatch.js" });
     defer parsed.deinit();
@@ -7402,7 +7402,7 @@ test "date prototype native builtin records ignore dispatch names" {
     var output_buffer: [48]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
     try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("1704067200000\n1704067200000\n", output.buffered());
 }
@@ -7452,9 +7452,9 @@ test "array static native builtin records ignore dispatch names" {
     try std.testing.expectEqual(@as(u32, 1), direct_from_array.arrayLength());
 
     const fake_is_array_key = try rt.internAtom("fakeArrayIsArray");
-    try global.defineOwnProperty(rt, fake_is_array_key, core.Descriptor.data(fake_is_array, true, false, true));
+    try global.defineOwnProperty(rt, fake_is_array_key, core.Descriptor.data(fake_is_array, .method));
     const fake_from_key = try rt.internAtom("fakeArrayFrom");
-    try global.defineOwnProperty(rt, fake_from_key, core.Descriptor.data(fake_from, true, false, true));
+    try global.defineOwnProperty(rt, fake_from_key, core.Descriptor.data(fake_from, .method));
 
     var parsed = try engine.parser.compile(.{ .realm = ctx }, "print(fakeArrayIsArray([])); print(fakeArrayFrom.call(Array, [7, 8]).join(','));", .{ .mode = .script, .filename = "array-static-native-record-dispatch.js" });
     defer parsed.deinit();
@@ -7463,7 +7463,7 @@ test "array static native builtin records ignore dispatch names" {
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
     try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("true\n7,8\n", output.buffered());
 }
@@ -7532,9 +7532,9 @@ test "array prototype native builtin records ignore dispatch names" {
     fake_values_object.nativeFunctionIdSlot().* = values_object.nativeFunctionIdSlot().*;
 
     const fake_map_key = try rt.internAtom("fakeArrayMap");
-    try global.defineOwnProperty(rt, fake_map_key, core.Descriptor.data(fake_map, true, false, true));
+    try global.defineOwnProperty(rt, fake_map_key, core.Descriptor.data(fake_map, .method));
     const fake_values_key = try rt.internAtom("fakeArrayValues");
-    try global.defineOwnProperty(rt, fake_values_key, core.Descriptor.data(fake_values, true, false, true));
+    try global.defineOwnProperty(rt, fake_values_key, core.Descriptor.data(fake_values, .method));
 
     var parsed = try engine.parser.compile(.{ .realm = ctx }, "print(fakeArrayMap.call([1,2], function(v){ return v + 1; }).join(',')); const it = fakeArrayValues.call([9]); print(it.next().value);", .{ .mode = .script, .filename = "array-prototype-native-record-dispatch.js" });
     defer parsed.deinit();
@@ -7543,7 +7543,7 @@ test "array prototype native builtin records ignore dispatch names" {
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
     try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("2,3\n9\n", output.buffered());
 }
@@ -7619,15 +7619,15 @@ test "collection native builtin records ignore dispatch names" {
     fake_set_values_object.nativeFunctionIdSlot().* = set_values_object.nativeFunctionIdSlot().*;
 
     const fake_map_set_key = try rt.internAtom("fakeMapSet");
-    try global.defineOwnProperty(rt, fake_map_set_key, core.Descriptor.data(fake_map_set, true, false, true));
+    try global.defineOwnProperty(rt, fake_map_set_key, core.Descriptor.data(fake_map_set, .method));
     const fake_group_by_key = try rt.internAtom("fakeMapGroupBy");
-    try global.defineOwnProperty(rt, fake_group_by_key, core.Descriptor.data(fake_group_by, true, false, true));
+    try global.defineOwnProperty(rt, fake_group_by_key, core.Descriptor.data(fake_group_by, .method));
     const fake_map_for_each_key = try rt.internAtom("fakeMapForEach");
-    try global.defineOwnProperty(rt, fake_map_for_each_key, core.Descriptor.data(fake_map_for_each, true, false, true));
+    try global.defineOwnProperty(rt, fake_map_for_each_key, core.Descriptor.data(fake_map_for_each, .method));
     const fake_set_union_key = try rt.internAtom("fakeSetUnion");
-    try global.defineOwnProperty(rt, fake_set_union_key, core.Descriptor.data(fake_set_union, true, false, true));
+    try global.defineOwnProperty(rt, fake_set_union_key, core.Descriptor.data(fake_set_union, .method));
     const fake_set_values_key = try rt.internAtom("fakeSetValues");
-    try global.defineOwnProperty(rt, fake_set_values_key, core.Descriptor.data(fake_set_values, true, false, true));
+    try global.defineOwnProperty(rt, fake_set_values_key, core.Descriptor.data(fake_set_values, .method));
 
     var parsed = try engine.parser.compile(.{ .realm = ctx }, "const grouped = fakeMapGroupBy.call(Map, ['aa', 'b'], function(v) { return v.length; }); print(grouped.get(2)[0]); const m = new Map(); fakeMapSet.call(m, 'a', 1); print(m.get('a')); fakeMapForEach.call(m, function(value, key) { print(key + ':' + value); }); const left = new Set(); left.add(1); const right = new Set(); right.add(2); const union = fakeSetUnion.call(left, right); print(Array.from(fakeSetValues.call(union)).join(','));", .{ .mode = .script, .filename = "collection-native-record-dispatch.js" });
     defer parsed.deinit();
@@ -7636,7 +7636,7 @@ test "collection native builtin records ignore dispatch names" {
     var output_buffer: [32]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
     try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("aa\n1\na:1\n1,2\n", output.buffered());
 }
@@ -7729,19 +7729,19 @@ test "buffer native builtin records ignore dispatch names" {
     try std.testing.expectEqual(@as(?i32, 6), direct_length_result.as(.int));
 
     const fake_is_view_key = try rt.internAtom("fakeArrayBufferIsView");
-    try global.defineOwnProperty(rt, fake_is_view_key, core.Descriptor.data(fake_is_view, true, false, true));
+    try global.defineOwnProperty(rt, fake_is_view_key, core.Descriptor.data(fake_is_view, .method));
     const fake_array_buffer_slice_key = try rt.internAtom("fakeArrayBufferSlice");
-    try global.defineOwnProperty(rt, fake_array_buffer_slice_key, core.Descriptor.data(fake_array_buffer_slice, true, false, true));
+    try global.defineOwnProperty(rt, fake_array_buffer_slice_key, core.Descriptor.data(fake_array_buffer_slice, .method));
     const fake_array_buffer_byte_length_key = try rt.internAtom("fakeArrayBufferByteLength");
-    try global.defineOwnProperty(rt, fake_array_buffer_byte_length_key, core.Descriptor.data(fake_array_buffer_byte_length, true, false, true));
+    try global.defineOwnProperty(rt, fake_array_buffer_byte_length_key, core.Descriptor.data(fake_array_buffer_byte_length, .method));
     const fake_shared_array_buffer_slice_key = try rt.internAtom("fakeSharedArrayBufferSlice");
-    try global.defineOwnProperty(rt, fake_shared_array_buffer_slice_key, core.Descriptor.data(fake_shared_array_buffer_slice, true, false, true));
+    try global.defineOwnProperty(rt, fake_shared_array_buffer_slice_key, core.Descriptor.data(fake_shared_array_buffer_slice, .method));
     const fake_data_view_get_uint8_key = try rt.internAtom("fakeDataViewGetUint8");
-    try global.defineOwnProperty(rt, fake_data_view_get_uint8_key, core.Descriptor.data(fake_data_view_get_uint8, true, false, true));
+    try global.defineOwnProperty(rt, fake_data_view_get_uint8_key, core.Descriptor.data(fake_data_view_get_uint8, .method));
     const fake_data_view_set_uint8_key = try rt.internAtom("fakeDataViewSetUint8");
-    try global.defineOwnProperty(rt, fake_data_view_set_uint8_key, core.Descriptor.data(fake_data_view_set_uint8, true, false, true));
+    try global.defineOwnProperty(rt, fake_data_view_set_uint8_key, core.Descriptor.data(fake_data_view_set_uint8, .method));
     const fake_data_view_byte_length_key = try rt.internAtom("fakeDataViewByteLength");
-    try global.defineOwnProperty(rt, fake_data_view_byte_length_key, core.Descriptor.data(fake_data_view_byte_length, true, false, true));
+    try global.defineOwnProperty(rt, fake_data_view_byte_length_key, core.Descriptor.data(fake_data_view_byte_length, .method));
 
     var parsed = try engine.parser.compile(.{ .realm = ctx },
         \\const b = new ArrayBuffer(6);
@@ -7761,7 +7761,7 @@ test "buffer native builtin records ignore dispatch names" {
     var output_buffer: [40]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
     try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("true\n3\n6\n2\n77\n6\n", output.buffered());
 }
@@ -7809,18 +7809,18 @@ test "typed array accessor native builtin records ignore dispatch names" {
     try std.testing.expectEqualStrings("notTypedArrayByteLength", dispatch_name);
 
     const direct_buffer = try engine.exec.buffer_ops.arrayBufferConstructArgs(rt, &.{core.JSValue.int32(8)}, null);
-    const direct_typed_array = try engine.exec.buffer_ops.typedArrayConstructWithOptions(rt, 1, 2, direct_buffer, &.{direct_buffer}, prototype_object);
+    const direct_typed_array = try engine.exec.buffer_ops.typedArrayConstructWithOptions(rt, 1, .uint8, direct_buffer, &.{direct_buffer}, prototype_object);
     const direct_byte_length = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_typed_array, fake_byte_length, &.{});
     try std.testing.expectEqual(@as(?i32, 8), direct_byte_length.as(.int));
     const direct_length = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_typed_array, fake_length, &.{});
     try std.testing.expectEqual(@as(?i32, 8), direct_length.as(.int));
 
     const fake_byte_length_key = try rt.internAtom("fakeTypedArrayByteLength");
-    try global.defineOwnProperty(rt, fake_byte_length_key, core.Descriptor.data(fake_byte_length, true, false, true));
+    try global.defineOwnProperty(rt, fake_byte_length_key, core.Descriptor.data(fake_byte_length, .method));
     const fake_length_key = try rt.internAtom("fakeTypedArrayLength");
-    try global.defineOwnProperty(rt, fake_length_key, core.Descriptor.data(fake_length, true, false, true));
+    try global.defineOwnProperty(rt, fake_length_key, core.Descriptor.data(fake_length, .method));
     const fake_tag_key = try rt.internAtom("fakeTypedArrayTag");
-    try global.defineOwnProperty(rt, fake_tag_key, core.Descriptor.data(fake_tag, true, false, true));
+    try global.defineOwnProperty(rt, fake_tag_key, core.Descriptor.data(fake_tag, .method));
 
     var parsed = try engine.parser.compile(.{ .realm = ctx },
         \\const ta = new Uint8Array([1, 2, 3, 4]);
@@ -7835,7 +7835,7 @@ test "typed array accessor native builtin records ignore dispatch names" {
     var output_buffer: [32]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
     try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("4\n4\nUint8Array\nundefined\n", output.buffered());
 }
@@ -7871,7 +7871,7 @@ test "regexp static native builtin records ignore dispatch names" {
     try std.testing.expect(direct_result_string.eqlBytes("\\."));
 
     const fake_key = try rt.internAtom("fakeRegExpEscape");
-    try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, true, false, true));
+    try global.defineOwnProperty(rt, fake_key, core.Descriptor.data(fake, .method));
 
     var parsed = try engine.parser.compile(.{ .realm = ctx }, "print(fakeRegExpEscape('.')); print(fakeRegExpEscape('a+b'));", .{ .mode = .script, .filename = "regexp-static-native-record-dispatch.js" });
     defer parsed.deinit();
@@ -7880,7 +7880,7 @@ test "regexp static native builtin records ignore dispatch names" {
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
     try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("\\.\n\\x61\\+b\n", output.buffered());
 }
@@ -7957,11 +7957,11 @@ test "regexp prototype native builtin records ignore dispatch names" {
     try std.testing.expect(to_string_result_string.eqlBytes("/a/"));
 
     const fake_exec_key = try rt.internAtom("fakeRegExpExec");
-    try global.defineOwnProperty(rt, fake_exec_key, core.Descriptor.data(fake_exec, true, false, true));
+    try global.defineOwnProperty(rt, fake_exec_key, core.Descriptor.data(fake_exec, .method));
     const fake_test_key = try rt.internAtom("fakeRegExpTest");
-    try global.defineOwnProperty(rt, fake_test_key, core.Descriptor.data(fake_test, true, false, true));
+    try global.defineOwnProperty(rt, fake_test_key, core.Descriptor.data(fake_test, .method));
     const fake_to_string_key = try rt.internAtom("fakeRegExpToString");
-    try global.defineOwnProperty(rt, fake_to_string_key, core.Descriptor.data(fake_to_string, true, false, true));
+    try global.defineOwnProperty(rt, fake_to_string_key, core.Descriptor.data(fake_to_string, .method));
 
     var parsed = try engine.parser.compile(.{ .realm = ctx }, "const r = /a/; const m = fakeRegExpExec.call(r, 'cat'); print(m[0] + ':' + m.index); print(fakeRegExpTest.call(r, 'cat')); print(fakeRegExpToString.call(r));", .{ .mode = .script, .filename = "regexp-prototype-native-record-dispatch.js" });
     defer parsed.deinit();
@@ -7970,7 +7970,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
     var output_buffer: [32]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
     try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("a:1\ntrue\n/a/\n", output.buffered());
 }
@@ -8058,15 +8058,15 @@ test "regexp symbol native builtin records ignore dispatch names" {
     try std.testing.expectEqual(@as(u32, 2), split_array.arrayLength());
 
     const fake_search_key = try rt.internAtom("fakeRegExpSearch");
-    try global.defineOwnProperty(rt, fake_search_key, core.Descriptor.data(fake_search, true, false, true));
+    try global.defineOwnProperty(rt, fake_search_key, core.Descriptor.data(fake_search, .method));
     const fake_match_key = try rt.internAtom("fakeRegExpMatch");
-    try global.defineOwnProperty(rt, fake_match_key, core.Descriptor.data(fake_match, true, false, true));
+    try global.defineOwnProperty(rt, fake_match_key, core.Descriptor.data(fake_match, .method));
     const fake_match_all_key = try rt.internAtom("fakeRegExpMatchAll");
-    try global.defineOwnProperty(rt, fake_match_all_key, core.Descriptor.data(fake_match_all, true, false, true));
+    try global.defineOwnProperty(rt, fake_match_all_key, core.Descriptor.data(fake_match_all, .method));
     const fake_replace_key = try rt.internAtom("fakeRegExpReplace");
-    try global.defineOwnProperty(rt, fake_replace_key, core.Descriptor.data(fake_replace, true, false, true));
+    try global.defineOwnProperty(rt, fake_replace_key, core.Descriptor.data(fake_replace, .method));
     const fake_split_key = try rt.internAtom("fakeRegExpSplit");
-    try global.defineOwnProperty(rt, fake_split_key, core.Descriptor.data(fake_split, true, false, true));
+    try global.defineOwnProperty(rt, fake_split_key, core.Descriptor.data(fake_split, .method));
 
     var parsed = try engine.parser.compile(.{ .realm = ctx },
         \\const r = /a/;
@@ -8082,7 +8082,7 @@ test "regexp symbol native builtin records ignore dispatch names" {
     var output_buffer: [48]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
     try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("1\na\na\ncot\nc|t\n", output.buffered());
 }
@@ -8134,9 +8134,9 @@ test "regexp accessor native builtin records ignore dispatch names" {
     try std.testing.expectEqual(true, global_result.as(.boolean).?);
 
     const fake_source_key = try rt.internAtom("fakeRegExpSourceGetter");
-    try global.defineOwnProperty(rt, fake_source_key, core.Descriptor.data(fake_source, true, false, true));
+    try global.defineOwnProperty(rt, fake_source_key, core.Descriptor.data(fake_source, .method));
     const fake_global_key = try rt.internAtom("fakeRegExpGlobalGetter");
-    try global.defineOwnProperty(rt, fake_global_key, core.Descriptor.data(fake_global, true, false, true));
+    try global.defineOwnProperty(rt, fake_global_key, core.Descriptor.data(fake_global, .method));
 
     var parsed = try engine.parser.compile(.{ .realm = ctx },
         \\const r = /a\/b/g;
@@ -8149,7 +8149,7 @@ test "regexp accessor native builtin records ignore dispatch names" {
     var output_buffer: [24]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
     const function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
-    const vm_result = try engine.exec.zjs_vm.runWithArgs(ctx, &stack, function, global.value(), &.{}, &.{}, &output, global, true, false, false);
+    const vm_result = try engine.exec.zjs_vm.runWithArgs(.{ .ctx = ctx, .stack = &stack, .function = function, .initial_this_value = global.value(), .output = &output, .global = global, .break_var_ref_cycles_on_exit = true });
     try std.testing.expect(vm_result.is(.undefined_value));
     try std.testing.expectEqualStrings("a\\/b\ntrue\n", output.buffered());
 }
@@ -9132,7 +9132,7 @@ test "native record calls preflight the native stack and recover" {
     try global.defineOwnProperty(
         js.runtime,
         name,
-        core.Descriptor.data(function_value, true, false, true),
+        core.Descriptor.data(function_value, .method),
     );
 
     NativeRecordStackProbe.callable = function_value;
@@ -9635,8 +9635,8 @@ test "module import-meta and eval-exception cycles are released by runtime cycle
     const import_meta = try core.Object.create(rt, core.class.ids.object, null);
     const eval_exception = try core.Object.create(rt, core.class.ids.object, null);
     const record_value = core.JSValue.module(&record.header);
-    try import_meta.defineOwnProperty(rt, back_key, core.Descriptor.data(record_value, true, true, true));
-    try eval_exception.defineOwnProperty(rt, back_key, core.Descriptor.data(record_value, true, true, true));
+    try import_meta.defineOwnProperty(rt, back_key, core.Descriptor.data(record_value, .all));
+    try eval_exception.defineOwnProperty(rt, back_key, core.Descriptor.data(record_value, .all));
 
     // Pins ModuleRecord import_meta/eval_exception edges, module.zig:572-573.
     record.import_meta = import_meta.value();
@@ -11089,7 +11089,7 @@ test "thenable job reservation OOM leaves resolving function retryable" {
     try thenable.defineOwnProperty(
         js.runtime,
         then_key,
-        core.Descriptor.data(callable, true, true, true),
+        core.Descriptor.data(callable, .all),
     );
 
     js.runtime.setMemoryLimit(js.runtime.memory.allocated_bytes);
@@ -13370,7 +13370,7 @@ test "missing-argument calls read undefined across every entry arm" {
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
 
     // Outcome side of the `argc < arg_count` call shape (qjs's `for(i = argc;
-    // i < arg_count; i++) arg_buf[i] = JS_UNDEFINED`, quickjs.c:17856-17857):
+    // i < arg_count; i++) arg_buf[i] = JS_UNDEFINED`, quickjs.c):
     // missing params read undefined, writes to a padded slot stay frame-local
     // (fresh undefined on the next call), the supplied prefix stays bound, and
     // the sloppy/strict/arrow/method `this` arms keep their policies. A
@@ -14750,7 +14750,7 @@ test "dense write leaf consumes reserved appends only inside the qjs capacity wi
     try shaped_array.defineOwnProperty(
         rt,
         extra_atom,
-        core.Descriptor.data(core.JSValue.int32(1), true, true, true),
+        core.Descriptor.data(core.JSValue.int32(1), .all),
     );
     const shaped_retained = try core.Object.create(rt, core.class.ids.object, null);
     try std.testing.expectEqual(
@@ -16937,7 +16937,7 @@ test "started generator resumes preserve unmapped arguments from parked locals" 
 }
 
 test "array named proto field uses ordinary lookup; length and index stay exotic" {
-    // qjs GET_FIELD_INLINE (quickjs.c:19135-19138): Array exotic is index +
+    // qjs GET_FIELD_INLINE: Array exotic is index +
     // length. A named atom such as `push` must resolve on Array.prototype
     // without changing `length` or dense-element reads.
     var js = try helpers.TestEngine.init(std.testing.allocator);
@@ -17133,7 +17133,7 @@ test "async resume callbacks remain callable and nonconstructible to all consume
     for ([_]bool{ false, true }) |rejected| {
         const continuation = try core.Object.create(js.runtime, core.class.ids.object, null);
         const callback = try engine.exec.promise_ops.asyncFunctionResumeCallback(js.runtime, global, continuation, rejected);
-        try global.defineOwnProperty(js.runtime, key, core.Descriptor.data(callback, true, true, true));
+        try global.defineOwnProperty(js.runtime, key, core.Descriptor.data(callback, .all));
         _ = try js.eval(
             \\assert.sameValue(typeof internalResumeCallback, 'function');
             \\assert.sameValue(Object.prototype.toString.call(internalResumeCallback), '[object Function]');
@@ -17286,7 +17286,7 @@ test "fulfilled await roots its continuation through constructor getter GC" {
     continuation_value = continuation.value();
     const input = try core.Object.expect(awaited);
     const symbol = input.promiseResult().?.asSymbolAtom().?;
-    try global.defineOwnProperty(js.runtime, key, core.Descriptor.data(core.JSValue.undefinedValue(), true, true, true));
+    try global.defineOwnProperty(js.runtime, key, core.Descriptor.data(core.JSValue.undefinedValue(), .all));
     const canary = try core.Object.create(js.runtime, core.class.ids.object, null);
     setup_roots.deactivate(js.runtime);
     setup_active = false;
@@ -17650,7 +17650,7 @@ test "event-loop caller reaches external C function with one callee realm view" 
     try caller_global.defineOwnProperty(
         js.runtime,
         escaped_key,
-        core.Descriptor.data(native_value, true, true, true),
+        core.Descriptor.data(native_value, .all),
     );
 
     var caller_wrapper = zjs.JSContext.borrowCore(caller_realm);
@@ -17732,7 +17732,7 @@ test "legacy output writer failure is a catchable named Error" {
     try global.defineOwnProperty(
         js.runtime,
         name,
-        core.Descriptor.data(function_value, true, true, true),
+        core.Descriptor.data(function_value, .all),
     );
 
     var output_buffer: [0]u8 = .{};
@@ -19417,7 +19417,7 @@ const ReflectActiveRootSymbolProbe = struct {
 };
 
 fn reflectTestSetArrayIndex(rt: *core.JSRuntime, array: *core.Object, index: u32, value: core.JSValue) !void {
-    try array.defineOwnProperty(rt, core.Atom.taggedInt(index), core.Descriptor.data(value, true, true, true));
+    try array.defineOwnProperty(rt, core.Atom.taggedInt(index), core.Descriptor.data(value, .all));
     if (array.arrayLength() <= index) array.setArrayLength(index + 1);
 }
 
@@ -19450,7 +19450,7 @@ test "reflect construct roots argument list while resolving prototype" {
     try std.testing.expect(try target_object.addArrayBuiltinMarker(rt, .constructor));
     const new_target = try core.function.nativeFunction(ctx, "Array", 1);
     const new_target_object = engine.exec.call.thisObject(new_target) orelse return error.TypeError;
-    try new_target_object.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(core.JSValue.int32(1), true, false, true));
+    try new_target_object.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(core.JSValue.int32(1), .method));
 
     const args_object = try core.Object.createArray(rt, null);
     var args_alive = true;
@@ -19895,7 +19895,7 @@ test "get_var uninitialized-cell inline global-object leg preserves the cold wat
     const rt = js.runtime;
 
     // Q1 red lights: op_get_var's inline uninit leg (qjs OP_get_var
-    // quickjs.c:18469-18483 mirror) must stay outcome-identical to the cold
+    // quickjs.c mirror) must stay outcome-identical to the cold
     // waterfall (vm_property_globals.getVar) it short-circuits.
     //
     // JS level, exercised through function-hot reads of parked cells:
@@ -19963,8 +19963,8 @@ test "named function expression self-binding materializes lazily with pinned Qui
 
     // Q2 red lights: the self-binding var (kind `.function_name`) and its
     // `special_object THIS_FUNC ; put_loc` prologue materialize lazily now
-    // (qjs add_func_var call sites: resolve_scope_var quickjs.c:32977/33153,
-    // add_eval_variables quickjs.c:33650/33698) instead of unconditionally at
+    // (qjs add_func_var call sites: resolve_scope_var quickjs.c,
+    // add_eval_variables quickjs.c) instead of unconditionally at
     // function entry. Every observable of the eager model must hold:
     //   * self-reference returns/recurses the binding, incl. nested
     //     functions, arrows, and generators;
@@ -20225,7 +20225,7 @@ test "JSON.rawJSON latin1 payload survives the simple stringify byte buffer" {
 test "native function toString keeps non-ASCII identifier names (qjs js_function_toString)" {
     // Regression: the native-source name filter only accepted ASCII
     // identifiers, silently dropping latin1/unicode identifier names that
-    // qjs js_function_toString (quickjs.c:41335) emits verbatim.
+    // qjs js_function_toString emits verbatim.
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -21700,10 +21700,13 @@ test "an unresolved binding names its identifier in the ReferenceError message (
     );
 }
 
+// One deliberate departure from the qjs-generated text: qjs prints regexp
+// flags by bit index over "gimsuydv", so a named-group pattern (flag bit 7)
+// comes out as `/(?<n>x)/v`; zjs prints the flags the regexp actually has.
 test "print / console.log dump objects like QuickJS JS_PrintValue (qjs-generated expectations, 36 shapes)" {
     // Expected text is the output of the pinned QuickJS yardstick binary on
     // the same source (tools: print_inspector.zig mirrors quickjs.c
-    // 13678-14432). Stacks are assigned explicitly because qjs and zjs
+    // Stacks are assigned explicitly because qjs and zjs
     // differ in the eval frame text, not in the dump.
     try helpers.expectPrints(
         \\(function () {
@@ -21768,7 +21771,7 @@ test "print / console.log dump objects like QuickJS JS_PrintValue (qjs-generated
         \\Map(2) { "a" => 1, { k: 1 } => [ 2 ] } Set(3) { 1, "two", { three: 3 } } Map(0) {  } Set(0) {  }
         \\Map(2) { 1 => 1, 3 => 3 }
         \\1970-01-01T00:00:00.000Z Date {  } 2026-09-06T12:30:00.007Z
-        \\/ab+c/gi /a\/b[/]\n/su /(?:)/ /a\/b/ /x/yd /(?<n>x)/v
+        \\/ab+c/gi /a\/b[/]\n/su /(?:)/ /a\/b/ /x/yd /(?<n>x)/
         \\Uint8Array(3) [ 1, 2, 3 ] Float64Array(3) [ 1.5, -0, NaN ] Int8Array(0) [  ] BigInt64Array(2) [ 1, -2 ] Float32Array(1) [ 0.10000000149011612 ] Uint8ClampedArray(1) [ 255 ] Int16Array(1) [ -2 ]
         \\ArrayBuffer {  } DataView {  } Object {  } Object {  }
         \\{  } { z: 1 }

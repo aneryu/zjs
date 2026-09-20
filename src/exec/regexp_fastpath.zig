@@ -122,7 +122,7 @@ pub fn regExpFunctionCall(
             pattern = string_value;
         }
     } else if (!pattern_is_regexp and !pattern.isString() and !pattern.is(.undefined_value)) {
-        // Mirrors js_regexp_constructor (quickjs.c:47786-47793): any non-regexp,
+        // Mirrors js_regexp_constructor: any non-regexp,
         // non-undefined pattern goes through JS_ToString, which throws TypeError
         // for symbols instead of leaking '[object Object]'.
         const string_value = try toStringForAnnexB(ctx, output, global, pattern, caller_function, caller_frame);
@@ -145,7 +145,7 @@ pub fn regExpFunctionCall(
         owned_flags = empty;
         break :blk empty;
     };
-    // Mirrors js_compile_regexp (quickjs.c:47577-47578): the flags operand is
+    // Mirrors js_compile_regexp: the flags operand is
     // ToString'd via JS_ToCStringLen, which throws TypeError for symbols.
     if (!flags.is(.undefined_value) and !flags.isString()) {
         const string_value = try toStringForAnnexB(ctx, output, global, flags, caller_function, caller_frame);
@@ -235,7 +235,7 @@ fn regExpConstructCallInNativeScope(
             pattern = string_value;
         }
     } else if (!pattern.isString()) {
-        // Mirrors js_regexp_constructor (quickjs.c:47786-47793): any non-regexp,
+        // Mirrors js_regexp_constructor: any non-regexp,
         // non-undefined pattern goes through JS_ToString, which throws TypeError
         // for symbols instead of leaking '[object Object]'.
         const string_value = try toStringForAnnexB(ctx, output, global, pattern, caller_function, caller_frame);
@@ -261,7 +261,7 @@ fn regExpConstructCallInNativeScope(
 
     var prototype = try reflectConstructPrototypeVm(ctx, output, global, "RegExp", new_target, caller_function, caller_frame);
     defer prototype.deinit(ctx.runtime);
-    // Mirrors js_regexp_constructor + js_compile_regexp (quickjs.c:47795-47797 +
+    // Mirrors js_regexp_constructor + js_compile_regexp (quickjs.c +
     // 47577-47578): the flags operand is ToString'd inside js_compile_regexp —
     // after js_create_from_ctor resolved new.target's prototype — and
     // JS_ToCStringLen throws TypeError for symbols (not SyntaxError).
@@ -282,7 +282,7 @@ pub fn regExpExecMethod(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const regexp_object = property_ops.expectObject(this_value) catch {
+    const regexp_object = core.value_semantics.objectFromValue(this_value) orelse {
         return try throwTypeErrorMessage(ctx, global, "RegExp object expected");
     };
     if (regexp_object.class_id != core.class.ids.regexp) {
@@ -307,7 +307,7 @@ pub fn regExpTestMethod(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    const receiver_object = property_ops.expectObject(this_value) catch {
+    const receiver_object = core.value_semantics.objectFromValue(this_value) orelse {
         return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "RegExp object expected"));
     };
     const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
@@ -340,8 +340,8 @@ pub fn regExpTestFastNoResult(
     const cached_bytecode = regexp_object.regexpCompiledBytecode();
     if (cached_bytecode.len != 0) {
         const compiled = regexp_adapter.Compiled{ .bytecode = @constCast(cached_bytecode) };
-        const flag_bits = compiled.flagBits();
-        if ((flag_bits & (regexp_adapter.flag_bits.global | regexp_adapter.flag_bits.sticky)) != 0) return null;
+        const flags = compiled.flags();
+        if (flags.global or flags.sticky) return null;
         return regexp_adapter.testOnStringFromIndex(ctx.runtime, compiled, string_value, 0) catch |err| switch (err) {
             error.BytecodeCorrupt, error.Timeout => return null,
             else => return err,
@@ -366,7 +366,7 @@ pub fn regExpCompile(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    const regexp_object = property_ops.expectObject(this_value) catch return null;
+    const regexp_object = core.value_semantics.objectFromValue(this_value) orelse return null;
     if (regexp_object.class_id != core.class.ids.regexp) return null;
     var expected_prototype = regExpPrototypeFromGlobal(ctx.runtime, global) orelse
         return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "RegExp object expected"));
@@ -717,18 +717,15 @@ pub fn regExpExecResult(
     const cached_bytecode = regexp_object.regexpCompiledBytecode();
     if (cached_bytecode.len != 0) {
         const compiled = regexp_adapter.Compiled{ .bytecode = @constCast(cached_bytecode) };
-        const bits = compiled.flagBits();
-        const is_global = (bits & regexp_adapter.flag_bits.global) != 0;
-        const is_sticky = (bits & regexp_adapter.flag_bits.sticky) != 0;
-        const has_indices = (bits & regexp_adapter.flag_bits.indices) != 0;
-        const start_index = if (use_last_index and (is_global or is_sticky)) initial_last_index else 0;
+        const flags = compiled.flags();
+        const start_index = if (use_last_index and (flags.global or flags.sticky)) initial_last_index else 0;
         if (start_index > input_len) {
-            if (use_last_index and (is_global or is_sticky)) {
+            if (use_last_index and (flags.global or flags.sticky)) {
                 try setRegExpLastIndexStrict(ctx, output, global, regexp_value, regexp_object, core.JSValue.int32(0), caller_function, caller_frame);
             }
             return core.JSValue.nullValue();
         }
-        return try regExpExecCompiledResult(ctx, output, global, regexp_value, regexp_object, string_value, string_data, compiled, use_last_index, is_global, is_sticky, has_indices, start_index, caller_function, caller_frame);
+        return try regExpExecCompiledResult(ctx, output, global, regexp_value, regexp_object, string_value, string_data, compiled, use_last_index, flags, start_index, caller_function, caller_frame);
     }
 
     return null;
@@ -744,9 +741,7 @@ pub fn regExpExecCompiledResult(
     string_data: core.string.String.ResolvedData,
     compiled: regexp_adapter.Compiled,
     use_last_index: bool,
-    is_global: bool,
-    is_sticky: bool,
-    has_indices: bool,
+    flags: regexp_adapter.Flags,
     start_index: usize,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
@@ -785,7 +780,7 @@ pub fn regExpExecCompiledResult(
         .match => {
             const match_start = regexp_adapter.captureSlotValue(capture_slots[0]) orelse 0;
             const match_end = regexp_adapter.captureSlotValue(capture_slots[1]) orelse match_start;
-            if (use_last_index and (is_global or is_sticky)) {
+            if (use_last_index and (flags.global or flags.sticky)) {
                 const next_index = match_end;
                 const next_value = if (next_index <= @as(usize, @intCast(std.math.maxInt(i32))))
                     core.JSValue.int32(@intCast(next_index))
@@ -801,12 +796,12 @@ pub fn regExpExecCompiledResult(
                 .capture_slots = capture_slots[2 .. total_capture_count * 2],
                 .capture_bytecode = compiled.bytecode,
                 .capture_count = total_capture_count - 1,
-                .has_named_captures = (compiled.flagBits() & regexp_adapter.flag_bits.named_groups) != 0,
+                .has_named_captures = compiled.flags().named_groups,
             };
-            return try createRegExpMatchArrayFromValue(rt, global, string_value, &found, string_data.len(), has_indices);
+            return try createRegExpMatchArrayFromValue(rt, global, string_value, &found, string_data.len(), flags.indices);
         },
         .no_match, .out_of_range => {
-            if (use_last_index and (is_global or is_sticky)) {
+            if (use_last_index and (flags.global or flags.sticky)) {
                 try setRegExpLastIndexStrict(ctx, output, global, regexp_value, regexp_object, core.JSValue.int32(0), caller_function, caller_frame);
             }
             return core.JSValue.nullValue();
@@ -816,7 +811,7 @@ pub fn regExpExecCompiledResult(
 }
 
 pub fn isRegExpValue(value: core.JSValue) bool {
-    const object = property_ops.expectObject(value) catch return false;
+    const object = core.value_semantics.objectFromValue(value) orelse return false;
     return object.class_id == core.class.ids.regexp;
 }
 

@@ -138,6 +138,6 @@ python3 docs/code-walkthrough/_check_coverage.py \
     --docs 'docs/code-walkthrough/10-*.md' \
     src/core/root.zig src/core/runtime.zig src/core/context.zig \
     src/core/jobs.zig src/core/module.zig src/core/global_slots.zig \
-    src/core/list.zig src/core/array_list_erased.zig src/core/sort_erased.zig \
+    src/core/array_list_erased.zig src/core/sort_erased.zig \
     src/core/bulk_memory.zig src/core/profile.zig
 ```

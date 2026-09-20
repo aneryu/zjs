@@ -1,67 +1,8 @@
 # 10 — 容器、全局槽、剖析、bulk fill
 
-本分册覆盖 `src/core/` 里不带 Runtime/Context 所有权的小工具：侵入式链表、类型擦除 ArrayList/heap、全局 atom/value 槽、opcode 剖析、以及编译器用的向量填充。`src/core/root.zig` 是零函数文件，文件级职责写在主册 [10-core-runtime.md](10-core-runtime.md)。`bulk_memory.fillByte` 见下文。
+本分册覆盖 `src/core/` 里不带 Runtime/Context 所有权的小工具：类型擦除 ArrayList/heap、全局 atom/value 槽、opcode 剖析、以及编译器用的向量填充。`src/core/root.zig` 是零函数文件，文件级职责写在主册 [10-core-runtime.md](10-core-runtime.md)。`bulk_memory.fillByte` 见下文。
 
 ---
-
-## `src/core/list.zig` — 无分配侵入式双向链表
-
-QuickJS 用 `struct list_head`（`list.h`）把对象、job、weak 持有者串起来。zjs 的 `List`/`Node` 是同一形状的核心工具：不分配、不追踪 GC、不携带 payload。嵌入者提供 `Node` 并保证链接期间节点存活。启用断言时检查节点是否已有两条链接；调用方仍须保证环的完整性与地址稳定。
-
-### 类型
-
-`Node`：`prev` / `next` 均为 `?*Node`，默认 `null`。两端都非空才算已链接。
-
-`List`：哨兵 `head: Node`。空表时 `head.prev == head.next == &head`。
-
-### `Node.isLinked` (`src/core/list.zig:13`)
-
-- **签名**：`pub fn isLinked(self: Node) bool`。
-- **作用**：检查两条链接是否均非null。
-- **实现**：返回prev != null and next != null；初始化后的哨兵也返回true。
-- **所有权 / 错误 / 调用**：不是成员资格或环完整性验证；半链接节点返回false，不修复状态。
-
-### `List.init` (`src/core/list.zig:21`)
-
-- **签名**：`pub fn init(self: *List) void`。
-- **作用**：将哨兵初始化为空环。
-- **实现**：prev和next都指向self.head。
-- **所有权 / 错误 / 调用**：无分配；已经链接的表不可用它清空并释放节点。初始化后List地址必须稳定，按值复制不会重定位自指针。
-
-### `List.isEmpty` (`src/core/list.zig:26`)
-
-- **签名**：`pub fn isEmpty(self: *const List) bool`。
-- **作用**：判断哨兵的后继是否为自身。
-- **实现**：只比较head.next和&head。
-- **所有权 / 错误 / 调用**：要求已初始化且环有效；未初始化默认值返回false，不代表其中有合法节点。
-
-### `List.add` (`src/core/list.zig:30`)
-
-- **签名**：`pub fn add(self: *List, node: *Node) void`。
-- **作用**：把节点插到队头。
-- **实现**：以哨兵和当前head.next调用insertBetween。
-- **所有权 / 错误 / 调用**：要求表已初始化、节点未链接且地址稳定；不分配、不接管承载结构的释放。
-
-### `List.addTail` (`src/core/list.zig:34`)
-
-- **签名**：`pub fn addTail(self: *List, node: *Node) void`。
-- **作用**：把节点插到队尾。
-- **实现**：以当前head.prev和哨兵调用insertBetween。
-- **所有权 / 错误 / 调用**：与add相同的有效性和生命周期前提；不自行root节点内的GC值。
-
-### `List.remove` (`src/core/list.zig:38`)
-
-- **签名**：`pub fn remove(node: *Node) void`。
-- **作用**：从有效双向环摘掉一个节点。
-- **实现**：prev或next为null便返回；否则连接两侧邻居，再清空自己的两条链接。
-- **所有权 / 错误 / 调用**：对正常未链接节点幂等，但半链接状态会原样保留。不能用于移除表哨兵；不释放节点，也不验证邻居反向链接。
-
-### `List.insertBetween` (`src/core/list.zig:47`)
-
-- **签名**：`fn insertBetween(node: *Node, prev: *Node, next: *Node) void`。
-- **作用**：在两个邻居之间接入节点。
-- **实现**：assert(!node.isLinked())，随后设置prev.next、node.prev、node.next、next.prev。
-- **所有权 / 错误 / 调用**：断言不是完整结构校验，半链接节点也可通过；关闭安全检查时不能依靠它拒绝双插。调用方保证邻居属于有效环、节点未链接。
 
 ## `src/core/array_list_erased.zig` — 类型擦除 ArrayList
 
@@ -349,6 +290,6 @@ Zig 0.16 的 `std.ArrayList(T).append` / `toOwnedSlice` 可能随元素类型产
 
 ## 覆盖核对
 
-- 清单函数数: 42（`src/core/array_list_erased.zig` 7 + `src/core/bulk_memory.zig` 1 + `src/core/global_slots.zig` 3 + `src/core/list.zig` 7 + `src/core/profile.zig` 19 + `src/core/sort_erased.zig` 5）
-- 本文标题覆盖: 42
+- 清单函数数: 35（`src/core/array_list_erased.zig` 7 + `src/core/bulk_memory.zig` 1 + `src/core/global_slots.zig` 3 + `src/core/profile.zig` 19 + `src/core/sort_erased.zig` 5）
+- 本文标题覆盖: 35
 - 未覆盖: 无

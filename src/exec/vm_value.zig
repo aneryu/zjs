@@ -4,7 +4,7 @@
 //! values are duplicated before they are pushed, while explicit pop/drop paths
 //! release their slots. Private symbols and completion values transfer only at
 //! their named handoff points. These cold adapters mirror the standalone
-//! QuickJS opcode cases beginning at quickjs.c:17879-17910; fused hot dispatch
+//! QuickJS opcode cases beginning at quickjs.c; fused hot dispatch
 //! remains outside this module.
 
 const std = @import("std");
@@ -54,7 +54,7 @@ pub fn pushI8Operand(stack: *stack_mod.Stack, function: *const bytecode.Function
 ///
 /// qjs has no runtime push+binop fusion: every push opcode is a standalone
 /// `*sp++ = ...` and a following binop is a separate dispatch (quickjs.c
-/// 17879-17910). The threaded fast path (zjs_vm.zig push_i32/i16/i8) already
+/// The threaded fast path (zjs_vm.zig push_i32/i16/i8) already
 /// pushes the immediate inline; this is the non-threaded fallback, kept
 /// byte-identical to it — a plain push, no stack-lhs fold.
 pub fn pushSmallInt(stack: *stack_mod.Stack, value: i32) !void {

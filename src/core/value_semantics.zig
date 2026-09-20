@@ -4,7 +4,7 @@
 //! rejects VarRef cell wrappers that share the object tag; the trusted
 //! expression form relies on compiler stack discipline and keeps that proof as
 //! a Debug assertion. QuickJS analogue: `JS_VALUE_GET_OBJ` and ToBoolean paths
-//! around quickjs.c:19123. This core leaf may import core only and never any
+//! around quickjs.c. This core leaf may import core only and never any
 //! parser/exec/runtime/binding layer.
 
 const std = @import("std");
@@ -32,7 +32,7 @@ pub fn objectFromValue(value: JSValue) ?*object.Object {
 
 /// Expression-receiver variant — qjs JS_VALUE_GET_OBJ: tag test then raw
 /// pointer cast, no second header-kind probe (GET_FIELD_INLINE,
-/// quickjs.c:19123-19125; OP_put_field, 19190-19192). Precondition: the value
+/// quickjs.c; OP_put_field, 19190-19192). Precondition: the value
 /// is an evaluated EXPRESSION value (popped operand, argument, property
 /// read result). The only handler that pushes a cell wrapper onto the operand
 /// stack is h_make_slot_ref (make_loc_ref/make_arg_ref/make_var_ref_ref), and

@@ -391,26 +391,7 @@
 - **实现**：Map/WeakMap 只接受 set/get/has/delete；Set/WeakSet 只接受 add/has/delete；其他 class 或名称返回 null。各组内部先查名称表，再过滤 ID。
 - **所有权 / 错误 / 调用**：不查实例、原型或当前属性是否被覆盖；返回非 null 仅表示 class/name 组合满足此处条件，外围仍负责快路径其他前提。
 
-### `builtin_method_id_lookup.date.staticMethodId` (`src/core/host_function.zig:1113`)
 
-- **签名**：`pub fn staticMethodId(name: []const u8) ?u32`。
-- **作用**：将 Date 静态方法名映射为域内编号。
-- **实现**：UTC、parse、now 分别返回 1、2、3；逐字节区分大小写，其他名称返回 null。
-- **所有权 / 错误 / 调用**：纯名称匹配，不执行日期解析或读取时钟。
-
-### `builtin_method_id_lookup.date.decodePrototypeMethodId` (`src/core/host_function.zig:1125`)
-
-- **签名**：`pub fn decodePrototypeMethodId(id: u32) ?u32`。
-- **作用**：将支持的 Date 原型记录 ID 转成遗留编号。
-- **实现**：显式 switch 对应 101–134 → 1–34，getTime 到 toTimeString；其他编号返回 null，包括 to_primitive=135、内部 captured setter 136/137、构造 100 和静态 1–3。
-- **所有权 / 错误 / 调用**：并非所有 PrototypeMethod 枚举都可解码；不执行方法，也不判断某编号是否在运行时安装。
-
-### `builtin_method_id_lookup.date.encodePrototypeMethodId` (`src/core/host_function.zig:1170`)
-
-- **签名**：`pub fn encodePrototypeMethodId(decoded: u32) ?u32`。
-- **作用**：把遗留 Date 方法编号转换回域内记录 ID。
-- **实现**：显式 switch 对应 1–34 → 101–134，与 decode 的已定义映射互逆；0、35 及其他值返回 null。
-- **所有权 / 错误 / 调用**：只返回整数，不包含域编码或对象状态；不产生 to_primitive 或 captured setter 的记录编号。
 
 ### `builtin_method_id_lookup.buffer.dataViewGetMethodId` (`src/core/host_function.zig:1219`)
 

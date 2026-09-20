@@ -5,7 +5,7 @@
 //! conversion can build the same named value without mutating that slot. Only
 //! preallocated or explicitly stackless paths omit capture. This centralizes
 //! parser, host-I/O, promise, and runtime error policy around QuickJS
-//! `JS_ThrowError2` and stack setup at quickjs.c:7553-7658.
+//! `JS_ThrowError2` and stack setup at quickjs.c.
 
 const std = @import("std");
 
@@ -89,7 +89,7 @@ pub fn createNamedErrorWithPrototype(ctx: *core.JSContext, global: *core.Object,
     root_frame.activate(ctx.runtime);
     defer root_frame.deactivate(ctx.runtime);
 
-    const rooted_object = property_ops.expectObject(rooted_prototype) catch return error.InvalidBuiltinRegistry;
+    const rooted_object = core.value_semantics.objectFromValue(rooted_prototype) orelse return error.InvalidBuiltinRegistry;
     const object = try core.Object.create(ctx.runtime, core.class.ids.error_, rooted_object);
     const error_value = object.value();
     const message_value = try value_ops.createStringValue(ctx.runtime, message);
@@ -140,7 +140,7 @@ fn buildNamedErrorObject(rt: *core.JSRuntime, ctor_value: core.JSValue, name: []
 
     const object = try core.Object.create(rt, core.class.ids.error_, null);
     errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
-    // Mirror JS_ThrowError2 (quickjs.c:7637-7658): the thrown error carries a
+    // Mirror JS_ThrowError2: the thrown error carries a
     // single own `message` data property (JS_PROP_WRITABLE|JS_PROP_CONFIGURABLE,
     // non-enumerable); `name`/`constructor` resolve through the prototype
     // installed below (qjs allocates directly on ctx->native_error_proto[]).
@@ -148,11 +148,11 @@ fn buildNamedErrorObject(rt: *core.JSRuntime, ctor_value: core.JSValue, name: []
     try defineNonEnumValueProperty(rt, object, core.atom.ids.message, message_value);
     var prototype_installed = false;
     if (rooted_ctor_value.is(.object)) {
-        const ctor = property_ops.expectObject(rooted_ctor_value) catch null;
+        const ctor = core.value_semantics.objectFromValue(rooted_ctor_value);
         if (ctor) |ctor_object| {
             const proto_value = try ctor_object.getProperty(core.atom.ids.prototype);
             if (proto_value.is(.object)) {
-                const proto = property_ops.expectObject(proto_value) catch null;
+                const proto = core.value_semantics.objectFromValue(proto_value);
                 if (proto) |prototype| {
                     try object.setPrototype(rt, prototype);
                     prototype_installed = true;
@@ -268,7 +268,7 @@ pub fn runtimeErrorValueForGeneratorCatch(ctx: *core.JSContext, global: *core.Ob
 }
 
 /// Internally built AggregateError for Promise.any/allSettled rejection.
-/// Mirrors js_aggregate_error_constructor (quickjs.c:41582): a bare
+/// Mirrors js_aggregate_error_constructor: a bare
 /// error-class object on AggregateError.prototype whose only own property is
 /// `errors` (JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, non-enumerable) — no
 /// own `message`/`name`. qjs does not run build_backtrace here either; zjs
@@ -282,10 +282,10 @@ pub fn promiseAggregateError(ctx: *core.JSContext, global: *core.Object, errors:
     const object = try core.Object.create(rt, core.class.ids.error_, null);
     const aggregate_error = object.value();
     if (ctor_value.is(.object)) {
-        if (property_ops.expectObject(ctor_value) catch null) |ctor_object| {
+        if (core.value_semantics.objectFromValue(ctor_value)) |ctor_object| {
             const proto_value = try ctor_object.getProperty(core.atom.ids.prototype);
             if (proto_value.is(.object)) {
-                if (property_ops.expectObject(proto_value) catch null) |prototype| {
+                if (core.value_semantics.objectFromValue(proto_value)) |prototype| {
                     try object.setPrototype(rt, prototype);
                 }
             }
@@ -415,7 +415,7 @@ pub fn throwReferenceErrorMessage(ctx: *core.JSContext, global: *core.Object, me
     return error.ReferenceError;
 }
 
-/// qjs JS_ThrowReferenceErrorNotDefined (quickjs.c:7820): `'name' is not
+/// qjs JS_ThrowReferenceErrorNotDefined: `'name' is not
 /// defined`. Every unresolved-binding exit (get_var, strict put_var, the
 /// with-scope and ref-value legs) goes through here so the identifier reaches
 /// the message; the bare `error.ReferenceError` sentinel (runtimeErrorInfo:
@@ -492,7 +492,7 @@ pub fn resolveBacktraceLocation(data: ?*const anyopaque, target_pc: usize) core.
 /// Snapshot one live VM frame for the backtrace walk. The Machine-owned
 /// per-invocation resolver (inline_calls.zig) walks the Entry chain + L0 frame
 /// directly — faithful to qjs's single
-/// `current_stack_frame -> prev_frame` walk (quickjs.c:7571), with no per-call
+/// `current_stack_frame -> prev_frame` walk, with no per-call
 /// parallel backtrace node.
 pub fn frameBacktraceSnapshot(frame: *const frame_mod.Frame) core.ActiveBacktraceSnapshot {
     const function = frame.function;
@@ -505,7 +505,7 @@ pub fn frameBacktraceSnapshot(frame: *const frame_mod.Frame) core.ActiveBacktrac
         // the currently-executing instruction, like qjs sf->cur_pc). Back off
         // one byte so the line/col lookup lands inside that instruction —
         // mirrors build_backtrace's `sf->cur_pc - b->byte_code_buf - 1`
-        // (quickjs.c:7595); without it a frame whose call is the last
+        //; without it a frame whose call is the last
         // statement maps past the call (even one line past EOF).
         .pc = frame.pc -| 1,
         .location_data = function,
@@ -519,7 +519,7 @@ pub fn isErrorConstructorName(name: []const u8) bool {
 }
 
 pub fn functionNameBytes(rt: *core.JSRuntime, value: core.JSValue) ![]u8 {
-    const object = property_ops.expectObject(value) catch return rt.memory.allocator.dupe(u8, "");
+    const object = core.value_semantics.objectFromValue(value) orelse return rt.memory.allocator.dupe(u8, "");
     const name_value = try object.getProperty(core.atom.ids.name);
     if (!name_value.isString()) return rt.memory.allocator.dupe(u8, "");
     var bytes = std.ArrayList(u8).empty;
@@ -587,29 +587,29 @@ pub fn runtimeErrorInfo(err: anyerror) ?ErrorInfo {
         // JS catch handler still surface error.OutOfMemory to the embedder.
         error.OutOfMemory => .{ .name = "InternalError", .message = "out of memory" },
         // Native C-stack recursion guard (QuickJS JS_ThrowStackOverflow ->
-        // InternalError "stack overflow", quickjs.c:7789-7791).
+        // InternalError "stack overflow", quickjs.c).
         error.StackOverflow => .{ .name = "InternalError", .message = "stack overflow" },
         error.Interrupted => .{ .name = "InternalError", .message = "interrupted" },
-        // JS_STRING_LEN_MAX creation/concat cap (qjs quickjs.c:4078/4368/4655/4898).
+        // JS_STRING_LEN_MAX creation/concat cap (qjs quickjs.c).
         error.StringTooLong => .{ .name = "InternalError", .message = "string too long" },
         // qjs OP_check_ctor_return deliberately creates this TypeError in the
-        // constructor's caller context (quickjs.c:18273-18278). Keep a distinct
+        // constructor's caller context. Keep a distinct
         // sentinel so the caller frame can materialize the exact message there.
         error.DerivedConstructorReturn => .{ .name = "TypeError", .message = "derived class constructor must return an object or undefined" },
         // qjs OP_get_loc_checkthis likewise uses caller_ctx for the implicit
-        // derived-constructor return (quickjs.c:18717-18728).
+        // derived-constructor return.
         error.DerivedThisUninitialized => .{ .name = "ReferenceError", .message = "this is not initialized" },
         error.TypeError => .{ .name = "TypeError", .message = "" },
-        // qjs JS_CreateProperty not_extensible (quickjs.c:10144).
+        // qjs JS_CreateProperty not_extensible.
         error.NotExtensible => .{ .name = "TypeError", .message = "object is not extensible" },
         error.InvalidCharacterError => .{ .name = "InvalidCharacterError", .message = "" },
         error.SyntaxError => .{ .name = "SyntaxError", .message = "invalid syntax" },
         error.RangeError => .{ .name = "RangeError", .message = "" },
-        // qjs js_bigint_new single throw site (quickjs.c:11593-11594).
+        // qjs js_bigint_new single throw site.
         error.BigIntTooLarge => .{ .name = "RangeError", .message = "BigInt is too large to allocate" },
-        // qjs js_bigint_divrem division-by-zero guard (quickjs.c:11888).
+        // qjs js_bigint_divrem division-by-zero guard.
         error.DivisionByZero => .{ .name = "RangeError", .message = "BigInt division by zero" },
-        // qjs js_bigint_pow negative-exponent guard (quickjs.c:12113).
+        // qjs js_bigint_pow negative-exponent guard.
         error.NegativeExponent => .{ .name = "RangeError", .message = "BigInt negative exponent" },
         error.ReferenceError => .{ .name = "ReferenceError", .message = "not defined" },
         else => null,
@@ -628,11 +628,11 @@ pub fn promiseErrorInfo(err: anyerror) ErrorInfo {
         error.TypeError => .{ .name = "TypeError", .message = "" },
         error.SyntaxError => .{ .name = "SyntaxError", .message = "invalid syntax" },
         error.RangeError => .{ .name = "RangeError", .message = "" },
-        // qjs js_bigint_new single throw site (quickjs.c:11593-11594).
+        // qjs js_bigint_new single throw site.
         error.BigIntTooLarge => .{ .name = "RangeError", .message = "BigInt is too large to allocate" },
-        // qjs js_bigint_divrem division-by-zero guard (quickjs.c:11888).
+        // qjs js_bigint_divrem division-by-zero guard.
         error.DivisionByZero => .{ .name = "RangeError", .message = "BigInt division by zero" },
-        // qjs js_bigint_pow negative-exponent guard (quickjs.c:12113).
+        // qjs js_bigint_pow negative-exponent guard.
         error.NegativeExponent => .{ .name = "RangeError", .message = "BigInt negative exponent" },
         error.ReferenceError => .{ .name = "ReferenceError", .message = "not defined" },
         else => .{ .name = "Error", .message = "" },
@@ -761,10 +761,10 @@ const objectFromValue = core.value_semantics.objectFromValue;
 
 /// JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE (non-enumerable) data property —
 /// the attribute set qjs uses for every own property it defines on error
-/// objects (JS_ThrowError2 quickjs.c:7652, js_aggregate_error_constructor
-/// quickjs.c:41593).
+/// objects (JS_ThrowError2 quickjs.c, js_aggregate_error_constructor
+/// quickjs.c).
 fn defineNonEnumValueProperty(rt: *core.JSRuntime, object: *core.Object, key: core.Atom, value: core.JSValue) !void {
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(value, true, false, true));
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(value, .method));
 }
 
 /// Last-resort TDZ throw for the paths that have no realm (or whose error

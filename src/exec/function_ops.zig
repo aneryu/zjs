@@ -5,7 +5,7 @@
 //! rooted across observable prototype work. Generic call/apply execution remains
 //! in `call_runtime.zig`; this module owns the Function-domain record seam and
 //! dynamic source compilation. The builtin table maps to QuickJS
-//! `js_function_proto_funcs` at quickjs.c:41390.
+//! `js_function_proto_funcs` at quickjs.c.
 
 const std = @import("std");
 const zjs_vm = @import("zjs_vm.zig");
@@ -46,7 +46,7 @@ pub fn isDefaultHasInstanceRecord(rt: *core.JSRuntime, record: *const core.Nativ
     return if (expected) |slot| record == slot else false;
 }
 
-/// qjs compares the C function pointer (`js_function_hasInstance`, 41379).
+/// qjs compares the C function pointer (`js_function_hasInstance`).
 /// Same identity as `isDefaultHasInstanceRecord` without the runtime table.
 pub inline fn recordIsDefaultHasInstance(record: *const core.NativeEntry) bool {
     return record.target == default_has_instance_target;
@@ -57,7 +57,7 @@ pub inline fn recordIsDefaultHasInstance(record: *const core.NativeEntry) bool {
 const default_has_instance_target = native_legacy.entryFromInternal(functionHasInstanceEntry()).target;
 
 /// Declaration + dispatch table for the `.function` native-builtin domain
-/// (QuickJS `js_function_proto_funcs` analogue, quickjs.c:41390).
+/// (QuickJS `js_function_proto_funcs` analogue, quickjs.c).
 pub const internal_entries = [_]core.host_function.InternalEntry{
     functionCallEntry(),
     functionApplyEntry(),
@@ -446,7 +446,7 @@ pub fn constructDynamicFunctionFromSource(
     if (compiled.syntax_error) |*parse_error| {
         // Compile-error surface: own fileName/lineNumber/columnNumber +
         // leading stack line (build_backtrace filename branch,
-        // quickjs.c:7553-7570).
+        // quickjs.c).
         const parse_filename = ctx.runtime.atoms.name(parse_error.filename) orelse filename;
         return error_stack_ops.throwParseSyntaxError(ctx, function_global, parse_filename, parse_error.position.line, parse_error.position.column, parse_error.message);
     }

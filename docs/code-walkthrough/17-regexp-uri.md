@@ -130,12 +130,6 @@ RegExp 分三层：`regexp_ops` 记录/编译/escape，`regexp_fastpath` 可观�
 - **实现**：已经是字符串就原样返回；否则开临时 `ArrayList(u8)`（defer 释放），`appendValueString` 写入后 `createStringValue`。
 - **所有权 / 错误 / 调用**：本文件的 `appendValueString` 带 `.unsupported = .type_error`，所以不能字符串化的值（如 Symbol）会变成 `error.TypeError`。
 
-### `lreCheckStackOverflow` (`src/exec/regexp_ops.zig:503`)
-
-- **签名**：`fn lreCheckStackOverflow(opaque_ptr: ?*anyopaque, alloca_size: usize) bool`。
-- **作用**：编译期的 native 栈溢出检查回调（与 `regexp_adapter` 里的同名函数是两份独立副本）。
-- **实现**：`opaque_ptr` 为 null 返回 false；否则还原成 `*core.JSRuntime` 并返回 `rt.checkNativeStackOverflow(alloca_size)`。对应 qjs `lre_check_stack_overflow` → `js_check_stack_overflow`（quickjs.c:48000）。
-- **所有权 / 错误 / 调用**：只被 `regexpCompileOptions` 装进选项。
 
 ### `regexpCompileOptions` (`src/exec/regexp_ops.zig:509`)
 
@@ -574,12 +568,6 @@ RegExp 分三层：`regexp_ops` 记录/编译/escape，`regexp_fastpath` 可观�
 - **实现**：`regexp_lib.compilePatternAndFlagsWithOptions(rt.memory.allocator, pattern, flags, .{ .@"opaque" = rt, .check_stack_overflow = lreCheckStackOverflow })`——`opaque` 带的就是 runtime 指针。
 - **所有权 / 错误 / 调用**：返回的 `Compiled` 归调用方（RegExp 对象的 payload），用 `rt.memory.allocator` 释放。
 
-### `lreCheckStackOverflow` (`src/exec/regexp_adapter.zig:35`)
-
-- **签名**：`fn lreCheckStackOverflow(opaque_ptr: ?*anyopaque, alloca_size: usize) bool`。
-- **作用**：regexp 库编译期的栈溢出检查回调。
-- **实现**：`opaque_ptr` 为 null 时返回 false；否则还原成 `*core.JSRuntime` 并返回 `runtime.checkNativeStackOverflow(alloca_size)`。对应 qjs 的 `lre_check_stack_overflow` → `js_check_stack_overflow(ctx->rt, alloca_size)`（quickjs.c:48000）。
-- **所有权 / 错误 / 调用**：函数指针形态，只由 `compileWithRuntime` 装进 options。
 
 ### `execCaptureSlotsOnResolvedStringFromIndex` (`src/exec/regexp_adapter.zig:45`)
 
@@ -616,12 +604,6 @@ RegExp 分三层：`regexp_ops` 记录/编译/escape，`regexp_fastpath` 可观�
 - **实现**：`!rt.hasInterruptHandler()` 时返回默认空选项（一次回调都不装，热路径零开销）；否则返回 `.{ .@"opaque" = rt, .check_timeout = checkRuntimeTimeout }`。
 - **所有权 / 错误 / 调用**：被 `execCaptureSlotsOnResolvedStringFromIndex` 与 `testOnStringFromIndex` 使用。
 
-### `checkRuntimeTimeout` (`src/exec/regexp_adapter.zig:85`)
-
-- **签名**：`fn checkRuntimeTimeout(context: ?*anyopaque) bool`。
-- **作用**：匹配循环里的中断 / 超时回调。
-- **实现**：`context` 为 null 返回 false；否则还原成 `*core.JSRuntime` 并返回 `rt.runInterruptHandler()`（返回 true 时库侧把匹配变成 `Timeout`）。
-- **所有权 / 错误 / 调用**：函数指针形态，只由 `execOptions` 装上。
 
 ### `flagBitsFromBytecode` (`src/exec/regexp_adapter.zig:90`)
 

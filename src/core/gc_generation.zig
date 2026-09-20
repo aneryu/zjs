@@ -24,6 +24,18 @@ const gc = @import("gc.zig");
 /// Both cost nothing in ReleaseFast, where the skip is the whole point.
 pub const remembered_skip_audit = std.debug.runtime_safety;
 
+/// The phases of one minor collection, in execution order; `Stats.minor_ns`
+/// accumulates each one's STW time when detailed reports are on.
+pub const MinorPhase = enum {
+    clear,
+    roots,
+    conservative,
+    remembered,
+    trace,
+    sweep,
+    promote,
+};
+
 pub const Stats = struct {
     /// Safety-build only (TGC S4-h (2)): monotone count of young publications.
     /// `sweepUnmarkedYoung` asserts on it that the extent half of the sweep,
@@ -73,13 +85,7 @@ pub const Stats = struct {
     /// reports are requested; `pause_ns_total` stays the always-on outer
     /// envelope, so its remainder also exposes collector init/deinit and
     /// instrumentation overhead instead of losing them between phases.
-    minor_clear_ns_total: u64 = 0,
-    minor_roots_ns_total: u64 = 0,
-    minor_conservative_ns_total: u64 = 0,
-    minor_remembered_ns_total: u64 = 0,
-    minor_trace_ns_total: u64 = 0,
-    minor_sweep_ns_total: u64 = 0,
-    minor_promote_ns_total: u64 = 0,
+    minor_ns: std.EnumArray(MinorPhase, u64) = .initFill(0),
     /// Young objects present when each minor started, summed. Divided by
     /// `minor_collections` this is the average young-list size a minor had to
     /// walk -- the scaling figure.
@@ -100,13 +106,9 @@ pub const Stats = struct {
     remembered_clears: usize = 0,
 
     pub fn minorPhaseNsTotal(self: Stats) u64 {
-        return self.minor_clear_ns_total +|
-            self.minor_roots_ns_total +|
-            self.minor_conservative_ns_total +|
-            self.minor_remembered_ns_total +|
-            self.minor_trace_ns_total +|
-            self.minor_sweep_ns_total +|
-            self.minor_promote_ns_total;
+        var total: u64 = 0;
+        for (self.minor_ns.values) |ns| total +|= ns;
+        return total;
     }
 };
 

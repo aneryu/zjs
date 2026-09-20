@@ -5,8 +5,8 @@
 //! and temporary flattened strings or buffers are released locally. Realm- and
 //! VM-aware string/RegExp integration stays in `string_ops.zig`; the record/id
 //! seam here lets direct leaf handlers avoid that wider dependency. QuickJS
-//! coordinates include `js_string_concat` at quickjs.c:45525, split at
-//! quickjs.c:45749-45836, and repeat at quickjs.c:46371.
+//! coordinates include `js_string_concat` at quickjs.c, split at
+//! quickjs.c, and repeat at quickjs.c.
 
 const core = @import("../core/root.zig");
 const iterator_ops = @import("iterator_ops.zig");
@@ -291,13 +291,13 @@ inline fn stringPrimitiveIndexRead(host_call: NativeCall, comptime mid: u32) Hos
     const string_value = host_call.this_value;
     if (!string_value.isString()) return null;
     // qjs's js_string_charCodeAt / charAt / codePointAt / at all open with
-    // JS_ToStringCheckObject (quickjs.c:45450), whose JS_ToStringInternal
+    // JS_ToStringCheckObject, whose JS_ToStringInternal
     // JS_TAG_STRING_ROPE case linearizes the receiver through
-    // js_linearize_string_rope (quickjs.c:13597-13598 -> 4828). Linearize at the
+    // js_linearize_string_rope. Linearize at the
     // same boundary: StringRope.flatten caches the flat body into the node and
     // is O(1) once linearized, exactly like js_linearize_string_rope's
-    // already-linearized check (quickjs.c:4838-4844) and its node rewrite
-    // (quickjs.c:4851-4855). Without this each call re-descends the rope tree
+    // already-linearized check and its node rewrite
+    //. Without this each call re-descends the rope tree
     // in stringValueCodeUnitAtUnchecked, so scanning a content stream costs
     // O(depth) per character instead of O(1).
     if (string_value.ropeBody()) |node| {
@@ -356,12 +356,12 @@ inline fn stringPrimitiveInt32Sat(value: core.JSValue) ?i32 {
 /// path) without observable difference.
 const concat_direct_max_args = 7;
 
-/// qjs `js_string_concat` (quickjs.c:45525): `JS_ToStringCheckObject(this)`,
+/// qjs `js_string_concat`: `JS_ToStringCheckObject(this)`,
 /// then one `JS_ConcatString(r, JS_ToString(argv[i]))` per argument. For the
 /// hot shape — flat latin1 string receiver with flat latin1 string / int32
 /// arguments (all with pure, side-effect-free ToString) — run the
 /// measure-once / allocate-once / memcpy-each-part body (`JS_ConcatString1`,
-/// quickjs.c:4646 semantics) directly from the record entry, skipping the
+/// quickjs.c semantics) directly from the record entry, skipping the
 /// realm resolution + double method-id dispatch tower. int32 arguments format
 /// into stack buffers instead of materializing an intermediate digits
 /// JSString (`appendAsciiSuffixOwned` / `stringAddStringInt` precedent:
@@ -788,7 +788,7 @@ pub fn stringIteratorNext(rt: *core.JSRuntime, global: ?*core.Object, receiver: 
     const first = core.string.stringValueCodeUnitAtUnchecked(target, index);
 
     // Single code unit (`c <= 0xffff`, non-surrogate-pair): qjs routes these
-    // through js_new_string_char (quickjs.c:3953-3962), which takes the latin1
+    // through js_new_string_char, which takes the latin1
     // path for `c < 0x100`. Mirror that — a latin1 unit comes from the
     // runtime's single-code-unit table (zero-alloc); only `>= 0x100` and
     // surrogate pairs reach the wide createUtf16.
@@ -1011,7 +1011,7 @@ fn isLowSurrogateUnit(unit: u16) bool {
 }
 
 /// Mirrors the non-RegExp core of QuickJS `js_string_split`
-/// (`quickjs.c:45749-45836`): convert receiver/separator to strings and
+///: convert receiver/separator to strings and
 /// create an ordinary array of substrings.
 fn split(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
     var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
@@ -1186,7 +1186,7 @@ fn match(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !co
     try defineIntProperty(rt, out, core.atom.ids.index, @intCast(index));
     input = try createStringValue(rt, bytes);
     const input_key = core.atom.ids.input;
-    try out.defineOwnProperty(rt, input_key, core.Descriptor.data(input, true, false, true));
+    try out.defineOwnProperty(rt, input_key, core.Descriptor.data(input, .method));
     return out_value;
 }
 
@@ -1254,7 +1254,7 @@ fn defineValueElement(rt: *core.JSRuntime, object: *core.Object, index: u32, val
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    try object.defineOwnProperty(rt, core.Atom.taggedInt(index), core.Descriptor.data(rooted_value, true, true, true));
+    try object.defineOwnProperty(rt, core.Atom.taggedInt(index), core.Descriptor.data(rooted_value, .all));
 }
 
 fn defineStringIndexUnitProperty(rt: *core.JSRuntime, object: *core.Object, index: u32, unit: u16) !void {
@@ -1266,7 +1266,7 @@ fn defineStringIndexUnitProperty(rt: *core.JSRuntime, object: *core.Object, inde
     const units: [1]u16 = .{unit};
     const string = try core.string.String.createUtf16(rt, &units);
     const value = string.value();
-    try object.defineOwnProperty(rt, core.Atom.taggedInt(index), core.Descriptor.data(value, false, true, false));
+    try object.defineOwnProperty(rt, core.Atom.taggedInt(index), core.Descriptor.data(value, .{ .enumerable = true }));
 }
 
 fn trimStartAscii(bytes: []const u8) []const u8 {
@@ -1622,7 +1622,7 @@ fn stringSliceRange(rt: *core.JSRuntime, len_usize: usize, args: []const core.JS
 }
 
 /// Resolve-once String.prototype.repeat for plain String / String-object
-/// receivers, mirroring QuickJS `js_string_repeat` (quickjs.c:46371): the
+/// receivers, mirroring QuickJS `js_string_repeat`: the
 /// receiver's already-flat code units are borrowed ONCE (no per-call
 /// transcode-copy of the slow `repeat(bytes)` path) and the result is built
 /// directly in a buffer pre-sized to `count * unit_len`, narrow latin1 stays
@@ -1639,7 +1639,7 @@ fn repeatReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const cor
     };
 
     const count = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
-    // qjs js_string_repeat (quickjs.c:46371): count outside [0, 2^31-1] is
+    // qjs js_string_repeat: count outside [0, 2^31-1] is
     // RangeError "invalid repeat count"; a result past JS_STRING_LEN_MAX is
     // RangeError "invalid string length". Both messages are attached by the
     // string_ops dispatch wrapper (error.RangeError / error.InvalidLength).
@@ -1669,7 +1669,7 @@ fn repeatReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const cor
 
 fn repeat(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
     const count = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
-    // Mirror of repeatReceiver's qjs js_string_repeat checks (quickjs.c:46371).
+    // Mirror of repeatReceiver's qjs js_string_repeat checks.
     if (count < 0 or count > 2147483647) return error.RangeError;
     if (bytes.len == 0 or count == 0) return createStringValue(rt, "");
     const repeat_count: usize = @intCast(count);
@@ -1849,7 +1849,7 @@ fn stringIndexOfUnits(haystack: *core.string.String, needle: *core.string.String
     if (nlen == 0) return start;
     if (nlen > hlen - start) return null;
     // Resolve both operands to their flat code-unit slice ONCE (qjs string_indexof
-    // hoists is_wide_char out of the loop, quickjs.c:45553/45579) instead of
+    // hoists is_wide_char out of the loop, quickjs.c) instead of
     // re-walking the slice/rope parent chain via `codeUnitAt` on every character,
     // and first-char-skip so a non-matching position is rejected in a single read.
     // The loop runs no allocations, so the resolved slices stay valid throughout.
@@ -1916,7 +1916,7 @@ fn stringValueFromReceiverRaw(value: core.JSValue) ?core.JSValue {
     const string_value = if (value.isString())
         value
     else if (value.is(.object)) blk: {
-        const object = expectObject(value) catch return null;
+        const object = core.value_semantics.objectFromValue(value) orelse return null;
         if (object.class_id != core.class.ids.string) return null;
         break :blk object.objectData() orelse return null;
     } else return null;
@@ -1933,13 +1933,8 @@ test "string iteratorResult roots direct function bytecode value while creating 
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
-    var fb_published = false;
-    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-string-iterator-result-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
-    fb.publishFixtureNoFail(rt);
-    fb_published = true;
+    const fb = try core.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
 
     const result_value = core.JSValue.functionBytecode(&fb.header);
 
@@ -2011,7 +2006,7 @@ fn defineIntProperty(rt: *core.JSRuntime, object: *core.Object, key: core.Atom, 
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(value), true, true, true));
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(value), .all));
 }
 
 fn defineReadonlyIntProperty(rt: *core.JSRuntime, object: *core.Object, key: core.Atom, value: i32) !void {
@@ -2020,7 +2015,7 @@ fn defineReadonlyIntProperty(rt: *core.JSRuntime, object: *core.Object, key: cor
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(value), false, false, false));
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(value), .none));
 }
 
 fn stringSearchStart(rt: *core.JSRuntime, length: usize, value: core.JSValue) !usize {

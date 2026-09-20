@@ -4,7 +4,7 @@
 //! its own GC block; borrowed library views must never deinit or realloc those
 //! limbs. Header offset, total size, alignment, and limb geometry are comptime
 //! pins used by JSValue decoding and GC accounting. QuickJS map: `JSBigInt` and
-//! its limb tail around quickjs.c:611-617. Core and higher layers may import
+//! its limb tail around quickjs.c. Core and higher layers may import
 //! this module; it depends only on core/libs, never exec/runtime/binding.
 
 const std = @import("std");
@@ -295,7 +295,7 @@ pub const BigInt = struct {
     /// `3000000000n` is a one-limb heap BigInt and `3000000000n *
     /// 3000000000n` is `9e18 < 2^63` -- a product that does fit a short. qjs
     /// compacts every multiplication result (`JS_CompactBigInt` at
-    /// quickjs.c:15054, collapsing at `len == 1`), so skipping that collapse
+    /// quickjs.c, collapsing at `len == 1`), so skipping that collapse
     /// would be an alignment divergence. The FAM path therefore runs only
     /// where the collapse is provably impossible; everything else keeps the
     /// old path and its `createBigIntOwned` collapse.
@@ -325,7 +325,7 @@ pub const BigInt = struct {
     /// product's limbs come from one `createWithFam`, and the basecase loop
     /// writes straight into the trailing limbs. This is the topology qjs has
     /// (`js_bigint_new` is `js_malloc(sizeof(JSBigInt) + len * sizeof(limb))`,
-    /// quickjs.c:11860), replacing zjs's separate `mulAlloc` limb block plus
+    /// quickjs.c), replacing zjs's separate `mulAlloc` limb block plus
     /// `createFromOwned` wrapper.
     ///
     /// Everything after the allocation is infallible, so OOM has exactly one
@@ -335,7 +335,7 @@ pub const BigInt = struct {
         std.debug.assert(mulResultCannotCompactToShort(lhs, rhs));
 
         // Mirrors the js_bigint_new cap that bounds mulAlloc
-        // (quickjs.c:11592-11596). `capacity` cannot overflow before the check:
+        //. `capacity` cannot overflow before the check:
         // both lengths are already <= max_limbs, which is 16384.
         const capacity = @as(usize, lhs.len) + @as(usize, rhs.len);
         const self = try createInlineUninitialized(rt, capacity);
@@ -357,7 +357,7 @@ pub const BigInt = struct {
         //
         // Shorter operand as the outer row (P6-01c), first row overwrites so no
         // pre-zeroing pass exists (P6-01, mirroring qjs mp_mul_basecase at
-        // quickjs.c:11401-11413), and each row's top carry slot is a pure write.
+        // quickjs.c), and each row's top carry slot is a pure write.
         const outer = if (lhs_limbs.len <= rhs_limbs.len) lhs_limbs else rhs_limbs;
         const inner = if (lhs_limbs.len <= rhs_limbs.len) rhs_limbs else lhs_limbs;
         for (outer, 0..) |a, i| {
@@ -856,7 +856,7 @@ test "heap multiplication rejects an oversize product before allocating" {
     const rt = try JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    // max_limbs is the js_bigint_new cap (quickjs.c:11592-11596). Two operands
+    // max_limbs is the js_bigint_new cap. Two operands
     // just over half of it produce a product that exceeds it, and the check has
     // to happen before the FAM allocation.
     const half = bigint.max_limbs / 2 + 1;

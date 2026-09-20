@@ -61,95 +61,97 @@ pub const IntrusiveHeaderList = struct {
     /// the same branch-free shape as the old intrusive sentinel: the tail link
     /// is always writable, including for the first element.
     tail: ?*Header = null,
+
+    /// Bind the cyclic sentinel (qjs `init_list_head`). Idempotent on an
+    /// empty list.
+    pub inline fn init(head: *IntrusiveHeaderList) void {
+        head.sentinel.next_non_object = &head.sentinel;
+        head.tail = &head.sentinel;
+    }
+
+    pub inline fn isEmpty(head: *const IntrusiveHeaderList) bool {
+        return head.sentinel.next_non_object == @constCast(&head.sentinel);
+    }
+
+    pub inline fn addTail(head: *IntrusiveHeaderList, el: *Header) void {
+        std.debug.assert(el.metaConst().flags.kind != .object);
+        std.debug.assert(el.next_non_object == null);
+        const tail = head.tail.?;
+        el.next_non_object = &head.sentinel;
+        tail.next_non_object = el;
+        head.tail = el;
+        setStoredListPrevious(el, tail);
+    }
+
+    /// Append to a collector-private list whose every removal is performed by a
+    /// forward traversal already carrying the predecessor. Such lists never need
+    /// Shape/Realm's arbitrary-unlink backlink, so do not pay the kind dispatch
+    /// that maintains it on the allocation-ordered `gc_obj_list`.
+    pub inline fn addTailTraversalOwned(head: *IntrusiveHeaderList, el: *Header) void {
+        std.debug.assert(el.metaConst().flags.kind != .object);
+        std.debug.assert(el.next_non_object == null);
+        const tail = head.tail.?;
+        el.next_non_object = &head.sentinel;
+        tail.next_non_object = el;
+        head.tail = el;
+    }
+
+    /// Return the predecessor of `el` in `head`. Callers that do not already hold
+    /// a traversal cursor pay one cold forward scan, except for the two kinds that
+    /// keep an accelerator backlink in their body.
+    pub inline fn predecessor(head: *IntrusiveHeaderList, el: *Header) *Header {
+        switch (el.metaConst().flags.kind) {
+            .shape, .realm_context => {
+                const stored = storedListPrevious(el).?;
+                std.debug.assert(stored.next_non_object == el);
+                return stored;
+            },
+            else => {},
+        }
+        var cursor: *Header = &head.sentinel;
+        while (cursor.next_non_object != el) {
+            cursor = cursor.next_non_object.?;
+            std.debug.assert(cursor != &head.sentinel);
+        }
+        return cursor;
+    }
+
+    /// Delete `el` when its predecessor is already known by the caller's forward
+    /// traversal. This is the normal compact-trace sweep primitive: one pointer
+    /// splice, never a search per corpse.
+    pub inline fn delAfter(head: *IntrusiveHeaderList, prev: *Header, el: *Header) void {
+        std.debug.assert(el.metaConst().flags.kind != .object);
+        std.debug.assert(prev.next_non_object == el);
+        const next = el.next_non_object.?;
+        prev.next_non_object = next;
+        if (next != &head.sentinel) setStoredListPrevious(next, prev);
+        head.tail = if (head.tail == el) prev else head.tail;
+        // Linkage is already authoritatively cleared by `next = null` below.
+        // ReleaseFast does not pay a second kind dispatch merely to scrub the
+        // Shape/Realm acceleration slot of an object that is either destroyed
+        // or immediately re-linked (which overwrites it). Keep the scrub in
+        // safety builds so stale-backlink misuse still fails close to origin.
+        if (std.debug.runtime_safety) setStoredListPrevious(el, null);
+        el.next_non_object = null;
+    }
+
+    /// Traversal-owned counterpart to `delAfter`. The caller promises this is
+    /// not `gc_obj_list`: no mutator can arbitrarily unlink Shape/Realm nodes from
+    /// it, so successor backlinks are deliberately absent and need no repair.
+    pub inline fn delAfterTraversalOwned(head: *IntrusiveHeaderList, prev: *Header, el: *Header) void {
+        std.debug.assert(el.metaConst().flags.kind != .object);
+        std.debug.assert(prev.next_non_object == el);
+        prev.next_non_object = el.next_non_object.?;
+        head.tail = if (head.tail == el) prev else head.tail;
+        el.next_non_object = null;
+    }
+
+    pub inline fn first(head: *const IntrusiveHeaderList) ?*Header {
+        const next = head.sentinel.next_non_object.?;
+        if (next == @constCast(&head.sentinel)) return null;
+        return next;
+    }
 };
-
-pub inline fn listInit(head: *IntrusiveHeaderList) void {
-    head.sentinel.next_non_object = &head.sentinel;
-    head.tail = &head.sentinel;
-}
-
-pub inline fn listEmpty(head: *const IntrusiveHeaderList) bool {
-    return head.sentinel.next_non_object == @constCast(&head.sentinel);
-}
-
-pub inline fn listAddTail(head: *IntrusiveHeaderList, el: *Header) void {
-    std.debug.assert(el.metaConst().flags.kind != .object);
-    std.debug.assert(el.next_non_object == null);
-    const previous = head.tail.?;
-    el.next_non_object = &head.sentinel;
-    previous.next_non_object = el;
-    head.tail = el;
-    setStoredListPrevious(el, previous);
-}
-
-/// Append to a collector-private list whose every removal is performed by a
-/// forward traversal already carrying the predecessor. Such lists never need
-/// Shape/Realm's arbitrary-unlink backlink, so do not pay the kind dispatch
-/// that maintains it on the allocation-ordered `gc_obj_list`.
-pub inline fn listAddTailTraversalOwned(head: *IntrusiveHeaderList, el: *Header) void {
-    std.debug.assert(el.metaConst().flags.kind != .object);
-    std.debug.assert(el.next_non_object == null);
-    const previous = head.tail.?;
-    el.next_non_object = &head.sentinel;
-    previous.next_non_object = el;
-    head.tail = el;
-}
-
-/// Return the predecessor of `el` in `head`. Callers that do not already hold
-/// a traversal cursor pay one cold forward scan, except for the two kinds that
-/// keep an accelerator backlink in their body.
-pub inline fn listPrevious(head: *IntrusiveHeaderList, el: *Header) *Header {
-    switch (el.metaConst().flags.kind) {
-        .shape, .realm_context => {
-            const previous = storedListPrevious(el) orelse unreachable;
-            std.debug.assert(previous.next_non_object == el);
-            return previous;
-        },
-        else => {},
-    }
-    var previous: *Header = &head.sentinel;
-    while (previous.next_non_object != el) {
-        previous = previous.next_non_object.?;
-        std.debug.assert(previous != &head.sentinel);
-    }
-    return previous;
-}
-
-/// Delete `el` when its predecessor is already known by the caller's forward
-/// traversal. This is the normal compact-trace sweep primitive: one pointer
-/// splice, never a search per corpse.
-pub inline fn listDelAfter(head: *IntrusiveHeaderList, previous: *Header, el: *Header) void {
-    std.debug.assert(el.metaConst().flags.kind != .object);
-    std.debug.assert(previous.next_non_object == el);
-    const next = el.next_non_object.?;
-    previous.next_non_object = next;
-    if (next != &head.sentinel) setStoredListPrevious(next, previous);
-    head.tail = if (head.tail == el) previous else head.tail;
-    // Linkage is already authoritatively cleared by `next = null` below.
-    // ReleaseFast does not pay a second kind dispatch merely to scrub the
-    // Shape/Realm acceleration slot of an object that is either destroyed
-    // or immediately re-linked (which overwrites it). Keep the scrub in
-    // safety builds so stale-backlink misuse still fails close to origin.
-    if (std.debug.runtime_safety) setStoredListPrevious(el, null);
-    el.next_non_object = null;
-}
-
-/// Traversal-owned counterpart to `listDelAfter`. The caller promises this is
-/// not `gc_obj_list`: no mutator can arbitrarily unlink Shape/Realm nodes from
-/// it, so successor backlinks are deliberately absent and need no repair.
-pub inline fn listDelAfterTraversalOwned(head: *IntrusiveHeaderList, previous: *Header, el: *Header) void {
-    std.debug.assert(el.metaConst().flags.kind != .object);
-    std.debug.assert(previous.next_non_object == el);
-    previous.next_non_object = el.next_non_object.?;
-    head.tail = if (head.tail == el) previous else head.tail;
-    el.next_non_object = null;
-}
-
-pub inline fn listFirst(head: *const IntrusiveHeaderList) ?*Header {
-    const next = head.sentinel.next_non_object.?;
-    if (next == @constCast(&head.sentinel)) return null;
-    return next;
-}
 
 pub inline fn headerLinked(header: *const Header) bool {
     return header.nextNonObject() != null;
@@ -162,7 +164,7 @@ pub fn verifyCircularHeaderList(
 ) InvariantError!usize {
     const sentinel = &head.sentinel;
     if (sentinel.next_non_object == null) return error.CorruptGcList;
-    if (listEmpty(head)) {
+    if (head.isEmpty()) {
         if (head.tail != sentinel) return error.CorruptGcList;
         return 0;
     }
@@ -216,7 +218,7 @@ pub const Lists = struct {
     young_predecessor: ?*Header = null,
 
     // No live-object counter: qjs add_gc_object/remove_gc_object
-    // (quickjs.c:6540/6548) are pure list splices with no count scalar.
+    // are pure list splices with no count scalar.
     // Diagnostics (`Registry.liveCount`) derive the count by walking, like
     // `liveCountKind` always has.
 
@@ -231,7 +233,7 @@ pub const Lists = struct {
     /// header is published, and is idempotent: rebinding an empty list to
     /// itself is the same state.
     pub fn init(self: *Lists) void {
-        listInit(&self.objects);
+        self.objects.init();
     }
 
     /// Publication marks a freshly appended carrier young immediately after
@@ -248,10 +250,10 @@ pub const Lists = struct {
         self.young_predecessor = null;
     }
 
-    /// qjs `list_add_tail` (quickjs.c:6545).
+    /// qjs `list_add_tail`.
     pub inline fn linkTail(self: *Lists, header: *Header) void {
         std.debug.assert(header.metaConst().flags.kind != .object);
         self.stageYoungTailPredecessor();
-        listAddTail(&self.objects, header);
+        self.objects.addTail(header);
     }
 };

@@ -42,6 +42,7 @@ const SpaceHistogram = @import("gc_space.zig").Histogram;
 pub const AllocationHandle = carrier.AllocationHandle;
 pub const CurrentMembershipKey = carrier.CurrentMembershipKey;
 pub const CarrierStateMask = carrier.StateMask;
+pub const carrier_state_masks = carrier.state_masks;
 pub const CarrierLifecycleState = carrier.LifecycleState;
 pub const CarrierResolveError = carrier.ResolveError;
 pub const block_generation_enabled = carrier.block_generation_enabled;
@@ -117,7 +118,6 @@ pub const UnbarrieredStoreSite = enum(u8) {
     dense_array_in_capacity_append,
     global_lexical_cell_replace,
 };
-pub var unbarriered_store_hits: [3]usize = .{ 0, 0, 0 };
 
 /// `ZJS_GC_ARENA_AUDIT=1`: after every collection, check that a slab block
 /// reads as a live GC object exactly when it holds one.
@@ -158,32 +158,60 @@ pub inline fn mCutInjection(comptime mutation: u8) bool {
     return m_cut_inject == mutation;
 }
 
+/// One `ZJS_*` audit switch as spelled in the environment: unset, off
+/// ("" / "0"), on (anything else), or the two escalations "fatal" and
+/// "verbose", which also count as on.
+const EnvSwitch = enum {
+    unset,
+    off,
+    on,
+    fatal,
+    verbose,
+
+    fn read(name: [*:0]const u8) EnvSwitch {
+        const raw = std.c.getenv(name) orelse return .unset;
+        const text = std.mem.span(raw);
+        if (text.len == 0 or std.mem.eql(u8, text, "0")) return .off;
+        if (std.mem.eql(u8, text, "fatal")) return .fatal;
+        if (std.mem.eql(u8, text, "verbose")) return .verbose;
+        return .on;
+    }
+
+    fn enabled(self: EnvSwitch) bool {
+        return self != .unset and self != .off;
+    }
+};
+
 /// Read once at `Registry.init`. "0" or empty disables; "1" enables at the
 /// default cadence; any other integer enables at that cadence.
 fn readStressFromEnv() void {
-    if (std.c.getenv("ZJS_MINOR_AUDIT")) |raw| {
-        const text = std.mem.span(raw);
-        minor_audit = text.len != 0 and !std.mem.eql(u8, text, "0");
-        minor_audit_fatal = std.mem.eql(u8, text, "fatal");
+    switch (EnvSwitch.read("ZJS_MINOR_AUDIT")) {
+        .unset => {},
+        else => |value| {
+            minor_audit = value.enabled();
+            minor_audit_fatal = value == .fatal;
+        },
     }
-    if (std.c.getenv("ZJS_ATOM_AUDIT")) |raw| {
-        const text = std.mem.span(raw);
-        atom_audit_fatal = std.mem.eql(u8, text, "fatal");
+    switch (EnvSwitch.read("ZJS_ATOM_AUDIT")) {
+        .unset => {},
+        else => |value| atom_audit_fatal = value == .fatal,
     }
-    if (std.c.getenv("ZJS_GC_ARENA_AUDIT")) |raw| {
-        const text = std.mem.span(raw);
-        arena_audit = text.len != 0 and !std.mem.eql(u8, text, "0");
+    switch (EnvSwitch.read("ZJS_GC_ARENA_AUDIT")) {
+        .unset => {},
+        else => |value| arena_audit = value.enabled(),
     }
-    if (std.c.getenv("ZJS_GC_VERIFY_MINOR")) |raw| {
-        const text = std.mem.span(raw);
-        verify_minor = text.len != 0 and !std.mem.eql(u8, text, "0");
-        verify_minor_fatal = std.mem.eql(u8, text, "fatal");
-        verify_minor_verbose = roots_diag_enabled or std.mem.eql(u8, text, "verbose");
+    switch (EnvSwitch.read("ZJS_GC_VERIFY_MINOR")) {
+        .unset => {},
+        else => |value| {
+            verify_minor = value.enabled();
+            verify_minor_fatal = value == .fatal;
+            verify_minor_verbose = roots_diag_enabled or value == .verbose;
+        },
     }
     if (comptime roots_diag_enabled) {
-        if (std.c.getenv("ZJS_GC_VERIFY_MAJOR_ALL")) |raw| {
-            const text = std.mem.span(raw);
-            verify_major_all = text.len != 0 and !std.mem.eql(u8, text, "0");
+        switch (EnvSwitch.read("ZJS_GC_VERIFY_MAJOR_ALL")) {
+            .unset => {},
+            else => |value| verify_major_all = value.enabled(),
         }
     }
     if (comptime builtin.is_test) {
@@ -215,6 +243,7 @@ pub const registry_diagnostics = @import("gc_registry_diagnostics.zig");
 /// barrier only reads them. Mutual import with `gc_trace_stw.zig` is fine --
 /// Zig resolves lazily.
 const gc_trace_stw_reports = @import("gc_trace_stw.zig");
+const JSRuntime = @import("runtime.zig").JSRuntime;
 pub const generation = @import("gc_generation.zig");
 const IncrementalState = incremental.State;
 
@@ -417,12 +446,12 @@ pub const ExternalMemoryToken = struct {
 
 /// 6.2 GcKind definition
 /// 4-bit tag packed into the low nibble of the shared kind/flags byte of
-/// `Metadata` (qjs `JSMallocBlockHeader.gc_obj_type : 7`, quickjs.c:276).
+/// `Metadata` (qjs `JSMallocBlockHeader.gc_obj_type: 7`, quickjs.c).
 /// It was three bits until TGC S4-a, which spent the retired `mark` bit on
 /// the fourth: eight values were full, and S4 needs four more kinds.
 ///
 /// Value order is load-bearing for codegen, mirroring qjs's
-/// `JS_GC_OBJ_TYPE_JS_OBJECT == 0` (quickjs.c:423): the hot `kind == .object`
+/// `JS_GC_OBJ_TYPE_JS_OBJECT == 0`: the hot `kind ==.object`
 /// guards compile to a single `tst` of the masked byte, and the recurring
 /// encoded kind checks stay compact. Values 0..7 are unchanged, so every
 /// bare kind tag byte a raw prefix writer stores keeps its old encoding.
@@ -651,9 +680,9 @@ pub const RequestUrgency = enum(u8) {
     urgent,
 };
 
+/// A latched major-collection request; absent (null) when none is pending.
 pub const Request = struct {
-    pending: bool = false,
-    reason: ?RequestReason = null,
+    reason: RequestReason,
     urgency: RequestUrgency = .soon,
 };
 
@@ -667,12 +696,7 @@ pub const ExternalTokenEntry = struct {
     bytes: usize = 0,
 };
 
-pub const PinEntry = struct {
-    header: *Header,
-    count: usize = 0,
-};
-
-/// Reserved PinEntry count for a fully initialized but unpublished generator
+/// Reserved pin count for a fully initialized but unpublished generator
 /// shell. Host pins are positive reference counts and can never reach this
 /// value; the discriminator adds no field or padding to the existing ledger.
 pub const construction_pin_count = std.math.maxInt(usize);
@@ -685,7 +709,7 @@ pub fn ratioPerMille(numerator: usize, denominator: usize) usize {
 
 /// Byte 3 of the metadata prefix: the GC kind and the GC lifecycle bits share
 /// one byte, mirroring qjs `JSMallocBlockHeader` byte 3 = `gc_obj_type : 7 |
-/// mark : 1` (quickjs.c:276). zjs needs cycle/lifecycle bits qjs carries in
+/// mark: 1`. zjs needs cycle/lifecycle bits qjs carries in
 /// its wider 4-bit `mark` value ranges and list membership, so the kind is
 /// four bits and the flags take the remaining four.
 ///
@@ -697,7 +721,7 @@ pub const BlockFlags = packed struct(u8) {
     /// GC kind tag (qjs `gc_obj_type`). Bits 0-3.
     kind: GcKind = .object,
     /// Padding: former `in_cycle_list`. Membership is the cyclic list itself
-    /// (qjs `list_add_tail` / `list_del`, quickjs.c:6545/6548). Kept so
+    /// (qjs `list_add_tail` / `list_del`, quickjs.c). Kept so
     /// `finalizing` / the spare bit stay at their historical bit positions
     /// — `memory.zig` writes this flags byte by layout.
     /// Was `in_cycle_list`, then padding. Now carries the sticky generation
@@ -738,7 +762,7 @@ pub const BlockFlags = packed struct(u8) {
 };
 
 /// Byte 2 of the metadata prefix = the allocator's `block_size_idx` byte (qjs
-/// `JSMallocBlockHeader.block_size_idx`, quickjs.c:275), now stamped for GC
+/// `JSMallocBlockHeader.block_size_idx`, quickjs.c), now stamped for GC
 /// allocations too, plus two zjs state bits in the unused high bits
 /// (slab classes only need 5 bits; qjs marks its large blocks via
 /// `u.block_idx == FREE_NIL` instead, but zjs stores encoded heap bytes in
@@ -746,7 +770,7 @@ pub const BlockFlags = packed struct(u8) {
 pub const AllocInfo = packed struct(u8) {
     /// Slab size-class index of the owning block. Valid iff `!standalone`;
     /// free paths read it back instead of re-deriving the class from the byte
-    /// size (qjs `__js_free`, quickjs.c:1614-1617).
+    /// size (qjs `__js_free`, quickjs.c).
     block_size_idx: u5 = 0,
     reserved: bool = false,
     /// The allocation has been published to the live heap. Kept separate from
@@ -1092,14 +1116,6 @@ inline fn assertInitialHeaderLifetime(h: *const Header) void {
 // Registry cursors that use them; these aliases keep the `gc.listX` spelling
 // the collector already had.
 pub const IntrusiveHeaderList = registry_lists.IntrusiveHeaderList;
-pub const listInit = registry_lists.listInit;
-pub const listEmpty = registry_lists.listEmpty;
-pub const listAddTail = registry_lists.listAddTail;
-pub const listAddTailTraversalOwned = registry_lists.listAddTailTraversalOwned;
-pub const listPrevious = registry_lists.listPrevious;
-pub const listDelAfter = registry_lists.listDelAfter;
-pub const listDelAfterTraversalOwned = registry_lists.listDelAfterTraversalOwned;
-pub const listFirst = registry_lists.listFirst;
 const headerLinked = registry_lists.headerLinked;
 
 const large_heap_size_class = std.math.maxInt(u16);
@@ -1139,10 +1155,7 @@ pub const InvariantError = error{
     DuplicateExternalMemoryToken,
     EmptyExternalMemoryToken,
     ExternalTokenBytesMismatch,
-    DuplicatePinEntry,
     EmptyPinEntry,
-    PinnedHeaderFlagMismatch,
-    PinnedHeaderMissingEntry,
     PinEntryNotLive,
     YoungCountMismatch,
     RememberedOwnerNotLive,
@@ -1391,7 +1404,7 @@ pub const Stats = struct {
 /// `freeObjectAssumeObject`/`free`, mirroring qjs `__JS_FreeValueRT`'s
 /// `gc_phase` check) -- including the per-return function rc-- on the hot
 /// call path. QuickJS keeps `gc_phase` in the JSRuntime head
-/// (quickjs.c:342); zjs auto layout had pushed it to the Registry tail at
+///; zjs auto layout had pushed it to the Registry tail at
 /// rt+18-19KB, costing a `mov #imm` address materialization plus a cold
 /// cache line on every release (M1 dossier K4).
 ///
@@ -1421,6 +1434,16 @@ pub const HotWords = extern struct {
 };
 
 pub const Registry = struct {
+    /// Outcome of the most recent collection on THIS runtime: the panel
+    /// row, the census time it deducts, and the raw final-remark witness the
+    /// deduction test reads. Per runtime, so two runtimes on two threads
+    /// cannot contaminate each other's panels (gc_incremental.Stats had the
+    /// same bug once).
+    last_report: gc_trace_stw_reports.Report = .{},
+    last_census_ns: u64 = 0,
+    last_finish_remark_raw_ns: u64 = 0,
+    /// Unbarriered old->young stores caught by the audit, by store site.
+    unbarriered_store_hits: [3]usize = .{ 0, 0, 0 },
     // Field ORDER is load-bearing, not cosmetic. Zig's auto layout keeps
     // declaration order within an alignment class, so the offsets below are
     // exactly this list: the groups the mutator touches on every allocation
@@ -1563,7 +1586,7 @@ pub const Registry = struct {
         self.morgue.init();
     }
 
-    pub fn deinit(self: *Registry, rt: anytype) void {
+    pub fn deinit(self: *Registry, rt: *JSRuntime) void {
         self.abortCycleEnvelope();
         self.invalidateCycleEnvelopeBaseline();
         // Close the epoch before any destructor can condemn or raw-free a
@@ -1621,11 +1644,11 @@ pub const Registry = struct {
                 rt.drainDeferredClassPayloadFinalizers();
             }
         }
-        while (!listEmpty(&self.lists.objects)) {
+        while (!self.lists.objects.isEmpty()) {
             // Compact headers have no backlink on tracer-owned kinds. Teardown
             // order is mediated by the holding stacks below, not list order,
             // so consume the head and keep every detach O(1).
-            const h = listFirst(&self.lists.objects).?;
+            const h = self.lists.objects.first().?;
             if (h.meta().flags.kind == .shape) {
                 self.removeGcObject(h);
                 h.setNextNonObject(held_shapes);
@@ -1834,7 +1857,7 @@ pub const Registry = struct {
     /// know the block heap declined; the fallible generic publication API calls
     /// it again as a defensive boundary for test/embedding-created carriers.
     pub fn prepareNonBlockObjectAuthority(self: *Registry) !void {
-        const authority = self.nonblock_objects orelse unreachable;
+        const authority = self.nonblock_objects.?;
         try authority.prepare(addressRegistryAllocator());
     }
 
@@ -1923,7 +1946,7 @@ pub const Registry = struct {
                 @panic("gc: CARRIER IDENTITY: publication missing carrier record");
         }
         // qjs add_gc_object writes header bookkeeping once and then
-        // list_add_tail's (quickjs.c:6540-6546). No membership flag. GC pacing
+        // list_add_tail's. No membership flag. GC pacing
         // is owned by MemoryAccount.allocated_bytes; logical space bytes and
         // counts are derived by statsSnapshot.
         if (comptime arm == .fast) {
@@ -1965,12 +1988,12 @@ pub const Registry = struct {
             // `Table.remove +308 / insert +61` of the S2/S3 close-out symbol
             // diff. The range gate those inserts also widened is now merged
             // from `Heap.extent_bounds_lo/hi` in `rebuildScanFilter`.
-            self.registerLiveAddressClassified(h, bytes, tracked, standalone and !is_extent_carrier, is_block_cell, arm);
+            self.registerLiveAddressClassified(h, bytes, .{ .tracked = tracked, .needs_occupant = standalone and !is_extent_carrier, .is_block_cell = is_block_cell }, arm);
             self.observeNewPublication(h, bytes);
         }
     }
 
-    /// qjs `add_gc_object` for shapes (quickjs.c:6540): rc/kind already live
+    /// qjs `add_gc_object` for shapes: rc/kind already live
     /// in the prefix, then heap_accounted + list_add_tail.
     /// Shapes stay below `large_object_threshold` (8KiB); skip the large
     /// compare, standalone size_class stamp, and isCycleCandidate test.
@@ -1992,7 +2015,7 @@ pub const Registry = struct {
         }
         self.lists.linkTail(h);
         const info = h.metaConst().alloc_info;
-        self.registerLiveAddressClassified(h, bytes, true, info.standalone, isBlockCellHeader(h), .cold);
+        self.registerLiveAddressClassified(h, bytes, .{ .tracked = true, .needs_occupant = info.standalone, .is_block_cell = isBlockCellHeader(h) }, .cold);
         self.observeNewPublication(h, bytes);
     }
 
@@ -2007,7 +2030,7 @@ pub const Registry = struct {
         return h.metaConst().size_class;
     }
 
-    pub fn heapByteSizeFromHeader(rt: anytype, h: *const Header) usize {
+    pub fn heapByteSizeFromHeader(rt: *const JSRuntime, h: *const Header) usize {
         if (storedHeapBytes(h)) |bytes| return bytes;
         return switch (h.metaConst().flags.kind) {
             .object => blk: {
@@ -2039,7 +2062,7 @@ pub const Registry = struct {
                     break :blk storageCellBlockTotalBytes(h) - metadata_prefix_size;
                 }
                 const base = @intFromPtr(h) - metadata_prefix_size;
-                break :blk (rt.gc.block_heap.extentUserBytes(base) orelse unreachable) - metadata_prefix_size;
+                break :blk (rt.gc.block_heap.extentUserBytes(base).?) - metadata_prefix_size;
             },
             .big_int => blk: {
                 const big: *const bigint.BigInt = @alignCast(@fieldParentPtr("header", h));
@@ -2340,7 +2363,7 @@ pub const Registry = struct {
         sb_index: usize = 0,
         blk_index: usize = 0,
         cell_index: u32 = 0,
-        young_block: usize = 0,
+        young_block: BlockHeapMod.BlockLink = .unlinked,
         /// Extent phase cursor; null means the selection excludes extents or
         /// the phase is retired. This is the one part of the iterator that is
         /// not a scalar -- two hash-map key iterators -- so it is kept last,
@@ -2470,8 +2493,7 @@ pub const Registry = struct {
 
         fn nextYoungCell(self: *GcObjectIterator, heap: *const BlockHeapMod.Heap) ?*Header {
             _ = heap;
-            while (self.young_block > 1) {
-                const block: *BlockHeapMod.Block = @ptrFromInt(self.young_block);
+            while (self.young_block.next()) |block| {
                 if (self.nextInBlock(block, true)) |header| return header;
                 self.young_block = block.young_link;
                 self.cell_index = 0;
@@ -2551,9 +2573,9 @@ pub const Registry = struct {
             .young_only = young_only,
             .side_objects = selection == .all or selection == .young or selection == .young_list,
             .young_block = if (comptime young_only and include_blocks)
-                (if (self.block_heap.young_blocks) |head| @intFromPtr(head) else 0)
+                BlockHeapMod.BlockLink.at(self.block_heap.young_blocks)
             else
-                0,
+                .unlinked,
             .extents = if (selection == .all) self.block_heap.extentKeys() else null,
         };
     }
@@ -2638,19 +2660,19 @@ pub const Registry = struct {
         std.debug.assert(header.metaConst().flags.kind == .object);
         std.debug.assert(!isBlockCellHeader(header));
         std.debug.assert(!headerCondemned(header));
-        const authority = self.nonblock_objects orelse unreachable;
+        const authority = self.nonblock_objects.?;
         authority.condemn(header);
         self.unregisterNonBlockObject(header);
         stampHeaderCondemned(header);
     }
 
-    /// qjs `list_del` / `remove_gc_object` (quickjs.c:6548). Already-unlinked
+    /// qjs `list_del` / `remove_gc_object`. Already-unlinked
     /// headers (deinit shape self-remove) are a no-op; a linked node is spliced
     /// with no head/tail null branches.
     fn removeGcObject(self: *Registry, header: *Header) void {
         std.debug.assert(header.metaConst().flags.kind != .object);
         if (!headerLinked(header)) return;
-        const previous = listPrevious(&self.lists.objects, header);
+        const previous = self.lists.objects.predecessor(header);
         self.removeGcObjectAfter(previous, header);
     }
 
@@ -2664,7 +2686,7 @@ pub const Registry = struct {
         self.unregisterLiveAddress(header);
         if (removed_predecessor) self.lists.young_predecessor = previous;
         if (self.lists.young_head == null) self.lists.young_predecessor = null;
-        listDelAfter(&self.lists.objects, previous, header);
+        self.lists.objects.delAfter(previous, header);
     }
 
     /// Mark accessors, split by population.
@@ -3440,7 +3462,7 @@ pub const Registry = struct {
         while (it.next()) |addr| {
             if (addr.* == @intFromPtr(owner)) return;
         }
-        const slot = &unbarriered_store_hits[@intFromEnum(site)];
+        const slot = &self.unbarriered_store_hits[@intFromEnum(site)];
         slot.* += 1;
         const owner_class: u32 = if (owner.metaConst().flags.kind == .object)
             object.Object.fromHeader(owner).class_id
@@ -3604,30 +3626,34 @@ pub const Registry = struct {
     /// `alloc_info` classification in a register. Publication reads that byte,
     /// then writes it, then would need it again for three separate decisions;
     /// threading the answers through keeps it to one load per publication.
+    /// What the address registry must record for a header being published.
+    const LiveAddressClass = struct {
+        /// False for allocations the registry never needs to find.
+        tracked: bool,
+        /// Standalone-prefix allocations need an occupant entry; slab-backed
+        /// ones are found through their registered arena.
+        needs_occupant: bool,
+        is_block_cell: bool,
+    };
+
     inline fn registerLiveAddressClassified(
         self: *Registry,
         header: *Header,
         bytes: usize,
-        tracked: bool,
-        needs_occupant: bool,
-        is_block_cell: bool,
+        address_class: LiveAddressClass,
         comptime arm: PublicationArm,
     ) void {
-        if (!tracked) return;
+        if (!address_class.tracked) return;
         // Slab-backed objects need no entry: their arena is registered, the
         // mask finds it, and the `heap_accounted` bit set just above this call
         // is the same "live GC object" answer the table was storing. Only
         // standalone-prefix allocations -- past the slab's 512-byte class
         // ceiling, or over-aligned -- are unreachable that way.
-        if (needs_occupant) {
+        if (address_class.needs_occupant) {
             @branchHint(.unlikely);
             self.insertLiveAddressCold(header, bytes);
         }
-        self.markPublishedYoungClassified(
-            header,
-            is_block_cell,
-            arm,
-        );
+        self.markPublishedYoungClassified(header, address_class.is_block_cell, arm);
     }
 
     /// Outlined so the standalone-prefix arm's call does not have to be
@@ -3835,7 +3861,7 @@ pub const Registry = struct {
     /// costs one pass over at most a few thousand pointers and only happens
     /// after an allocation failure. If it still cannot record them, the caller
     /// must mark without sweeping: a bounded leak instead of a use-after-free.
-    pub fn addressSetWhole(self: *Registry, rt: anytype) bool {
+    pub fn addressSetWhole(self: *Registry, rt: *JSRuntime) bool {
         if (self.address_registry.arenasIncomplete()) {
             const slab = self.arena_slab orelse return false;
             if (!self.address_registry.resyncArenas(addressRegistryAllocator(), slab)) return false;

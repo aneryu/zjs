@@ -1165,7 +1165,7 @@ test "FunctionDef final scope proof reseals late arguments links and rejects cyc
     _ = try fd.appendScope(-1);
     _ = try fd.appendScope(-1);
     fd.has_parameter_expressions = true;
-    const parameter_idx = try fd.addScopeVar(parameter, .normal, 1, true, false);
+    const parameter_idx = try fd.addScopeVar(parameter, .normal, 1, .{ .is_lexical = true });
     try fd.rebuildFinalScopeLinks();
     try fd.validateFinalScopeLinks();
 
@@ -1205,7 +1205,7 @@ test "compiler run rejects cyclic scope links before trusted lookup" {
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     defer fd.deinit(rt);
     _ = try fd.appendScope(-1);
-    const local_idx = try fd.addScopeVar(local, .normal, 0, false, false);
+    const local_idx = try fd.addScopeVar(local, .normal, 0, .{});
     try fd.rebuildFinalScopeLinks();
 
     const input = try attachBuilder(&fd);
@@ -1236,7 +1236,7 @@ test "compiler parent miss proves corrupt and cyclic synthetic ancestors" {
     var parent = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     defer parent.deinit(rt);
     _ = try parent.appendScope(-1);
-    const parent_local_idx = try parent.addScopeVar(parent_local, .normal, 0, false, false);
+    const parent_local_idx = try parent.addScopeVar(parent_local, .normal, 0, .{});
     try parent.rebuildFinalScopeLinks();
 
     var child = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
@@ -2488,7 +2488,7 @@ test "direct eval reserves identity for visible function-scope locals and argume
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, function_name);
     defer fd.deinit(rt);
     _ = try fd.appendScope(-1);
-    _ = try fd.addScopeVar(local_name, .normal, 0, false, false);
+    _ = try fd.addScopeVar(local_name, .normal, 0, .{});
     _ = try fd.appendArg(.{
         .var_name = arg_name,
         .scope_level = 0,
@@ -2529,7 +2529,7 @@ test "surviving local references reserve compact open VarRef storage" {
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, function_name);
     defer fd.deinit(rt);
     _ = try fd.appendScope(-1);
-    _ = try fd.addScopeVar(local_name, .normal, 0, false, false);
+    _ = try fd.addScopeVar(local_name, .normal, 0, .{});
 
     // `scope_make_ref` carries a LabelId in the producer, not an address, so
     // the reference tail is a real label identity bound after the read.
@@ -2664,7 +2664,7 @@ test "direct Bytecode retains compact open VarRef frame sizing" {
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, function_name);
     defer fd.deinit(rt);
     _ = try fd.appendScope(-1);
-    _ = try fd.addScopeVar(local_name, .normal, 0, false, false);
+    _ = try fd.addScopeVar(local_name, .normal, 0, .{});
 
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, function_name);
     defer function.deinit(rt);
@@ -2712,10 +2712,10 @@ test "mapped frames use the exact compile-time open-binding count for every fram
     try std.testing.expectEqual(@as(usize, 2), frame_mod.frameOpenVarRefStorageCount(execution_adapter.init(&function)));
 
     const open_count: usize = 2;
-    const storage_len = try frame_mod.FrameSlab.requiredStorageSlots(5, 0, 2, 3, 3, open_count);
-    const storage = try rt.memory.alloc(core.JSValue, storage_len);
+    const layout: frame_mod.SlabLayout = .{ .args = 5, .locals = 2, .stack = 3, .var_refs = 3, .open_var_refs = open_count };
+    const storage = try rt.memory.alloc(core.JSValue, try layout.totalSlots());
     defer rt.memory.free(core.JSValue, storage);
-    const slab = frame_mod.FrameSlab.partitionStorage(storage, 5, 0, 2, 3, 3, open_count);
+    const slab = frame_mod.FrameSlab.partition(storage, layout);
     try std.testing.expectEqual(@as(usize, 5), slab.args.len);
     try std.testing.expectEqual(@as(usize, 3), slab.var_refs.len);
     try std.testing.expectEqual(open_count, slab.open_var_refs.len);

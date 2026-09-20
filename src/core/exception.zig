@@ -3,7 +3,7 @@
 //! `set` transfers one owned JSValue into the slot after clearing any previous
 //! exception; `clear` releases it and `take` transfers it back to the caller.
 //! The uninitialized sentinel means empty and is never a GC edge. This mirrors
-//! QuickJS `JSContext.current_exception` near quickjs.c:528. The leaf belongs
+//! QuickJS `JSContext.current_exception` near quickjs.c. The leaf belongs
 //! to core context state and may not depend on higher engine layers.
 
 const JSValue = @import("value.zig").JSValue;

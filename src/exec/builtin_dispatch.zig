@@ -22,7 +22,7 @@ var empty_realm_globals: [0]core.global_slots.Slot = .{};
 
 /// Native-chain return. 16B, AAPCS64 x0+x1. Failure iff tag==exception
 /// and rt.current_exception is set (throwValue already does both).
-/// Mirrors qjs JS_EXCEPTION / JS_IsException (quickjs.c:294).
+/// Mirrors qjs JS_EXCEPTION / JS_IsException.
 pub const NativeValue = core.JSValue;
 
 /// Integer overlay for the noinline assume terminal. Zig's auto ABI srets
@@ -247,7 +247,7 @@ pub fn finalCallableRealmView(
 /// and completed its call-side preflight. True C_FUNCTION objects switch to
 /// their owned construction realm; C_FUNCTION_DATA and synthetic calls retain
 /// the incoming view. This mirrors js_call_c_function's late
-/// `ctx = p->u.cfunc.realm` assignment (quickjs.c:17586).
+/// `ctx = p->u.cfunc.realm` assignment.
 fn finalCallEnvironment(
     ctx: *core.JSContext,
     global: ?*core.Object,
@@ -629,8 +629,7 @@ pub inline fn callRecordFromVmInRealm(
         return nativeFromHostError(ctx, global, error.InvalidBuiltinRegistry);
     // Native backtrace frame, pushed directly (no scope object, no active
     // flag): the qjs `sf` link of js_call_c_function.
-    var bt_data: NativeBacktraceData = undefined;
-    bt_data.function_value = func_obj.value();
+    var bt_data: NativeBacktraceData = .{ .function_value = func_obj.value() };
     var bt_frame: core.ActiveBacktraceFrame = .{ .data = &bt_data, .resolver = resolveNativeBacktrace };
     realm.pushActiveBacktraceFrame(&bt_frame);
     defer realm.popActiveBacktraceFrame(&bt_frame);
@@ -665,8 +664,7 @@ pub inline fn callManagedFromWindow(
     this_value: core.JSValue,
     args: []const core.JSValue,
 ) core.JSValue {
-    var bt_data: NativeBacktraceData = undefined;
-    bt_data.function_value = func_obj.value();
+    var bt_data: NativeBacktraceData = .{ .function_value = func_obj.value() };
     var bt_frame: core.ActiveBacktraceFrame = .{
         .previous = rt.hot.current_backtrace_frame,
         .data = &bt_data,
@@ -689,8 +687,7 @@ pub inline fn callGetterFromWindow(
     func_obj: *core.Object,
     receiver: core.JSValue,
 ) core.JSValue {
-    var bt_data: NativeBacktraceData = undefined;
-    bt_data.function_value = func_obj.value();
+    var bt_data: NativeBacktraceData = .{ .function_value = func_obj.value() };
     var bt_frame: core.ActiveBacktraceFrame = .{
         .previous = rt.hot.current_backtrace_frame,
         .data = &bt_data,
@@ -714,8 +711,7 @@ pub inline fn callMethodManagedFromWindow(
     this_value: core.JSValue,
     args: []const core.JSValue,
 ) core.JSValue {
-    var bt_data: NativeBacktraceData = undefined;
-    bt_data.function_value = func_obj.value();
+    var bt_data: NativeBacktraceData = .{ .function_value = func_obj.value() };
     var bt_frame: core.ActiveBacktraceFrame = .{
         .previous = rt.hot.current_backtrace_frame,
         .data = &bt_data,

@@ -4,7 +4,7 @@
 //! helper; locals release them after construction, and `pushOwned` transfers
 //! the fresh RegExp result back to the stack. The active global selects the
 //! realm's fixed RegExp shape without consulting the mutable constructor
-//! binding, matching QuickJS `OP_regexp` at quickjs.c:18426.
+//! binding, matching QuickJS `OP_regexp` at quickjs.c.
 
 const core = @import("../core/root.zig");
 const stack_mod = @import("stack.zig");

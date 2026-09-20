@@ -703,7 +703,7 @@ pub const opcode = struct {
     /// Final-view lookup, for bytecode after `resolve_labels`: ids in the
     /// temp/short overlap range (op_temp_start..op_temp_end-1) resolve to
     /// the SHORT opcode entry, stored `op.op_temp_count` slots past the
-    /// id. Mirrors QuickJS `short_opcode_info` (quickjs.c:21842). Returns
+    /// id. Mirrors QuickJS `short_opcode_info`. Returns
     /// null for ids no opcode claims (op.op_count..255).
     pub inline fn finalInfo(op_id: u8) ?*const Info {
         if (op_id >= op.op_count) return null;
@@ -728,7 +728,7 @@ pub const opcode = struct {
     /// Phase-1-view lookup, for parser-emitted streams before
     /// `resolve_labels`: ids in the temp/short overlap range resolve to
     /// the TEMP opcode entry at its id position. Mirrors QuickJS's bare
-    /// `opcode_info[op]` indexing (quickjs.c:21826). zjs deviation: the
+    /// `opcode_info[op]` indexing. zjs deviation: the
     /// parser also emits some final-form opcodes above the overlap range
     /// in phase 1 (`get_length`, `if_false8`, `is_undefined`, ...), so
     /// ids outside the overlap fall through to the final view (the two
@@ -2972,7 +2972,7 @@ pub const CompileContext = struct {
 pub const function_bytecode = struct {
     pub const AsyncExecutionPolicy = enum(u16) { unknown, no_suspend, may_suspend };
 
-    /// Mirrors `JSFunctionKindEnum` (`quickjs.c:761`).
+    /// Mirrors `JSFunctionKindEnum`.
     pub const FunctionKind = enum(u2) {
         normal = 0,
         generator = 1 << 0,
@@ -2980,7 +2980,7 @@ pub const function_bytecode = struct {
         async_generator = 3, // generator | async
     };
 
-    /// Mirrors `JSClosureTypeEnum` (`quickjs.c:675`).
+    /// Mirrors `JSClosureTypeEnum`.
     pub const ClosureType = enum(u3) {
         local, // 'var_idx' is the index of a local variable in the parent function
         arg, // 'var_idx' is the index of an argument variable in the parent function
@@ -2992,7 +2992,7 @@ pub const function_bytecode = struct {
         module_import, // definition of a module import (eval code only)
     };
 
-    /// Mirrors `JSVarKindEnum` (`quickjs.c:707`).
+    /// Mirrors `JSVarKindEnum`.
     pub const VarKind = enum(u4) {
         normal = 0,
         function_decl = 1, // lexical var with function declaration
@@ -3016,10 +3016,10 @@ pub const function_bytecode = struct {
     pub const no_open_binding: u16 = std.math.maxInt(u16);
 
     /// QuickJS's special end marker for a lexical chain that terminates in the
-    /// separate parameter environment (`ARG_SCOPE_END`, quickjs.c:636).
+    /// separate parameter environment (`ARG_SCOPE_END`, quickjs.c).
     pub const arg_scope_end: i32 = -2;
 
-    /// Mirrors `JSVarDef` (`quickjs.c:724`).
+    /// Mirrors `JSVarDef`.
     pub const VarDef = struct {
         var_name: atom.Atom,
         scope_level: i32, // index into scopes of this variable lexical scope
@@ -3043,7 +3043,7 @@ pub const function_bytecode = struct {
     };
 
     /// Final runtime variable row, mirroring `JSBytecodeVarDef`
-    /// (`quickjs.c:654-670`). Unlike the compile-time `VarDef`, this carries
+    ///. Unlike the compile-time `VarDef`, this carries
     /// only data read after finalization. Arguments and locals occupy one
     /// contiguous table in `FunctionBytecode`, with arguments first.
     pub const BytecodeVarDef = extern struct {
@@ -3196,7 +3196,7 @@ pub const function_bytecode = struct {
         var_object: u16,
     };
 
-    /// Mirrors `JSGlobalVar` (`quickjs.c:713`).
+    /// Mirrors `JSGlobalVar`.
     pub const GlobalVar = struct {
         cpool_idx: i32,
         force_init: bool = false,
@@ -3262,7 +3262,7 @@ pub const function_bytecode = struct {
         /// with full construct-context semantics. Published code is immutable,
         /// so hoisting the probe out of per-call resolution is exact. qjs
         /// needs no such bit — its OP_check_ctor throws inside the callee
-        /// (quickjs.c:18253) — but zjs's inline frame constructors must reject
+        /// — but zjs's inline frame constructors must reject
         /// before entering. Derived constructors keep the canonical qjs
         /// header bit; this covers only the base-class entry probe.
         entry_rejects_plain_call: bool = false,
@@ -3474,7 +3474,7 @@ pub const function_bytecode = struct {
     /// whose checked layout always has len >= 0.
     pub const legacy_byte_code_len_sentinel: i32 = -1;
 
-    /// Mirrors `JSFunctionBytecode` (`quickjs.c:768-804`).
+    /// Mirrors `JSFunctionBytecode`.
     ///
     /// This is the final compiled bytecode structure produced by the
     /// js_create_function equivalent. It contains the fully processed bytecode
@@ -3674,7 +3674,7 @@ pub const function_bytecode = struct {
             if (self.byte_code_len == function_bytecode.legacy_byte_code_len_sentinel) {
                 return @ptrCast(bytes + @sizeOf(FunctionBytecodeImpl));
             }
-            const offset = self.layout().hot_off orelse unreachable;
+            const offset = self.layout().hot_off.?;
             return @ptrCast(bytes + offset);
         }
 
@@ -3683,12 +3683,12 @@ pub const function_bytecode = struct {
             if (self.byte_code_len == function_bytecode.legacy_byte_code_len_sentinel) {
                 return @ptrCast(bytes + @sizeOf(FunctionBytecodeImpl));
             }
-            const offset = self.layout().hot_off orelse unreachable;
+            const offset = self.layout().hot_off.?;
             return @ptrCast(bytes + offset);
         }
 
         inline fn hotExtensionRequiredMut(self: *FunctionBytecodeImpl) *align(1) FunctionBytecodeHotExtension {
-            return self.hotExtensionMut() orelse unreachable;
+            return self.hotExtensionMut().?;
         }
 
         /// Fast-path accessor for callers that have already established a
@@ -3708,7 +3708,7 @@ pub const function_bytecode = struct {
             std.debug.assert(self.byte_code_len > 0);
             if (comptime builtin.mode == .Debug) {
                 @setRuntimeSafety(false);
-                const code_ptr = self.byte_code orelse unreachable;
+                const code_ptr = self.byte_code.?;
                 const code_len: usize = @intCast(self.byte_code_len);
                 const hot: *align(1) const FunctionBytecodeHotExtension =
                     @ptrFromInt(@intFromPtr(code_ptr) +% code_len);
@@ -3862,7 +3862,7 @@ pub const function_bytecode = struct {
                 std.debug.assert(self.vardefs == null);
                 return &.{};
             }
-            return (self.vardefs orelse unreachable)[0..count];
+            return (self.vardefs.?)[0..count];
         }
         pub inline fn argVarDefs(self: *const FunctionBytecodeImpl) []BytecodeVarDef {
             if (self.legacyBytecodeAdapter()) |legacy| return @constCast(legacy.argdefs);
@@ -3883,7 +3883,7 @@ pub const function_bytecode = struct {
                 std.debug.assert(self.closure_var == null);
                 return &.{};
             }
-            return (self.closure_var orelse unreachable)[0..count];
+            return (self.closure_var.?)[0..count];
         }
         pub inline fn cpoolSlice(self: *const FunctionBytecodeImpl) []JSValue {
             if (self.legacyBytecodeAdapter()) |legacy| return legacy.constants.values;
@@ -3893,7 +3893,7 @@ pub const function_bytecode = struct {
                 std.debug.assert(self.cpool == null);
                 return &.{};
             }
-            return (self.cpool orelse unreachable)[0..count];
+            return (self.cpool.?)[0..count];
         }
         pub inline fn constantAt(self: *const FunctionBytecodeImpl, index: usize) ?JSValue {
             const values = self.cpoolSlice();
@@ -4029,7 +4029,7 @@ pub const function_bytecode = struct {
                 std.debug.assert(dbg.pc2line_buf == null);
                 return &.{};
             }
-            return (dbg.pc2line_buf orelse unreachable)[0..len];
+            return (dbg.pc2line_buf.?)[0..len];
         }
         /// Starting source line, or 0 when no debug info was captured.
         pub inline fn lineNum(self: *const FunctionBytecodeImpl) i32 {
@@ -4206,6 +4206,16 @@ pub const function_bytecode = struct {
             return fb;
         }
 
+        /// A fixture whose constant pool is known up front: create, fill and
+        /// publish in one step.  `cpool.len` must equal `options.cpool_count`.
+        pub fn createPublishedFixture(rt: *runtime.JSRuntime, options: FixtureOptions, cpool: []const JSValue) !*FunctionBytecodeImpl {
+            std.debug.assert(cpool.len == options.cpool_count);
+            const fb = try createFixture(rt, options);
+            @memcpy(fb.cpoolSlice(), cpool);
+            fb.publishFixtureNoFail(rt);
+            return fb;
+        }
+
         pub fn destroyUnpublishedFixture(self: *FunctionBytecodeImpl, rt: *runtime.JSRuntime) void {
             const layout_value = self.layout();
             self.deinitWithLayout(rt, layout_value);
@@ -4337,7 +4347,7 @@ pub const function_bytecode = struct {
                 const pc2line_buf: []u8 = if (pc2line_len == 0)
                     &.{}
                 else
-                    (dbg.pc2line_buf orelse unreachable)[0..pc2line_len];
+                    (dbg.pc2line_buf.?)[0..pc2line_len];
                 dbg.pc2line_buf = null;
                 dbg.pc2line_len = 0;
                 if (pc2line_buf.len != 0) mem.free(u8, pc2line_buf);
@@ -4642,12 +4652,12 @@ pub const function_bytecode = struct {
 };
 
 pub const function_def = struct {
-    //! `FunctionDefImpl` — mirrors `JSFunctionDef` (`quickjs.c:21420`).
+    //! `FunctionDefImpl` — mirrors `JSFunctionDef`.
     //!
     //! This is the Phase 1 compilation state used by the parser to
     //! collect variable bindings, scopes, labels, and temporary bytecode.
     //! After Phase 2/Phase 3 pipeline, it's lowered to `FunctionBytecode`
-    //! (`JSFunctionBytecode` at `quickjs.c:768`).
+    //! (`JSFunctionBytecode` at `quickjs.c`).
 
     const function_bytecode_mod = function_bytecode;
 
@@ -4659,7 +4669,7 @@ pub const function_def = struct {
 
     pub const FunctionKind = function_bytecode_mod.FunctionKind;
 
-    /// Mirrors `JSParseFunctionEnum` (`quickjs.c:21401`).
+    /// Mirrors `JSParseFunctionEnum`.
     pub const ParseFunctionKind = enum(u7) {
         statement,
         var_, // renamed from 'var' (reserved keyword in Zig)
@@ -4677,7 +4687,7 @@ pub const function_def = struct {
     pub const VarKind = function_bytecode_mod.VarKind;
     pub const VarDef = function_bytecode_mod.VarDef;
 
-    /// Mirrors `JSVarScope` (`quickjs.c:702`).
+    /// Mirrors `JSVarScope`.
     pub const VarScope = struct {
         parent: i32, // index into scopes of the enclosing scope
         first: i32, // index into vars of the last variable in this scope
@@ -4706,7 +4716,7 @@ pub const function_def = struct {
         pub threadlocal var cache_hits: usize = 0;
     } else void;
 
-    /// Mirrors `RelocEntry` (`quickjs.c:21374`).
+    /// Mirrors `RelocEntry`.
     pub const RelocEntry = struct {
         next: ?*RelocEntry = null,
         addr: i32,
@@ -4714,7 +4724,7 @@ pub const function_def = struct {
         label: i32,
     };
 
-    /// Mirrors `LabelSlot` (`quickjs.c:21387`).
+    /// Mirrors `LabelSlot`.
     pub const LabelSlot = struct {
         ref_count: i32 = 0,
         pos: i32 = -1, // phase 1 address, -1 means not resolved yet
@@ -4723,7 +4733,7 @@ pub const function_def = struct {
         first_reloc: ?*RelocEntry = null,
     };
 
-    /// Mirrors `JumpSlot` (`quickjs.c:21380`).
+    /// Mirrors `JumpSlot`.
     pub const JumpSlot = struct {
         op: i32,
         size: i32,
@@ -4844,7 +4854,7 @@ pub const function_def = struct {
         }
     }
 
-    /// Mirrors `JSFunctionDef` (`quickjs.c:21420`).
+    /// Mirrors `JSFunctionDef`.
     pub const FunctionDefImpl = struct {
         memory: *memory.MemoryAccount,
         atoms: *atom.AtomTable,
@@ -4900,8 +4910,8 @@ pub const function_def = struct {
         /// `special_object THIS_FUNC ; put_loc` prologue materialize lazily on
         /// the first falling-through reference — mirroring qjs, where
         /// add_func_var is only called from resolve_scope_var
-        /// (quickjs.c:32975-32978 / 33151-33155) and add_eval_variables
-        /// (quickjs.c:33649-33650 / 33697-33698), never unconditionally.
+        /// and add_eval_variables
+        ///, never unconditionally.
         is_named_func_expr: bool = false,
         func_name: atom.Atom,
 
@@ -4965,7 +4975,6 @@ pub const function_def = struct {
         byte_code_capacity: usize = 0,
         atom_operands: []atom.Atom = &.{},
         atom_operands_capacity: usize = 0,
-        last_opcode_pos: i32 = -1,
         /// Compact temporary-bytecode emission backend for this function.
         /// Heap-allocated when parse begins; released in `deinit` or at the
         /// resolve_variables consumption point. One optional pointer keeps
@@ -5051,7 +5060,7 @@ pub const function_def = struct {
         }
 
         /// Append a `VarScope` to `scopes`. Mirrors `push_scope`
-        /// (`quickjs.c:23486`): the new scope records its parent index
+        ///: the new scope records its parent index
         /// and inherits the current visible binding head. Returns the index
         /// of the newly added scope (== new `scope_level`).
         pub fn appendScope(self: *FunctionDefImpl, parent: i32) !i32 {
@@ -5065,7 +5074,7 @@ pub const function_def = struct {
 
         /// Destructively rebuild the final scope linkage once, exactly where
         /// QuickJS does so at the start of `js_create_function`
-        /// (quickjs.c:36034-36059).  From this point onward `scopes[].first`
+        ///. From this point onward `scopes[].first`
         /// and `VarDef.scope_next` are the sole lexical-chain authority.
         pub fn rebuildFinalScopeLinks(self: *FunctionDefImpl) error{InvalidScope}!void {
             self.invalidateScopeLinkCache();
@@ -5232,7 +5241,7 @@ pub const function_def = struct {
             if (capacity != 0) self.memory.free(GlobalVar, globals.ptr[0..capacity]);
         }
 
-        /// Mirror qjs add_func_var (quickjs.c:24208-24219): create the named
+        /// Mirror qjs add_func_var: create the named
         /// function expression's self-binding var on demand, idempotent via
         /// `func_var_idx`. QuickJS marks the binding const only when the
         /// defining function is strict; sloppy writes are discarded during
@@ -5383,7 +5392,7 @@ pub const function_def = struct {
         }
 
         /// Append a `VarDef` to `vars`. Mirrors `add_var`
-        /// (`quickjs.c:23554`). The caller is responsible for setting
+        ///. The caller is responsible for setting
         /// `scope_level`, `var_kind`, `is_lexical`, `is_const`. The atom id
         /// is copied by value; the atom table is not consulted.
         /// Returns the index of the new var.
@@ -5418,7 +5427,7 @@ pub const function_def = struct {
 
         /// Append a child FunctionDefImpl to `child_list`. Mirrors
         /// `list_add_tail(&fd->link, &parent->child_list)` in
-        /// `js_new_function_def` (`quickjs.c:31487`). The parent takes
+        /// `js_new_function_def`. The parent takes
         /// ownership of the child pointer.
         pub fn addChild(self: *FunctionDefImpl, child: *FunctionDefImpl) !void {
             const tail = try growSliceBy(*FunctionDefImpl, self.memory, &self.child_list, &self.child_list_capacity, 1);
@@ -5427,16 +5436,19 @@ pub const function_def = struct {
             tail[0] = child;
         }
 
-        /// Mirror `add_scope_var` (`quickjs.c:23577`): add a var and
+        /// Mirror `add_scope_var`: add a var and
         /// attach it to `scope_level`'s scope (updates `scope_first`).
+        pub const ScopeVarOptions = struct { is_lexical: bool = false, is_const: bool = false };
+
         pub fn addScopeVar(
             self: *FunctionDefImpl,
             name: atom.Atom,
             var_kind: VarKind,
             scope_level: i32,
-            is_lexical: bool,
-            is_const: bool,
+            options: ScopeVarOptions,
         ) !i32 {
+            const is_lexical = options.is_lexical;
+            const is_const = options.is_const;
             const prev_first: i32 = if (scope_level >= 0 and @as(usize, @intCast(scope_level)) < self.scopes.len)
                 self.scopes[@intCast(scope_level)].first
             else
@@ -5541,7 +5553,7 @@ pub const function_def = struct {
 
         /// Find a var by name, searching newest-first. Returns the var
         /// index or `-1` if not found. Mirrors the htab-free path of
-        /// `find_var` (`quickjs.c:23378`).
+        /// `find_var`.
         pub fn findVar(self: *const FunctionDefImpl, name: atom.Atom) i32 {
             var i: usize = self.vars.len;
             while (i > 0) {
@@ -5739,8 +5751,7 @@ pub const function_def = struct {
         try std.testing.expectEqual(@as(?u16, null), fd.findFunctionVar(other));
         // Grow past the threshold; a block-scoped row with the name must
         // not shadow the function-level one, a newer function-level row must.
-        var i: usize = 0;
-        while (i < FunctionDefImpl.function_var_index_threshold) : (i += 1) {
+        for (0..FunctionDefImpl.function_var_index_threshold) |_| {
             _ = try fd.appendVar(.{ .var_name = other, .scope_level = 1 });
         }
         try std.testing.expectEqual(@as(?u16, 0), fd.findFunctionVar(target));
@@ -5780,7 +5791,7 @@ pub const function_def = struct {
         fd.vars[@intCast(bad)].scope_level = 0;
         try fd.proveAncestorScopeLinks();
 
-        _ = try fd.addScopeVar(name, .normal, 1, true, false);
+        _ = try fd.addScopeVar(name, .normal, 1, .{ .is_lexical = true });
         try std.testing.expectEqual(ScopeLinkCache.unproven, fd.scope_link_cache);
         try fd.proveAncestorScopeLinks();
         try fd.ensureArgumentsArgumentBinding();
@@ -5808,7 +5819,7 @@ pub const function_def = struct {
 pub const pipeline_pc2line = struct {
     //! Phase 3b: compute_pc2line_info
     //!
-    //! Mirrors `compute_pc2line_info` at `quickjs.c:33995`.
+    //! Mirrors `compute_pc2line_info` at `quickjs.c`.
     //!
     //! Encodes a sequence of (pc, line, col) source-location slots into a
     //! compact buffer, mirroring QuickJS's pc2line format byte-for-byte.
@@ -5837,13 +5848,13 @@ pub const pipeline_pc2line = struct {
     //!   sleb128(diff_line)
     //!   sleb128(diff_col)
 
-    /// PC2LINE encoding constants (mirror `quickjs.c:756`).
+    /// PC2LINE encoding constants (mirror `quickjs.c`).
     pub const PC2LINE_BASE: i32 = -1;
     pub const PC2LINE_RANGE: i32 = 5;
     pub const PC2LINE_OP_FIRST: i32 = 1;
     pub const PC2LINE_DIFF_PC_MAX: i32 = (255 - PC2LINE_OP_FIRST) / PC2LINE_RANGE; // = 50
 
-    /// One source-location slot — mirrors `SourceLocSlot` (`quickjs.c:21395`).
+    /// One source-location slot — mirrors `SourceLocSlot`.
     pub const SourceLocSlot = struct {
         pc: u32,
         line_num: i32,
@@ -6309,7 +6320,7 @@ pub const binding_rules = struct {
     //! Binding resolution rules.
     //!
     //! Mirrors the binding decisions and lowering writers of
-    //! `resolve_variables` at `quickjs.c:33622`: lexical-chain walk order,
+    //! `resolve_variables` at `quickjs.c`: lexical-chain walk order,
     //! closure-source threading, dynamic-environment probe planning, private
     //! brand resolution, and the exact byte forms each decision writes.
     //!
@@ -6358,10 +6369,7 @@ pub const binding_rules = struct {
             }
             visited += 1;
             const local_index: usize = @intCast(index);
-            fd.captureLocal(local_index) catch |err| return switch (err) {
-                error.InvalidBytecode => error.InvalidBytecode,
-                error.BytecodeOverflow => error.BytecodeOverflow,
-            };
+            try fd.captureLocal(local_index);
             index = fd.vars[local_index].scope_next;
         }
         if (index != -1 and index != function_bytecode.arg_scope_end) return error.InvalidBytecode;
@@ -6498,12 +6506,12 @@ pub const binding_rules = struct {
     }
 
     /// Shortest-form local-slot opcode triple. Mirrors `put_short_code`
-    /// (`quickjs.c:34140`):
+    ///:
     /// - `idx ∈ [0, 4)` → 1-byte short forms `get_loc0..3` / `put_loc0..3`
     ///   / `set_loc0..3` (idx encoded in opcode id).
     /// - `idx ∈ [4, 256)` → 2-byte `get_loc8` / `put_loc8` / `set_loc8`
     ///   (1-byte op + u8 idx).
-    /// - `idx ∈ [256, 65536)` → 3-byte `get_loc` / `put_loc` / `set_loc`
+    /// - `idx ∈ [256)` → 3-byte `get_loc` / `put_loc` / `set_loc`
     ///   (1-byte op + u16 idx).
     const ShortLocForm = struct {
         /// Selected opcode id.
@@ -6591,8 +6599,8 @@ pub const binding_rules = struct {
         // resolveBindingTopology/get_closure_var must have installed an entry
         // in the *current* function before lowering begins.  A parent closure,
         // local, or argument index is in a different index space and can never
-        // be emitted as this function's var-ref operand (quickjs.c:32736-32760,
-        // 33290-33354).  The former ancestor fallback merely hid a missing
+        // be emitted as this function's var-ref operand (quickjs.c,
+        //  The former ancestor fallback merely hid a missing
         // topology event and could address an unrelated current row.
         return null;
     }
@@ -6737,19 +6745,19 @@ pub const binding_rules = struct {
         return fd.closure_var[idx].varKind();
     }
 
-    /// qjs resolve_scope_var `has_idx` (quickjs.c:33301-33306): a write
+    /// qjs resolve_scope_var `has_idx`: a write
     /// (`OP_scope_put_var`) or reference capture (`OP_scope_make_ref`) that
     /// resolves to a const closure variable compiles to
     /// `OP_throw_error <name> JS_THROW_VAR_RO` instead of a store. The global
     /// families are exempt — qjs routes them to `has_global_idx`
-    /// (quickjs.c:33251) which has no such check; global const writes stay on
+    /// which has no such check; global const writes stay on
     /// the runtime global-lexical-cell path (TDZ ReferenceError precedence,
-    /// OP_put_var quickjs.c:18490-18525).
+    /// OP_put_var quickjs.c).
     ///
     /// This compile-time throw is what makes module import bindings read-only:
-    /// imports register `is_const` at parse time (add_import quickjs.c:31882)
+    /// imports register `is_const` at parse time (add_import quickjs.c)
     /// and their frame slot is a direct alias of the exporting module's cell
-    /// (js_inner_module_linking quickjs.c:30765-30777) — the shared cell
+    /// (js_inner_module_linking quickjs.c) — the shared cell
     /// itself carries no const flag, so the write must never reach it.
     fn closureVarWriteThrowsReadOnly(ctx: *const JSContext, ref_idx: u16) bool {
         const fd = ctx.function_def orelse return false;
@@ -6764,7 +6772,7 @@ pub const binding_rules = struct {
         // Follow the capture chain to its base closure var. The finalized
         // resolver threads local/module sources through descendants as plain
         // `.ref` rows, while eval-root GLOBAL families are re-derived as
-        // `.global_ref`, matching resolve_scope_var (quickjs.c:33196-33206).
+        // `.global_ref`, matching resolve_scope_var.
         // Const-write treatment is therefore decided by the base identity,
         // not by the immediate forwarding row alone.
         var hops: usize = 0;
@@ -6782,8 +6790,8 @@ pub const binding_rules = struct {
 
     /// `OP_throw_error <atom:u32> <type:u8>` — 6 bytes, one atom operand.
     const throw_error_instr_size: usize = 6;
-    const JS_THROW_VAR_RO: u8 = 0; // quickjs.c:18334
-    const JS_THROW_VAR_REDECL: u8 = 1; // quickjs.c:18335
+    const JS_THROW_VAR_RO: u8 = 0;
+    const JS_THROW_VAR_REDECL: u8 = 1;
     fn writeThrowVarReadOnly(func: *bytecode_function.Bytecode, output: []u8, out_idx: *usize, output_atoms: []atom.Atom, out_atom_idx: *usize, atom_id: atom.Atom) void {
         writeThrowVarError(func, output, out_idx, output_atoms, out_atom_idx, atom_id, JS_THROW_VAR_RO);
     }
@@ -6820,14 +6828,14 @@ pub const binding_rules = struct {
         if (ref_idx >= fd.closure_var.len) return ref_op;
         const resolved = fd.closure_var[ref_idx];
         // QuickJS resolve_scope_var keeps BindThisValue's initialize-once
-        // guard after `this` has escaped into a closure (quickjs.c:33355-33364).
+        // guard after `this` has escaped into a closure.
         // The parser intentionally carries only name+scope here; choose the
         // checked final opcode now that this function's exact ref index exists.
         if (op_id == opcode.op.scope_put_var_init and atom_id == atom.ids.this_) {
             ref_op = opcode.op.put_var_ref_check_init;
         }
         // qjs has_idx reads s->closure_var[idx] directly after get_closure_var
-        // selected that exact identity (quickjs.c:33301-33364).  Do not search
+        // selected that exact identity. Do not search
         // the same atom through the current and parent functions again: two
         // same-name closure rows may have different lexical metadata, and the
         // resolved ref_idx is the authoritative row.
@@ -7132,7 +7140,7 @@ pub const binding_rules = struct {
     }
 
     /// Byte size of the `enter_scope <scope>` lowering. Mirrors the QuickJS
-    /// `OP_enter_scope` case (quickjs.c:34398): initialize only the bindings
+    /// `OP_enter_scope` case: initialize only the bindings
     /// declared by this exact scope. Captured cells are detached exclusively
     /// by the corresponding leave marker.
     fn enterScopeRefreshSize(ctx: *const JSContext, scope: i32) Error!usize {
@@ -7278,7 +7286,7 @@ pub const binding_rules = struct {
 
     /// QuickJS checks the named function-expression binding after the current
     /// scope/var/argument lookup, including while the argument scope is active
-    /// (resolve_scope_var quickjs.c:32975-32978). That scope deliberately does
+    /// (resolve_scope_var quickjs.c). That scope deliberately does
     /// not link to the body scope, so the ordinary scope walk cannot find the
     /// lazily materialized function-name slot for a default initializer.
     fn lookupCurrentFunctionName(ctx: *const JSContext, atom_id: atom.Atom) ?u16 {
@@ -8190,7 +8198,7 @@ pub const binding_rules = struct {
     /// QuickJS resolve_scope_var builds a disposable `{ name: binding }`
     /// reference for sloppy function-expression names. Reference-form
     /// assignments then update that object property, leaving the immutable
-    /// self-binding untouched (quickjs.c:33012-33024, 33310-33322).
+    /// self-binding untouched.
     fn writeFunctionNameDummyRef(
         _: *bytecode_function.Bytecode,
         output: []u8,
@@ -8380,7 +8388,7 @@ pub const binding_rules = struct {
     /// QuickJS keeps ordinary lexical reads/writes TDZ-checked, but lowers an
     /// ordinary `scope_put_var_init` to bare `put_loc`; only the derived
     /// constructor's `this` binding uses `put_loc_check_init` so `super()`
-    /// cannot initialize it twice (quickjs.c:33068-33087).
+    /// cannot initialize it twice.
     fn localLexicalAccessNeedsCheck(ctx: *const JSContext, atom_id: atom.Atom, loc_idx: u16, op_id: u8) bool {
         if (!isLexicalLocal(ctx, loc_idx)) return false;
         return op_id != opcode.op.scope_put_var_init or atom_id == atom.ids.this_;
@@ -8479,7 +8487,7 @@ pub const binding_rules = struct {
         if (!fd.is_direct_eval) return false;
         for (fd.closure_var) |cv| {
             // add_global_variables appends global-family entries at the end;
-            // QuickJS's validation walk stops there (quickjs.c:34209-34215).
+            // QuickJS's validation walk stops there.
             if (closureVarIsGlobalFamily(cv)) return false;
             if (cv.var_name == gv.var_name) {
                 // Annex B.3.4 excludes the same-name simple catch environment
@@ -9132,7 +9140,7 @@ pub const binding_rules = struct {
 pub const pipeline_stack_size = struct {
     //! Phase 3c: compute_stack_size
     //!
-    //! Mirrors `compute_stack_size` at `quickjs.c:35167`.
+    //! Mirrors `compute_stack_size` at `quickjs.c`.
     //!
     //! Performs a BFS over the bytecode graph to compute the maximum
     //! stack depth. Validates that:
@@ -9197,7 +9205,7 @@ pub const pipeline_stack_size = struct {
         /// EMPTY operand stack once the return value is popped. The parser
         /// elides trailing expression-statement drops and keeps switch
         /// discriminants live across `return` (qjs releases both in the done:
-        /// local_buf..sp loop, quickjs.c:20701-20706), so this is a
+        /// local_buf..sp loop, quickjs.c), so this is a
         /// per-return-site fact, not a validity check: `compute` still
         /// succeeds for unbalanced functions. Sole consumer is the zero-arg
         /// empty-leaf publication gate in final execution-flag publication, whose
@@ -9909,7 +9917,7 @@ pub const pipeline_stack_size = struct {
 pub const pipeline_finalize = struct {
     //! Finalization: js_create_function equivalent
     //!
-    //! Mirrors `js_create_function` at `quickjs.c:35401`.
+    //! Mirrors `js_create_function` at `quickjs.c`.
     //!
     //! This walks the child_list of FunctionDefs, runs all pipeline phases,
     //! and installs the final FunctionBytecode into the parent's cpool.
@@ -10262,7 +10270,7 @@ pub const pipeline_finalize = struct {
 
     /// Create a FunctionBytecode from a FunctionDef.
     ///
-    /// This mirrors `js_create_function` at `quickjs.c:35401`. It:
+    /// This mirrors `js_create_function` at `quickjs.c`. It:
     /// 1. Recursively processes child functions (child_list walk)
     /// 2. Runs all pipeline phases on the FunctionDef
     /// 3. Allocates and populates a FunctionBytecode structure
@@ -10373,7 +10381,7 @@ pub const pipeline_finalize = struct {
         fd.consumeGlobalVars();
         fd.finalization_state = .resolved;
         fd.use_short_opcodes = true;
-        try publishLoweredMetadata(true, true, &lowered, fd, fd, false);
+        try publishLoweredMetadata(.{ .arguments_object_from_function_def = true, .validate_final_artifact = true, .publish_mutable_metadata = false }, &lowered, fd, fd);
 
         _ = try validateFinalArtifactShape(fd, &lowered);
 
@@ -10491,17 +10499,16 @@ pub const pipeline_finalize = struct {
             fd.source_text = null;
         }
 
-        bytecode_function.publishExecutionFlags(
-            fb,
-            lowered.flags.materializes_arguments_object,
-            lowered.flags.has_mapped_arguments,
-            lowered.leaf_returns_balanced,
-            fd.has_eval_call,
-            fd.is_derived_class_constructor or
+        bytecode_function.publishExecutionFlags(fb, .{
+            .materializes_arguments_object = lowered.flags.materializes_arguments_object,
+            .has_mapped_arguments = lowered.flags.has_mapped_arguments,
+            .leaf_returns_balanced = lowered.leaf_returns_balanced,
+            .contains_direct_eval = fd.has_eval_call,
+            .class_syntax_excludes_inline = fd.is_derived_class_constructor or
                 fd.func_type == .class_constructor or
                 fd.func_type == .derived_class_constructor,
-            fd.is_module,
-        );
+            .is_module = fd.is_module,
+        });
 
         // Reserved constant-pool BigInts join the heap now; the FB published
         // on the next line owns the edge that keeps them alive. Nothing
@@ -10579,17 +10586,24 @@ pub const pipeline_finalize = struct {
         def.consumeGlobalVars();
         def.finalization_state = .resolved;
         def.use_short_opcodes = true;
-        try publishLoweredMetadata(true, false, function, def, def, true);
+        try publishLoweredMetadata(.{ .arguments_object_from_function_def = true, .validate_final_artifact = false, .publish_mutable_metadata = true }, function, def, def);
     }
 
+    const LoweredPublish = struct {
+        arguments_object_from_function_def: bool,
+        validate_final_artifact: bool,
+        publish_mutable_metadata: bool,
+    };
+
     fn publishLoweredMetadata(
-        comptime arguments_object_from_function_def: bool,
-        comptime validate_final_artifact: bool,
+        comptime options: LoweredPublish,
         function: *bytecode_function.Bytecode,
         fd: ?*const function_def_mod.FunctionDef,
         fd_mut: ?*function_def_mod.FunctionDef,
-        publish_mutable_metadata: bool,
     ) !void {
+        const arguments_object_from_function_def = options.arguments_object_from_function_def;
+        const validate_final_artifact = options.validate_final_artifact;
+        const publish_mutable_metadata = options.publish_mutable_metadata;
 
         // qjs captures every formal parameter before creating a mapped
         // arguments object. Do the same here, then assign one exact, stable
@@ -10839,7 +10853,7 @@ pub const pipeline_finalize = struct {
             var parent = function_def_mod.FunctionDef.init(&rt.memory, &rt.atoms, name);
             defer parent.deinit(rt);
             _ = try parent.appendScope(-1);
-            _ = try parent.addScopeVar(name, .normal, 0, false, false);
+            _ = try parent.addScopeVar(name, .normal, 0, .{});
             const input = try rt.memory.create(compiler.Builder);
             input.* = compiler.Builder.init(&rt.memory, &rt.atoms);
             parent.builder = input;
@@ -11066,7 +11080,7 @@ const function_mod = struct {
         /// geometry (no locals/captures/open refs/arguments/direct eval) with
         /// `arg_count > 0`. A call site that supplies exactly `arg_count`
         /// arguments borrows them in place from the caller's operand region
-        /// (qjs `arg_buf = argv`, quickjs.c:17841) and enters the warm leaf
+        /// (qjs `arg_buf = argv`, quickjs.c) and enters the warm leaf
         /// constructor. Published as two separate bytes mirroring the
         /// zero-arg family split (folding modes into one bit measured
         /// +3 insn/call on the established sloppy arm): this byte is the
@@ -11095,7 +11109,7 @@ const function_mod = struct {
         /// empty leaf owns argc==0 without captures, this byte owns argc==0
         /// with captures, exact-args owns argc==arg_count>0. The frame
         /// borrows the closure's cell array (qjs `var_refs =
-        /// p->u.func.var_refs`, quickjs.c:17844; rooted by the owned
+        /// p->u.func.var_refs`, quickjs.c; rooted by the owned
         /// callable) and publishes the `exact_args_leaf` teardown bit: its
         /// guarded return arm (callee operand window must be empty) is
         /// load-bearing here because inherited-capture bodies may read free
@@ -11560,17 +11574,12 @@ const function_mod = struct {
     pub const small_inline_max_slots: usize = 4;
     pub const small_inline_max_stack: usize = 4;
 
-    fn scanSmallInlineEligible(
-        fb: *const FunctionBytecode,
-        materializes_arguments_object: bool,
-        contains_direct_eval: bool,
-        class_syntax_excludes_inline: bool,
-    ) bool {
+    fn scanSmallInlineEligible(fb: *const FunctionBytecode, facts: ExecutionFacts) bool {
         if (fb.functionKind() != .normal) return false;
-        if (class_syntax_excludes_inline) return false;
+        if (facts.class_syntax_excludes_inline) return false;
         if (fb.isDerivedClassConstructor()) return false;
         if (!fb.hasSimpleParameterList()) return false;
-        if (materializes_arguments_object or contains_direct_eval) return false;
+        if (facts.materializes_arguments_object or facts.contains_direct_eval) return false;
         if (fb.closureVarCount() != 0 or fb.openVarRefCount() != 0) return false;
         const code = fb.byteCode();
         if (code.len == 0 or code.len > small_inline_max_code) return false;
@@ -11628,18 +11637,27 @@ const function_mod = struct {
         return .no_suspend;
     }
 
-    pub fn publishExecutionFlags(
-        fb: *FunctionBytecode,
+    /// Finalizer-side facts about a function body that the published
+    /// `CallFacts` classification consumes but the FB does not store itself.
+    pub const ExecutionFacts = struct {
         materializes_arguments_object: bool,
         has_mapped_arguments: bool,
         leaf_returns_balanced: bool,
         contains_direct_eval: bool,
+        /// Class syntax is a finalizer-only exclusion fact. Runtime rejection
+        /// is encoded by OP_check_ctor and derived construction keeps its
+        /// canonical QJS bit; no ordinary class-constructor flag is published.
         class_syntax_excludes_inline: bool,
         is_module: bool,
-    ) void {
-        // Class syntax is a finalizer-only exclusion fact. Runtime rejection is
-        // encoded by OP_check_ctor and derived construction keeps its canonical
-        // QJS bit; no ordinary class-constructor flag is published in the FB.
+    };
+
+    pub fn publishExecutionFlags(fb: *FunctionBytecode, facts: ExecutionFacts) void {
+        const materializes_arguments_object = facts.materializes_arguments_object;
+        const has_mapped_arguments = facts.has_mapped_arguments;
+        const leaf_returns_balanced = facts.leaf_returns_balanced;
+        const contains_direct_eval = facts.contains_direct_eval;
+        const class_syntax_excludes_inline = facts.class_syntax_excludes_inline;
+        const is_module = facts.is_module;
         std.debug.assert(!fb.isDerivedClassConstructor() or class_syntax_excludes_inline);
         // All published production and legacy-adapter FBs have one extension.
         // Load its possibly-unaligned hot word once, finish every classification
@@ -11680,12 +11698,7 @@ const function_mod = struct {
         // (`return_undef` → `undefined; goto`). The BFS proof is already
         // computed for empty-leaf publication; AND it here so leftover ctor
         // bodies never enter noteMonomorphic. Not a shape special case.
-        const small_inline_eligible = scanSmallInlineEligible(
-            fb,
-            materializes_arguments_object,
-            contains_direct_eval,
-            class_syntax_excludes_inline,
-        ) and leaf_returns_balanced;
+        const small_inline_eligible = scanSmallInlineEligible(fb, facts) and leaf_returns_balanced;
         if (fb.realmContext()) |realm| {
             realm.runtime.small_inline_published_bytes +|= entry_code.len;
         }

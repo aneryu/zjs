@@ -212,7 +212,7 @@ pub const Stats = struct {
     hot_publish_rejected_listed: usize = 0,
     hot_publish_rejected_decommitted: usize = 0,
     /// Candidates refused from the cached verdict of an earlier reopen
-    /// (`Block.flag_hot_rejected`), i.e. bitmap walks the cache saved.
+    /// (`Block.Flags.hot_rejected`), i.e. bitmap walks the cache saved.
     hot_publish_rejected_cached_k: usize = 0,
     /// Hot blocks `openBlock` rejected for having no interval long enough to
     /// be worth the reopen (`hot_reuse_min_interval_cells`). They are dropped
@@ -424,6 +424,34 @@ const ExtentPage = struct {
     end: usize,
 };
 
+/// Intrusive singly linked block-list link. Stored as an address so the
+/// Block header keeps its extern layout; the two small values are the
+/// "not on any list" and "last on the list" states.
+pub const BlockLink = enum(usize) {
+    unlinked = 0,
+    tail = 1,
+    _,
+
+    /// The link a block takes when pushed in front of `head`.
+    pub fn before(head: ?*Block) BlockLink {
+        return if (head) |block| @enumFromInt(@intFromPtr(block)) else .tail;
+    }
+
+    /// A link that points straight at `block` (unlinked when null); the
+    /// cursor form used by iterators that start from a list head.
+    pub fn at(block: ?*Block) BlockLink {
+        return if (block) |b| @enumFromInt(@intFromPtr(b)) else .unlinked;
+    }
+
+    /// The following block, or null at the tail (or when unlinked).
+    pub fn next(self: BlockLink) ?*Block {
+        return switch (self) {
+            .unlinked, .tail => null,
+            _ => @ptrFromInt(@intFromEnum(self)),
+        };
+    }
+};
+
 pub const Block = extern struct {
     magic: u64 = block_magic,
     mark_epoch: u64 = 0,
@@ -437,17 +465,17 @@ pub const Block = extern struct {
     /// empty/swept; condemnation and sliced destruction intentionally use the
     /// doomed bitmap/list rather than the historical five-state model.
     sweep_state: SweepState = .fresh,
-    flags: u8 = 0,
+    flags: Flags = .{},
     /// Intrusive doomed-block link (address; 0 = not linked; 1 = tail). A
     /// block joins at condemnation when its snapshot finds dead cells, and
     /// leaves when the destruction slices empty its doomed bitmap.
-    doomed_link: usize = 0,
+    doomed_link: BlockLink = .unlinked,
     /// Intrusive young-block link (address; 0 = not linked). A block joins
     /// the list the first time a cycle publishes a young object into it --
     /// including an OLD block that hands out a recycled cell, which is what
     /// makes cell reuse compatible with the young scan: the per-cell `young`
     /// header bit filters the old neighbours.
-    young_link: usize = 0,
+    young_link: BlockLink = .unlinked,
     cells_offset: u32 = 0,
     alloc_bits_off: u32 = 0,
     mark_bits_off: u32 = 0,
@@ -479,42 +507,46 @@ pub const Block = extern struct {
         std.debug.assert(@sizeOf(@This()) == 112);
     }
 
-    pub const flag_young: u8 = 1 << 0;
-    /// TGC S4-f (2): `openBlock` reopened this block, rebuilt its free
-    /// intervals and found none long enough to be worth allocating from
-    /// (`hot_reuse_min_interval_cells`). The answer cannot change until the
-    /// block gains free space, so it is cached here and cleared by the two
-    /// sites that grow a block's free space -- `freeSmall` and
-    /// `reclaimDoomedCells` -- plus `resetBlock`, which rewrites `flags`.
-    ///
-    /// Without the cache the minor-time publication slice re-offered the same
-    /// rejects on every sweep and `openBlock` paid a full bitmap walk to
-    /// re-derive the same no: earley-boyer took 592,540 rejected reopens
-    /// against 112,076 accepted ones (-6.5% on its score), splay 58,569.
-    pub const flag_hot_rejected: u8 = 1 << 1;
-    /// Stage-3 Pass-A settlement left holes that only the alloc bitmap
-    /// records: `settleDoomedCellInPassA` clears a cell's alloc bit without
-    /// writing a free link, so `free_list`/`bump` no longer enumerate every
-    /// hole in this block. The bitmap is the sole canonical free-space
-    /// representation until `rebuildFreeIntervals` reconstructs the allocator
-    /// view from it -- the same promise `flag_hot_list` makes, which is why
-    /// the audit treats the two identically.
-    ///
-    /// (Bit 4 previously held `flag_epoch_transition`, which the atomic
-    /// `ensureMarkEpoch` rewrite left declared but never read or written.)
-    const flag_bitmap_canonical: u8 = 1 << 4;
-    /// The block's cell pages (everything past the header page) have been
-    /// returned to the OS with MADV_DONTNEED. The header page stays mapped
-    /// and populated, so the free-list link, magic, and bitmaps remain valid;
-    /// `resetBlock` clears this flag on reuse because it rewrites the whole
-    /// header anyway and the cells are rebuilt from `bump = 0`.
-    const flag_decommitted: u8 = 1 << 5;
-    /// `bump..interval_end` plus `free_list` describe address-ordered free
-    /// intervals. While such a block is active, `next_free` is a low-16-bit
-    /// LIFO for exceptional cells returned after interval publication.
-    const flag_interval_allocator: u8 = 1 << 6;
-    /// The populated block is linked through `next_free` on `Heap.hot_blocks`.
-    const flag_hot_list: u8 = 1 << 7;
+    pub const Flags = packed struct(u8) {
+        /// A young object was published into this block this cycle.
+        young: bool = false, // bit 0
+        /// TGC S4-f (2): `openBlock` reopened this block, rebuilt its free
+        /// intervals and found none long enough to be worth allocating from
+        /// (`hot_reuse_min_interval_cells`). The answer cannot change until the
+        /// block gains free space, so it is cached here and cleared by the two
+        /// sites that grow a block's free space -- `freeSmall` and
+        /// `reclaimDoomedCells` -- plus `resetBlock`, which rewrites `flags`.
+        ///
+        /// Without the cache the minor-time publication slice re-offered the same
+        /// rejects on every sweep and `openBlock` paid a full bitmap walk to
+        /// re-derive the same no: earley-boyer took 592,540 rejected reopens
+        /// against 112,076 accepted ones (-6.5% on its score), splay 58,569.
+        hot_rejected: bool = false, // bit 1
+        _reserved: u2 = 0, // bits 2-3
+        /// Stage-3 Pass-A settlement left holes that only the alloc bitmap
+        /// records: `settleDoomedCellInPassA` clears a cell's alloc bit without
+        /// writing a free link, so `free_list`/`bump` no longer enumerate every
+        /// hole in this block. The bitmap is the sole canonical free-space
+        /// representation until `rebuildFreeIntervals` reconstructs the allocator
+        /// view from it -- the same promise `flag_hot_list` makes, which is why
+        /// the audit treats the two identically.
+        ///
+        /// (Bit 4 previously held `flag_epoch_transition`, which the atomic
+        /// `ensureMarkEpoch` rewrite left declared but never read or written.)
+        bitmap_canonical: bool = false, // bit 4
+        /// The block's cell pages (everything past the header page) have been
+        /// returned to the OS with MADV_DONTNEED. The header page stays mapped
+        /// and populated, so the free-list link, magic, and bitmaps remain valid;
+        /// `resetBlock` clears this flag on reuse because it rewrites the whole
+        /// header anyway and the cells are rebuilt from `bump = 0`.
+        decommitted: bool = false, // bit 5
+        /// `bump..interval_end` plus `free_list` describe address-ordered free
+        /// intervals. While such a block is active, `next_free` is a low-16-bit
+        /// LIFO for exceptional cells returned after interval publication.
+        interval_allocator: bool = false, // bit 6
+        /// The populated block is linked through `next_free` on `Heap.hot_blocks`.
+        hot_list: bool = false, // bit 7
+    };
 
     fn fromAddr(addr: usize) ?*Block {
         if (addr < block_bytes) return null;
@@ -666,7 +698,7 @@ pub const Block = extern struct {
     }
 
     inline fn isYoungListed(self: *const Block) bool {
-        return (self.flags & flag_young) != 0;
+        return self.flags.young;
     }
 
     fn hasPendingDoomed(self: *Block) bool {
@@ -733,7 +765,7 @@ pub const Block = extern struct {
     /// Only meaningful while the block is on the doomed list; outside that
     /// window `remember` holds remembered-set bits, which must stay.
     fn forgetDoomedCell(self: *Block, index: u32) void {
-        if (self.doomed_link == 0) return;
+        if (self.doomed_link == .unlinked) return;
         const word_index = index / 64;
         const mask = @as(u64, 1) << @as(u6, @intCast(index % 64));
         self.bitmaps().remember[word_index] &= ~mask;
@@ -799,7 +831,7 @@ pub const Block = extern struct {
         self.doomed_word = 0;
         if (freed != 0) {
             self.allocated_count -= freed;
-            self.flags |= flag_bitmap_canonical;
+            self.flags.bitmap_canonical = true;
         }
         return freed;
     }
@@ -1511,8 +1543,7 @@ pub const Heap = struct {
         // Indexed, re-reading the list each step: the destroy callback runs
         // arbitrary teardown, and a captured slice would be a dangling read if
         // anything it touched grew the list.
-        var index: usize = 0;
-        while (index < self.young_extents.items.len) : (index += 1) {
+        for (0..self.young_extents.items.len) |index| {
             const base = self.young_extents.items[index];
             const user_bytes = self.extentUserBytes(base) orelse continue;
             const header: *const gc.Header = @ptrFromInt(base + gc.metadata_prefix_size);
@@ -1794,7 +1825,7 @@ pub const Heap = struct {
     /// aged decommit). Both are bounded -- one block per size class, one block
     /// per emptying -- so the bulk path still covers essentially every corpse.
     pub fn reclaimDoomedCells(self: *Heap, block: *Block) u32 {
-        std.debug.assert(block.doomed_link == 0);
+        std.debug.assert(block.doomed_link == .unlinked);
         var doomed_total: u32 = 0;
         for (block.bitmaps().remember) |word| doomed_total += @popCount(word);
         if (doomed_total == 0) return 0;
@@ -1817,7 +1848,7 @@ pub const Heap = struct {
             }
         }
         const freed = block.reclaimDoomedIntoBitmap();
-        block.flags &= ~Block.flag_hot_rejected;
+        block.flags.hot_rejected = false;
         std.debug.assert(freed == doomed_total);
         self.stats.bitmap_reclaimed_cells +|= freed;
         return freed;
@@ -1846,8 +1877,8 @@ pub const Heap = struct {
                 row.blocks += 1;
                 row.cells += block.cell_count;
                 row.allocated += block.allocated_count;
-                if (block.flags & Block.flag_young != 0) row.young += 1;
-                if (block.flags & Block.flag_decommitted != 0) row.decommitted += 1;
+                if (block.flags.young) row.young += 1;
+                if (block.flags.decommitted) row.decommitted += 1;
                 if (block.allocated_count == 0) {
                     row.empty += 1;
                 } else {
@@ -1896,8 +1927,8 @@ pub const Heap = struct {
     /// block on the young list. One flag test on the publication path.
     pub inline fn noteYoungCell(self: *Heap, block: *Block) void {
         if (block.isYoungListed()) return;
-        block.flags |= Block.flag_young;
-        block.young_link = if (self.young_blocks) |head| @intFromPtr(head) else 1;
+        block.flags.young = true;
+        block.young_link = BlockLink.before(self.young_blocks);
         self.young_blocks = block;
     }
 
@@ -1906,11 +1937,11 @@ pub const Heap = struct {
         var cursor = self.young_blocks;
         var cleared: usize = 0;
         while (cursor) |block| {
-            const link = block.young_link;
-            block.flags &= ~Block.flag_young;
-            block.young_link = 0;
+            const next = block.young_link.next();
+            block.flags.young = false;
+            block.young_link = .unlinked;
             cleared += 1;
-            cursor = if (link <= 1) null else @ptrFromInt(link);
+            cursor = next;
         }
         self.young_blocks = null;
         return cleared;
@@ -1923,8 +1954,7 @@ pub const Heap = struct {
         var cursor = self.young_blocks;
         while (cursor) |block| {
             block.clearYoungMarksStw(self.mark_epoch);
-            const link = block.young_link;
-            cursor = if (link <= 1) null else @ptrFromInt(link);
+            cursor = block.young_link.next();
         }
     }
 
@@ -1960,9 +1990,9 @@ pub const Heap = struct {
             var cursor = head.*;
             head.* = null;
             while (cursor) |block| {
-                std.debug.assert(block.flags & Block.flag_hot_list != 0);
+                std.debug.assert(block.flags.hot_list);
                 const link = block.next_free;
-                block.flags &= ~Block.flag_hot_list;
+                block.flags.hot_list = false;
                 // Outside list membership this field is the returned-cell
                 // head for interval allocation, whose empty value is free_nil.
                 block.next_free = free_nil;
@@ -2016,11 +2046,12 @@ pub const Heap = struct {
         std.debug.assert(!block.hasPendingDoomed());
         std.debug.assert(hasHotReuseCapacity(block));
 
-        block.flags |= Block.flag_interval_allocator;
+        block.flags.interval_allocator = true;
         // The reconstruction below reads exactly the alloc bitmap, so it is
         // also what discharges any stage-3 settlement debt: from here on
         // `bump`/`interval_end`/`free_list` enumerate every hole again.
-        block.flags &= ~(Block.flag_hot_list | Block.flag_bitmap_canonical);
+        block.flags.hot_list = false;
+        block.flags.bitmap_canonical = false;
         block.bump = 0;
         block.interval_end = 0;
         block.free_list = free_nil;
@@ -2073,19 +2104,19 @@ pub const Heap = struct {
             self.stats.hot_publish_rejected_doomed +|= 1;
             return;
         }
-        if (block.flags & Block.flag_young != 0) {
+        if (block.flags.young) {
             self.stats.hot_publish_rejected_young +|= 1;
             return;
         }
-        if (block.flags & Block.flag_hot_list != 0) {
+        if (block.flags.hot_list) {
             self.stats.hot_publish_rejected_listed +|= 1;
             return;
         }
-        if (block.flags & Block.flag_decommitted != 0) {
+        if (block.flags.decommitted) {
             self.stats.hot_publish_rejected_decommitted +|= 1;
             return;
         }
-        if (block.flags & Block.flag_hot_rejected != 0) {
+        if (block.flags.hot_rejected) {
             self.stats.hot_publish_rejected_cached_k +|= 1;
             return;
         }
@@ -2094,10 +2125,10 @@ pub const Heap = struct {
         // was private. The alloc bitmap is now the single canonical source.
         // Hot publication is intentionally unprepared. Rebuild is deferred
         // until this block is actually selected by openBlock.
-        block.flags &= ~Block.flag_interval_allocator;
+        block.flags.interval_allocator = false;
         block.next_free = if (self.hot_blocks[block.size_class]) |head| @intFromPtr(head) else 0;
         const class_idx = block.size_class;
-        block.flags |= Block.flag_hot_list;
+        block.flags.hot_list = true;
         self.hot_blocks[class_idx] = block;
         self.stats.hot_blocks_published += 1;
     }
@@ -2158,7 +2189,7 @@ pub const Heap = struct {
             const i: usize = @ctz(nonempty);
             nonempty &= nonempty - 1;
             const block: *Block = @ptrFromInt(@intFromPtr(sb.bytes.ptr) + i * block_bytes);
-            if (block.flags & Block.flag_hot_list != 0) continue;
+            if (block.flags.hot_list) continue;
             self.publishHotBlock(block);
         }
     }
@@ -2210,8 +2241,8 @@ pub const Heap = struct {
         // here.
         result.bitmap_bytes += @as(usize, dead - counts.finalizing) *
             (block.cell_size - gc.metadata_prefix_size);
-        if (block.doomed_link == 0) {
-            block.doomed_link = if (self.doomed_blocks) |head| @intFromPtr(head) else 1;
+        if (block.doomed_link == .unlinked) {
+            block.doomed_link = BlockLink.before(self.doomed_blocks);
             self.doomed_blocks = block;
         }
     }
@@ -2248,9 +2279,9 @@ pub const Heap = struct {
         var result = DoomedSnapshot{};
         var cursor = self.young_blocks;
         while (cursor) |block| {
-            const young_link = block.young_link;
+            const next = block.young_link.next();
             self.recordDoomedBlock(block, block.snapshotDoomed(epoch), &result, .minor);
-            cursor = if (young_link <= 1) null else @ptrFromInt(young_link);
+            cursor = next;
         }
         return result;
     }
@@ -2299,7 +2330,7 @@ pub const Heap = struct {
             var cursor = head;
             while (cursor) |block| {
                 cursor = if (block.next_free == 0) null else @ptrFromInt(block.next_free);
-                if (block.flags & Block.flag_decommitted != 0) continue;
+                if (block.flags.decommitted) continue;
                 if (now_ns -| block.free_time_ns < decommit_min_idle_ns) continue;
                 if (decommit_bytes == 0) continue;
                 if (!decommitCellPages(block)) continue;
@@ -2311,7 +2342,7 @@ pub const Heap = struct {
                 // audit never follows page-discarded links.
                 block.bump = 0;
                 block.free_list = free_nil;
-                block.flags |= Block.flag_decommitted;
+                block.flags.decommitted = true;
                 released += decommit_bytes;
             }
         }
@@ -2386,8 +2417,7 @@ pub const Heap = struct {
         for (self.superblocks.items) |sb| {
             if (sb.kind != .classed) continue;
             if (sb.used_blocks > blocks_per_superblock) return error.BlockGeometryCorrupt;
-            var i: usize = 0;
-            while (i < blocks_per_superblock) : (i += 1) {
+            for (0..blocks_per_superblock) |i| {
                 const block: *Block = @ptrFromInt(@intFromPtr(sb.bytes.ptr) + i * block_bytes);
                 const indexed = testPage(sb.page_bits, @intCast(i));
                 if (i >= sb.used_blocks) {
@@ -2437,14 +2467,14 @@ pub const Heap = struct {
                 {
                     return error.BlockGeometryCorrupt;
                 }
-                const interval_mode = block.flags & Block.flag_interval_allocator != 0;
-                const hot_unprepared = block.flags & Block.flag_hot_list != 0;
+                const interval_mode = block.flags.interval_allocator;
+                const hot_unprepared = block.flags.hot_list;
                 // Stage-3 settlement removes cells from the alloc bitmap
                 // without writing a free link, so for such a block the chain
                 // walk below would (correctly) report an incomplete chain. The
                 // bitmap remains the canonical authority and is still checked
                 // by `AllocCountMismatch` and the doomed/tail-bit rules above.
-                const bitmap_canonical = block.flags & Block.flag_bitmap_canonical != 0;
+                const bitmap_canonical = block.flags.bitmap_canonical;
                 if (hot_unprepared) {
                     if (interval_mode) return error.SweepStateInvariant;
                 } else if (interval_mode) {
@@ -2541,7 +2571,7 @@ pub const Heap = struct {
                     // On a hot-list block `next_free` links blocks. Otherwise
                     // it is the exceptional returned-cell chain accumulated
                     // after interval publication.
-                    if (block.flags & Block.flag_hot_list == 0) {
+                    if (!block.flags.hot_list) {
                         var returned: u32 = @intCast(block.next_free);
                         var returned_count: u32 = 0;
                         while (returned != free_nil) {
@@ -2624,7 +2654,7 @@ pub const Heap = struct {
                         return error.FreeChainCorrupt;
                     }
                 }
-                if (block.flags & Block.flag_decommitted != 0 and block.allocated_count != 0) {
+                if (block.flags.decommitted and block.allocated_count != 0) {
                     return error.DecommittedBlockOccupied;
                 }
             }
@@ -2648,11 +2678,10 @@ pub const Heap = struct {
                 if (!self.containsInitializedBlock(block) or block.magic != block_magic) {
                     return error.ListLinkOutOfHeap;
                 }
-                if (block.flags & Block.flag_young == 0) return error.YoungListFlagMismatch;
+                if (!block.flags.young) return error.YoungListFlagMismatch;
                 young_seen += 1;
                 if (young_seen > max_blocks) return error.YoungListCycle;
-                const link = block.young_link;
-                cursor = try self.blockFromListLink(link);
+                cursor = try self.blockFromListLink(block.young_link);
             }
         }
         var doomed_seen: usize = 0;
@@ -2666,8 +2695,7 @@ pub const Heap = struct {
                 if (block.sweep_state != .active) return error.SweepStateInvariant;
                 doomed_seen += 1;
                 if (doomed_seen > max_blocks) return error.DoomedListCycle;
-                const link = block.doomed_link;
-                cursor = try self.blockFromListLink(link);
+                cursor = try self.blockFromListLink(block.doomed_link);
             }
         }
         if (doomed_seen != pending_doomed_blocks) return error.DoomedListMembershipMismatch;
@@ -2675,12 +2703,11 @@ pub const Heap = struct {
         var hot_flagged: usize = 0;
         for (self.superblocks.items) |sb2| {
             if (sb2.kind != .classed) continue;
-            var j: usize = 0;
-            while (j < blocks_per_superblock) : (j += 1) {
+            for (0..blocks_per_superblock) |j| {
                 const b2: *Block = @ptrFromInt(@intFromPtr(sb2.bytes.ptr) + j * block_bytes);
                 if (b2.magic != block_magic) continue;
-                if (b2.flags & Block.flag_young != 0) flagged += 1;
-                if (b2.flags & Block.flag_hot_list != 0) hot_flagged += 1;
+                if (b2.flags.young) flagged += 1;
+                if (b2.flags.hot_list) hot_flagged += 1;
             }
         }
         if (flagged != young_seen) return error.UnlistedYoungFlag;
@@ -2694,7 +2721,7 @@ pub const Heap = struct {
                 }
                 if (block.allocated_count != 0) return error.FreeListNotEmpty;
                 if (block.size_class != class_idx) return error.FreeListNotEmpty;
-                if (block.flags & Block.flag_young != 0 or block.doomed_link != 0) {
+                if (block.flags.young or block.doomed_link != .unlinked) {
                     return error.FreeListMembershipMismatch;
                 }
                 if (block.sweep_state != .swept) return error.SweepStateInvariant;
@@ -2719,9 +2746,9 @@ pub const Heap = struct {
                 if (block.size_class != class_idx or block.allocated_count == 0 or
                     self.active[class_idx] == block or block.hasPendingDoomed() or
                     !hasHotReuseCapacity(block) or block.sweep_state != .active or
-                    block.flags & Block.flag_hot_list == 0 or
-                    block.flags & Block.flag_interval_allocator != 0 or
-                    block.flags & (Block.flag_young | Block.flag_decommitted) != 0)
+                    !block.flags.hot_list or
+                    block.flags.interval_allocator or
+                    block.flags.young or block.flags.decommitted)
                 {
                     return error.FreeListMembershipMismatch;
                 }
@@ -2802,8 +2829,7 @@ pub const Heap = struct {
     ) VerifyError!void {
         for (self.superblocks.items) |sb| {
             if (sb.kind != .classed) continue;
-            var i: usize = 0;
-            while (i < sb.used_blocks) : (i += 1) {
+            for (0..sb.used_blocks) |i| {
                 const block: *Block = @ptrFromInt(@intFromPtr(sb.bytes.ptr) + i * block_bytes);
                 var index: u32 = 0;
                 while (index < block.cell_count) : (index += 1) {
@@ -2860,7 +2886,7 @@ pub const Heap = struct {
                             .{ .text = " (flags=0x" },
                             .{ .hex = flags },
                             .{ .text = ", block_flags=0x" },
-                            .{ .hex = block.flags },
+                            .{ .hex = @as(u8, @bitCast(block.flags)) },
                             .{ .text = ", marked=" },
                             .{ .text = gc_audit_print.boolText(block.isMarked(index, self.mark_epoch)) },
                             .{ .text = ", doomed=0x" },
@@ -2920,8 +2946,7 @@ pub const Heap = struct {
         var count: usize = 0;
         for (self.superblocks.items) |sb| {
             if (sb.kind != .classed) continue;
-            var i: usize = 0;
-            while (i < sb.used_blocks) : (i += 1) {
+            for (0..sb.used_blocks) |i| {
                 const block: *Block = @ptrFromInt(@intFromPtr(sb.bytes.ptr) + i * block_bytes);
                 if (block.magic != block_magic) continue;
                 count += block.allocated_count;
@@ -2980,13 +3005,12 @@ pub const Heap = struct {
             out.initialized_blocks += sb.used_blocks;
             out.reserved_uninitialized_blocks += blocks_per_superblock - sb.used_blocks;
 
-            var i: usize = 0;
-            while (i < sb.used_blocks) : (i += 1) {
+            for (0..sb.used_blocks) |i| {
                 const block: *const Block = @ptrFromInt(@intFromPtr(sb.bytes.ptr) + i * block_bytes);
                 if (block.magic != block_magic) continue;
                 const class_idx = block.size_class;
-                if (block.flags & Block.flag_hot_list != 0) out.hot_reuse_blocks += 1;
-                if (block.flags & Block.flag_interval_allocator != 0 and
+                if (block.flags.hot_list) out.hot_reuse_blocks += 1;
+                if (block.flags.interval_allocator and
                     self.active[class_idx] == block)
                 {
                     out.interval_active_blocks += 1;
@@ -2999,7 +3023,7 @@ pub const Heap = struct {
                 const capacity_bytes = @as(usize, block.cell_count) * block.cell_size;
                 if (block.allocated_count == 0) {
                     out.empty_cell_capacity_bytes += capacity_bytes;
-                    if (block.flags & Block.flag_decommitted != 0) {
+                    if (block.flags.decommitted) {
                         out.decommitted_empty_blocks += 1;
                     }
                     if (self.active[class_idx] == block) {
@@ -3046,20 +3070,25 @@ pub const Heap = struct {
         return self.containsBlock(block);
     }
 
-    fn blockFromListLink(self: *const Heap, link: usize) VerifyError!?*Block {
-        if (link == 1) return null;
-        if (link == 0) return error.ListLinkOutOfHeap;
-        if (link & (block_bytes - 1) != 0) return error.ListLinkOutOfHeap;
-        const block: *Block = @ptrFromInt(link);
+    fn blockFromListLink(self: *const Heap, link: BlockLink) VerifyError!?*Block {
+        const addr = switch (link) {
+            .tail => return null,
+            .unlinked => return error.ListLinkOutOfHeap,
+            _ => @intFromEnum(link),
+        };
+        if (addr & (block_bytes - 1) != 0) return error.ListLinkOutOfHeap;
+        const block: *Block = @ptrFromInt(addr);
         if (!self.containsInitializedBlock(block)) return error.ListLinkOutOfHeap;
         if (block.magic != block_magic) return error.ListLinkOutOfHeap;
         return block;
     }
 
+    /// `next_free` as a block-list link: 0 is the tail there, and 1 is never
+    /// a valid block address.
     fn blockFromFreeLink(self: *const Heap, link: usize) VerifyError!?*Block {
         if (link == 0) return null;
         if (link == 1) return error.ListLinkOutOfHeap;
-        return self.blockFromListLink(link);
+        return self.blockFromListLink(@enumFromInt(link));
     }
 
     fn allocSmall(self: *Heap, class_idx: usize, user_bytes: usize) std.mem.Allocator.Error![]u8 {
@@ -3082,7 +3111,7 @@ pub const Heap = struct {
         // This block just gained free space, so a cached "no long enough
         // interval" verdict is out of date (S4-f (2)). The header line is
         // already dirty from `allocated_count`.
-        block.flags &= ~Block.flag_hot_rejected;
+        block.flags.hot_rejected = false;
         if (comptime lifecycle_state_enabled) {
             const lifecycle = self.lifecycleFor(block, index);
             lifecycle.state = .free;
@@ -3095,8 +3124,9 @@ pub const Heap = struct {
             // Empty blocks keep the existing aged-decommit lifecycle. Their
             // interval state no longer has a consumer, and `next_free` is
             // about to become a block-list link.
-            block.flags &= ~(Block.flag_interval_allocator | Block.flag_hot_list |
-                Block.flag_bitmap_canonical);
+            block.flags.interval_allocator = false;
+            block.flags.hot_list = false;
+            block.flags.bitmap_canonical = false;
             block.bump = 0;
             block.interval_end = 0;
             block.free_list = free_nil;
@@ -3111,16 +3141,16 @@ pub const Heap = struct {
         while (self.hot_blocks[class_idx]) |block| {
             const link = block.next_free;
             self.hot_blocks[class_idx] = if (link == 0) null else @ptrFromInt(link);
-            std.debug.assert(block.flags & Block.flag_hot_list != 0);
+            std.debug.assert(block.flags.hot_list);
             std.debug.assert(block.allocated_count != 0);
             std.debug.assert(!block.hasPendingDoomed());
-            block.flags &= ~Block.flag_hot_list;
+            block.flags.hot_list = false;
             block.next_free = free_nil;
             block.sweep_state = .active;
             const max_interval = rebuildFreeIntervals(block);
             if (max_interval < hot_reuse_min_interval_cells) {
                 self.stats.hot_blocks_k_rejected +|= 1;
-                block.flags |= Block.flag_hot_rejected;
+                block.flags.hot_rejected = true;
                 // K-rejected non-empty partial: retain the valid interval
                 // representation just built, but give it no allocation/list
                 // owner. It remains census-owned and non-decommittable until
@@ -3135,7 +3165,7 @@ pub const Heap = struct {
                 null
             else
                 @ptrFromInt(block.next_free);
-            if (block.flags & Block.flag_decommitted != 0) {
+            if (block.flags.decommitted) {
                 // The pages re-fault as zero on first touch; only the account
                 // moves here. `resetBlock` clears the flag with the rest.
                 self.stats.recommitted_bytes += decommit_bytes;
@@ -3240,8 +3270,7 @@ pub const Heap = struct {
             if (block_generation_enabled) @splat(0) else {};
         if (comptime block_generation_enabled) {
             if (kind == .classed) {
-                var i: usize = 0;
-                while (i < blocks_per_superblock) : (i += 1) {
+                for (0..blocks_per_superblock) |i| {
                     if (self.block_generation_exhausted or self.next_block_incarnation == std.math.maxInt(u32)) {
                         self.block_generation_exhausted = true;
                         return error.OutOfMemory;
@@ -3380,7 +3409,7 @@ pub const Heap = struct {
         if (comptime std.debug.runtime_safety) {
             if (reused) {
                 std.debug.assert(!block.isYoungListed());
-                std.debug.assert(block.doomed_link == 0);
+                std.debug.assert(block.doomed_link == .unlinked);
             }
         }
         const geometry = blockGeometry(cell_size);
@@ -3405,7 +3434,7 @@ pub const Heap = struct {
             .free_list = free_nil,
             .size_class = @intCast(class_idx),
             .sweep_state = .fresh,
-            .flags = 0,
+            .flags = .{},
             .cells_offset = geometry.cells_off,
             .alloc_bits_off = geometry.alloc_off,
             .mark_bits_off = geometry.mark_off,
@@ -3949,7 +3978,7 @@ pub fn processHeapTrimNeeded(current_decommitted: usize, released: usize) bool {
 }
 
 fn popCell(block: *Block) ?u32 {
-    if (block.flags & Block.flag_interval_allocator != 0) {
+    if (block.flags.interval_allocator) {
         if (block.bump < block.interval_end) {
             const index = block.bump;
             block.bump += 1;
@@ -4010,8 +4039,8 @@ fn pushCell(block: *Block, index: u32, cell: [*]u8) void {
     // as unaccounted and untraced no matter where it sits in the chain, so the
     // "free cell impersonates a live header" class of bug is closed for links
     // as well as for the terminator.
-    if (block.flags & Block.flag_interval_allocator != 0) {
-        std.debug.assert(block.flags & Block.flag_hot_list == 0);
+    if (block.flags.interval_allocator) {
+        std.debug.assert(!block.flags.hot_list);
         const returned: u32 = @intCast(block.next_free);
         @as(*u32, @ptrCast(@alignCast(cell))).* = free_poison | (returned & free_link_mask);
         block.next_free = index;

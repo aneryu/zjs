@@ -127,7 +127,7 @@ fn recordTable(comptime entries: []const InternalEntry) EntryTable {
 /// the `class_tag * 10 + method` encoding from
 /// `exec/object_ops.primitivePrototypeMethod` for methods 1-5; methods 6+
 /// are the wrapper constructors' static function lists (qjs `js_bigint_funcs`
-/// quickjs.c:56350, `js_symbol_funcs` quickjs.c:51672), which share the domain
+/// quickjs.c, `js_symbol_funcs` quickjs.c), which share the domain
 /// but not that handler.
 const primitive_entries = primitive.boolean_entries ++ primitive.shared_entries ++
     primitive.symbol_entries ++ primitive.bigint_static_entries ++ primitive.symbol_static_entries;
@@ -179,7 +179,6 @@ const exec_side_id_enums = [_]IdEnumBinding{
     .{ .domain = .error_object, .label = "error_ops.StaticMethod", .Ids = error_object.StaticMethod },
     .{ .domain = .function, .label = "function_ops.PrototypeMethod", .Ids = function.PrototypeMethod },
     .{ .domain = .object, .label = "object_builtin_ops.PrototypeMethod", .Ids = object.PrototypeMethod },
-    .{ .domain = .date, .label = "date_ops.ExtendedPrototypeMethod", .Ids = date.ExtendedPrototypeMethod },
     .{ .domain = .collection, .label = "collection_ops.StaticMethod", .Ids = collection.StaticMethod },
 };
 

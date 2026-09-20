@@ -23,7 +23,7 @@ const proxyAwareOwnPropertyDescriptor = object_ops.proxyAwareOwnPropertyDescript
 // ---------------------------------------------------------------------------
 // for-in iterator (mirrors qjs JSForInIterator / build_for_in_iterator)
 //
-// qjs JSForInIterator field mapping (struct at quickjs.c:1276) onto the zjs
+// qjs JSForInIterator field mapping (struct at quickjs.c) onto the zjs
 // iterator payload (core/object.zig IteratorPayload):
 //   it->obj                -> payload.target      (current chain object; null
 //                             mirrors the JS_NULL/JS_UNDEFINED "done" states)
@@ -38,7 +38,7 @@ const proxyAwareOwnPropertyDescriptor = object_ops.proxyAwareOwnPropertyDescript
 //   it->in_prototype_chain -> payload.zip_state   (repurposed u8 slot, 0/1)
 // The visited-key dedup set lives as properties on the iterator object itself,
 // exactly like qjs defines JS_NULL-valued props on the JS_CLASS_FOR_IN_ITERATOR
-// enum_obj (js_for_in_next quickjs.c:16469).
+// enum_obj (js_for_in_next quickjs.c).
 // ---------------------------------------------------------------------------
 
 /// qjs `it->is_array` (JSForInIterator).
@@ -51,10 +51,10 @@ pub fn forInInProtoChainSlot(iterator: *core.Object) *u8 {
     return iterator.iteratorZipStateSlot();
 }
 
-/// Mirrors qjs build_for_in_iterator (quickjs.c:16268): snapshot ONLY the root
+/// Mirrors qjs build_for_in_iterator: snapshot ONLY the root
 /// object's own string keys (JS_GPN_STRING_MASK | JS_GPN_SET_ENUM); the
 /// prototype chain is walked LAZILY by forInNext (js_for_in_next
-/// quickjs.c:16404), one prototype at a time.
+/// quickjs.c), one prototype at a time.
 pub fn createForInIterator(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -74,7 +74,7 @@ pub fn createForInIterator(
     iterator_val = iterator.value();
 
     // it->is_array = FALSE; it->obj = obj; it->idx = 0; it->tab_atom = NULL;
-    // it->atom_count = 0; it->in_prototype_chain = FALSE (quickjs.c:16292-16297)
+    // it->atom_count = 0; it->in_prototype_chain = FALSE
     iterator.iteratorKindSlot().* = iterator_ops.for_in_iterator_kind;
     iterator.iteratorIndexSlot().* = 0;
     iterator.setIteratorLength(0);
@@ -82,21 +82,20 @@ pub fn createForInIterator(
     forInInProtoChainSlot(iterator).* = 0;
 
     // null/undefined: it->obj stays null and the first next() reports done
-    // (quickjs.c:16301-16302 / 16428-16429).
     if (object_value.is(.null_value) or object_value.is(.undefined_value)) return iterator.value();
 
-    // JS_ToObjectFree for primitives (quickjs.c:16277-16279).
+    // JS_ToObjectFree for primitives.
     source_val = if (object_value.is(.object)) object_value else try primitiveObjectForAccess(rt, global, object_value);
     const source = try property_ops.expectObject(source_val);
     try iterator.setOptionalValueSlot(rt, iterator.iteratorTargetSlot(), source_val);
 
     if (forInFastArrayCount(rt, source)) |count| {
         // "for fast arrays, we only store the number of elements"
-        // (quickjs.c:16315-16317); index keys are generated on the fly.
+        //; index keys are generated on the fly.
         forInIsArraySlot(iterator).* = 1;
         iterator.setIteratorLength(count);
     } else {
-        // normal_case (quickjs.c:16318-16326).
+        // normal_case.
         const keys = try forInSnapshotOwnStringKeys(ctx, output, global, source, iterator);
         // TGC S3 §2.3: the key snapshot moves into a published iterator payload.
         for (keys) |key| rt.atoms.shadeAtomIfMarking(key);
@@ -106,12 +105,12 @@ pub fn createForInIterator(
     return iterator.value();
 }
 
-/// The `p->fast_array` branch of build_for_in_iterator (quickjs.c:16305-16317):
+/// The `p->fast_array` branch of build_for_in_iterator:
 /// a fast array (zjs dense array / typed array) with no enumerable shape
 /// props stores only the element count. Returns null for the normal case.
 fn forInFastArrayCount(rt: *core.JSRuntime, source: *core.Object) ?u32 {
     if (core.object.isTypedArrayObject(source)) {
-        // "check that there are no enumerable normal fields" (quickjs.c:16307).
+        // "check that there are no enumerable normal fields".
         for (source.shapeProps()) |prop| {
             const prop_flags = core.property.Flags.fromBits(prop.flags);
             if (!prop_flags.deleted and prop_flags.enumerable) return null;
@@ -133,11 +132,11 @@ fn forInFastArrayCount(rt: *core.JSRuntime, source: *core.Object) ?u32 {
 
 /// Mirrors JS_GetOwnPropertyNamesInternal(ctx, &tab, &n, obj,
 /// JS_GPN_STRING_MASK | JS_GPN_SET_ENUM) as consumed by the for-in machinery
-/// (build_for_in_iterator quickjs.c:16321, the js_for_in_next prototype step
-/// quickjs.c:16447 and the is_array conversion quickjs.c:16384). Returns the
+/// (build_for_in_iterator quickjs.c, the js_for_in_next prototype step
+/// quickjs.c and the is_array conversion quickjs.c). Returns the
 /// enumerable own string keys in tab order (owned atoms). qjs keeps the
 /// non-enumerable tab entries only to feed the visited-key set on the enum
-/// object (quickjs.c:16386-16390 and 16463-16472, always behind a dedup
+/// object (quickjs.c, always behind a dedup
 /// check); we record those straight onto the iterator's visited set here
 /// instead of carrying a parallel is_enumerable array.
 pub fn forInSnapshotOwnStringKeys(
@@ -174,10 +173,10 @@ pub fn forInSnapshotOwnStringKeys(
 }
 
 /// Per-key is_enumerable of the SET_ENUM walk. Ordinary objects read the
-/// shape flag (quickjs.c:8629); proxies/exotics run the full
-/// [[GetOwnProperty]] (quickjs.c:8674-8688 "set the is_enumerable field if
+/// shape flag; proxies/exotics run the full
+/// [[GetOwnProperty]] (quickjs.c "set the is_enumerable field if
 /// necessary"), so the gopd trap order/count matches qjs. A key whose
-/// descriptor probe reports absence counts as non-enumerable (quickjs.c:8673).
+/// descriptor probe reports absence counts as non-enumerable.
 fn forInOwnKeyIsEnumerable(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -199,22 +198,22 @@ fn forInOwnKeyIsEnumerable(
 
 /// JS_DefinePropertyValue(ctx, enum_obj, prop, JS_NULL, JS_PROP_ENUMERABLE):
 /// the visited-key set lives as JS_NULL-valued props on the iterator object
-/// itself (js_for_in_next quickjs.c:16469, prepare slow_path quickjs.c:16386).
+/// itself (js_for_in_next quickjs.c, prepare slow_path quickjs.c).
 /// qjs only ever defines a visited key after a dedup miss; the exists guard
 /// keeps redefinition of the non-configurable marker impossible.
 pub fn forInDefineVisited(rt: *core.JSRuntime, iterator: *core.Object, key: core.Atom) !void {
     if (try iterator.existsOwnProperty(rt, key)) return;
-    try iterator.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.nullValue(), false, true, false));
+    try iterator.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.nullValue(), .{ .enumerable = true }));
 }
 
 /// The JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY probe of
-/// js_for_in_prepare_prototype_chain_enum (quickjs.c:16360-16369): does this
+/// js_for_in_prepare_prototype_chain_enum: does this
 /// prototype own at least one enumerable string-keyed property? Ordinary
 /// objects reduce to a shape/dense scan (the same walk qjs's
-/// JS_GetOwnPropertyNamesInternal does off the shape, quickjs.c:8626-8651);
+/// JS_GetOwnPropertyNamesInternal does off the shape, quickjs.c);
 /// proxies/exotics run the full filtered-tab construction so ownKeys + the
 /// per-key gopd probes fire exactly as in qjs (the tab is discarded,
-/// quickjs.c:16369).
+/// quickjs.c).
 pub fn forInHasEnumerableStringKey(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -223,7 +222,7 @@ pub fn forInHasEnumerableStringKey(
 ) !bool {
     const rt = ctx.runtime;
     if (core.object.isTypedArrayObject(object)) {
-        // fast_array branch (quickjs.c:8656-8659): every element is an
+        // fast_array branch: every element is an
         // enumerable index key.
         if ((core.object.typedArrayLength(rt, object) catch 0) != 0) return true;
     } else if (object.proxyTarget() != null or object.hasExoticMethods() or
@@ -240,7 +239,7 @@ pub fn forInHasEnumerableStringKey(
         }
         return found;
     } else if (object.arrayElements().len != 0) {
-        // dense array elements are enumerable index keys (quickjs.c:8656-8659).
+        // dense array elements are enumerable index keys.
         return true;
     }
     for (object.shapeProps()) |prop| {

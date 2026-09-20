@@ -34,7 +34,7 @@ zjs 是用 Zig 写的可嵌入 JavaScript 引擎，语义权威是 ECMA-262（te
 | 08 | [08-core-shape-property.md](08-core-shape-property.md) | shape、property、array、class、function、typed array、collection |
 | 09 | [09-gc.md](09-gc.md) | tracing GC：registry、block heap、mark/sweep、conservative scan |
 | 10 | [10-core-runtime.md](10-core-runtime.md) | `JSRuntime`、`JSContext`、jobs、module 记录、句柄 |
-| 11 | [11-vm-kernel.md](11-vm-kernel.md) | `run`→Machine→尾分发外壳、`VmExecState` ABI、剖析与精确根；子册：[dispatch](11-vm-dispatch.md) / [colds](11-vm-dispatch-colds.md) / [frame-stack](11-vm-frame-stack.md) / [inline-calls](11-vm-inline-calls.md) |
+| 11 | [11-vm-kernel.md](11-vm-kernel.md) | `run`→Machine→尾分发外壳、剖析与精确根；子册：[dispatch](11-vm-dispatch.md) / [colds](11-vm-dispatch-colds.md) / [frame-stack](11-vm-frame-stack.md) / [inline-calls](11-vm-inline-calls.md) |
 | 12 | [12-vm-opcodes.md](12-vm-opcodes.md) | `vm_*.zig` / `vm_property_*.zig` opcode 族 |
 | 13 | [13-calls.md](13-calls.md) | call / construct / eval / closure / native / CallSite |
 | 14 | [14-property-ops.md](14-property-ops.md) | 属性读写、object 抽象操作、slot、class init |

@@ -21,7 +21,6 @@ const string_ops = @import("string_ops.zig");
 const buildCallSiteArray = array_ops.buildCallSiteArray;
 const buildErrorStackStringValue = string_ops.buildErrorStackStringValue;
 const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
-const defineDataPropertyByAtom = object_ops.defineDataPropertyByAtom;
 const formatCapturedErrorStackStringValue = string_ops.formatCapturedErrorStackStringValue;
 const isCallableValue = call_runtime.isCallableValue;
 
@@ -36,7 +35,7 @@ pub fn captureErrorStack(ctx: *core.JSContext, global: *core.Object, instance: *
 /// capture the stack at error construction time (QuickJS `build_backtrace`
 /// inside `JS_ThrowError2`).
 pub fn attachStackToErrorValue(ctx: *core.JSContext, global: *core.Object, value: core.JSValue) !void {
-    const object = property_ops.expectObject(value) catch return;
+    const object = core.value_semantics.objectFromValue(value) orelse return;
     try captureErrorStack(ctx, global, object);
 }
 
@@ -88,7 +87,7 @@ pub fn formatCapturedErrorStackValue(
 }
 
 /// Throw the compile-error SyntaxError for a parse failure, mirroring qjs's
-/// parse-error surface: build_backtrace's filename branch (quickjs.c:7553-7570)
+/// parse-error surface: build_backtrace's filename branch
 /// defines own fileName/lineNumber/columnNumber data properties
 /// (JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, non-enumerable) and prepends a
 /// `    at <file>:<line>:<col>` line to the stack, which for compile errors is
@@ -126,11 +125,11 @@ fn defineParseErrorSurface(
     col_num: i32,
 ) !void {
     const rt = ctx.runtime;
-    const instance = property_ops.expectObject(error_value) catch return;
+    const instance = core.value_semantics.objectFromValue(error_value) orelse return;
     const filename_value = try value_ops.createStringValue(rt, filename);
-    try defineDataPropertyByAtom(rt, instance, core.atom.ids.fileName, filename_value, true, false, true);
-    try defineDataPropertyByAtom(rt, instance, core.atom.ids.lineNumber, core.JSValue.int32(line_num), true, false, true);
-    try defineDataPropertyByAtom(rt, instance, core.atom.ids.columnNumber, core.JSValue.int32(col_num), true, false, true);
+    try instance.defineOwnProperty(rt, core.atom.ids.fileName, core.Descriptor.data(filename_value, .method));
+    try instance.defineOwnProperty(rt, core.atom.ids.lineNumber, core.Descriptor.data(core.JSValue.int32(line_num), .method));
+    try instance.defineOwnProperty(rt, core.atom.ids.columnNumber, core.Descriptor.data(core.JSValue.int32(col_num), .method));
 
     var bytes: std.ArrayList(u8) = .empty;
     defer bytes.deinit(rt.memory.allocator);
@@ -144,7 +143,7 @@ fn defineParseErrorSurface(
 fn errorPrepareStackTrace(global: *core.Object) !?core.JSValue {
     const error_key = core.atom.ids.Error;
     const error_value = try global.getProperty(error_key);
-    const error_object = property_ops.expectObject(error_value) catch return null;
+    const error_object = core.value_semantics.objectFromValue(error_value) orelse return null;
     const prepare_key = core.atom.ids.prepareStackTrace;
     const prepare = try error_object.getProperty(prepare_key);
     if (!isCallableValue(prepare)) {
@@ -158,10 +157,10 @@ pub fn backtraceFunctionNameEql(ctx: *core.JSContext, entry: core.BacktraceFrame
 }
 
 /// Display name for a backtrace frame. Mirrors qjs build_backtrace
-/// (quickjs.c:7580-7586): an empty name renders "<anonymous>", a top-level
+///: an empty name renders "<anonymous>", a top-level
 /// script/eval frame renders "<eval>". qjs gets the latter for free because
 /// the compiler names every top-level function def JS_ATOM__eval_
-/// (quickjs.c:37252); zjs's top-level bytecode instead carries name ==
+///; zjs's top-level bytecode instead carries name ==
 /// filename (the name-equality is also its eval-frame detection convention,
 /// e.g. vm_call.zig / eval_ops.zig), so the "<eval>" mapping is applied at
 /// this rendering seam.
@@ -275,7 +274,7 @@ pub fn errorStackSetter(
     const desc = try object_ops.proxyAwareOwnPropertyDescriptor(ctx, output, global, receiver, stack_key, caller_function, caller_frame);
 
     if (desc == null) {
-        const create_desc = core.Descriptor.data(value, true, true, true);
+        const create_desc = core.Descriptor.data(value, .all);
         const ok = if (receiver.proxyTarget() != null)
             try object_ops.proxyDefineOwnProperty(ctx, output, global, receiver, stack_key, create_desc, caller_function, caller_frame)
         else blk: {
@@ -295,7 +294,7 @@ pub fn errorStackSetter(
         if (try object_ops.proxySetTrapForErrorStackSetter(ctx, output, global, this_value, receiver, stack_key, value, caller_function, caller_frame)) {
             return core.JSValue.undefinedValue();
         }
-        try object_ops.defineErrorStackDataProperty(ctx, output, global, receiver, stack_key, core.Descriptor.data(value, true, true, true), caller_function, caller_frame);
+        try object_ops.defineErrorStackDataProperty(ctx, output, global, receiver, stack_key, core.Descriptor.data(value, .all), caller_function, caller_frame);
         return core.JSValue.undefinedValue();
     }
 
@@ -339,6 +338,6 @@ pub fn errorCaptureStackTrace(
         null;
     defer if (skip_name) |bytes| ctx.runtime.memory.allocator.free(bytes);
     const stack_value = try error_stack_ops.buildErrorStackValue(ctx, output, global, args[0], skip_name);
-    try object_ops.defineDataPropertyByAtom(ctx.runtime, target, core.atom.ids.stack, stack_value, true, false, true);
+    try target.defineOwnProperty(ctx.runtime, core.atom.ids.stack, core.Descriptor.data(stack_value, .method));
     return core.JSValue.undefinedValue();
 }

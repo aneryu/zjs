@@ -238,13 +238,13 @@ pub fn atomicsReadModifyWrite(
         else
             try toUint32ForAtomics(ctx, output, global, replacement_arg, caller_function, caller_frame);
     } else @as(u64, 0);
-    // js_atomics_op (quickjs.c:60604): LOAD coerces no operand, so qjs skips
+    // js_atomics_op: LOAD coerces no operand, so qjs skips
     // the post-coercion re-check for it; every other op re-validates after
     // the operand conversions ran user code.
     if (atomic_op != .load) try atomicsRevalidateIndex(ctx.runtime, view, index);
 
     const bytes = try atomicsElementBytes(view, index);
-    // One atomic instruction per op (qjs js_atomics_op, quickjs.c:60637-60697);
+    // One atomic instruction per op (qjs js_atomics_op, quickjs.c);
     // a plain read/compute/write here loses concurrent RMW updates.
     const old = atomicsReadModifyWriteBits(view, bytes, atomic_op, operand, replacement);
     return atomicsValueFromBits(ctx.runtime, view, old);
@@ -274,7 +274,7 @@ pub fn atomicsStore(
         try bigintBitsForAtomics(ctx.runtime, stored_value)
     else
         try uint32FromIntegerValueForAtomics(ctx.runtime, stored_value);
-    // Mirrors js_atomics_store (quickjs.c:60770-60773): re-check
+    // Mirrors js_atomics_store: re-check
     // typed_array_is_oob (TypeError) then the fresh count (RangeError) after
     // the value coercion ran user code.
     try atomicsRevalidateIndex(ctx.runtime, view, index);
@@ -325,7 +325,7 @@ pub fn atomicsWait(
         try toInt32BitsForAtomics(ctx, output, global, expected_arg, caller_function, caller_frame);
     const timeout_arg = if (args.len >= 4) args[3] else core.JSValue.float64(std.math.inf(f64));
     const timeout = try toNumberForAtomics(ctx, output, global, timeout_arg, caller_function, caller_frame);
-    // Mirrors js_atomics_wait (quickjs.c:60900-60901): the can-block check
+    // Mirrors js_atomics_wait: the can-block check
     // runs after the operand coercions but BEFORE the memory load/compare, so
     // a non-blockable thread throws TypeError instead of returning
     // "not-equal".
@@ -468,7 +468,7 @@ pub fn processExpiredAtomicsWaiters(ctx: *core.JSContext) !void {
         atomics_waiter_mutex.unlock(io);
 
         const waiter = ready orelse return;
-        const waiter_ctx = waiter.realm.borrow() orelse unreachable;
+        const waiter_ctx = waiter.realm.borrow().?;
         waiter_ctx.runtime.job_queue.enqueueAtomicsWaiter(
             waiter_ctx,
             waiter,
@@ -833,7 +833,7 @@ pub fn atomicsValidateIndex(rt: *core.JSRuntime, object: *core.Object, index: us
     if (index >= length) return error.RangeError;
 }
 
-/// Mirrors js_atomics_get_buf (quickjs.c:60526) for the non-waitable Atomics
+/// Mirrors js_atomics_get_buf for the non-waitable Atomics
 /// ops (is_waitable == 0): after the class check, a detached non-shared buffer
 /// throws TypeError BEFORE ToIndex; the view length is captured BEFORE ToIndex
 /// (`old_len`) so an index-coercion side effect that grows a length-tracking
@@ -858,7 +858,7 @@ pub fn atomicsGetBufIndex(
     return index;
 }
 
-/// Mirrors the js_atomics_op (quickjs.c:60628-60631) / js_atomics_store
+/// Mirrors the js_atomics_op / js_atomics_store
 /// post-coercion re-check: typed_array_is_oob (detached or shrunk-resizable)
 /// -> TypeError, then the fresh count -> RangeError.
 pub fn atomicsRevalidateIndex(rt: *core.JSRuntime, view: *core.Object, index: usize) !void {
@@ -875,7 +875,7 @@ pub fn atomicsElementBytes(object: *core.Object, index: usize) ![]u8 {
 }
 
 /// Seq-cst atomic element load (qjs js_atomics_op ATOMICS_OP_LOAD,
-/// quickjs.c:60659-60669; js_atomics_wait's value probe is likewise an
+/// quickjs.c; js_atomics_wait's value probe is likewise an
 /// atomic_load). Element pointers are naturally aligned: a typed array's
 /// byteOffset is a multiple of the element size and the backing allocation is
 /// at least 8-aligned.
@@ -889,7 +889,7 @@ pub fn atomicsReadBits(object: *core.Object, bytes: []const u8) u64 {
     };
 }
 
-/// Seq-cst atomic element store (qjs js_atomics_store, quickjs.c:60778-60790
+/// Seq-cst atomic element store (qjs js_atomics_store, quickjs.c
 /// atomic_store per width).
 pub fn atomicsWriteBits(object: *core.Object, bytes: []u8, value: u64) void {
     switch (object.typedArrayElementSize()) {
@@ -903,7 +903,7 @@ pub fn atomicsWriteBits(object: *core.Object, bytes: []u8, value: u64) void {
 
 /// Single-instruction atomic read-modify-write on one typed-array element,
 /// mirroring qjs js_atomics_op's per-width `OP(...)` atomic builtins
-/// (quickjs.c:60637-60656) plus the LOAD (60659-60669) and COMPARE_EXCHANGE
+/// plus the LOAD (60659-60669) and COMPARE_EXCHANGE
 /// (60671-60697) arms. The pre-fix read/compute/write sequence lost concurrent
 /// updates (two agents' Atomics.add could interleave), deadlocking the
 /// multi-agent test262 wait protocols.
@@ -924,7 +924,7 @@ fn atomicsRmwTyped(
         .xor => @atomicRmw(T, ptr, .Xor, op_bits, .seq_cst),
         .exchange => @atomicRmw(T, ptr, .Xchg, op_bits, .seq_cst),
         // A successful cmpxchg returns null; the old value then equals the
-        // expected operand (qjs returns `v1` unchanged on success, 60675).
+        // expected operand (qjs returns `v1` unchanged on success).
         .compareExchange => @cmpxchgStrong(T, ptr, op_bits, @as(T, @truncate(replacement)), .seq_cst, .seq_cst) orelse op_bits,
     };
 }
@@ -958,14 +958,14 @@ pub fn atomicsMaskBits(object: *core.Object, value: u64) u64 {
 
 pub fn atomicsValueFromBits(rt: *core.JSRuntime, object: *core.Object, bits: u64) !core.JSValue {
     return switch (object.typedArrayKind()) {
-        1 => core.JSValue.int32(@as(i8, @bitCast(@as(u8, @truncate(bits))))),
-        2 => core.JSValue.int32(@as(u8, @truncate(bits))),
-        4 => core.JSValue.int32(@as(i16, @bitCast(@as(u16, @truncate(bits))))),
-        5 => core.JSValue.int32(@as(u16, @truncate(bits))),
-        6 => core.JSValue.int32(@as(i32, @bitCast(@as(u32, @truncate(bits))))),
-        7 => atomicsNumberResult(@floatFromInt(@as(u32, @truncate(bits)))),
-        11 => value_ops.createBigIntI128(rt, @as(i64, @bitCast(bits))),
-        12 => value_ops.createBigIntI128(rt, @as(i128, bits)),
+        .int8 => core.JSValue.int32(@as(i8, @bitCast(@as(u8, @truncate(bits))))),
+        .uint8 => core.JSValue.int32(@as(u8, @truncate(bits))),
+        .int16 => core.JSValue.int32(@as(i16, @bitCast(@as(u16, @truncate(bits))))),
+        .uint16 => core.JSValue.int32(@as(u16, @truncate(bits))),
+        .int32 => core.JSValue.int32(@as(i32, @bitCast(@as(u32, @truncate(bits))))),
+        .uint32 => atomicsNumberResult(@floatFromInt(@as(u32, @truncate(bits)))),
+        .bigint64 => value_ops.createBigIntI128(rt, @as(i64, @bitCast(bits))),
+        .biguint64 => value_ops.createBigIntI128(rt, @as(i128, bits)),
         else => error.TypeError,
     };
 }
@@ -1318,13 +1318,8 @@ test "atomicsWaitAsyncResult roots direct function bytecode value while creating
     const ctx = try core.JSContext.create(rt);
     defer ctx.destroy();
 
-    const fb = try bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
-    var fb_published = false;
-    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-atomics-wait-async-result-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
-    fb.publishFixtureNoFail(rt);
-    fb_published = true;
+    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
 
     const result_payload = core.JSValue.functionBytecode(&fb.header);
 

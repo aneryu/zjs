@@ -268,7 +268,7 @@ pub const JSContext = struct {
         var key_roots = core.runtime.rootAtoms(.{&key});
         key_roots.activate(self.core.runtime);
         defer key_roots.deactivate(self.core.runtime);
-        try object.defineOwnProperty(self.core.runtime, key, Descriptor.data(val, options.writable, options.enumerable, options.configurable));
+        try object.defineOwnProperty(self.core.runtime, key, Descriptor.data(val, .{ .writable = options.writable, .enumerable = options.enumerable, .configurable = options.configurable }));
     }
 
     pub fn arrayBuffer(self: *JSContext, store: *JSValue.Bytes.Store) !JSValue {
@@ -546,7 +546,7 @@ pub const JSContext = struct {
         const global = options.realm_global orelse try self.globalObject();
         var desc = try exec.object_ops.proxyAwareOwnPropertyDescriptor(self.core, options.output, global, object, property_name, null, null) orelse {
             if (object.isGlobal() and exec.value_ops.atomNameEql(self.core.runtime, property_name, "globalThis")) {
-                return Descriptor.data(object.value(), true, false, true);
+                return Descriptor.data(object.value(), .method);
             }
             return null;
         };
@@ -651,7 +651,7 @@ pub const JSContext = struct {
         var name_roots = core.runtime.rootAtoms(.{&property_name});
         name_roots.activate(rt);
         defer name_roots.deactivate(rt);
-        try global_object.defineOwnProperty(rt, property_name, Descriptor.data(function_value, true, false, true));
+        try global_object.defineOwnProperty(rt, property_name, Descriptor.data(function_value, .method));
         return function_value;
     }
 
@@ -679,8 +679,8 @@ pub const JSContext = struct {
             const object_proto = try Object.expect(object_proto_value);
             const prototype = try Object.createWithOwnPropertyCapacity(rt, class.ids.object, object_proto, 1);
             const prototype_value = prototype.value();
-            try prototype.defineOwnPropertyAssumingNew(rt, atom.ids.constructor, Descriptor.data(function_value, true, false, true));
-            try function_object.defineOwnPropertyAssumingNew(rt, atom.ids.prototype, Descriptor.data(prototype_value, true, false, false));
+            try prototype.defineOwnPropertyAssumingNew(rt, atom.ids.constructor, Descriptor.data(function_value, .method));
+            try function_object.defineOwnPropertyAssumingNew(rt, atom.ids.prototype, Descriptor.data(prototype_value, .{ .writable = true }));
         }
         function_object.installNativeEntry(entry);
         return function_value;

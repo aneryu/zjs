@@ -27,7 +27,7 @@ pub const Scheduler = struct {
     policy: Policy = .{},
     major_phase: MajorPhase = .idle,
     major_reason: ?RequestReason = null,
-    major_request: Request = .{},
+    major_request: ?Request = null,
 
     /// Set only around `JSRuntime.deinit`'s teardown collections. The host has
     /// by contract released every handle and no mutator frame is live, so those
@@ -57,15 +57,10 @@ pub const Scheduler = struct {
 
     /// Latch a major request, or strengthen the one already latched.
     pub fn request(self: *Scheduler, reason: RequestReason, urgency: RequestUrgency) void {
-        const slot = &self.major_request;
-        if (!slot.pending) {
-            slot.* = .{
-                .pending = true,
-                .reason = reason,
-                .urgency = urgency,
-            };
+        const slot = &(self.major_request orelse {
+            self.major_request = .{ .reason = reason, .urgency = urgency };
             return;
-        }
+        });
         if (urgency == .urgent and slot.urgency != .urgent) {
             slot.urgency = .urgent;
             slot.reason = reason;
@@ -78,24 +73,20 @@ pub const Scheduler = struct {
         // the stale threshold request.
         if (slot.reason == .allocation_threshold and reason != .allocation_threshold) {
             slot.reason = reason;
-            return;
         }
-        if (slot.reason == null) slot.reason = reason;
     }
 
     pub fn hasPendingMajorRequest(self: Scheduler) bool {
-        return self.major_request.pending;
+        return self.major_request != null;
     }
 
     pub fn pendingMajorRequest(self: Scheduler) ?Request {
-        return if (self.major_request.pending) self.major_request else null;
+        return self.major_request;
     }
 
     pub fn clearMajorRequest(self: *Scheduler) ?Request {
-        if (!self.major_request.pending) return null;
-        const pending = self.major_request;
-        self.major_request = .{};
-        return pending;
+        defer self.major_request = null;
+        return self.major_request;
     }
 
     /// Is the pending major request the collector pacing itself off the
@@ -115,7 +106,7 @@ pub const Scheduler = struct {
     pub fn clearStaleAllocationThresholdRequest(self: *Scheduler) bool {
         const pending = self.pendingMajorRequest() orelse return false;
         if (pending.reason != .allocation_threshold or pending.urgency != .soon) return false;
-        self.major_request = .{};
+        self.major_request = null;
         return true;
     }
 

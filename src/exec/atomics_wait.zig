@@ -1,6 +1,6 @@
 //! Atomics engine primitives that live in `exec` because the Atomics wait
 //! mechanism is part of the VM core, not a client builtin (QuickJS keeps
-//! `js_atomics_wait` in the engine; see quickjs.c:61234 and the roadmap's
+//! `js_atomics_wait` in the engine; see quickjs.c and the roadmap's
 //! "keep the Atomics wait machinery in exec" decision). The typed record handler
 //! (`atomics_ops.atomicsCallForNativeRecord`) switches on this
 //! `StaticMethod` selector, and the wait/notify state machine lives beside it

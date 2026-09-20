@@ -85,17 +85,32 @@ const ParseScratch = extern struct {
     mem: [27]u64,
 };
 
-pub const JS_DTOA_FORMAT_FREE: i32 = 0 << 0;
-pub const JS_DTOA_FORMAT_FIXED: i32 = 1 << 0;
-pub const JS_DTOA_FORMAT_FRAC: i32 = 2 << 0;
-pub const JS_DTOA_FORMAT_MASK: i32 = 3 << 0;
+/// Digit-count policy of `floatToText` (dtoa.h format flags).
+pub const Format = enum {
+    /// Shortest round-tripping digits (`Number#toString`).
+    free,
+    /// Exactly `n_digits` significant digits (`toPrecision`, `toExponential`).
+    fixed,
+    /// `n_digits` digits after the point (`toFixed`).
+    frac,
+};
 
-pub const JS_DTOA_EXP_AUTO: i32 = 0 << 2;
-pub const JS_DTOA_EXP_ENABLED: i32 = 1 << 2;
-pub const JS_DTOA_EXP_DISABLED: i32 = 2 << 2;
-pub const JS_DTOA_EXP_MASK: i32 = 3 << 2;
+/// Exponent-notation policy (dtoa.h exponent flags).
+pub const ExpMode = enum {
+    /// Exponent when the decimal exponent leaves the JS `toString` window.
+    auto,
+    /// Always exponent notation.
+    enabled,
+    /// Never exponent notation (radix `toString`).
+    disabled,
+};
 
-pub const JS_DTOA_MINUS_ZERO: i32 = 1 << 4;
+pub const FormatOptions = struct {
+    format: Format = .free,
+    exp: ExpMode = .auto,
+    /// Keep the sign on negative zero (`js_print_float64`).
+    minus_zero: bool = false,
+};
 
 /// Grammar switches for `parseNumberPrefix` (QuickJS `ATOD_*` flags).
 pub const ParseFlags = packed struct {
@@ -134,7 +149,7 @@ pub fn formatNumber(buf: []u8, value: f64) ![]const u8 {
     if (std.math.isNegativeInf(value)) return "-Infinity";
 
     var tmp_mem: FormatScratch = undefined;
-    const len = floatToText(buf, value, 10, 0, JS_DTOA_FORMAT_FREE | JS_DTOA_EXP_AUTO, &tmp_mem);
+    const len = floatToText(buf, value, 10, 0, .{}, &tmp_mem);
     return buf[0..len];
 }
 
@@ -152,30 +167,30 @@ pub fn formatInt64(buf: []u8, value: i64) []const u8 {
 /// arguments, so a caller can size its buffer instead of guessing. Radix 2
 /// with `EXP_DISABLED` runs past a thousand digits on a denormal, which is why
 /// guessing does not work.
-pub fn radixMaxLen(value: f64, radix: i32, n_digits: i32, flags: i32) !usize {
-    const len_max = floatToTextMaxLen(value, radix, n_digits, flags);
+pub fn radixMaxLen(value: f64, radix: i32, n_digits: i32, options: FormatOptions) !usize {
+    const len_max = floatToTextMaxLen(value, radix, n_digits, options);
     if (len_max < 0) return error.InvalidRadix;
     return @as(usize, @intCast(len_max)) + 1;
 }
 
 /// `Number.prototype.toString(radix)` for any radix in 2..36. Digit generation
 /// is the same `floatToText` path radix 10 uses.
-pub fn formatRadix(buf: []u8, value: f64, radix: i32, n_digits: i32, flags: i32) ![]const u8 {
-    if (buf.len < try radixMaxLen(value, radix, n_digits, flags)) return error.NoSpaceLeft;
+pub fn formatRadix(buf: []u8, value: f64, radix: i32, n_digits: i32, options: FormatOptions) ![]const u8 {
+    if (buf.len < try radixMaxLen(value, radix, n_digits, options)) return error.NoSpaceLeft;
     var tmp_mem: FormatScratch = undefined;
-    const len = floatToText(buf, value, radix, n_digits, flags, &tmp_mem);
+    const len = floatToText(buf, value, radix, n_digits, options, &tmp_mem);
     if (len >= buf.len) return error.NoSpaceLeft;
     return buf[0..len];
 }
 
 /// Capacity-checked decimal dtoa for `toFixed` / `toExponential` / `toPrecision`.
-pub fn formatDtoaChecked(buf: []u8, value: f64, n_digits: i32, flags: i32) ![]const u8 {
-    const len_max = floatToTextMaxLen(value, 10, n_digits, flags);
+pub fn formatDtoaChecked(buf: []u8, value: f64, n_digits: i32, options: FormatOptions) ![]const u8 {
+    const len_max = floatToTextMaxLen(value, 10, n_digits, options);
     if (len_max < 0) return error.NoSpaceLeft;
     const needed: usize = @as(usize, @intCast(len_max)) + 1;
     if (needed > buf.len) return error.NoSpaceLeft;
     var tmp_mem: FormatScratch = undefined;
-    const len = floatToText(buf, value, 10, n_digits, flags, &tmp_mem);
+    const len = floatToText(buf, value, 10, n_digits, options, &tmp_mem);
     if (len >= buf.len) return error.NoSpaceLeft;
     return buf[0..len];
 }
@@ -187,10 +202,7 @@ pub fn formatDtoaChecked(buf: []u8, value: f64, n_digits: i32, flags: i32) ![]co
 /// whitespace first and decides whether trailing bytes are an error.
 pub fn parseNumberPrefix(text: []const u8, radix: u8, flags: ParseFlags) Parsed {
     var scratch: ParseScratch = undefined;
-    var end: ?[*]const u8 = null;
-    const value = textToFloat(text, &end, radix, flags, &scratch);
-    if (std.math.isNan(value)) return .{ .value = std.math.nan(f64), .len = 0 };
-    return .{ .value = value, .len = @intFromPtr(end.?) - @intFromPtr(text.ptr) };
+    return textToFloat(text, radix, flags, &scratch) orelse .{ .value = std.math.nan(f64), .len = 0 };
 }
 
 /// `parseNumberPrefix` that must consume all of `text`; null otherwise.
@@ -482,7 +494,9 @@ fn udiv1normInit(d: limb_t) limb_t {
     return @truncate(numerator / d);
 }
 
-fn udiv1norm(pr: *limb_t, a1: limb_t, a0: limb_t, d: limb_t, d_inv: limb_t) limb_t {
+const DivStep = struct { quotient: limb_t, remainder: limb_t };
+
+fn udiv1norm(a1: limb_t, a0: limb_t, d: limb_t, d_inv: limb_t) DivStep {
     const n1m: limb_t = @bitCast(@as(slimb_t, @bitCast(a0)) >> (LIMB_BITS - 1));
     const n_adj = a0 +% (n1m & d);
     var a: dlimb_t = @as(dlimb_t, d_inv) * @as(dlimb_t, a1 -% n1m) + n_adj;
@@ -491,9 +505,7 @@ fn udiv1norm(pr: *limb_t, a1: limb_t, a0: limb_t, d: limb_t, d_inv: limb_t) limb
     a = a -% @as(dlimb_t, q) * @as(dlimb_t, d) -% d;
     const ah: limb_t = @truncate(a >> LIMB_BITS);
     q +%= 1 +% ah;
-    const r = @as(limb_t, @truncate(a)) +% (ah & d);
-    pr.* = r;
-    return q;
+    return .{ .quotient = q, .remainder = @as(limb_t, @truncate(a)) +% (ah & d) };
 }
 
 fn mpDiv1(tabr: []limb_t, taba: []const limb_t, b: limb_t, r_in: limb_t) limb_t {
@@ -539,7 +551,9 @@ fn mpDiv1norm(tabr: []limb_t, taba: []const limb_t, b: limb_t, r_in: limb_t, b_i
     }
     var i: isize = @as(isize, @intCast(n)) - 1;
     while (i >= 0) : (i -= 1) {
-        tabr[@as(usize, @intCast(i))] = udiv1norm(&r, r, taba[@as(usize, @intCast(i))], b, b_inv);
+        const step = udiv1norm(r, taba[@as(usize, @intCast(i))], b, b_inv);
+        tabr[@as(usize, @intCast(i))] = step.quotient;
+        r = step.remainder;
     }
     if (shift != 0) {
         r >>= @intCast(shift);
@@ -755,23 +769,23 @@ fn powUi(radix: u32, n: u32) u64 {
     return r;
 }
 
-fn powUiInv(pr_inv: *u32, pshift: *i32, a: u32, b: u32) u32 {
+/// `a^b` normalised to the top bit, with the shift applied and the
+/// reciprocal `udiv1norm` needs.
+const NormalizedPower = struct { value: u32, inverse: u32, shift: i32 };
+
+fn powUiInv(a: u32, b: u32) NormalizedPower {
     if (a == 5 and b >= 1 and b <= 13) {
         var r: u32 = pow5_table[b - 1];
         const shift: i32 = clz32(r);
         r <<= @intCast(shift);
-        pr_inv.* = pow5_inv_table[b - 1];
-        pshift.* = shift;
-        return r;
+        return .{ .value = r, .inverse = pow5_inv_table[b - 1], .shift = shift };
     }
 
     const r: u64 = powUi(a, b);
     var r32: u32 = @truncate(r);
     const shift = clz32(r32);
     r32 <<= @intCast(shift);
-    pr_inv.* = udiv1normInit(r32);
-    pshift.* = shift;
-    return r32;
+    return .{ .value = r32, .inverse = udiv1normInit(r32), .shift = shift };
 }
 
 // ============================================================
@@ -970,19 +984,17 @@ fn mulPow(a: *MpbMax, radix1: i32, radix_shift: i32, f: i32, is_int: bool, e: i3
             e_offset += extra_bits;
             mpbShrRound(a, -(l * @as(i32, LIMB_BITS) + extra_bits), JS_RNDZ);
 
-            var b: u32 = 0;
-            var b_inv: u32 = 0;
-            var shift: i32 = 0;
+            var power: NormalizedPower = .{ .value = 0, .inverse = 0, .shift = 0 };
             var n0: i32 = 0;
             var rem: limb_t = 0;
             while (f2 != 0) {
                 const n: i32 = minInt(f2, d);
                 if (n != n0) {
-                    b = powUiInv(&b_inv, &shift, @intCast(radix1), @intCast(n));
+                    power = powUiInv(@intCast(radix1), @intCast(n));
                     n0 = n;
                 }
                 const rlen: usize = @intCast(a.len);
-                const r = mpDiv1norm(a.tab[0..rlen], a.tab[0..rlen], b, 0, b_inv, shift);
+                const r = mpDiv1norm(a.tab[0..rlen], a.tab[0..rlen], power.value, 0, power.inverse, power.shift);
                 rem |= r;
                 mpbRenorm(a);
                 f2 -= n;
@@ -1000,11 +1012,11 @@ fn mulPowRound(tmp1: *MpbMax, m: u64, e: i32, radix1: i32, radix_shift: i32, f: 
     mpbShrRound(tmp1, -e + e_offset, rnd_mode);
 }
 
-fn roundToD(pe: *i32, a: *MpbMax, e_offset: i32, rnd_mode: i32) u64 {
-    if (a.tab[0] == 0 and a.len == 1) {
-        pe.* = 0;
-        return 0;
-    }
+/// A binary64 mantissa/exponent pair before `buildFloat64` packs it.
+const Rounded = struct { mantissa: u64, exponent: i32 };
+
+fn roundToD(a: *MpbMax, e_offset: i32, rnd_mode: i32) Rounded {
+    if (a.tab[0] == 0 and a.len == 1) return .{ .mantissa = 0, .exponent = 0 };
 
     var e_val = mpbFloorLog2(a) + 1 - e_offset;
     const prec1: i32 = 53;
@@ -1026,13 +1038,12 @@ fn roundToD(pe: *i32, a: *MpbMax, e_offset: i32, rnd_mode: i32) u64 {
         e_val += 1;
     }
 
-    pe.* = e_val;
-    return m;
+    return .{ .mantissa = m, .exponent = e_val };
 }
 
-fn mulPowRoundToD(pe: *i32, a: *MpbMax, radix1: i32, radix_shift: i32, f: i32, rnd_mode: i32) u64 {
+fn mulPowRoundToD(a: *MpbMax, radix1: i32, radix_shift: i32, f: i32, rnd_mode: i32) Rounded {
     const e_offset = mulPow(a, radix1, radix_shift, f, false, 55);
-    return roundToD(pe, a, e_offset, rnd_mode);
+    return roundToD(a, e_offset, rnd_mode);
 }
 
 // ============================================================
@@ -1097,21 +1108,12 @@ fn outputHelper(
     P: i32,
     E: i32,
     n_digits: i32,
-    flags: i32,
+    options: FormatOptions,
 ) usize {
     var q = q_start;
-    const fmt = flags & JS_DTOA_FORMAT_MASK;
+    const E_max: i32 = if (options.format == .fixed) n_digits else dtoa_max_digits_table[@intCast(radix - 2)] + 4;
 
-    var E_max: i32 = undefined;
-    if (fmt == JS_DTOA_FORMAT_FIXED) {
-        E_max = n_digits;
-    } else {
-        E_max = dtoa_max_digits_table[@intCast(radix - 2)] + 4;
-    }
-
-    if ((flags & JS_DTOA_EXP_MASK) == JS_DTOA_EXP_ENABLED or
-        ((flags & JS_DTOA_EXP_MASK) == JS_DTOA_EXP_AUTO and (E <= -6 or E > E_max)))
-    {
+    if (options.exp == .enabled or (options.exp == .auto and (E <= -6 or E > E_max))) {
         q = q[outputDigits(q, tmp1, radix, P, 1)..];
         var E2 = E - 1;
         if (radix == 10) {
@@ -1160,17 +1162,16 @@ fn outputHelper(
 
 const DtoaScale = struct { P: i32, E: i32 };
 
-fn floatToTextMaxLen(d: f64, radix: i32, n_digits: i32, flags: i32) i32 {
-    const fmt = flags & JS_DTOA_FORMAT_MASK;
+fn floatToTextMaxLen(d: f64, radix: i32, n_digits: i32, options: FormatOptions) i32 {
     var n: i32 = 0;
 
-    if (fmt != JS_DTOA_FORMAT_FRAC) {
-        if (fmt == JS_DTOA_FORMAT_FREE) {
+    if (options.format != .frac) {
+        if (options.format == .free) {
             n = dtoa_max_digits_table[@intCast(radix - 2)];
         } else {
             n = n_digits;
         }
-        if ((flags & JS_DTOA_EXP_MASK) == JS_DTOA_EXP_DISABLED) {
+        if (options.exp == .disabled) {
             const a = float64AsUint64(d);
             var e: i32 = @intCast((a >> 52) & 0x7ff);
             if (e == 0x7ff) {
@@ -1418,9 +1419,8 @@ fn dtoaShortest(tmp1: *MpbMax, m: u64, e: i32, radix: i32, radix1: i32, radix_sh
             continue;
         }
         mpbSetU64(tmp1, mant2);
-        var e1: i32 = 0;
-        const m1 = mulPowRoundToD(&e1, tmp1, radix1, radix_shift, E - P, JS_RNDN);
-        if (m1 == m and e1 == e) {
+        const rounded = mulPowRoundToD(tmp1, radix1, radix_shift, E - P, JS_RNDN);
+        if (rounded.mantissa == m and rounded.exponent == e) {
             P_found = P;
             E_found = E;
             mant_found = mant2;
@@ -1463,7 +1463,7 @@ fn dtoaFixed(tmp1: *MpbMax, mant_max: *MpbMax, m: u64, e: i32, E_in: i32, radix1
     return E;
 }
 
-fn floatToText(buf: []u8, d: f64, radix: i32, n_digits: i32, flags: i32, tmp_mem: *FormatScratch) usize {
+fn floatToText(buf: []u8, d: f64, radix: i32, n_digits: i32, options: FormatOptions, tmp_mem: *FormatScratch) usize {
     var mptr: [*]u64 = &tmp_mem.mem;
     const tmp1 = dtoaMalloc(MpbMax, &mptr);
     const mant_max_small = dtoaMalloc(Mpb(MANT_LEN_MAX), &mptr);
@@ -1484,17 +1484,16 @@ fn floatToText(buf: []u8, d: f64, radix: i32, n_digits: i32, flags: i32, tmp_mem
             tmp1.len = 1;
             tmp1.tab[0] = 0;
             const E: i32 = 1;
-            const P: i32 = if ((flags & JS_DTOA_FORMAT_MASK) == JS_DTOA_FORMAT_FREE)
-                1
-            else if ((flags & JS_DTOA_FORMAT_MASK) == JS_DTOA_FORMAT_FRAC)
-                n_digits + 1
-            else
-                n_digits;
-            if (sgn != 0 and (flags & JS_DTOA_MINUS_ZERO) != 0) {
+            const P: i32 = switch (options.format) {
+                .free => 1,
+                .frac => n_digits + 1,
+                .fixed => n_digits,
+            };
+            if (sgn != 0 and options.minus_zero) {
                 q[0] = '-';
                 q = q[1..];
             }
-            return outputHelper(q, buf, tmp1, radix, radix1, radix_shift, P, E, n_digits, flags);
+            return outputHelper(q, buf, tmp1, radix, radix1, radix_shift, P, E, n_digits, options);
         }
         const l = clz64(m) - 11;
         e -= l - 1;
@@ -1510,10 +1509,10 @@ fn floatToText(buf: []u8, d: f64, radix: i32, n_digits: i32, flags: i32, tmp_mem
 
     e -= 1022;
 
-    if ((flags & JS_DTOA_FORMAT_MASK) == JS_DTOA_FORMAT_FREE and
+    if (options.format == .free and
         e >= 1 and e <= 53 and
         (m & ((@as(u64, 1) << @intCast(53 - e)) - 1)) == 0 and
-        (flags & JS_DTOA_EXP_MASK) != JS_DTOA_EXP_ENABLED)
+        options.exp != .enabled)
     {
         const m_shifted = m >> @intCast(53 - e);
         const len = u64toaRadix(q, m_shifted, @intCast(radix));
@@ -1523,20 +1522,19 @@ fn floatToText(buf: []u8, d: f64, radix: i32, n_digits: i32, flags: i32, tmp_mem
 
     var E = 1 + mulLog2Radix(e - 1, radix);
     var P: i32 = 0;
-    const fmt = flags & JS_DTOA_FORMAT_MASK;
 
-    if (fmt == JS_DTOA_FORMAT_FREE) {
+    if (options.format == .free) {
         const scale = if (radix == 10) dtoaShortestDecimal(tmp1, a) else dtoaShortest(tmp1, m, e, radix, radix1, radix_shift);
         P = scale.P;
         E = scale.E;
-    } else if (fmt == JS_DTOA_FORMAT_FRAC) {
+    } else if (options.format == .frac) {
         return writtenLen(buf, dtoaFrac(q, tmp1, m, e, E, radix, radix1, radix_shift, n_digits));
     } else {
         P = n_digits;
         E = dtoaFixed(tmp1, mant_max, m, e, E, radix1, radix_shift, P);
     }
 
-    return outputHelper(q, buf, tmp1, radix, radix1, radix_shift, P, E, n_digits, flags);
+    return outputHelper(q, buf, tmp1, radix, radix1, radix_shift, P, E, n_digits, options);
 }
 
 // ============================================================
@@ -1727,7 +1725,11 @@ fn convertEiselLemire(q: i32, w_in: u64) ?u64 {
 /// incomplete trailing group in `cur_limb` / `limb_digit_count` so the caller
 /// can keep appending or flush it. Keeps the bignum state bit-identical to the
 /// upstream loop.
-fn replayMantissa(tmp0: *MpbMax, mant: u64, digit_count: i32, cur_limb: *limb_t, limb_digit_count: *i32) void {
+/// Digits of a decimal mantissa that did not fill a whole limb yet.
+const PendingLimb = struct { limb: limb_t, digit_count: i32 };
+
+/// Push the full limbs of `mant` into `tmp0` and return the partial tail.
+fn replayMantissa(tmp0: *MpbMax, mant: u64, digit_count: i32) PendingLimb {
     const digits_per_limb: i32 = 9;
     const radix_base: limb_t = 1_000_000_000;
     var full_limbs = @divTrunc(digit_count, digits_per_limb);
@@ -1743,8 +1745,7 @@ fn replayMantissa(tmp0: *MpbMax, mant: u64, digit_count: i32, cur_limb: *limb_t,
         head %= divisor;
         divisor /= radix_base;
     }
-    cur_limb.* = @truncate(mant % tail_pow);
-    limb_digit_count.* = tail_digits;
+    return .{ .limb = @truncate(mant % tail_pow), .digit_count = tail_digits };
 }
 
 /// Radix-10 conversion for inputs whose significant digits fit `mant`
@@ -1779,18 +1780,16 @@ fn convertBignumToBits(
         const expn1 = expn_adj + digit_count * radix_bits;
         if (expn1 >= 1024 + radix_bits) return @as(u64, 0x7ff) << 52;
         if (expn1 <= -1075) return 0;
-        var e_val: i32 = 0;
-        const m_val = roundToD(&e_val, tmp0, -expn_adj, JS_RNDN);
-        return buildFloat64(m_val, e_val);
+        const rounded = roundToD(tmp0, -expn_adj, JS_RNDN);
+        return buildFloat64(rounded.mantissa, rounded.exponent);
     }
 
     const expn_adj = expn - expn_offset;
     const expn1 = expn_adj + digit_count;
     if (expn1 >= max_exponent[@intCast(radix - 2)] + 1) return @as(u64, 0x7ff) << 52;
     if (expn1 <= min_exponent[@intCast(radix - 2)]) return 0;
-    var e_val: i32 = 0;
-    const m_val = mulPowRoundToD(&e_val, tmp0, radix1, radix_shift, expn_adj, JS_RNDN);
-    return buildFloat64(m_val, e_val);
+    const rounded = mulPowRoundToD(tmp0, radix1, radix_shift, expn_adj, JS_RNDN);
+    return buildFloat64(rounded.mantissa, rounded.exponent);
 }
 
 fn buildFloat64(m: u64, e: i32) u64 {
@@ -1803,17 +1802,16 @@ fn buildFloat64(m: u64, e: i32) u64 {
     return (@as(u64, @intCast(e + 1022)) << 52) | (m & ((@as(u64, 1) << 52) - 1));
 }
 
-fn finishParse(a: u64, is_neg: i32, p: []const u8, pnext: *?[*]const u8) f64 {
+fn finishParse(a: u64, is_neg: i32, str: []const u8, rest: []const u8) Parsed {
     var a2 = a;
     a2 |= @as(u64, @intCast(is_neg)) << 63;
-    pnext.* = p.ptr;
-    return uint64AsFloat64(a2);
+    return .{ .value = uint64AsFloat64(a2), .len = str.len - rest.len };
 }
 
 /// Text -> binary64 kernel (dtoa.c `js_atod` plus the `js_atof` scan rules).
-/// `pnext` receives the first unconsumed byte, or the start of the digits
-/// when nothing parsed (value NaN). Use `parseNumberPrefix`.
-fn textToFloat(str: []const u8, pnext: *?[*]const u8, radix_arg: u8, flags: ParseFlags, tmp_mem: *ParseScratch) f64 {
+/// Returns the value and the number of bytes consumed, or null when no
+/// number starts at `str`. Use `parseNumberPrefix`.
+fn textToFloat(str: []const u8, radix_arg: u8, flags: ParseFlags, tmp_mem: *ParseScratch) ?Parsed {
     var mptr: [*]u64 = &tmp_mem.mem;
     const tmp0 = dtoaMalloc(MpbMax, &mptr);
 
@@ -1865,19 +1863,13 @@ fn textToFloat(str: []const u8, pnext: *?[*]const u8, radix_arg: u8, flags: Pars
             no_prefix = true;
         }
         if (!no_prefix) {
-            if (p.len == 0 or toDigit(p[0]) >= radix) {
-                pnext.* = str.ptr;
-                return std.math.nan(f64);
-            }
+            if (p.len == 0 or toDigit(p[0]) >= radix) return null;
         }
     } else {
         if (!flags.int_only) {
             if (p.len >= 8 and std.mem.eql(u8, p[0..8], "Infinity")) {
                 p = p[8..];
-                var a_ret: u64 = @as(u64, 0x7ff) << 52;
-                a_ret |= @as(u64, @intCast(is_neg)) << 63;
-                pnext.* = p.ptr;
-                return uint64AsFloat64(a_ret);
+                return finishParse(@as(u64, 0x7ff) << 52, is_neg, str, p);
             }
         }
     }
@@ -1963,7 +1955,9 @@ fn textToFloat(str: []const u8, pnext: *?[*]const u8, radix_arg: u8, flags: Pars
             // Radix 10 only reaches here once `mant` is full: hand its digits
             // to the bignum and continue with the upstream limb scheme.
             if (radix == 10 and digit_count == FAST_MANTISSA_DIGITS) {
-                replayMantissa(tmp0, mant, digit_count, &cur_limb, &limb_digit_count);
+                const pending = replayMantissa(tmp0, mant, digit_count);
+                cur_limb = pending.limb;
+                limb_digit_count = pending.digit_count;
             }
             cur_limb = cur_limb * @as(limb_t, @intCast(radix)) + @as(limb_t, @intCast(c));
             limb_digit_count += 1;
@@ -1995,23 +1989,18 @@ fn textToFloat(str: []const u8, pnext: *?[*]const u8, radix_arg: u8, flags: Pars
     const exp = parseExponent(p, p_start, radix, radix_bits, flags, sep);
     p = exp.p;
 
-    if (p.ptr == p_start.ptr) {
-        pnext.* = str.ptr;
-        return std.math.nan(f64);
-    }
+    if (p.ptr == p_start.ptr) return null;
 
     if (radix == 10 and !is_zero and digit_count <= FAST_MANTISSA_DIGITS) {
         if (!exp.overflow) {
             if (convertDecimalFast(mant, exp.expn - expn_offset)) |bits| {
-                return finishParse(bits, is_neg, p, pnext);
+                return finishParse(bits, is_neg, str, p);
             }
         }
         // Bignum must decide: give it the digits the limb loop would have built.
-        var pending_limb: limb_t = 0;
-        var pending_digits: i32 = 0;
-        replayMantissa(tmp0, mant, digit_count, &pending_limb, &pending_digits);
-        if (pending_digits != 0) {
-            mpbMul1Base(tmp0, @truncate(powUi(10, @intCast(pending_digits))), pending_limb);
+        const pending = replayMantissa(tmp0, mant, digit_count);
+        if (pending.digit_count != 0) {
+            mpbMul1Base(tmp0, @truncate(powUi(10, @intCast(pending.digit_count))), pending.limb);
         }
     }
 
@@ -2028,7 +2017,7 @@ fn textToFloat(str: []const u8, pnext: *?[*]const u8, radix_arg: u8, flags: Pars
         exp.is_bin_exp,
         is_zero,
     );
-    return finishParse(a_ret, is_neg, p, pnext);
+    return finishParse(a_ret, is_neg, str, p);
 }
 
 // ============================================================
@@ -2064,7 +2053,7 @@ test "formatRadix round-trips odd and power-of-two radices" {
     var buf: [2200]u8 = undefined;
     for (values) |v| {
         for (radices) |radix| {
-            const text = try formatRadix(&buf, v, radix, 0, JS_DTOA_FORMAT_FREE | JS_DTOA_EXP_AUTO);
+            const text = try formatRadix(&buf, v, radix, 0, .{});
             const back = parseNumberExact(text, radix, .{ .accept_radix_fraction = true }).?;
             try std.testing.expectEqual(v, back);
         }
@@ -2073,9 +2062,9 @@ test "formatRadix round-trips odd and power-of-two radices" {
 
 test "formatDtoaChecked FRAC FIXED and EXP" {
     var buf: [128]u8 = undefined;
-    try std.testing.expectEqualStrings("1.50", try formatDtoaChecked(&buf, 1.5, 2, JS_DTOA_FORMAT_FRAC));
-    try std.testing.expectEqualStrings("1.2e+2", try formatDtoaChecked(&buf, 123.0, 2, JS_DTOA_FORMAT_FIXED | JS_DTOA_EXP_ENABLED));
-    try std.testing.expectEqualStrings("123", try formatDtoaChecked(&buf, 123.0, 3, JS_DTOA_FORMAT_FIXED | JS_DTOA_EXP_DISABLED));
+    try std.testing.expectEqualStrings("1.50", try formatDtoaChecked(&buf, 1.5, 2, .{ .format = .frac }));
+    try std.testing.expectEqualStrings("1.2e+2", try formatDtoaChecked(&buf, 123.0, 2, .{ .format = .fixed, .exp = .enabled }));
+    try std.testing.expectEqualStrings("123", try formatDtoaChecked(&buf, 123.0, 3, .{ .format = .fixed, .exp = .disabled }));
 }
 
 test "decimal fast path agrees with the correctly rounded reference" {

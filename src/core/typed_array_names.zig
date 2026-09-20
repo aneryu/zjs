@@ -10,9 +10,57 @@
 
 const std = @import("std");
 
+/// The typed-array element kinds, plus the DataView-only marker that reuses
+/// the same payload slot. `none` is the value of a slot that names no view.
+pub const Kind = enum(u8) {
+    none = 0,
+    int8 = 1,
+    uint8 = 2,
+    uint8_clamped = 3,
+    int16 = 4,
+    uint16 = 5,
+    int32 = 6,
+    uint32 = 7,
+    float16 = 8,
+    float32 = 9,
+    float64 = 10,
+    bigint64 = 11,
+    biguint64 = 12,
+    /// A DataView (element_size 0) whose byte length tracks its resizable
+    /// buffer instead of being fixed at construction.
+    data_view_length_tracking = 13,
+
+    /// A concrete typed-array element kind (not `none` / the DataView marker).
+    pub fn isElement(self: Kind) bool {
+        return switch (self) {
+            .none, .data_view_length_tracking => false,
+            else => true,
+        };
+    }
+
+    /// The non-BigInt element kinds: decoded and encoded without allocating.
+    pub fn isNumeric(self: Kind) bool {
+        return switch (self) {
+            .int8, .uint8, .uint8_clamped, .int16, .uint16, .int32, .uint32, .float16, .float32, .float64 => true,
+            else => false,
+        };
+    }
+
+    pub fn isInteger(self: Kind) bool {
+        return switch (self) {
+            .int8, .uint8, .uint8_clamped, .int16, .uint16, .int32, .uint32 => true,
+            else => false,
+        };
+    }
+
+    pub fn isBigInt(self: Kind) bool {
+        return self == .bigint64 or self == .biguint64;
+    }
+};
+
 pub const Element = struct {
     size: u32,
-    kind: u8,
+    kind: Kind,
 };
 
 const Entry = struct {
@@ -21,18 +69,18 @@ const Entry = struct {
 };
 
 pub const concrete = [_]Entry{
-    .{ .name = "Int8Array", .element = .{ .size = 1, .kind = 1 } },
-    .{ .name = "Uint8Array", .element = .{ .size = 1, .kind = 2 } },
-    .{ .name = "Uint8ClampedArray", .element = .{ .size = 1, .kind = 3 } },
-    .{ .name = "Int16Array", .element = .{ .size = 2, .kind = 4 } },
-    .{ .name = "Uint16Array", .element = .{ .size = 2, .kind = 5 } },
-    .{ .name = "Int32Array", .element = .{ .size = 4, .kind = 6 } },
-    .{ .name = "Uint32Array", .element = .{ .size = 4, .kind = 7 } },
-    .{ .name = "Float16Array", .element = .{ .size = 2, .kind = 8 } },
-    .{ .name = "Float32Array", .element = .{ .size = 4, .kind = 9 } },
-    .{ .name = "Float64Array", .element = .{ .size = 8, .kind = 10 } },
-    .{ .name = "BigInt64Array", .element = .{ .size = 8, .kind = 11 } },
-    .{ .name = "BigUint64Array", .element = .{ .size = 8, .kind = 12 } },
+    .{ .name = "Int8Array", .element = .{ .size = 1, .kind = .int8 } },
+    .{ .name = "Uint8Array", .element = .{ .size = 1, .kind = .uint8 } },
+    .{ .name = "Uint8ClampedArray", .element = .{ .size = 1, .kind = .uint8_clamped } },
+    .{ .name = "Int16Array", .element = .{ .size = 2, .kind = .int16 } },
+    .{ .name = "Uint16Array", .element = .{ .size = 2, .kind = .uint16 } },
+    .{ .name = "Int32Array", .element = .{ .size = 4, .kind = .int32 } },
+    .{ .name = "Uint32Array", .element = .{ .size = 4, .kind = .uint32 } },
+    .{ .name = "Float16Array", .element = .{ .size = 2, .kind = .float16 } },
+    .{ .name = "Float32Array", .element = .{ .size = 4, .kind = .float32 } },
+    .{ .name = "Float64Array", .element = .{ .size = 8, .kind = .float64 } },
+    .{ .name = "BigInt64Array", .element = .{ .size = 8, .kind = .bigint64 } },
+    .{ .name = "BigUint64Array", .element = .{ .size = 8, .kind = .biguint64 } },
 };
 
 pub fn element(name: []const u8) ?Element {
@@ -42,7 +90,7 @@ pub fn element(name: []const u8) ?Element {
     return null;
 }
 
-pub fn nameFromKind(kind: u8) ?[]const u8 {
+pub fn nameFromKind(kind: Kind) ?[]const u8 {
     for (concrete) |entry| {
         if (entry.element.kind == kind) return entry.name;
     }
@@ -58,10 +106,10 @@ test "typed array concrete names map to stable element sizes and kinds" {
 
     try testing.expectEqual(@as(usize, 12), concrete.len);
     try testing.expectEqual(@as(u32, 1), element("Int8Array").?.size);
-    try testing.expectEqual(@as(u8, 2), element("Uint8Array").?.kind);
+    try testing.expectEqual(Kind.uint8, element("Uint8Array").?.kind);
     try testing.expectEqual(@as(u32, 2), element("Float16Array").?.size);
-    try testing.expectEqual(@as(u8, 12), element("BigUint64Array").?.kind);
-    try testing.expectEqualStrings("BigInt64Array", nameFromKind(11).?);
+    try testing.expectEqual(Kind.biguint64, element("BigUint64Array").?.kind);
+    try testing.expectEqualStrings("BigInt64Array", nameFromKind(.bigint64).?);
     try testing.expect(isConcrete("Float64Array"));
     try testing.expect(!isConcrete("TypedArray"));
     try testing.expect(element("ArrayBuffer") == null);

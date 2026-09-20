@@ -4,7 +4,7 @@
 //! that arm's JSValue/object/VarRef edge, while auto-init descriptors are stable
 //! Runtime-owned interned records. Packed flags and extern auto-init layouts are
 //! compile-time pinned because object lookup and GC dispatch read them directly.
-//! QuickJS map: `JSShapeProperty`/`JSProperty` around quickjs.c:944-952. This
+//! QuickJS map: `JSShapeProperty`/`JSProperty` around quickjs.c. This
 //! core representation may import core/libs only, never parser/exec/runtime/binding.
 
 const class = @import("class.zig");
@@ -16,7 +16,7 @@ const native_entry = @import("native_entry.zig");
 const module_auto_init = @import("module_auto_init.zig");
 const std = @import("std");
 
-/// Property kind (qjs `JS_PROP_TMASK`, quickjs.h:303-307). The kind is NOT
+/// Property kind (qjs `JS_PROP_TMASK`, quickjs.h). The kind is NOT
 /// stored in the per-property value cell (qjs `JSProperty`); it lives in the
 /// owning shape's per-property flags and is read via `Object.propFlagsAt`.
 /// Ordering matches qjs: NORMAL(0)/GETSET(1)/VARREF(2)/AUTOINIT(3).
@@ -27,6 +27,23 @@ pub const Kind = enum(u2) {
     auto_init, // JS_PROP_AUTOINIT (3 << 4): lazy builtin placeholder
 };
 
+/// The three ECMAScript property attributes (ECMA-262 §6.1.7.1). Accessor
+/// properties have no `[[Writable]]`; builders for them ignore that bit.
+pub const Attrs = packed struct(u3) {
+    writable: bool = false,
+    enumerable: bool = false,
+    configurable: bool = false,
+
+    /// All three set: what assignment and object literals create.
+    pub const all: Attrs = .{ .writable = true, .enumerable = true, .configurable = true };
+    /// Writable and configurable, not enumerable: built-in methods and
+    /// most intrinsic data properties.
+    pub const method: Attrs = .{ .writable = true, .configurable = true };
+    /// None set: frozen constants such as `Math.PI` and `length` of functions
+    /// before ES2015.
+    pub const none: Attrs = .{};
+};
+
 pub const Flags = packed struct(u6) {
     writable: bool = false, // bit 0  (JS_PROP_WRITABLE analog)
     enumerable: bool = false, // bit 1
@@ -34,30 +51,29 @@ pub const Flags = packed struct(u6) {
     kind: Kind = .data, // bits 3-4 (== JS_PROP_TMASK >> 4)
     deleted: bool = false, // bit 5  (qjs: atom == JS_ATOM_NULL free entry)
 
-    pub fn data(writable: bool, enumerable: bool, configurable: bool) Flags {
+    pub fn data(attrs: Attrs) Flags {
+        return withAttrs(attrs, .data);
+    }
+
+    pub fn accessorFlags(attrs: Attrs) Flags {
+        return withAttrs(attrs, .accessor);
+    }
+
+    pub fn varRef(attrs: Attrs) Flags {
+        return withAttrs(attrs, .var_ref);
+    }
+
+    fn withAttrs(attrs: Attrs, kind: Kind) Flags {
         return .{
-            .writable = writable,
-            .enumerable = enumerable,
-            .configurable = configurable,
-            .kind = .data,
+            .writable = attrs.writable and kind != .accessor,
+            .enumerable = attrs.enumerable,
+            .configurable = attrs.configurable,
+            .kind = kind,
         };
     }
 
-    pub fn accessorFlags(enumerable: bool, configurable: bool) Flags {
-        return .{
-            .enumerable = enumerable,
-            .configurable = configurable,
-            .kind = .accessor,
-        };
-    }
-
-    pub fn varRef(writable: bool, enumerable: bool, configurable: bool) Flags {
-        return .{
-            .writable = writable,
-            .enumerable = enumerable,
-            .configurable = configurable,
-            .kind = .var_ref,
-        };
+    pub fn attributes(self: Flags) Attrs {
+        return .{ .writable = self.writable, .enumerable = self.enumerable, .configurable = self.configurable };
     }
 
     /// Reproject these flags onto a new kind, clearing the deleted bit.
@@ -97,7 +113,7 @@ pub const Flags = packed struct(u6) {
     }
 };
 
-/// qjs `struct { JSObject *getter, *setter; }` (quickjs.c:949-952). Getters and
+/// qjs `struct { JSObject *getter, *setter; }`. Getters and
 /// setters are always callable objects or absent; absence is `null` (qjs NULL),
 /// surfacing as `undefined`. Two object-header pointers = 16B, faithful to qjs
 /// and half the size of the old `{ getter, setter: JSValue }` (32B).
@@ -320,7 +336,7 @@ pub const AutoInit = struct {
 pub const AutoInitMaterialization = module_auto_init.AutoInitMaterialization;
 pub const AutoInitModuleOwner = module_auto_init.AutoInitModuleOwner;
 
-/// qjs `JSProperty` (quickjs.c:947-963): a 16B untagged union. The active arm
+/// qjs `JSProperty`: a 16B untagged union. The active arm
 /// is NOT discriminated by an in-cell tag; the owning shape's `Flags.kind`
 /// (read via `Object.propFlagsAt`) selects the arm. Always pair every slot
 /// write with the matching `Flags.kind` write (use the `Object` typed API /
@@ -368,7 +384,7 @@ pub fn internAutoInit(rt: *JSRuntime, info: AutoInit) !*const AutoInit {
 
 pub fn autoInit(ref: anytype) *const AutoInit {
     return switch (@TypeOf(ref)) {
-        AutoInitSlot => ref.descriptor() orelse unreachable,
+        AutoInitSlot => ref.descriptor().?,
         else => @compileError("expected AutoInitSlot"),
     };
 }

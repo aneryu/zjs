@@ -7,7 +7,7 @@
 //! extraction seams without merging implementations. Keep the measured
 //! `ctx`/`output`/`global`/caller-function/caller-frame tuple explicit and keep
 //! collection hot arms separate from cold generic callbacks. QuickJS mappings
-//! include groupBy at quickjs.c:52343, forEach at 52318-52332, and collection
+//! include groupBy at quickjs.c, forEach at 52318-52332, and collection
 //! iterators at 52556-52605.
 
 const core = @import("../core/root.zig");
@@ -17,6 +17,7 @@ const primitive_ops = @import("primitive_ops.zig");
 const globals_mod = core.global_slots;
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
+const iterator_slots = @import("iterator_slots.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const call_runtime = @import("call_runtime.zig");
 const call_site_mod = @import("call_site.zig");
@@ -239,7 +240,7 @@ fn collectionGroupByRecord(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) HostError!core.JSValue {
-    // Mirrors js_object_groupBy (quickjs.c:52343, shared is_map=1 entry for
+    // Mirrors js_object_groupBy (quickjs.c, shared is_map=1 entry for
     // Map.groupBy): the receiver is never read — qjs constructs the result via
     // js_map_constructor with a JS_UNDEFINED this (the intrinsic Map
     // prototype), so a detached `const g = Map.groupBy; g(items, fn)` works.
@@ -514,7 +515,7 @@ fn mapSetNoResult(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, 
     if (object.class_id != core.class.ids.map) return error.TypeError;
     const canonical_key = canonicalizeKey(key);
     if (findStrongEntry(object, canonical_key)) |index| {
-        const entry = &object.collectionEntriesSlot().*[index];
+        const entry = &object.collectionEntriesSlot().items[index];
         const next_value = value;
         entry.value = next_value;
         // Overwriting an existing entry stores into the payload slice, which
@@ -538,12 +539,12 @@ fn mapGet(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue) !core.JS
     if (object.class_id == core.class.ids.weakmap) {
         const key_identity = weakKeyIdentityPeek(rt, key) orelse return core.JSValue.undefinedValue();
         const index = findWeakEntry(object, key_identity) orelse return core.JSValue.undefinedValue();
-        return object.weakCollectionEntriesSlot().*[index].value;
+        return object.weakCollectionEntriesSlot().items[index].value;
     }
 
     if (object.class_id != core.class.ids.map) return error.TypeError;
     const index = findStrongEntry(object, key) orelse return core.JSValue.undefinedValue();
-    return object.collectionEntriesSlot().*[index].value;
+    return object.collectionEntriesSlot().items[index].value;
 }
 
 // Map latin1-prefix-int fusion fast paths relocated to engine core
@@ -553,11 +554,7 @@ fn mapGet(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue) !core.JS
 pub const mapGetLatin1PrefixIntValue = core.collection.mapGetLatin1PrefixIntValue;
 pub const mapSetLatin1PrefixInt32Range = core.collection.mapSetLatin1PrefixInt32Range;
 
-const CollectionIteratorKind = enum(u8) {
-    key = 1,
-    value = 2,
-    key_value = 3,
-};
+const CollectionIteratorKind = iterator_slots.CollectionIteratorKind;
 
 const IteratorPrototypeRef = struct {
     object: *core.Object,
@@ -613,11 +610,11 @@ fn collectionIterator(
     errdefer core.Object.destroyFromHeader(rt, iterator.gcHeader());
     try iterator.setOptionalValueSlot(rt, iterator.iteratorTargetSlot(), target_value);
     // No entry-array cursor yet: qjs's fresh iterator has `cur_record == NULL`
-    // and holds no record reference (js_map_iterator_new quickjs.c:52556). The
+    // and holds no record reference (js_map_iterator_new quickjs.c). The
     // cursor is taken on the first advance and released on exhaustion or in the
     // iterator payload teardown.
     iterator.iteratorIndexSlot().* = 0;
-    iterator.iteratorKindSlot().* = @intFromEnum(kind);
+    iterator_slots.setCollectionIteratorKind(iterator, kind);
     return iterator.value();
 }
 
@@ -663,7 +660,7 @@ fn createIteratorPrototype(
         const iterator_method = try function_builtin.nativeFunctionForGlobal(rt, global, "[Symbol.iterator]", 0);
         const iterator_function = try expectObject(iterator_method);
         if (!try iterator_function.addIteratorIdentityFunction(rt)) return error.TypeError;
-        try fallback.defineOwnProperty(rt, core.atom.predefinedId("Symbol.iterator", .symbol).?, core.Descriptor.data(iterator_method, true, false, true));
+        try fallback.defineOwnProperty(rt, core.atom.predefinedId("Symbol.iterator", .symbol).?, core.Descriptor.data(iterator_method, .method));
 
         owned_base = fallback;
         break :blk fallback;
@@ -678,11 +675,11 @@ fn createIteratorPrototype(
     const next = try function_builtin.nativeFunctionForGlobal(rt, global, "next", 0);
     const next_object = try expectObject(next);
     next_object.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.collection, @intFromEnum(PrototypeMethod.iterator_next));
-    // Mirrors js_map_iterator_next (quickjs.c:52576): the next function is
+    // Mirrors js_map_iterator_next: the next function is
     // bound to one iterator class (JS_GetOpaque2 with JS_CLASS_MAP_ITERATOR +
     // magic), so a Map Iterator's next rejects Set iterators and vice versa.
     if (!try next_object.addCollectionMethodOwnerClass(rt, iterator_class)) return error.TypeError;
-    try specific.defineOwnProperty(rt, core.atom.predefinedId("next", .string).?, core.Descriptor.data(next, true, false, true));
+    try specific.defineOwnProperty(rt, core.atom.predefinedId("next", .string).?, core.Descriptor.data(next, .method));
     return specific;
 }
 
@@ -694,7 +691,7 @@ fn objectPrototypeFromGlobal(global: *core.Object) ?*core.Object {
 
 fn globalObjectFromGlobals(globals: []const globals_mod.Slot) ?*core.Object {
     const global_value = globals_mod.getByAtom(globals, core.atom.ids.globalThis);
-    return expectObject(global_value) catch null;
+    return core.value_semantics.objectFromValue(global_value);
 }
 
 // mirror of iterator_ops.defineToStringTag, keep in sync (kept local: this
@@ -702,7 +699,7 @@ fn globalObjectFromGlobals(globals: []const globals_mod.Slot) ?*core.Object {
 fn defineToStringTag(rt: *core.JSRuntime, object: *core.Object, tag_name: []const u8) !void {
     const tag_atom = core.atom.predefinedId("Symbol.toStringTag", .symbol) orelse return error.TypeError;
     const tag_value = try core.string.String.createUtf8(rt, tag_name);
-    try object.defineOwnProperty(rt, tag_atom, core.Descriptor.data(tag_value.value(), false, false, true));
+    try object.defineOwnProperty(rt, tag_atom, core.Descriptor.data(tag_value.value(), .{ .configurable = true }));
 }
 
 fn collectionIteratorNext(rt: *core.JSRuntime, global: ?*core.Object, iterator: *core.Object) !core.JSValue {
@@ -710,14 +707,15 @@ fn collectionIteratorNext(rt: *core.JSRuntime, global: ?*core.Object, iterator: 
     const target_value = (iterator.iteratorTargetSlot().*) orelse return iteratorResult(rt, global, core.JSValue.undefinedValue(), true);
     const target = try expectObject(target_value);
     // Park the cursor before reading a position out of the entry array
-    // (quickjs.c:52605 `mr->ref_count++`); the done arm below detaches it.
+    // (quickjs.c `mr->ref_count++`); the done arm below detaches it.
     iterator.retainCollectionIteratorCursor();
-    while ((iterator.iteratorIndexSlot().*) < target.collectionEntriesSlot().*.len) {
+    while ((iterator.iteratorIndexSlot().*) < target.collectionEntriesSlot().items.len) {
         const index = (iterator.iteratorIndexSlot().*);
         iterator.iteratorIndexSlot().* += 1;
-        const entry = target.collectionEntriesSlot().*[index];
+        const entry = target.collectionEntriesSlot().items[index];
         if (!entry.active) continue;
-        return iteratorResult(rt, global, try iteratorValue(rt, global, target.class_id, entry, @enumFromInt((iterator.iteratorKindSlot().*))), false);
+        const kind = iterator_slots.collectionIteratorKind(iterator) orelse return error.TypeError;
+        return iteratorResult(rt, global, try iteratorValue(rt, global, target.class_id, entry, kind), false);
     }
     const done_result = try iteratorResult(rt, global, core.JSValue.undefinedValue(), true);
     iterator.detachCollectionIteratorTarget(rt);
@@ -735,13 +733,13 @@ fn iteratorValue(rt: *core.JSRuntime, global: ?*core.Object, class_id: core.Clas
             root_frame.activate(rt);
             defer root_frame.deactivate(rt);
 
-            // qjs js_create_array → JS_NewArray (quickjs.c:9601, 5841): pair proto
+            // qjs js_create_array → JS_NewArray: pair proto
             // is the realm Array.prototype, not a null-proto class-name fallback.
             const prototype = if (global) |g| array_ops.arrayPrototypeFromGlobal(rt, g) else null;
             const pair = try core.Object.createArray(rt, prototype);
             errdefer core.Object.destroyFromHeader(rt, pair.gcHeader());
-            try pair.defineOwnProperty(rt, core.Atom.taggedInt(0), core.Descriptor.data(key_value, true, true, true));
-            try pair.defineOwnProperty(rt, core.Atom.taggedInt(1), core.Descriptor.data(value_value, true, true, true));
+            try pair.defineOwnProperty(rt, core.Atom.taggedInt(0), core.Descriptor.data(key_value, .all));
+            try pair.defineOwnProperty(rt, core.Atom.taggedInt(1), core.Descriptor.data(value_value, .all));
             return pair.value();
         },
     }
@@ -757,13 +755,8 @@ test "collection iteratorResult roots direct function bytecode value while creat
     const rt = try core.JSRuntime.create(std.testing.allocator);
     defer rt.destroy();
 
-    const fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
-    var fb_published = false;
-    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-collection-iterator-result-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
-    fb.publishFixtureNoFail(rt);
-    fb_published = true;
+    const fb = try core.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
 
     const result_value = core.JSValue.functionBytecode(&fb.header);
 
@@ -845,18 +838,18 @@ fn collectionForEach(
     if (object.class_id != core.class.ids.map and object.class_id != core.class.ids.set) return error.TypeError;
     if (args.len < 1 or !isCallableObject(args[0])) return error.TypeError;
     const this_arg = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    // js_map_forEach (quickjs.c:52318-52332) locks the current record for the
+    // js_map_forEach locks the current record for the
     // duration of the callback and only then advances. zjs walks by index, so
     // the lock is on the entry array: the callback may delete entries, but the
     // slots must not shift under the cursor.
     object.retainCollectionCursor();
     defer object.releaseCollectionCursor();
     var index: usize = 0;
-    while (index < object.collectionEntriesSlot().*.len) {
-        const entry = object.collectionEntriesSlot().*[index];
+    while (index < object.collectionEntriesSlot().items.len) {
+        const entry = object.collectionEntriesSlot().items[index];
         index += 1;
         if (!entry.active) continue;
-        // "must duplicate in case the record is deleted" (quickjs.c:52322):
+        // "must duplicate in case the record is deleted":
         // the callback can delete this entry. Under the tracing GC the copy is
         // not a retain, it is the read-before-callback that keeps the pair
         // stable -- the entry slot itself may be cleared while the callback
@@ -872,7 +865,7 @@ fn collectionForEach(
 fn mapGetOrInsert(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, value: core.JSValue) !core.JSValue {
     if (object.class_id == core.class.ids.weakmap) {
         const key_identity = (try weakKeyIdentityRegister(rt, key)) orelse return error.TypeError;
-        if (findWeakEntry(object, key_identity)) |index| return object.weakCollectionEntriesSlot().*[index].value;
+        if (findWeakEntry(object, key_identity)) |index| return object.weakCollectionEntriesSlot().items[index].value;
         const entry = core.object.WeakCollectionEntry{ .key_identity = key_identity, .value = value };
         try appendWeakEntry(rt, object, entry);
         return value;
@@ -880,7 +873,7 @@ fn mapGetOrInsert(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, 
 
     if (object.class_id != core.class.ids.map) return error.TypeError;
     const canonical_key = canonicalizeKey(key);
-    if (findStrongEntry(object, canonical_key)) |index| return object.collectionEntriesSlot().*[index].value;
+    if (findStrongEntry(object, canonical_key)) |index| return object.collectionEntriesSlot().items[index].value;
     const entry = core.object.CollectionEntry{ .key = canonical_key, .value = value };
     try appendStrongEntryOwned(rt, object, entry);
     return value;
@@ -896,10 +889,10 @@ fn mapGetOrInsertComputed(
     if (!isCallableObject(callback)) return error.TypeError;
     if (object.class_id == core.class.ids.weakmap) {
         const key_identity = (try weakKeyIdentityRegister(rt, key)) orelse return error.TypeError;
-        if (findWeakEntry(object, key_identity)) |index| return object.weakCollectionEntriesSlot().*[index].value;
+        if (findWeakEntry(object, key_identity)) |index| return object.weakCollectionEntriesSlot().items[index].value;
         var callback_args = [_]core.JSValue{key};
         const value = try host.callValue(callback, &callback_args);
-        // Mirrors js_map_getOrInsert computed branch (quickjs.c:52206):
+        // Mirrors js_map_getOrInsert computed branch:
         // map_delete_record + map_add_record after the callback, so a record
         // the callback inserted re-appends at the tail with the computed value.
         if (findWeakEntry(object, key_identity)) |index| try removeWeakEntry(rt, object, index);
@@ -910,10 +903,10 @@ fn mapGetOrInsertComputed(
 
     if (object.class_id != core.class.ids.map) return error.TypeError;
     const canonical_key = canonicalizeKey(key);
-    if (findStrongEntry(object, canonical_key)) |index| return object.collectionEntriesSlot().*[index].value;
+    if (findStrongEntry(object, canonical_key)) |index| return object.collectionEntriesSlot().items[index].value;
     var callback_args = [_]core.JSValue{canonical_key};
     const value = try host.callValue(callback, &callback_args);
-    // Mirrors js_map_getOrInsert computed branch (quickjs.c:52206):
+    // Mirrors js_map_getOrInsert computed branch:
     // map_delete_record + map_add_record after the callback, so a record the
     // callback inserted re-appends at the iteration tail with the computed
     // value instead of being overwritten in place.
@@ -1024,7 +1017,7 @@ fn setComposition(rt: *core.JSRuntime, object: *core.Object, args: []const core.
     // These arms walk the receiver's entry array while calling into the
     // set-like `has`/`keys` methods, i.e. across arbitrary user code that may
     // delete from the receiver. Same contract as js_map_forEach's record lock
-    // (quickjs.c:52320): the walked slots must not shift.
+    //: the walked slots must not shift.
     object.retainCollectionCursor();
     defer object.releaseCollectionCursor();
     const result_value = try constructWithPrototype(rt, 2, object.getPrototype());
@@ -1033,7 +1026,7 @@ fn setComposition(rt: *core.JSRuntime, object: *core.Object, args: []const core.
     switch (operation) {
         .difference => {
             if (strongSize(object) > other_record.size) {
-                for (object.collectionEntriesSlot().*) |entry| {
+                for (object.collectionEntriesSlot().items) |entry| {
                     if (!entry.active) continue;
                     _ = try setAdd(rt, result, entry.key);
                 }
@@ -1046,7 +1039,7 @@ fn setComposition(rt: *core.JSRuntime, object: *core.Object, args: []const core.
                     }
                 }
             } else {
-                for (object.collectionEntriesSlot().*) |entry| {
+                for (object.collectionEntriesSlot().items) |entry| {
                     if (!entry.active) continue;
                     if (!try setLikeHas(rt, other_record, entry.key, host)) {
                         _ = try setAdd(rt, result, entry.key);
@@ -1056,7 +1049,7 @@ fn setComposition(rt: *core.JSRuntime, object: *core.Object, args: []const core.
         },
         .intersection => {
             if (strongSize(object) <= other_record.size) {
-                for (object.collectionEntriesSlot().*) |entry| {
+                for (object.collectionEntriesSlot().items) |entry| {
                     if (!entry.active) continue;
                     if (try setLikeHas(rt, other_record, entry.key, host)) {
                         _ = try setAdd(rt, result, entry.key);
@@ -1074,7 +1067,7 @@ fn setComposition(rt: *core.JSRuntime, object: *core.Object, args: []const core.
             }
         },
         .symmetric_difference => {
-            for (object.collectionEntriesSlot().*) |entry| {
+            for (object.collectionEntriesSlot().items) |entry| {
                 if (!entry.active) continue;
                 _ = try setAdd(rt, result, entry.key);
             }
@@ -1096,7 +1089,7 @@ fn setComposition(rt: *core.JSRuntime, object: *core.Object, args: []const core.
             }
         },
         .union_ => {
-            for (object.collectionEntriesSlot().*) |entry| {
+            for (object.collectionEntriesSlot().items) |entry| {
                 if (!entry.active) continue;
                 _ = try setAdd(rt, result, entry.key);
             }
@@ -1123,7 +1116,7 @@ fn setComparison(rt: *core.JSRuntime, object: *core.Object, args: []const core.J
     switch (operation) {
         .is_disjoint_from => {
             if (strongSize(object) <= other_record.size) {
-                for (object.collectionEntriesSlot().*) |entry| {
+                for (object.collectionEntriesSlot().items) |entry| {
                     if (!entry.active) continue;
                     if (try setLikeHas(rt, other_record, entry.key, host)) return core.JSValue.boolean(false);
                 }
@@ -1139,7 +1132,7 @@ fn setComparison(rt: *core.JSRuntime, object: *core.Object, args: []const core.J
         },
         .is_subset_of => {
             if (strongSize(object) > other_record.size) return core.JSValue.boolean(false);
-            for (object.collectionEntriesSlot().*) |entry| {
+            for (object.collectionEntriesSlot().items) |entry| {
                 if (!entry.active) continue;
                 if (!try setLikeHas(rt, other_record, entry.key, host)) return core.JSValue.boolean(false);
             }
@@ -1202,7 +1195,7 @@ fn setLikeKeys(rt: *core.JSRuntime, record: SetLikeRecord, host: CallbackHost) !
     if (object.class_id == core.class.ids.set or object.class_id == core.class.ids.map) {
         var values: []core.JSValue = &.{};
         errdefer freeValueList(rt, values);
-        for (object.collectionEntriesSlot().*) |entry| {
+        for (object.collectionEntriesSlot().items) |entry| {
             if (!entry.active) continue;
             try appendValue(rt, &values, entry.key);
         }
@@ -1360,7 +1353,7 @@ fn addGroupedItem(
 
 fn appendArrayValue(rt: *core.JSRuntime, array: *core.Object, value: core.JSValue) !void {
     if (!array.isArray()) return error.TypeError;
-    try array.defineOwnProperty(rt, core.Atom.taggedInt(array.arrayLength()), core.Descriptor.data(value, true, true, true));
+    try array.defineOwnProperty(rt, core.Atom.taggedInt(array.arrayLength()), core.Descriptor.data(value, .all));
 }
 
 fn stringElementAt(rt: *core.JSRuntime, string_object: *core.string.String, index: *usize) !core.JSValue {
@@ -1439,7 +1432,7 @@ fn defineNativeMethodWithRecordId(realm: *core.RealmContext, object: *core.Objec
     const method_object = try expectObject(method);
     const id = prototypeMethodId(name) orelse return error.TypeError;
     method_object.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.collection, id);
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(method, true, false, true));
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(method, .method));
 }
 
 fn defineNativeMethods(realm: *core.RealmContext, object: *core.Object, class_id: core.ClassId) !void {
@@ -1662,12 +1655,11 @@ fn collectionForEachRecord(
         caller_frame,
     );
     // Same record lock + argument duplication as js_map_forEach
-    // (quickjs.c:52318-52332).
     receiver.retainCollectionCursor();
     defer receiver.releaseCollectionCursor();
     var index: usize = 0;
-    while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
-        const entry = receiver.collectionEntriesSlot().*[index];
+    while (index < receiver.collectionEntriesSlot().items.len) : (index += 1) {
+        const entry = receiver.collectionEntriesSlot().items[index];
         if (!entry.active) continue;
         const key = entry.key;
         const value = if (receiver.class_id == core.class.ids.set) key else entry.value;
@@ -1727,7 +1719,7 @@ fn getSetRecord(
     caller_frame: ?*builtin_dispatch.Frame,
 ) !SetLikeRecordVm {
     const object = object_ops.objectFromValue(other_value) orelse return error.TypeError;
-    // Mirrors get_set_record (quickjs.c:52641): only a native Set argument gets
+    // Mirrors get_set_record: only a native Set argument gets
     // the internal record-count fast path (`JS_GetOpaque(obj, JS_CLASS_SET)`);
     // Map and set-like arguments read the observable `.size` property, and the
     // `has`/`keys` properties are always read (and later called), even for
@@ -1793,7 +1785,7 @@ fn getSetRecord(
 
 fn setStrongSize(object: *core.Object) usize {
     var count: usize = 0;
-    for (object.collectionEntriesSlot().*) |entry| {
+    for (object.collectionEntriesSlot().items) |entry| {
         if (entry.active) count += 1;
     }
     return count;
@@ -1826,7 +1818,7 @@ fn setLikeHasCall(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !bool {
-    // Mirrors js_set_isSubsetOf and friends (quickjs.c:52813): the record's
+    // Mirrors js_set_isSubsetOf and friends: the record's
     // retrieved `has` is JS_Call'ed for every argument kind, native Sets
     // included.
     const out = try call_runtime.callValueOrBytecodeSyncInternalOutlined(
@@ -1850,7 +1842,7 @@ fn setLikeKeysIterator(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !core.JSValue {
-    // Mirrors js_set_union (quickjs.c:53144): the record's retrieved `keys` is
+    // Mirrors js_set_union: the record's retrieved `keys` is
     // JS_Call'ed for every argument kind, native Sets/Maps included.
     const source = try call_runtime.callValueOrBytecodeSyncInternalOutlined(
         ctx,
@@ -1874,8 +1866,8 @@ fn setLikeKeysIterator(
 fn setCloneReceiver(ctx: *core.JSContext, receiver: *core.Object) !core.JSValue {
     const result_value = try constructPlainSet(ctx);
     var index: usize = 0;
-    while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
-        const entry = receiver.collectionEntriesSlot().*[index];
+    while (index < receiver.collectionEntriesSlot().items.len) : (index += 1) {
+        const entry = receiver.collectionEntriesSlot().items[index];
         if (!entry.active) continue;
         try setAddValue(ctx.runtime, result_value, entry.key);
     }
@@ -1888,7 +1880,7 @@ fn setSnapshotKeys(rt: *core.JSRuntime, receiver: *core.Object) ![]core.JSValue 
     const keys = try rt.memory.alloc(core.JSValue, count);
     errdefer rt.memory.free(core.JSValue, keys);
     var out: usize = 0;
-    for (receiver.collectionEntriesSlot().*) |entry| {
+    for (receiver.collectionEntriesSlot().items) |entry| {
         if (!entry.active) continue;
         keys[out] = entry.key;
         out += 1;
@@ -1925,8 +1917,8 @@ fn setDifference(
     const result_value = try constructPlainSet(ctx);
     if (@as(i64, @intCast(setStrongSize(receiver))) > other_record.size) {
         var copy_index: usize = 0;
-        while (copy_index < receiver.collectionEntriesSlot().*.len) : (copy_index += 1) {
-            const entry = receiver.collectionEntriesSlot().*[copy_index];
+        while (copy_index < receiver.collectionEntriesSlot().items.len) : (copy_index += 1) {
+            const entry = receiver.collectionEntriesSlot().items[copy_index];
             if (!entry.active) continue;
             try setAddValue(ctx.runtime, result_value, entry.key);
         }
@@ -1965,8 +1957,8 @@ fn setIntersection(
     const result_value = try constructPlainSet(ctx);
     if (@as(i64, @intCast(setStrongSize(receiver))) <= other_record.size) {
         var index: usize = 0;
-        while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
-            const entry = receiver.collectionEntriesSlot().*[index];
+        while (index < receiver.collectionEntriesSlot().items.len) : (index += 1) {
+            const entry = receiver.collectionEntriesSlot().items[index];
             if (!entry.active) continue;
             if (try setLikeHasCall(ctx, output, global, other_record, entry.key, caller_function, caller_frame)) {
                 try setAddValue(ctx.runtime, result_value, entry.key);
@@ -2044,8 +2036,8 @@ fn setIsDisjointFrom(
 ) !core.JSValue {
     if (@as(i64, @intCast(setStrongSize(receiver))) <= other_record.size) {
         var index: usize = 0;
-        while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
-            const entry = receiver.collectionEntriesSlot().*[index];
+        while (index < receiver.collectionEntriesSlot().items.len) : (index += 1) {
+            const entry = receiver.collectionEntriesSlot().items[index];
             if (!entry.active) continue;
             if (try setLikeHasCall(ctx, output, global, other_record, entry.key, caller_function, caller_frame)) {
                 return core.JSValue.boolean(false);
@@ -2080,8 +2072,8 @@ fn setIsSubsetOf(
 ) !core.JSValue {
     if (@as(i64, @intCast(setStrongSize(receiver))) > other_record.size) return core.JSValue.boolean(false);
     var index: usize = 0;
-    while (index < receiver.collectionEntriesSlot().*.len) : (index += 1) {
-        const entry = receiver.collectionEntriesSlot().*[index];
+    while (index < receiver.collectionEntriesSlot().items.len) : (index += 1) {
+        const entry = receiver.collectionEntriesSlot().items[index];
         if (!entry.active) continue;
         if (!try setLikeHasCall(ctx, output, global, other_record, entry.key, caller_function, caller_frame)) {
             return core.JSValue.boolean(false);
@@ -2187,7 +2179,7 @@ pub fn mapGetOrInsertComputedCall(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !?core.JSValue {
-    const receiver = property_ops.expectObject(receiver_value) catch return null;
+    const receiver = core.value_semantics.objectFromValue(receiver_value) orelse return null;
     if (receiver.class_id != core.class.ids.weakmap and receiver.class_id != core.class.ids.map) return null;
     if (collectionMethodOwnerClass(function_object)) |owner_class| {
         if (receiver.class_id != owner_class) return @as(?core.JSValue, try throwCollectionReceiverTypeError(ctx, global, owner_class));
@@ -2218,7 +2210,7 @@ pub fn mapGetOrInsertComputedCall(
         caller_function,
         caller_frame,
     );
-    // Mirrors js_map_getOrInsert computed branch (quickjs.c:52206): after the
+    // Mirrors js_map_getOrInsert computed branch: after the
     // callback qjs does map_delete_record + map_add_record, so a record the
     // callback inserted for this key is deleted and the key re-appends at the
     // iteration tail with the computed value.
@@ -2291,7 +2283,7 @@ fn mapAppendGroupByValue(
         try group.defineOwnProperty(
             ctx.runtime,
             core.Atom.taggedInt(group.arrayLength()),
-            core.Descriptor.data(value, true, true, true),
+            core.Descriptor.data(value, .all),
         );
         return;
     }
@@ -2301,7 +2293,7 @@ fn mapAppendGroupByValue(
     try group.defineOwnProperty(
         ctx.runtime,
         core.Atom.taggedInt(group.arrayLength()),
-        core.Descriptor.data(value, true, true, true),
+        core.Descriptor.data(value, .all),
     );
     _ = try methodCall(ctx.runtime, map_value, 1, &.{ key, group.value() });
 }

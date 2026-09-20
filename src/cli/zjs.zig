@@ -54,6 +54,10 @@ pub const RuntimeOptions = struct {
     /// tree instead of running the file. Used by the parser identity gate.
     bytecode_fingerprint: bool = false,
     bytecode_fingerprint_verbose: bool = false,
+    /// Collector-side census switches the stats panels read; applied to the
+    /// engine by `applyRuntimeOptions`, never during argument parsing.
+    gc_detailed_reports: bool = false,
+    gc_mark_footprint: bool = false,
     include_paths: [max_include_paths][]const u8 = @splat(""),
     include_count: usize = 0,
 
@@ -80,113 +84,111 @@ pub const FileCommand = struct {
     options: RuntimeOptions = .{},
 };
 
+/// Every option that may precede the command word. Aliases share one tag.
+const Flag = enum {
+    can_block,
+    dump_memory,
+    trace_memory,
+    gc_stats,
+    gc_gate_settle,
+    gc_block_census,
+    gc_mark_footprint,
+    profile_opcodes,
+    perf_json,
+    bytecode_fingerprint,
+    bytecode_fingerprint_verbose,
+    leak_check,
+    memory_limit,
+    stack_size,
+    include,
+};
+
+const flag_names = std.StaticStringMap(Flag).initComptime(.{
+    .{ "--can-block", .can_block },
+    .{ "-d", .dump_memory },
+    .{ "--dump", .dump_memory },
+    .{ "-T", .trace_memory },
+    .{ "--trace", .trace_memory },
+    .{ "--gc-stats", .gc_stats },
+    .{ "--gc-gate-settle", .gc_gate_settle },
+    .{ "--gc-block-census", .gc_block_census },
+    .{ "--gc-mark-footprint", .gc_mark_footprint },
+    .{ "--profile-opcodes", .profile_opcodes },
+    .{ "--perf-json", .perf_json },
+    .{ "--bytecode-fingerprint", .bytecode_fingerprint },
+    .{ "--bytecode-fingerprint-verbose", .bytecode_fingerprint_verbose },
+    .{ "--leak-check", .leak_check },
+    .{ "--memory-limit", .memory_limit },
+    .{ "--stack-size", .stack_size },
+    .{ "-I", .include },
+    .{ "--include", .include },
+});
+
 pub fn parseArgs(args: []const []const u8) CliError!Command {
     var rest = args;
     var options = RuntimeOptions{};
     while (rest.len != 0) {
-        if (std.mem.eql(u8, rest[0], "--can-block")) {
-            options.can_block = true;
-            rest = rest[1..];
-            continue;
+        const flag = flag_names.get(rest[0]) orelse break;
+        rest = rest[1..];
+        switch (flag) {
+            .can_block => options.can_block = true,
+            .dump_memory => options.dump_memory = true,
+            .trace_memory => options.trace_memory = true,
+            .gc_stats => {
+                options.gc_stats = true;
+                // The panel's census costs whole-heap walks per major, so the
+                // collector only performs them when someone is going to read
+                // them. The marked-set/storage census is NOT among them: it is
+                // the one walk large enough to move the scores this panel is
+                // used to judge, so it has its own flag below.
+                options.gc_detailed_reports = true;
+            },
+            .gc_gate_settle => {
+                // Gate-only contract: retain the natural endpoint, then complete
+                // any irreversible destruction transaction before publishing the
+                // stats the checker treats as settled. This implies --gc-stats so
+                // callers cannot accidentally request a silent settlement.
+                options.gc_stats = true;
+                options.gc_gate_settle = true;
+                options.gc_detailed_reports = true;
+            },
+            .gc_block_census => {
+                // TGC S4-f (2). A pure exit-time walk of the block table: nothing
+                // on a collector or allocator path consults it, so unlike
+                // `--gc-mark-footprint` it does not move the numbers it prints.
+                options.gc_stats = true;
+                options.gc_block_census = true;
+                options.gc_detailed_reports = true;
+            },
+            .gc_mark_footprint => {
+                // Opt in to the marked-set/storage census and print the panel that
+                // reads it. Measured cost on splay: Splay -9.8%, SplayLatency
+                // -23.7% against the same binary. That is a study tool, not a
+                // ruler -- do not take pause or score numbers from a run with it.
+                options.gc_stats = true;
+                options.gc_detailed_reports = true;
+                options.gc_mark_footprint = true;
+            },
+            .profile_opcodes => options.profile_opcodes = true,
+            .perf_json => options.perf_json = true,
+            .bytecode_fingerprint => options.bytecode_fingerprint = true,
+            .bytecode_fingerprint_verbose => {
+                options.bytecode_fingerprint = true;
+                options.bytecode_fingerprint_verbose = true;
+            },
+            .leak_check => options.leak_check = true,
+            .memory_limit, .stack_size, .include => {
+                if (rest.len == 0) return error.Usage;
+                const value = rest[0];
+                rest = rest[1..];
+                switch (flag) {
+                    .memory_limit => options.memory_limit = parseLimitKBytes(value) catch return error.Usage,
+                    .stack_size => options.stack_size = parseLimitKBytes(value) catch return error.Usage,
+                    .include => options.addInclude(value) catch return error.Usage,
+                    else => unreachable,
+                }
+            },
         }
-        if (std.mem.eql(u8, rest[0], "-d") or std.mem.eql(u8, rest[0], "--dump")) {
-            options.dump_memory = true;
-            rest = rest[1..];
-            continue;
-        }
-        if (std.mem.eql(u8, rest[0], "-T") or std.mem.eql(u8, rest[0], "--trace")) {
-            options.trace_memory = true;
-            rest = rest[1..];
-            continue;
-        }
-        if (std.mem.eql(u8, rest[0], "--gc-stats")) {
-            options.gc_stats = true;
-            // The panel's census costs whole-heap walks per major, so the
-            // collector only performs them when someone is going to read them.
-            // The marked-set/storage census is NOT among them: it is the one
-            // walk large enough to move the scores this panel is used to
-            // judge, so it has its own flag below.
-            engine.core.gc_trace_stw.detailed_reports = true;
-            rest = rest[1..];
-            continue;
-        }
-        if (std.mem.eql(u8, rest[0], "--gc-gate-settle")) {
-            // Gate-only contract: retain the natural endpoint, then complete
-            // any irreversible destruction transaction before publishing the
-            // stats the checker treats as settled. This implies --gc-stats so
-            // callers cannot accidentally request a silent settlement.
-            options.gc_stats = true;
-            options.gc_gate_settle = true;
-            engine.core.gc_trace_stw.detailed_reports = true;
-            rest = rest[1..];
-            continue;
-        }
-        if (std.mem.eql(u8, rest[0], "--gc-block-census")) {
-            // TGC S4-f (2). A pure exit-time walk of the block table: nothing
-            // on a collector or allocator path consults it, so unlike
-            // `--gc-mark-footprint` it does not move the numbers it prints.
-            options.gc_stats = true;
-            options.gc_block_census = true;
-            engine.core.gc_trace_stw.detailed_reports = true;
-            rest = rest[1..];
-            continue;
-        }
-        if (std.mem.eql(u8, rest[0], "--gc-mark-footprint")) {
-            // Opt in to the marked-set/storage census and print the panel that
-            // reads it. Measured cost on splay: Splay -9.8%, SplayLatency
-            // -23.7% against the same binary. That is a study tool, not a
-            // ruler -- do not take pause or score numbers from a run with it.
-            options.gc_stats = true;
-            engine.core.gc_trace_stw.detailed_reports = true;
-            engine.core.gc_trace_stw.mark_footprint_census = true;
-            rest = rest[1..];
-            continue;
-        }
-        if (std.mem.eql(u8, rest[0], "--profile-opcodes")) {
-            options.profile_opcodes = true;
-            rest = rest[1..];
-            continue;
-        }
-        if (std.mem.eql(u8, rest[0], "--perf-json")) {
-            options.perf_json = true;
-            rest = rest[1..];
-            continue;
-        }
-        if (std.mem.eql(u8, rest[0], "--bytecode-fingerprint")) {
-            options.bytecode_fingerprint = true;
-            rest = rest[1..];
-            continue;
-        }
-        if (std.mem.eql(u8, rest[0], "--bytecode-fingerprint-verbose")) {
-            options.bytecode_fingerprint = true;
-            options.bytecode_fingerprint_verbose = true;
-            rest = rest[1..];
-            continue;
-        }
-        if (std.mem.eql(u8, rest[0], "--leak-check")) {
-            options.leak_check = true;
-            rest = rest[1..];
-            continue;
-        }
-        if (std.mem.eql(u8, rest[0], "--memory-limit")) {
-            if (rest.len < 2) return error.Usage;
-            options.memory_limit = parseLimitKBytes(rest[1]) catch return error.Usage;
-            rest = rest[2..];
-            continue;
-        }
-        if (std.mem.eql(u8, rest[0], "--stack-size")) {
-            if (rest.len < 2) return error.Usage;
-            options.stack_size = parseLimitKBytes(rest[1]) catch return error.Usage;
-            rest = rest[2..];
-            continue;
-        }
-        if (std.mem.eql(u8, rest[0], "-I") or std.mem.eql(u8, rest[0], "--include")) {
-            if (rest.len < 2) return error.Usage;
-            options.addInclude(rest[1]) catch return error.Usage;
-            rest = rest[2..];
-            continue;
-        }
-        break;
     }
     if (rest.len == 0) {
         return error.Usage;
@@ -452,7 +454,7 @@ pub fn main(init: std.process.Init) !void {
         try dumpGcPhaseTotals(&stdout_writer.interface, &runtime.runtime.gc);
         try dumpGcGenerationStats(&stdout_writer.interface, &runtime.runtime.gc);
         if (comptime engine.core.gc.roots_diag_enabled) {
-            try engine.core.gc_conservative.reportGlobal(&stdout_writer.interface);
+            try engine.core.gc_conservative_diag.reportGlobal(&stdout_writer.interface);
         }
         try dumpGcDoomedState(
             &stdout_writer.interface,
@@ -521,6 +523,11 @@ fn commandScriptArgs(command: Command) []const []const u8 {
 }
 
 fn applyRuntimeOptions(runtime: *Runtime, options: RuntimeOptions) void {
+    engine.core.gc_trace_stw.detailed_reports = options.gc_detailed_reports;
+    engine.core.gc_trace_stw.mark_footprint_census = options.gc_mark_footprint;
+    // `detailed_reports` is one input of the barrier gate; a flip against a
+    // live Registry must republish it (gc.refreshBarrierGate contract).
+    runtime.runtime.gc.refreshBarrierGate();
     runtime.runtime.setCanBlock(options.can_block);
     if (options.memory_limit) |limit| runtime.runtime.setMemoryLimit(limit);
     if (options.stack_size) |size| {
@@ -658,7 +665,7 @@ fn detectFileMode(path: []const u8, source: []const u8, explicit_mode: zjs.conte
     return if (sourceLooksLikeModule(source)) .module else .script;
 }
 
-/// Mirrors qjs `JS_DetectModule` (quickjs.c:23792): after the shebang, only
+/// Mirrors qjs `JS_DetectModule`: after the shebang, only
 /// the FIRST token decides — `import` not followed by `(` or `.`, or a
 /// leading `export`. A late `export`/`import` no longer promotes the file to
 /// module mode (it is a SyntaxError in script mode, as in qjs), and
@@ -676,7 +683,7 @@ fn sourceLooksLikeModule(source: []const u8) bool {
     }
 }
 
-/// Mirrors qjs `skip_shebang` (quickjs.c:23761).
+/// Mirrors qjs `skip_shebang`.
 fn skipShebang(source: []const u8, pos: *usize) void {
     if (source.len >= 2 and source[0] == '#' and source[1] == '!') {
         var index: usize = 2;
@@ -783,17 +790,7 @@ fn dumpPerfJsonOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeP
     ensureOpcodeProfileNames();
 
     var rows: [zjs.OpcodeProfile.opcode_count]OpcodeProfileRow = undefined;
-    var row_count: usize = 0;
-    for (profile.count, 0..) |count, opcode| {
-        if (count == 0) continue;
-        rows[row_count] = .{
-            .opcode = @intCast(opcode),
-            .count = count,
-            .nanos = profile.nanos[opcode],
-        };
-        row_count += 1;
-    }
-    sort_erased.heap(OpcodeProfileRow, rows[0..row_count], {}, opcodeProfileRowLessThan);
+    const sorted_rows = sortedOpcodeProfileRows(profile, &rows);
 
     try output.print("  \"opcode_profile\": {{\n", .{});
     try output.print("    \"opcodes_executed\": {d},\n", .{profile.totalOpcodeCount()});
@@ -821,7 +818,7 @@ fn dumpPerfJsonOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeP
         try output.print("    \"call_frames\": {d},\n", .{profile.call_frame_count});
     }
     try output.writeAll("    \"opcodes\": [");
-    for (rows[0..row_count], 0..) |row, index| {
+    for (sorted_rows, 0..) |row, index| {
         if (index != 0) try output.writeByte(',');
         const name = zjs.OpcodeProfile.opcodeName(row.opcode);
         const display_name = if (name.len == 0) "<invalid>" else name;
@@ -834,7 +831,7 @@ fn dumpPerfJsonOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeP
             try output.print(", \"count\": {d}, \"nanos\": {d}, \"avg_ns\": {d}, \"slow\": {d}}}", .{ row.count, row.nanos, avg, profile.slow_count[row.opcode] });
         }
     }
-    if (row_count != 0) try output.writeByte('\n');
+    if (sorted_rows.len != 0) try output.writeByte('\n');
     try output.writeAll("    ]\n  }");
 }
 
@@ -1023,13 +1020,13 @@ fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *engine.core.gc.Regis
         }, "\n");
     }
     try writeCounterLine(writer, &.{
-        .{ "gc: minor phase totals clear ", st.minor_clear_ns_total },
-        .{ ", roots ", st.minor_roots_ns_total },
-        .{ ", conservative ", st.minor_conservative_ns_total },
-        .{ ", remembered ", st.minor_remembered_ns_total },
-        .{ ", trace ", st.minor_trace_ns_total },
-        .{ ", sweep+destroy ", st.minor_sweep_ns_total },
-        .{ ", promote ", st.minor_promote_ns_total },
+        .{ "gc: minor phase totals clear ", st.minor_ns.get(.clear) },
+        .{ ", roots ", st.minor_ns.get(.roots) },
+        .{ ", conservative ", st.minor_ns.get(.conservative) },
+        .{ ", remembered ", st.minor_ns.get(.remembered) },
+        .{ ", trace ", st.minor_ns.get(.trace) },
+        .{ ", sweep+destroy ", st.minor_ns.get(.sweep) },
+        .{ ", promote ", st.minor_ns.get(.promote) },
         .{ ", other ", st.pause_ns_total -| st.minorPhaseNsTotal() },
     }, " ns\n");
     try writeCounterLine(writer, &.{
@@ -1384,18 +1381,7 @@ fn dumpOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) 
     ensureOpcodeProfileNames();
 
     var rows: [zjs.OpcodeProfile.opcode_count]OpcodeProfileRow = undefined;
-    var row_count: usize = 0;
-    for (profile.count, 0..) |count, opcode| {
-        if (count == 0) continue;
-        rows[row_count] = .{
-            .opcode = @intCast(opcode),
-            .count = count,
-            .nanos = profile.nanos[opcode],
-        };
-        row_count += 1;
-    }
-
-    sort_erased.heap(OpcodeProfileRow, rows[0..row_count], {}, opcodeProfileRowLessThan);
+    const sorted_rows = sortedOpcodeProfileRows(profile, &rows);
 
     try output.print("\nZJS opcode profile\n", .{});
     try output.print("  opcodes executed: {d}\n", .{profile.totalOpcodeCount()});
@@ -1432,8 +1418,8 @@ fn dumpOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) 
         const v = std.mem.span(raw);
         break :blk v.len != 0 and v[0] == '1';
     } else false;
-    const limit = if (print_all) row_count else @min(row_count, 40);
-    for (rows[0..limit]) |row| {
+    const limit = if (print_all) sorted_rows.len else @min(sorted_rows.len, 40);
+    for (sorted_rows[0..limit]) |row| {
         const name = zjs.OpcodeProfile.opcodeName(row.opcode);
         const display_name = if (name.len == 0) "<invalid>" else name;
         const avg = if (row.count == 0) 0 else row.nanos / row.count;
@@ -1492,6 +1478,24 @@ fn writeV2OracleReportAtExit() callconv(.c) void {
     const text = engine.compiler.formatOracleReport(&buffer);
     if (text.len == 0) return;
     std.debug.print("{s}\n", .{text});
+}
+
+/// The executed opcodes as rows sorted by time, then count, then opcode.
+/// `rows` is the caller's backing storage; the returned slice aliases it.
+fn sortedOpcodeProfileRows(profile: *const zjs.OpcodeProfile, rows: *[zjs.OpcodeProfile.opcode_count]OpcodeProfileRow) []OpcodeProfileRow {
+    var row_count: usize = 0;
+    for (profile.count, 0..) |count, opcode| {
+        if (count == 0) continue;
+        rows[row_count] = .{
+            .opcode = @intCast(opcode),
+            .count = count,
+            .nanos = profile.nanos[opcode],
+        };
+        row_count += 1;
+    }
+    const sorted = rows[0..row_count];
+    sort_erased.heap(OpcodeProfileRow, sorted, {}, opcodeProfileRowLessThan);
+    return sorted;
 }
 
 fn opcodeProfileRowLessThan(_: void, lhs: OpcodeProfileRow, rhs: OpcodeProfileRow) bool {
@@ -1726,7 +1730,7 @@ test "zjs detects module mode from extension and first token (qjs JS_DetectModul
     try std.testing.expectEqual(zjs.context.EvalMode.module, detectFileMode("input.js", "\xC2\xA0import 'x';", .script));
     try std.testing.expectEqual(zjs.context.EvalMode.module, detectFileMode("input.js", "// \xCF\x80\xE2\x80\xA8export const x = 1;", .script));
     try std.testing.expectEqual(zjs.context.EvalMode.module, detectFileMode("input.js", "// \xCF\x80\xE2\x80\xA9import 'x';", .script));
-    // Only the first token decides (qjs JS_DetectModule quickjs.c:23792):
+    // Only the first token decides (qjs JS_DetectModule quickjs.c):
     // `import.meta` / `import(...)` never promote, and a late export/import
     // is a script-mode SyntaxError rather than a silent module promotion.
     try std.testing.expectEqual(zjs.context.EvalMode.script, detectFileMode("input.js", "console.log(import.meta.url)", .script));
@@ -1827,8 +1831,21 @@ test "zjs mark footprint serialization preserves populated rows and missing cens
 test "zjs generation diagnostic lines preserve populated snapshot" {
     var memory = engine.core.memory.MemoryAccount.init(std.testing.allocator);
     var registry: engine.core.gc.Registry = .{ .memory = &memory };
-    inline for (@typeInfo(@TypeOf(registry.generation.stats)).@"struct".fields, 0..) |field, i| {
-        if (@typeInfo(field.type) == .int) @field(registry.generation.stats, field.name) = @intCast(i + 11);
+    // Position-based fill so every counter prints a distinct value; the
+    // minor phase array takes one position per phase.
+    comptime var position: usize = 0;
+    inline for (@typeInfo(@TypeOf(registry.generation.stats)).@"struct".fields) |field| {
+        if (@typeInfo(field.type) == .int) {
+            @field(registry.generation.stats, field.name) = @intCast(position + 11);
+            position += 1;
+        } else if (field.type == std.EnumArray(engine.core.gc.generation.MinorPhase, u64)) {
+            inline for (0..@field(registry.generation.stats, field.name).values.len) |phase_index| {
+                @field(registry.generation.stats, field.name).values[phase_index] = position + 11;
+                position += 1;
+            }
+        } else {
+            position += 1;
+        }
     }
     inline for (@typeInfo(@TypeOf(registry.incremental.stats)).@"struct".fields, 0..) |field, i| {
         if (@typeInfo(field.type) == .int) @field(registry.incremental.stats, field.name) = @intCast(i + 101);

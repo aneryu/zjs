@@ -154,7 +154,7 @@ pub const Snapshot = struct {
     reloc_len: u32,
     control_len: u32,
     source_len: u32,
-    last_opcode_pos: i64,
+    last_opcode_pos: ?u32,
 };
 
 pub const Builder = struct {
@@ -195,8 +195,8 @@ pub const Builder = struct {
     source_len: u32 = 0,
 
     /// qjs fd->last_opcode_pos: temp offset of the last emitted opcode, or
-    /// -1 when invalidated at a control-flow merge.
-    last_opcode_pos: i64 = -1,
+    /// null once a control-flow merge invalidated it.
+    last_opcode_pos: ?u32 = null,
 
     pub fn init(memory: *core.memory.MemoryAccount, atoms: *core.atom.AtomTable) Builder {
         return .{ .memory = memory, .atoms = atoms };
@@ -266,8 +266,7 @@ pub const Builder = struct {
     /// only the sparse index that lets cfg.build avoid decoding unrelated ops.
     pub fn recordControl(self: *Builder, kind: ControlKind) Error!void {
         if (!self.control_index_enabled) return;
-        if (self.last_opcode_pos < 0) return error.InvalidBytecode;
-        const offset: u32 = @intCast(self.last_opcode_pos);
+        const offset = self.last_opcode_pos orelse return error.InvalidBytecode;
         if (offset >= self.code_len or offset > std.math.maxInt(u31))
             return error.BytecodeOverflow;
         if (self.control_len != 0 and
@@ -312,7 +311,7 @@ pub const Builder = struct {
         self.source_slots = &.{};
         self.source_capacity = 0;
         self.source_len = 0;
-        self.last_opcode_pos = -1;
+        self.last_opcode_pos = null;
     }
 
     pub fn newLabel(self: *Builder) Error!LabelId {
@@ -370,7 +369,7 @@ pub const Builder = struct {
         if (slot.flags.bound) slot.flags.backward_target = true;
 
         self.reloc_len += 1;
-        self.last_opcode_pos = @intCast(opcode_offset);
+        self.last_opcode_pos = opcode_offset;
         self.code_len += 5;
     }
 
@@ -502,7 +501,7 @@ pub const Builder = struct {
 
         const opcode_offset = self.code_len;
         self.code[opcode_offset] = op_id;
-        self.last_opcode_pos = @intCast(opcode_offset);
+        self.last_opcode_pos = opcode_offset;
         self.code_len += 1;
     }
 
@@ -514,7 +513,7 @@ pub const Builder = struct {
         const opcode_index: usize = @intCast(opcode_offset);
         self.code[opcode_index] = op_id;
         self.code[opcode_index + 1] = val;
-        self.last_opcode_pos = @intCast(opcode_offset);
+        self.last_opcode_pos = opcode_offset;
         self.code_len += 2;
     }
 
@@ -526,7 +525,7 @@ pub const Builder = struct {
         const opcode_index: usize = @intCast(opcode_offset);
         self.code[opcode_index] = op_id;
         std.mem.writeInt(u16, self.code[opcode_index + 1 ..][0..2], val, .little);
-        self.last_opcode_pos = @intCast(opcode_offset);
+        self.last_opcode_pos = opcode_offset;
         self.code_len += 3;
     }
 
@@ -541,7 +540,7 @@ pub const Builder = struct {
         self.code[opcode_index] = op_id;
         std.mem.writeInt(u16, self.code[opcode_index + 1 ..][0..2], argc, .little);
         self.code[opcode_index + 3] = 0;
-        self.last_opcode_pos = @intCast(opcode_offset);
+        self.last_opcode_pos = opcode_offset;
         self.code_len += 4;
     }
 
@@ -553,7 +552,7 @@ pub const Builder = struct {
         const opcode_index: usize = @intCast(opcode_offset);
         self.code[opcode_index] = op_id;
         std.mem.writeInt(u32, self.code[opcode_index + 1 ..][0..4], val, .little);
-        self.last_opcode_pos = @intCast(opcode_offset);
+        self.last_opcode_pos = opcode_offset;
         self.code_len += 5;
     }
 
@@ -565,7 +564,7 @@ pub const Builder = struct {
         const opcode_index: usize = @intCast(opcode_offset);
         self.code[opcode_index] = op_id;
         std.mem.writeInt(i32, self.code[opcode_index + 1 ..][0..4], val, .little);
-        self.last_opcode_pos = @intCast(opcode_offset);
+        self.last_opcode_pos = opcode_offset;
         self.code_len += 5;
     }
 
@@ -580,10 +579,8 @@ pub const Builder = struct {
         const size: u32 = if (cache_bearing) 6 else 5;
         // Ownership transfer is unconditional: the sink consumes the caller's
         // retained atom even when either capacity reservation fails.
-        self.reserveCode(size) catch |err| {
-            return err;
-        };
-        reserve(
+        try self.reserveCode(size);
+        try reserve(
             core.atom.Atom,
             self.memory,
             &self.atom_operands,
@@ -591,9 +588,7 @@ pub const Builder = struct {
             self.atom_len,
             1,
             8,
-        ) catch |err| {
-            return err;
-        };
+        );
 
         const opcode_offset = self.code_len;
         const opcode_index: usize = @intCast(opcode_offset);
@@ -603,7 +598,7 @@ pub const Builder = struct {
         if (cache_bearing) self.code[opcode_index + 5] = bytecode.PropSiteCache.no_cache_idx;
 
         self.atom_len += 1;
-        self.last_opcode_pos = @intCast(opcode_offset);
+        self.last_opcode_pos = opcode_offset;
         self.code_len += size;
     }
 
@@ -611,10 +606,8 @@ pub const Builder = struct {
     /// u8, the define_class/define_method temp encoding). `atom_id` ownership
     /// (one retain) transfers into the builder ledger.
     pub fn emitAtomOpU8Owned(self: *Builder, op_id: u8, atom_id: core.atom.Atom, val: u8) Error!void {
-        self.reserveCode(6) catch |err| {
-            return err;
-        };
-        reserve(
+        try self.reserveCode(6);
+        try reserve(
             core.atom.Atom,
             self.memory,
             &self.atom_operands,
@@ -622,9 +615,7 @@ pub const Builder = struct {
             self.atom_len,
             1,
             8,
-        ) catch |err| {
-            return err;
-        };
+        );
 
         const opcode_offset = self.code_len;
         const opcode_index: usize = @intCast(opcode_offset);
@@ -634,17 +625,15 @@ pub const Builder = struct {
         self.code[opcode_index + 5] = val;
 
         self.atom_len += 1;
-        self.last_opcode_pos = @intCast(opcode_offset);
+        self.last_opcode_pos = opcode_offset;
         self.code_len += 6;
     }
 
     /// Emit an atom-bearing opcode with a trailing u16 immediate (op + atom +
     /// scope operand, the scope_get_var-family temp encoding). Owned-atom sink.
     pub fn emitAtomOpU16Owned(self: *Builder, op_id: u8, atom_id: core.atom.Atom, val: u16) Error!void {
-        self.reserveCode(7) catch |err| {
-            return err;
-        };
-        reserve(
+        try self.reserveCode(7);
+        try reserve(
             core.atom.Atom,
             self.memory,
             &self.atom_operands,
@@ -652,9 +641,7 @@ pub const Builder = struct {
             self.atom_len,
             1,
             8,
-        ) catch |err| {
-            return err;
-        };
+        );
 
         const opcode_offset = self.code_len;
         const opcode_index: usize = @intCast(opcode_offset);
@@ -664,7 +651,7 @@ pub const Builder = struct {
         std.mem.writeInt(u16, self.code[opcode_index + 5 ..][0..2], val, .little);
 
         self.atom_len += 1;
-        self.last_opcode_pos = @intCast(opcode_offset);
+        self.last_opcode_pos = opcode_offset;
         self.code_len += 7;
     }
 
@@ -685,10 +672,8 @@ pub const Builder = struct {
             return error.InvalidBytecode;
         }
 
-        self.reserveCode(11) catch |err| {
-            return err;
-        };
-        reserve(
+        try self.reserveCode(11);
+        try reserve(
             labels.RelocEntry,
             self.memory,
             &self.relocs,
@@ -696,10 +681,8 @@ pub const Builder = struct {
             self.reloc_len,
             1,
             8,
-        ) catch |err| {
-            return err;
-        };
-        reserve(
+        );
+        try reserve(
             core.atom.Atom,
             self.memory,
             &self.atom_operands,
@@ -707,9 +690,7 @@ pub const Builder = struct {
             self.atom_len,
             1,
             8,
-        ) catch |err| {
-            return err;
-        };
+        );
 
         const opcode_offset = self.code_len;
         const opcode_index: usize = @intCast(opcode_offset);
@@ -733,7 +714,7 @@ pub const Builder = struct {
 
         self.atom_len += 1;
         self.reloc_len += 1;
-        self.last_opcode_pos = @intCast(opcode_offset);
+        self.last_opcode_pos = opcode_offset;
         self.code_len += 11;
     }
 
@@ -755,8 +736,7 @@ pub const Builder = struct {
         expected_atom: core.atom.Atom,
     ) Error!core.atom.Atom {
         const offset: usize = @intCast(opcode_offset);
-        if (self.last_opcode_pos < 0 or
-            @as(u32, @intCast(self.last_opcode_pos)) != opcode_offset or
+        if (self.last_opcode_pos != opcode_offset or
             opcode_offset > self.code_len or self.code_len - opcode_offset < 5 or
             self.code[offset] != expected_opcode or
             std.mem.readInt(u32, self.code[offset + 1 ..][0..4], .little) != expected_atom.raw() or
@@ -787,7 +767,7 @@ pub const Builder = struct {
             self.control_len -= 1;
         }
         self.code_len = opcode_offset;
-        self.last_opcode_pos = -1;
+        self.last_opcode_pos = null;
         return expected_atom;
     }
 
@@ -835,9 +815,8 @@ pub const Builder = struct {
         expected_atom: core.atom.Atom,
         replacement_opcode: u8,
     ) Error!void {
-        if (self.last_opcode_pos < 0 or self.atom_len == 0)
-            return error.InvalidBytecode;
-        const opcode_offset: u32 = @intCast(self.last_opcode_pos);
+        const opcode_offset = self.last_opcode_pos orelse return error.InvalidBytecode;
+        if (self.atom_len == 0) return error.InvalidBytecode;
         const offset: usize = @intCast(opcode_offset);
         if (opcode_offset > self.code_len or self.code_len - opcode_offset != 5 or
             self.code[offset] != expected_opcode or
@@ -852,7 +831,7 @@ pub const Builder = struct {
         _ = removed;
         self.code[offset] = replacement_opcode;
         self.code_len = std.math.add(u32, opcode_offset, 1) catch return error.InvalidBytecode;
-        self.last_opcode_pos = @intCast(opcode_offset);
+        self.last_opcode_pos = opcode_offset;
     }
 
     pub fn addSourceMarker(self: *Builder, line: i32, col: i32) Error!void {
@@ -951,10 +930,7 @@ pub const Builder = struct {
     /// new_code_len`; they describe the replacement emitted at that same
     /// boundary and must not be discarded. A source-less opcode is accepted.
     pub fn truncateLastOpcodePreserveSources(self: *Builder, new_code_len: u32) Error!void {
-        if (new_code_len > self.code_len or
-            self.last_opcode_pos < 0 or
-            @as(u32, @intCast(self.last_opcode_pos)) != new_code_len)
-        {
+        if (new_code_len > self.code_len or self.last_opcode_pos != new_code_len) {
             return error.InvalidBytecode;
         }
         if (self.reloc_len != 0 and
@@ -977,7 +953,7 @@ pub const Builder = struct {
             self.control_len -= 1;
         }
         self.code_len = new_code_len;
-        self.last_opcode_pos = -1;
+        self.last_opcode_pos = null;
     }
 
     /// Detach the tail emitted since `mark` (a snapshot taken at the segment
@@ -1122,7 +1098,7 @@ pub const Builder = struct {
         self.reloc_len = mark.reloc_len;
         self.control_len = mark.control_len;
         self.source_len = mark.source_len;
-        self.last_opcode_pos = -1;
+        self.last_opcode_pos = null;
         return seg;
     }
 
@@ -1276,7 +1252,7 @@ pub const Builder = struct {
     /// Control-flow merge: forget the last opcode so no peephole fuses across
     /// the join (qjs sets fd->last_opcode_pos = -1 at labels).
     pub fn invalidateLastOpcode(self: *Builder) void {
-        self.last_opcode_pos = -1;
+        self.last_opcode_pos = null;
     }
 
     fn freeSegmentBackings(self: *Builder, seg: *DetachedSegment) void {
@@ -1366,7 +1342,7 @@ test "compiler.builder: jump emission, bind, reloc chains" {
     try std.testing.expectError(error.InvalidBytecode, b.bindLabel(label));
 
     try b.emitOp(0x01);
-    try std.testing.expectEqual(@as(i64, 5), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 5), b.last_opcode_pos);
     try b.emitJump(0x21, label);
     try std.testing.expectEqual(@as(u32, 2), b.label_slots[label.index()].ref_count);
     try std.testing.expectEqual(@as(u32, 1), b.label_slots[label.index()].first_reloc);
@@ -1455,7 +1431,7 @@ test "compiler.builder: s2g4 scope ref owns atom and chains aux relocation" {
 
     try b.emitScopeRefOpOwned(0xd1, atom_id, label, 0x1234);
     try std.testing.expectEqual(@as(u32, 16), b.code_len);
-    try std.testing.expectEqual(@as(i64, 5), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 5), b.last_opcode_pos);
     try std.testing.expectEqual(@as(u8, 0xd1), b.code[5]);
     try std.testing.expectEqual(atom_id.raw(), std.mem.readInt(u32, b.code[6..10], .little));
     try std.testing.expectEqual(label.index(), std.mem.readInt(u32, b.code[10..14], .little));
@@ -1471,7 +1447,7 @@ test "compiler.builder: s2g4 scope ref owns atom and chains aux relocation" {
     try b.bindLabel(label);
     try b.emitScopeRefOpOwned(0xd2, atom_id, label, 0xabcd);
     try std.testing.expectEqual(@as(u32, 27), b.code_len);
-    try std.testing.expectEqual(@as(i64, 16), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 16), b.last_opcode_pos);
     try std.testing.expectEqual(@as(u32, 3), b.reloc_len);
     try std.testing.expectEqual(@as(u32, 3), b.label_slots[label.index()].ref_count);
     try std.testing.expectEqual(@as(u32, 2), b.label_slots[label.index()].first_reloc);
@@ -1511,7 +1487,7 @@ test "compiler.builder: compact immediate emission and rollback" {
 
     try b.emitOpU8(0xa1, 0x7f);
     try std.testing.expectEqual(@as(u32, 2), b.code_len);
-    try std.testing.expectEqual(@as(i64, 0), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 0), b.last_opcode_pos);
     try std.testing.expectEqualSlices(u8, &.{ 0xa1, 0x7f }, b.code[0..2]);
     b.rollback(empty);
     try std.testing.expectEqual(empty.code_len, b.code_len);
@@ -1519,7 +1495,7 @@ test "compiler.builder: compact immediate emission and rollback" {
 
     try b.emitOpU16(0xb2, 0x1234);
     try std.testing.expectEqual(@as(u32, 3), b.code_len);
-    try std.testing.expectEqual(@as(i64, 0), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 0), b.last_opcode_pos);
     try std.testing.expectEqualSlices(u8, &.{ 0xb2, 0x34, 0x12 }, b.code[0..3]);
     b.rollback(empty);
     try std.testing.expectEqual(empty.code_len, b.code_len);
@@ -1527,7 +1503,7 @@ test "compiler.builder: compact immediate emission and rollback" {
 
     try b.emitOpI32(0xc3, -2);
     try std.testing.expectEqual(@as(u32, 5), b.code_len);
-    try std.testing.expectEqual(@as(i64, 0), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 0), b.last_opcode_pos);
     try std.testing.expectEqualSlices(u8, &.{ 0xc3, 0xfe, 0xff, 0xff, 0xff }, b.code[0..5]);
     b.rollback(empty);
     try std.testing.expectEqual(empty.code_len, b.code_len);
@@ -1547,19 +1523,19 @@ test "compiler.builder: s2g4 compact atom immediates own refs" {
     const empty = b.snapshot();
     try b.emitOpU32(0xc1, 0x78563412);
     try std.testing.expectEqual(@as(u32, 5), b.code_len);
-    try std.testing.expectEqual(@as(i64, 0), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 0), b.last_opcode_pos);
     try std.testing.expectEqualSlices(u8, &.{ 0xc1, 0x12, 0x34, 0x56, 0x78 }, b.code[0..5]);
 
     try b.emitAtomOpU8Owned(0xc2, atom_id, 0xa5);
     try std.testing.expectEqual(@as(u32, 11), b.code_len);
-    try std.testing.expectEqual(@as(i64, 5), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 5), b.last_opcode_pos);
     try std.testing.expectEqual(@as(u8, 0xc2), b.code[5]);
     try std.testing.expectEqual(atom_id.raw(), std.mem.readInt(u32, b.code[6..10], .little));
     try std.testing.expectEqual(@as(u8, 0xa5), b.code[10]);
 
     try b.emitAtomOpU16Owned(0xc3, atom_id, 0x1234);
     try std.testing.expectEqual(@as(u32, 18), b.code_len);
-    try std.testing.expectEqual(@as(i64, 11), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 11), b.last_opcode_pos);
     try std.testing.expectEqual(@as(u8, 0xc3), b.code[11]);
     try std.testing.expectEqual(atom_id.raw(), std.mem.readInt(u32, b.code[12..16], .little));
     try std.testing.expectEqualSlices(u8, &.{ 0x34, 0x12 }, b.code[16..18]);
@@ -1632,7 +1608,7 @@ test "compiler.builder: lvalue atom take and opcode rewind are one transaction" 
     try std.testing.expectEqual(atom_id, owned);
     try std.testing.expectEqual(@as(u32, 0), b.atom_len);
     try std.testing.expectEqual(op_start, b.code_len);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, null), b.last_opcode_pos);
     try std.testing.expectEqual(@as(u32, 1), b.source_len);
     try std.testing.expectEqual(op_start, b.source_slots[0].temp_offset);
 }
@@ -1684,7 +1660,7 @@ test "compiler.builder: s2g4 detach and splice preserves global labels" {
     try std.testing.expectEqual(mark.reloc_len, b.reloc_len);
     try std.testing.expectEqual(mark.source_len, b.source_len);
     try std.testing.expectEqual(@as(u32, 3), b.label_len);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, null), b.last_opcode_pos);
     try expectRelocChain(&b, label_a, &.{1}, &.{.jump32});
     try expectRelocChain(&b, label_b, &.{}, &.{});
     try expectRelocChain(&b, label_c, &.{}, &.{});
@@ -1741,7 +1717,7 @@ test "compiler.builder: s2g4 detach and splice preserves global labels" {
     try std.testing.expectEqual(@as(u32, 10), b.source_slots[0].temp_offset);
     try std.testing.expectEqual(@as(u32, 11), b.source_slots[1].temp_offset);
     try std.testing.expectEqual(@as(u32, 27), b.source_slots[2].temp_offset);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, null), b.last_opcode_pos);
     try std.testing.expectEqual(@as(usize, 0), seg.code.len);
     try std.testing.expectEqual(@as(usize, 0), seg.atoms.len);
     try std.testing.expectEqual(@as(usize, 0), seg.relocs.len);
@@ -1768,7 +1744,7 @@ test "compiler.builder: s2g4 empty segment splice invalidates last opcode" {
     try std.testing.expectEqual(mark.atom_len, b.atom_len);
     try std.testing.expectEqual(mark.reloc_len, b.reloc_len);
     try std.testing.expectEqual(mark.source_len, b.source_len);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, null), b.last_opcode_pos);
     try std.testing.expectEqual(@as(usize, 0), seg.code.len);
     try std.testing.expectEqual(@as(usize, 0), seg.atoms.len);
     try std.testing.expectEqual(@as(usize, 0), seg.relocs.len);
@@ -1776,11 +1752,11 @@ test "compiler.builder: s2g4 empty segment splice invalidates last opcode" {
     try std.testing.expectEqual(@as(usize, 0), seg.sources.len);
 
     try b.emitOp(0xf1);
-    try std.testing.expectEqual(@as(i64, 1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 1), b.last_opcode_pos);
     try b.spliceSegment(&seg);
     try std.testing.expectEqual(@as(u32, 2), b.code_len);
     try std.testing.expectEqualSlices(u8, &.{ 0xf0, 0xf1 }, b.code[0..2]);
-    try std.testing.expectEqual(@as(i64, -1), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, null), b.last_opcode_pos);
 
     b.discardSegment(&seg);
     b.discardSegment(&seg);
@@ -1926,7 +1902,7 @@ test "compiler.builder: inferred-name patches keep code and atom ownership in lo
     try std.testing.expectEqual(inferred.raw(), std.mem.readInt(u32, b.code[1..5], .little));
     try std.testing.expectEqual(@as(u8, 0x42), b.code[5]);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
-    try std.testing.expectEqual(@as(i64, 5), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 5), b.last_opcode_pos);
     try std.testing.expectEqual(@as(u32, 1), b.source_len);
     try std.testing.expectEqual(@as(u32, 5), b.source_slots[0].temp_offset);
 

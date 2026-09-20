@@ -342,7 +342,7 @@ fn validateProductMetadata(product: *const resolve_variables.ResolvedProduct) Er
 /// ledgers.  resolve_labels then decodes those same bytes while consuming
 /// them, and the packed finalizer validates the resulting S4 stream in its
 /// fused owner/var-ref walk.  QuickJS likewise trusts the internal bytecode
-/// handed from resolve_variables to resolve_labels (quickjs.c:34796) instead
+/// handed from resolve_variables to resolve_labels instead
 /// of running an extra validation traversal between the two passes.
 fn validateProductCode(product: *const resolve_variables.ResolvedProduct) Error!void {
     const code = product.code[0..product.code_len];
@@ -419,6 +419,13 @@ const SeqMatch = struct {
     positions: [2]u32,
 };
 
+/// One legal A+B opcode pair: seeing `b` right after the live A rewrites
+/// the A byte to `fused`.
+const Fusion = struct { b: u8, fused: u8 };
+/// get_loc8 admits the most: push_2 / push_1, push_i8, and the leftover
+/// push_0 re-fuse.
+const max_fusions = 4;
+
 const Resolver = struct {
     function: *bytecode.Bytecode,
     fd: ?*const bytecode.function_def.FunctionDef,
@@ -470,19 +477,11 @@ const Resolver = struct {
     last_attached_source: ?cfg.SourcePoint = null,
     last_pc: u32 = 0,
     last_sz: u32 = 0,
-    /// Expected B opcode for the live A, or 0 if the last emit is not a
-    /// fusion A. A second B (get_loc2 → get_field / get_field2) uses fuse_b2.
-    fuse_b: u8 = 0,
-    fuse_op: u8 = 0,
-    fuse_b2: u8 = 0,
-    fuse_op2: u8 = 0,
-    fuse_b3: u8 = 0,
-    fuse_op3: u8 = 0,
-    /// Fourth B: leftover re-fuse of an already-fused opcode (get_loc8 → push_0,
-    /// leftover later rewritten to push_0_shr / push_0_or). Reuses an existing
-    /// fused A opcode — no new slot.
-    fuse_b4: u8 = 0,
-    fuse_op4: u8 = 0,
+    /// The B opcodes that may fuse with the last emitted A, in match order,
+    /// each with the fused opcode that replaces A. Empty when the last emit
+    /// is not a fusion A.
+    fusions: [max_fusions]Fusion = @splat(.{ .b = 0, .fused = 0 }),
+    fusion_count: u8 = 0,
     last_bound_output: u32 = std.math.maxInt(u32),
     /// Call sites written so far (native-boundary design 5.5): each final
     /// call/call0..3/tail_call/call_method/tail_call_method takes the next
@@ -742,153 +741,119 @@ const Resolver = struct {
         return (v4Mask() & bit) != 0;
     }
 
+    inline fn setFusions(self: *Resolver, comptime list: []const Fusion) void {
+        comptime std.debug.assert(list.len <= max_fusions);
+        inline for (list, 0..) |fusion, i| self.fusions[i] = fusion;
+        self.fusion_count = list.len;
+    }
+
+    inline fn addFusion(self: *Resolver, fusion: Fusion) void {
+        std.debug.assert(self.fusion_count < max_fusions);
+        self.fusions[self.fusion_count] = fusion;
+        self.fusion_count += 1;
+    }
+
     inline fn noteFusionA(self: *Resolver, opc: u8, pc: u32) void {
         self.last_pc = pc;
-        self.fuse_b3 = 0;
-        self.fuse_b4 = 0;
         // Record the legal B(s) for this A. Callers stay a single
         // forward walk — maybeFusePrev is O(1) and does not rescan pairs.
         switch (opc) {
             op.get_loc0 => {
                 self.last_sz = 1;
-                self.fuse_b = op.get_field;
-                self.fuse_op = op.get_loc0_field;
-                self.fuse_b2 = 0;
+                self.setFusions(&.{.{ .b = op.get_field, .fused = op.get_loc0_field }});
             },
             op.lt => {
                 self.last_sz = 1;
-                self.fuse_b = op.if_false8;
-                self.fuse_op = op.cmp_if_false8;
-                self.fuse_b2 = 0;
+                self.setFusions(&.{.{ .b = op.if_false8, .fused = op.cmp_if_false8 }});
             },
             op.put_loc8 => {
                 self.last_sz = 2;
-                self.fuse_b = op.get_loc8;
-                self.fuse_op = op.put_loc8_get_loc8;
-                self.fuse_b2 = 0;
+                self.setFusions(&.{.{ .b = op.get_loc8, .fused = op.put_loc8_get_loc8 }});
             },
             op.push_this => {
                 self.last_sz = 1;
-                self.fuse_b = op.put_loc0;
-                self.fuse_op = op.push_this_put_loc0;
-                self.fuse_b2 = 0;
+                self.setFusions(&.{.{ .b = op.put_loc0, .fused = op.push_this_put_loc0 }});
             },
             op.get_field2 => {
                 // W1: `atom_cache_u8` (atom u32 + cache_idx u8).
                 self.last_sz = 6;
-                self.fuse_b = op.call_method;
-                self.fuse_op = op.get_field2_call_method;
-                self.fuse_b2 = 0;
+                self.setFusions(&.{.{ .b = op.call_method, .fused = op.get_field2_call_method }});
             },
             op.get_loc2 => {
                 self.last_sz = 1;
-                self.fuse_b = op.get_field;
-                self.fuse_op = op.get_loc2_field;
-                self.fuse_b2 = op.get_field2;
-                self.fuse_op2 = op.get_loc2_field2;
+                self.setFusions(&.{ .{ .b = op.get_field, .fused = op.get_loc2_field }, .{ .b = op.get_field2, .fused = op.get_loc2_field2 } });
             },
             op.eq => {
                 self.last_sz = 1;
-                self.fuse_b = op.if_false8;
-                self.fuse_op = op.eq_if_false8;
-                self.fuse_b2 = 0;
+                self.setFusions(&.{.{ .b = op.if_false8, .fused = op.eq_if_false8 }});
             },
             op.get_field => {
                 // W1: `atom_cache_u8` (atom u32 + cache_idx u8).
                 self.last_sz = 6;
-                self.fuse_b = op.get_field2;
-                self.fuse_op = op.get_field_field2;
-                self.fuse_b2 = 0;
+                self.setFusions(&.{.{ .b = op.get_field2, .fused = op.get_field_field2 }});
             },
             op.get_var => {
                 self.last_sz = 3;
-                self.fuse_b = op.get_field;
-                self.fuse_op = op.get_var_field;
-                self.fuse_b2 = 0;
+                self.setFusions(&.{.{ .b = op.get_field, .fused = op.get_var_field }});
             },
             op.push_0 => {
                 self.last_sz = 1;
                 if (v4On(v4_push_0_or)) {
-                    self.fuse_b = op.@"or";
-                    self.fuse_op = op.push_0_or;
-                    self.fuse_b2 = op.shr;
-                    self.fuse_op2 = op.push_0_shr;
+                    self.setFusions(&.{ .{ .b = op.@"or", .fused = op.push_0_or }, .{ .b = op.shr, .fused = op.push_0_shr } });
                 } else {
-                    self.fuse_b = op.shr;
-                    self.fuse_op = op.push_0_shr;
-                    self.fuse_b2 = 0;
+                    self.setFusions(&.{.{ .b = op.shr, .fused = op.push_0_shr }});
                 }
             },
             op.sar => if (v4On(v4_sar_get_array_el)) {
                 self.last_sz = 1;
-                self.fuse_b = op.get_array_el;
-                self.fuse_op = op.sar_get_array_el;
-                self.fuse_b2 = 0;
+                self.setFusions(&.{.{ .b = op.get_array_el, .fused = op.sar_get_array_el }});
             } else {
-                self.fuse_b = 0;
-                self.fuse_b2 = 0;
+                self.fusion_count = 0;
             },
             op.push_2 => if (v4On(v4_push_2_sar)) {
                 self.last_sz = 1;
-                self.fuse_b = op.sar;
-                self.fuse_op = op.push_2_sar;
-                self.fuse_b2 = 0;
+                self.setFusions(&.{.{ .b = op.sar, .fused = op.push_2_sar }});
             } else {
-                self.fuse_b = 0;
-                self.fuse_b2 = 0;
+                self.fusion_count = 0;
             },
             op.get_loc8 => {
                 self.last_sz = 2;
                 if (v4On(v4_get_loc8_push_2)) {
-                    self.fuse_b = op.push_2;
-                    self.fuse_op = op.get_loc8_push_2;
-                    self.fuse_b2 = op.push_1;
-                    self.fuse_op2 = op.get_loc8_push_1;
+                    self.setFusions(&.{ .{ .b = op.push_2, .fused = op.get_loc8_push_2 }, .{ .b = op.push_1, .fused = op.get_loc8_push_1 } });
                 } else {
-                    self.fuse_b = op.push_1;
-                    self.fuse_op = op.get_loc8_push_1;
-                    self.fuse_b2 = 0;
+                    self.setFusions(&.{.{ .b = op.push_1, .fused = op.get_loc8_push_1 }});
                 }
-                self.fuse_b3 = op.push_i8;
-                self.fuse_op3 = op.get_loc8_push_i8;
+                self.addFusion(.{ .b = op.push_i8, .fused = op.get_loc8_push_i8 });
                 // Leftover re-fuse: get_loc8 → push_0 (later push_0_shr /
                 // push_0_or). Reuse get_loc8_push_2 — handler tail-musts the
                 // leftover opcode, no new slot.
-                self.fuse_b4 = op.push_0;
-                self.fuse_op4 = op.get_loc8_push_2;
+                self.addFusion(.{ .b = op.push_0, .fused = op.get_loc8_push_2 });
             },
             op.push_i8 => {
                 self.last_sz = 2;
-                self.fuse_b = op.add;
-                self.fuse_op = op.push_i8_add;
-                self.fuse_b2 = 0;
+                self.setFusions(&.{.{ .b = op.add, .fused = op.push_i8_add }});
             },
             op.get_var_ref0 => {
                 self.last_sz = 1;
-                self.fuse_b = op.get_loc8;
-                self.fuse_op = op.get_var_ref0_get_loc8;
-                self.fuse_b2 = 0;
+                self.setFusions(&.{.{ .b = op.get_loc8, .fused = op.get_var_ref0_get_loc8 }});
             },
             else => {
-                self.fuse_b = 0;
-                self.fuse_b2 = 0;
+                self.fusion_count = 0;
             },
         }
     }
 
     inline fn maybeFusePrev(self: *Resolver, b: u8) void {
-        const expect = self.fuse_b;
-        if (expect == 0) return;
+        if (self.fusion_count == 0) return;
         if (self.output_len != self.last_pc + self.last_sz) return;
         if (self.output_len == self.last_bound_output) return;
-        if (b == expect) {
-            self.output[self.last_pc] = self.fuse_op;
-        } else if (self.fuse_b2 != 0 and b == self.fuse_b2) {
-            self.output[self.last_pc] = self.fuse_op2;
-        } else if (self.fuse_b3 != 0 and b == self.fuse_b3) {
-            self.output[self.last_pc] = self.fuse_op3;
-        } else if (self.fuse_b4 != 0 and b == self.fuse_b4) {
-            self.output[self.last_pc] = self.fuse_op4;
+        // Unrolled: the walk calls this once per emitted opcode.
+        inline for (self.fusions, 0..) |fusion, i| {
+            if (i >= self.fusion_count) return;
+            if (b == fusion.b) {
+                self.output[self.last_pc] = fusion.fused;
+                return;
+            }
         }
     }
 
@@ -1615,7 +1580,7 @@ const Resolver = struct {
                     // drop run and rejects terminal threading when a source
                     // slot sits after any consumed drop. Source markers are
                     // side-table entries in v2, so enforce the same barrier
-                    // explicitly (qjs find_jump_target, quickjs.c:34661).
+                    // explicitly (qjs find_jump_target, quickjs.c).
                     if (self.hasInputSourceAt(position)) {
                         source_blocked = true;
                         break;
@@ -1639,7 +1604,7 @@ const Resolver = struct {
 
     /// Retarget a conditional edge consumed by a producer peephole through
     /// the same bounded goto walk as an ordinary branch.  This reuses qjs's
-    /// `find_jump_target` refcount transaction (quickjs.c:34661-34710); the
+    /// `find_jump_target` refcount transaction; the
     /// canonical legacy resolver also applies it to nullish/typeof fold
     /// targets before dead-code reachability is decided.
     fn findFoldedBranchTarget(self: *Resolver, label_index: u32) Error!u32 {
@@ -4951,15 +4916,13 @@ test "compiler.resolve_labels: strict this and arguments prologue is exact" {
         core.atom.ids.this_,
         .normal,
         0,
-        false,
-        false,
+        .{},
     ));
     harness.fd.arguments_var_idx = @intCast(try harness.fd.addScopeVar(
         core.atom.ids.arguments,
         .normal,
         0,
-        false,
-        false,
+        .{},
     ));
     harness.fd.is_strict_mode = true;
     try harness.input().emitOp(op.object);

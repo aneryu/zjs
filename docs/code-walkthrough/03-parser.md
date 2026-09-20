@@ -145,13 +145,6 @@ break/continue/finally/using 的解析期栈。`LabelFrame` 带 `LabelId`（不�
 断言 `isKeyword`。返回 `ATOM_null + (val - TOK_NULL)`，与 `quickjs-atom.h:29..76` 行对齐；`keywordAtomAlignmentTest` 钉死这个不变量。
 - **所有权 / 错误 / 调用**：返回的是**预定义 atom id**（`ids.null_ + (val - TOK_NULL)`，对应 quickjs-atom.h 的 1..47 号），不是新建的 atom：既不分配也不 retain，调用方不得 release，它们在 AtomTable 的整个生命周期内恒存，与 `CompileAtomScope` 无关。无 error set（非关键字只有 Debug `assert`）。调用方：`lexer.zig:617`，parser 内 11 处（`tokenKindLabel`（`src/parser.zig:2107`）、`parseNewCalleeMemberAccess`（`:5821`）、`parseMemberChain`（`:5877`/`:5940`）、`parsePrimary` 的松散 `let`（`:6387`）、`parseObjectPropertyName`（`:6924`/`:6930`）、`identifierLikeAtom`（`:7102`）、`parseVar`（`:10548`）、类元素名（`:14074`）、导出名（`:15419`））。
 
-### `lreCheckStackOverflow` (`src/parser.zig:296`)
-
-- **签名**：`fn lreCheckStackOverflow(opaque_ptr: ?*anyopaque, alloca_size: usize) bool`。
-- **作用**：给 libregexp 编译器用的原生栈溢出回调。
-- **实现**：
-RegExp 编译回调。`opaque_ptr` 转 `*JSRuntime`，转调 `checkNativeStackOverflow(alloca_size)`。`null` 指针返回 false。对应 `quickjs.c:48000` `lre_check_stack_overflow`。
-- **所有权 / 错误 / 调用**：无：把 `?*anyopaque` 还原成 `*JSRuntime` 再问一次原生栈余量，不分配、无 error set，`null` 上下文直接返回 false。它是**给 C 风格回调表用的函数指针**，parser 侧唯一的登记点是 `parseRegExpLiteral`（`src/parser.zig:6210`）的 `.check_stack_overflow`；同名函数在 `exec/regexp_ops.zig:523`、`exec/regexp_adapter.zig:31` 各有一份，别混。
 
 ### `DeclarationConflictIndex.deinit` (`src/parser.zig:363`)
 

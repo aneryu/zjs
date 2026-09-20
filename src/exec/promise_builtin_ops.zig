@@ -32,7 +32,7 @@ pub const internal_entries = [_]core.host_function.InternalEntry{
     promiseStaticEntry("withResolvers", 0, .with_resolvers),
     promiseStaticEntry("allKeyed", 1, .all_keyed),
     promiseStaticEntry("allSettledKeyed", 1, .all_settled_keyed),
-    // qjs js_promise_proto_funcs (quickjs.c:54376).
+    // qjs js_promise_proto_funcs.
     promisePrototypeEntry("then", 2, .then),
     promisePrototypeEntry("catch", 1, .catch_),
     promisePrototypeEntry("finally", 1, .finally),
@@ -71,12 +71,12 @@ fn promisePrototypeEntry(
 }
 
 /// Shared record handler for `Promise.prototype.then` / `catch` / `finally`
-/// (qjs `js_promise_proto_funcs`, quickjs.c:54376). The magic only selects
+/// (qjs `js_promise_proto_funcs`, quickjs.c). The magic only selects
 /// which of the three method names `promiseThen` branches on, so the whole
-/// body -- the `JS_GetOpaque2` receiver check (quickjs.c:54253), the
-/// `JS_SpeciesConstructor` derivation (quickjs.c:54257), `catch`'s
-/// unconditional `JS_Invoke(this, "then", ...)` re-entry (quickjs.c:54275) and
-/// `finally`'s thunk construction (quickjs.c:54329) -- is bit-for-bit the same
+/// body -- the `JS_GetOpaque2` receiver check, the
+/// `JS_SpeciesConstructor` derivation, `catch`'s
+/// unconditional `JS_Invoke(this, "then",...)` re-entry and
+/// `finally`'s thunk construction -- is bit-for-bit the same
 /// code the name cascade reached.
 fn promisePrototypeCall(
     native_ctx: *core.JSContext,

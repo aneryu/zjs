@@ -176,7 +176,7 @@ pub noinline fn field(
             // superset of this one's; a miss there is a guaranteed miss here.
             // Same shape as the `h_put_var` cell arm removal above. qjs's
             // GET_FIELD_INLINE window likewise runs once per access and drops
-            // straight into JS_GetPropertyInternal (quickjs.c:19107-19160).
+            // straight into JS_GetPropertyInternal.
             if (ordinaryDataPropertyValueOrUndefinedForFastPath(ctx.runtime, receiver, atom_id)) |value| {
                 replaceTopBorrowed(ctx.runtime, stack, top_index, receiver, value);
                 return .done;
@@ -210,7 +210,7 @@ pub noinline fn field(
             }
             // Removed for the same reason as the get_field arm above: the
             // resident `op_get_field2` already ran this exact walk and tailed
-            // here only because it missed (quickjs.c:19107-19160).
+            // here only because it missed.
             if (ordinaryDataPropertyValueOrUndefinedForFastPath(ctx.runtime, obj, atom_id)) |value| {
                 stack.pushAssumeCapacity(value);
                 return .done;
@@ -239,7 +239,7 @@ pub noinline fn field(
             const obj = try stack.pop();
             if (setArrayLengthForPutFieldFastPath(ctx.runtime, obj, atom_id, value)) return .done;
             // Single-walk cold put (qjs OP_put_field's slow path is ONE call
-            // into JS_SetPropertyInternal, quickjs.c:19188-19203 ->
+            // into JS_SetPropertyInternal, quickjs.c ->
             // 9706-9890): one trusted own probe, one prototype walk, then
             // add_property. The old cascade here re-ran the same gates and
             // own probe up to four times per new-property write
@@ -295,8 +295,8 @@ pub inline fn fastArrayLengthValue(value: core.JSValue) ?core.JSValue {
 /// can never mint a .private atom (kind-filtered predefinedId + .string
 /// internDynamic). Mirrors qjs, whose OP_get_field operand is likewise
 /// unreachable by JS_ATOM_TYPE_PRIVATE atoms (js_parse_postfix_expr routes
-/// #name through OP_scope_get_private_field, quickjs.c:27430, resolved at
-/// 27574 into the OP_get_private_field family, 19232).
+/// #name through OP_scope_get_private_field, quickjs.c, resolved at
+/// 27574 into the OP_get_private_field family).
 inline fn debugAssertNonPrivateFieldOperandAtom(rt: *const core.JSRuntime, atom_id: core.Atom) void {
     if (comptime builtin.mode == .Debug) {
         const kind = rt.atoms.kind(atom_id) orelse .string;
@@ -314,7 +314,7 @@ inline fn getFieldFastSlotWithExoticOrder(
     absent: *bool,
 ) ?*const core.JSValue {
     // Object-ness gate FIRST, mirroring qjs GET_FIELD_INLINE's leading
-    // JS_VALUE_GET_TAG(obj)==JS_TAG_OBJECT check (quickjs.c:19107-19160): a non-object
+    // JS_VALUE_GET_TAG(obj)==JS_TAG_OBJECT check: a non-object
     // receiver (e.g. a string routed here from op_get_field2) returns immediately
     // without paying the private-atom probe. Two pure guards reordered.
     // Trusted-expression classification: the receiver came off the operand
@@ -344,10 +344,10 @@ inline fn getFieldFastSlotWithExoticOrder(
     // Phase 1 — the absence-authoritative prefix (only compiled for callers that
     // ask for the tri-state). qjs ends its inline window at the chain root with
     // `p = p->shape->proto; if (!p) { val = JS_UNDEFINED; break; }`
-    // (quickjs.c:19141-19143), because there a shape miss on a non-exotic link
+    //, because there a shape miss on a non-exotic link
     // is the whole answer. After deleting the zjs-only class-name miss
     // fallback, a complete ordinary miss is also JS_UNDEFINED
-    // (quickjs.c:8355-8363). `undefined` is still synthesized only when EVERY
+    //. `undefined` is still synthesized only when EVERY
     // link walked was one of the two classes with no exotic miss behaviour —
     // plain `object` and the global object — matching the per-cursor admission
     // set of the out-of-line `property_direct.ordinaryDataPropertyLookup`. This
@@ -373,7 +373,7 @@ inline fn getFieldFastSlotWithExoticOrder(
             if (object.findOwnDataSlotFast(atom_id, &slow_property)) |slot| return slot;
             if (slow_property) return null;
             // qjs GET_FIELD_INLINE consults `p->is_exotic` only AFTER the own
-            // probe misses (quickjs.c:19135-19141): an own plain-data hit — a
+            // probe misses: an own plain-data hit — a
             // sparse array element, named data on a typed array, anything the
             // shape authoritatively owns — never pays the class test.
             //
@@ -391,7 +391,7 @@ inline fn getFieldFastSlotWithExoticOrder(
                 };
                 continue;
             }
-            // qjs GET_FIELD_INLINE (quickjs.c:19135-19138): `is_exotic` after
+            // qjs GET_FIELD_INLINE: `is_exotic` after
             // own miss, with an XXX to keep arrays off the slow path when
             // `prop` is not numeric. Array/Arguments exotic [[Get]] is index
             // + `length` only; a named non-index atom (bytecode `.push`) is
@@ -431,7 +431,7 @@ inline fn getFieldFastSlotWithExoticOrder(
 }
 
 /// Array / unmapped Arguments / mapped Arguments are exotic only for
-/// canonical numeric indices and `length` (quickjs.c:19135-19138). A
+/// canonical numeric indices and `length`. A
 /// named non-index atom cannot be an element or the length slot, so the
 /// GET_FIELD_INLINE proto walk is semantically the same as for a plain
 /// object. Tagged-int atoms cover the interned 0..2^31-1 index window;
@@ -451,7 +451,7 @@ inline fn namedAtomUsesOrdinaryWalkOnIndexExotic(class_id: core.class.ClassId, a
 /// walk ran off the end of a chain whose every link was absence-authoritative
 /// (see the terminal comment above), i.e. the property is genuinely missing and
 /// the result is `undefined` — qjs GET_FIELD_INLINE's `if (!p) { val =
-/// JS_UNDEFINED; break; }` (quickjs.c:19141-19143). `absent.*` false keeps the
+/// JS_UNDEFINED; break; }`. `absent.*` false keeps the
 /// previous meaning: defer to the resolver. The caller must initialize it to
 /// false; the walk only ever writes it on the chain-exhausted leg.
 pub inline fn getFieldFastSlotOrAbsent(
@@ -707,7 +707,7 @@ noinline fn typedArrayPrototypeNamedPropertyForFastPath(
     var holder = receiver.getPrototype() orelse return .{ .borrowed = core.JSValue.undefinedValue() };
     while (true) {
         // Trusted hash-chain probe: mirrors qjs's force-inlined find_own_property
-        // (quickjs.c:6135), which walks hash_next off the already-loaded property
+        //, which walks hash_next off the already-loaded property
         // with no per-step cycle/bounds guards. The defensive findProperty's
         // extra `steps < prop_count` / `index >= prop_count` / `index >= props.len`
         // guards are dead on any well-formed shape (the trusted probe's debug
@@ -729,7 +729,7 @@ noinline fn typedArrayNamedPropertyForFastPath(
     atom_id: core.Atom,
 ) ?PropertyFastValue {
     const expected_id = typedArrayAccessorMethodId(atom_id) orelse return null;
-    // Trusted hash-chain probe (qjs find_own_property, quickjs.c:6135), matching
+    // Trusted hash-chain probe (qjs find_own_property, quickjs.c), matching
     // the ordinary get_field data path rather than the defensive findProperty
     // whose per-step guards are dead on a well-formed shape.
     if (object.findPropertyIndexTrusted(atom_id)) |index| {
@@ -846,7 +846,7 @@ pub inline fn atomPropertyValueForFastPath(
 }
 
 /// Computed-property twin of the field fast paths. qjs `JS_ValueToAtom` turns a
-/// symbol value directly into its atom (quickjs.c:9012-9015), then sends strings
+/// symbol value directly into its atom, then sends strings
 /// and symbols through the same `JS_GetProperty` / `find_own_property` path. zjs
 /// can likewise borrow the atom carried by a live symbol body or the weak atom
 /// back-pointer on a materialized string. Indexed storage is string-only; both
@@ -873,7 +873,7 @@ pub inline fn existingPropertyKeyValueForFastPath(
 }
 
 /// qjs `JS_ValueToAtom` handles an existing symbol before any general
-/// ToPropertyKey/string conversion (quickjs.c:9012-9015).  Both returned ids
+/// ToPropertyKey/string conversion. Both returned ids
 /// are borrowed from the still-live key value; a caller that can re-enter must
 /// retain the atom first.
 pub inline fn existingPropertyKeyAtomForFastPath(value: core.JSValue) ?core.Atom {
@@ -881,7 +881,7 @@ pub inline fn existingPropertyKeyAtomForFastPath(value: core.JSValue) ?core.Atom
     return string_ops.stringAtomId(value);
 }
 
-/// Hot-handler variant of the qjs OP_put_field fast window (quickjs.c:19188-
+/// Hot-handler variant of the qjs OP_put_field fast window (quickjs.c-
 /// 19203): returns the MUTABLE own plain-writable-data slot address so the
 /// resident op_put_field can perform set_value's swap-then-free itself with
 /// integer-pair slot accesses. Mirrors the get-side probe-first ordering:
@@ -905,12 +905,12 @@ pub inline fn existingPropertyKeyAtomForFastPath(value: core.JSValue) ?core.Atom
 /// operation; both callers consume it immediately.
 pub inline fn putFieldFastSlot(rt: *core.JSRuntime, receiver: core.JSValue, atom_id: core.Atom) ?*core.JSValue {
     // Trusted-expression receiver contract (qjs OP_put_field's raw
-    // JS_VALUE_GET_OBJ, quickjs.c:19190-19192): expression receivers are
+    // JS_VALUE_GET_OBJ, quickjs.c): expression receivers are
     // never cells, so the header-kind recheck is a Debug assert only.
     const object = object_ops.objectFromValueTrustedExpression(receiver) orelse return null;
     // Bytecode put_field atom operands are proven non-private (qjs
     // OP_put_field's inline window carries no private probe either,
-    // quickjs.c:19177-19199; private stores are OP_put_private_field only).
+    // quickjs.c; private stores are OP_put_private_field only).
     debugAssertNonPrivateFieldOperandAtom(rt, atom_id);
     if (object.class_id == core.class.ids.mapped_arguments) return null;
     var slow_property = false;
@@ -961,7 +961,7 @@ fn setArrayLengthForPutFieldFastPath(
         object.truncateArrayElements(rt, new_len);
     }
     // Growth keeps the fast array and just extends `.length` into tail holes
-    // (faithful to set_array_length quickjs.c:9447-9455 — count is unchanged,
+    // (faithful to set_array_length quickjs.c — count is unchanged,
     // no sparse conversion). This is the `arr.length = bigger` fast path.
     object.setArrayLength(new_len);
     return true;
@@ -1024,7 +1024,7 @@ pub inline fn putArrayElementAfterFastMiss(
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };
-    // qjs JS_SetPropertyValue slow path (quickjs.c:10060) runs
+    // qjs JS_SetPropertyValue slow path runs
     // JS_ValueToAtom on the key BEFORE JS_SetPropertyInternal's nullish base
     // TypeError, so user key-coercion side effects fire first.
     if (obj.is(.null_value) or obj.is(.undefined_value)) {
@@ -1076,7 +1076,7 @@ pub noinline fn getArrayElement(
             // Mapped-arguments first: an integer key used to intern as an
             // atom and fall into getValueProperty (full resolver) before the
             // var-ref arm below could run. qjs JS_GetPropertyValue switches
-            // on class_id first (quickjs.c:9047-9049).
+            // on class_id first.
             if (fastMappedArgumentsElementValue(obj, key)) |value| {
                 try stack.pushOwned(value);
                 return .done;
@@ -1187,7 +1187,7 @@ pub noinline fn getArrayElement(
     return .done;
 }
 
-// qjs JS_GetPropertyValue TA arm (quickjs.c:9050-9083): one live-count
+// qjs JS_GetPropertyValue TA arm: one live-count
 // bounds check (detach publishes count=0), then a class-id load. No second
 // data/width probe — `live_length > 0` implies a published pointer.
 /// Non-optional JSValue (same two-reg ABI as `readNumericElement`) so the
@@ -1218,12 +1218,12 @@ pub fn fastTypedArrayElementValue(obj: core.JSValue, key: core.JSValue) ?core.JS
 
 pub const TypedArrayWriteFast = enum { not_typed_array, handled };
 
-/// qjs JS_SetPropertyValue (quickjs.c:9947) typed-array arm: a single
+/// qjs JS_SetPropertyValue typed-array arm: a single
 /// per-class_id store that, for each numeric element kind, converts the value
 /// (which can run user code via valueOf/Symbol.toPrimitive and DETACH/RESIZE the
 /// buffer) and stores into the typed buffer after a bounds RE-check. The
 /// convert-first / recheck-after / silent-no-op-on-OOB ordering (qjs comment at
-/// quickjs.c:9987 + the `ta_out_of_bound: return TRUE` leg) lives in the
+/// quickjs.c + the `ta_out_of_bound: return TRUE` leg) lives in the
 /// canonical `typedArraySetElement` helper, which this fast probe delegates to as
 /// the single source of truth for the value->bytes mapping.
 ///
@@ -1258,7 +1258,7 @@ pub fn putTypedArrayElementFast(rt: *core.JSRuntime, obj: core.JSValue, key: cor
     // live pair -> store; detach/OOB after conversion is a silent no-op.
     const payload = object.typedArrayPayloadFast() orelse return .not_typed_array;
     const kind = payload.kind;
-    if (kind < 1 or kind > 10) return .not_typed_array; // BigInt / non-TA -> slow
+    if (!kind.isNumeric()) return .not_typed_array; // BigInt / non-TA -> slow
     const backing = payload.backing_payload orelse return .not_typed_array;
     if (backing.immutable) return .handled; // silent no-op
     const width = payload.element_size;

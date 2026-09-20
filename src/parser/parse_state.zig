@@ -29,12 +29,6 @@ pub const core = @import("../core/root.zig");
 
 pub const regexp_lib = @import("../libs/regexp.zig");
 
-pub fn lreCheckStackOverflow(opaque_ptr: ?*anyopaque, alloca_size: usize) bool {
-    // qjs:quickjs.c:48000 lre_check_stack_overflow -> js_check_stack_overflow(ctx->rt, alloca_size)
-    const rt: *core.JSRuntime = @ptrCast(@alignCast(opaque_ptr orelse return false));
-    return rt.checkNativeStackOverflow(alloca_size);
-}
-
 pub const libs_bignum = @import("../libs/bigint.zig");
 
 pub const simple_token = @import("../simple_token.zig");
@@ -110,7 +104,7 @@ pub const Error = lexer_mod.Error || error{
     ParserInvariant,
     // Native recursion-descent guard (QuickJS next_token
     // `js_check_stack_overflow` -> js_parse_error "stack overflow",
-    // quickjs.c:22836). Surfaced by `compile` as a catchable SyntaxError.
+    // quickjs.c). Surfaced by `compile` as a catchable SyntaxError.
     StackOverflow,
 };
 
@@ -127,7 +121,7 @@ pub const PendingDiagnostic = struct {
     }
 };
 
-/// Parse flags mirror the QuickJS `PF_*` macros (`quickjs.c:21358..21370`).
+/// Parse flags mirror the QuickJS `PF_*` macros.
 pub const ParseFlags = packed struct(u32) {
     in_accepted: bool = false,
     pow_allowed: bool = false,
@@ -142,7 +136,7 @@ pub const ParseFlags = packed struct(u32) {
     pub const default = ParseFlags{ .in_accepted = true };
 };
 
-/// Mirror `quickjs.c:21352` — BlockEnv for break/continue/finally tracking.
+/// Mirror `quickjs.c` — BlockEnv for break/continue/finally tracking.
 pub const BlockEnv = struct {
     prev: ?*BlockEnv,
     /// Label of a labelled statement, loop or switch; null for the
@@ -538,7 +532,7 @@ pub const State = struct {
     /// overload signature and declared nothing.
     ts_last_decl_was_signature: bool = false,
 
-    /// QuickJS `eval_ret_idx` mirror (`quickjs.c:21480`). When set,
+    /// QuickJS `eval_ret_idx` mirror. When set,
     /// the slot at this local index receives the result of every
     /// expression statement (instead of the placeholder `drop`), and
     /// the caller's `finalizeEvalReturn` retrieves it at script end.
@@ -555,7 +549,7 @@ pub const State = struct {
     ///
     /// The parser still emits to `function.code` as before; this is a
     /// parallel structure that mirrors `JSParseState.curFunc`
-    /// (`quickjs.c:21581`). Tests in `qjs_parser_test.zig` assert the
+    ///. Tests in `qjs_parser_test.zig` assert the
     /// `vars` / `scopes` layout is populated correctly.
     function_def: function_def_mod.FunctionDef,
 
@@ -644,7 +638,7 @@ pub const State = struct {
         // compile_entry overwrites these facts for direct eval/module.
         state.function_def.has_this_binding = true;
         state.function_def.arguments_allowed = true;
-        // Mirror `js_new_function_def` (`quickjs.c:31511`): scope 0
+        // Mirror `js_new_function_def`: scope 0
         // is the function's var/arg scope, parent = -1.
         _ = try state.function_def.appendScope(-1);
         // The root's Builder is the emission destination from the first
@@ -849,7 +843,7 @@ pub const State = struct {
 
     /// Push a new FunctionDef onto the stack. Called when entering
     /// a nested function. Mirrors the parent link setup in
-    /// `js_new_function_def` (`quickjs.c:31484-31490`).
+    /// `js_new_function_def`.
     pub fn pushFunction(self: *State, fd: *function_def_mod.FunctionDef) Error!void {
         const old_len = self.cur_func_stack.len;
         const new_len = self.cur_func_stack.len + 1;
@@ -904,7 +898,7 @@ pub const State = struct {
         self.discarded_func_head = fd;
     }
 
-    /// Mirror `push_scope` (`quickjs.c:23486`): allocate a new
+    /// Mirror `push_scope`: allocate a new
     /// `VarScope` whose parent is the current scope, then switch
     /// `scope_level` to it. Call on entry to a new lexical block.
     pub fn pushScopeIdentity(self: *State) Error!void {
@@ -945,7 +939,7 @@ pub const State = struct {
         self.curFunc().body_scope = self.scope_level;
     }
 
-    /// Mirror `pop_scope` (`quickjs.c:23532`): restore the parent
+    /// Mirror `pop_scope`: restore the parent
     /// scope. Also updates `function_def.scope_first` to the outer
     /// scope's first lexical var so subsequent lookups see the
     /// correct chain.
@@ -955,7 +949,7 @@ pub const State = struct {
         self.scope_level = parent;
         self.curFunc().scope_level = parent;
         // Recompute scope_first for the new current scope (mirrors
-        // `get_first_lexical_var` at `quickjs.c:23521`).
+        // `get_first_lexical_var` at `quickjs.c`).
         var scope = parent;
         self.curFunc().scope_first = -1;
         while (scope >= 0) {
@@ -1027,7 +1021,7 @@ pub const State = struct {
     /// Switch the parser into eval mode and allocate the synthetic
     /// `<ret>` local that holds the result of the last evaluated
     /// expression. Mirrors `set_eval_ret_undefined` setup +
-    /// `add_var(JS_ATOM__ret_)` (`quickjs.c:28219`/`28834`). The
+    /// `add_var(JS_ATOM__ret_)`. The
     /// caller invokes this immediately after `State.init` and
     /// before parsing any statements.
     ///
@@ -1072,7 +1066,7 @@ pub const State = struct {
         try Emitter.opU16(self, opcode.op.put_loc, idx);
     }
 
-    /// Mirror the tail of `js_parse_program` (`quickjs.c:31459`):
+    /// Mirror the tail of `js_parse_program`:
     /// after the last statement is parsed, load `<ret>` and terminate the
     /// body with an explicit value-return. No-op when completion capture is
     /// disabled.
@@ -1082,7 +1076,7 @@ pub const State = struct {
         try Emitter.op(self, opcode.op.@"return");
     }
 
-    /// Mirror QuickJS `set_eval_ret_undefined` (`quickjs.c:28219-28226`):
+    /// Mirror QuickJS `set_eval_ret_undefined`:
     /// control-flow statements reset eval completion before parsing their
     /// children, and executed expression statements overwrite it.
     pub fn setEvalReturnUndefined(self: *State) Error!void {
@@ -1092,7 +1086,7 @@ pub const State = struct {
     }
 
     pub fn emitReturnUndefined(self: *State) Error!void {
-        // qjs js_parse_program/function tail (quickjs.c:31459/36946): emit the implicit return_undef terminal.
+        // qjs js_parse_program/function tail: emit the implicit return_undef terminal.
         try Emitter.op(self, opcode.op.return_undef);
     }
 
@@ -1101,7 +1095,7 @@ pub const State = struct {
         // Native C-stack recursion guard. Every recursive-descent path
         // (parens, arrays, objects, nested statements) consumes tokens
         // through here, so a single check mirrors QuickJS guarding
-        // `next_token` (quickjs.c:22836) and turns pathological nesting into
+        // `next_token` and turns pathological nesting into
         // a catchable SyntaxError instead of a native stack overflow.
         if (self.runtime) |rt| {
             if (rt.checkNativeStackOverflow(0)) return self.failHere(error.StackOverflow);
@@ -1882,7 +1876,7 @@ pub const State = struct {
     pub fn canTreatLetAsForInitializerExpression(s: *State) bool {
         if (s.peekKind() != .kw_let) return false;
         // qjs calls is_let(s, DECL_MASK_OTHER) for the for-initializer and
-        // the for-in/of head (quickjs.c:29164, quickjs.c:28703).
+        // the for-in/of head.
         return statements.canTreatLetAsExpressionStatement(s, DeclMask{ .other = true });
     }
 
@@ -1896,7 +1890,6 @@ pub const State = struct {
         atom_len: usize,
         source_loc_len: usize,
         label_count: u32,
-        last_opcode_pos: i32,
         last_opcode_source_offset: ?u32,
     };
 
@@ -1909,7 +1902,6 @@ pub const State = struct {
             else
                 self.function.source_loc_slots.len,
             .label_count = self.currentParserLabelCount(),
-            .last_opcode_pos = self.curFunc().last_opcode_pos,
             .last_opcode_source_offset = self.last_opcode_source_offset,
         };
     }
@@ -1931,7 +1923,6 @@ pub const State = struct {
             self.function.truncateCode(snapshot.code_len);
         }
         self.setParserLabelCount(snapshot.label_count);
-        self.curFunc().last_opcode_pos = snapshot.last_opcode_pos;
         self.last_opcode_source_offset = snapshot.last_opcode_source_offset;
     }
 
@@ -1954,7 +1945,7 @@ pub const State = struct {
         fd.has_eval_call = true;
     }
 
-    /// qjs js_parse_function_decl2 (quickjs.c:36500): emit the child
+    /// qjs js_parse_function_decl2: emit the child
     /// closure with its parent constant-pool index. Always the wide form:
     /// phase-1 temporary opcodes overlap the short-opcode range that
     /// contains fclosure8, so resolve_labels shortens it after the temp
@@ -1965,12 +1956,12 @@ pub const State = struct {
 
     pub fn emitCloseLoc(self: *State, idx: u16) Error!void {
         // qjs close_scopes emits this phase-1 cleanup without a
-        // source marker (quickjs.c:24160-24169).
+        // source marker.
         try Emitter.opU16NoSource(self, opcode.op.close_loc, idx);
     }
 
     /// Mirror the `OP_enter_scope` emission of QuickJS `push_scope`
-    /// (`quickjs.c:23486`). `resolve_variables` lowers this temp opcode
+    ///. `resolve_variables` lowers this temp opcode
     /// to a per-scope binding refresh (TDZ re-arm + captured-slot
     /// detach, see `enterScopeRefreshSize`) so block-scoped bindings
     /// are fresh on every scope entry — the per-iteration semantics of
@@ -1979,14 +1970,14 @@ pub const State = struct {
     pub fn emitEnterScope(self: *State) Error!void {
         if (self.scope_level < 0) return;
         // qjs push_scope emits the phase-1 marker with no source
-        // event (quickjs.c:24128-24135).
+        // event.
         try Emitter.opU16NoSource(self, opcode.op.enter_scope, @intCast(self.scope_level));
     }
 
     pub fn emitLeaveScope(self: *State, scope: i32) Error!void {
         if (scope < 0) return;
         // qjs pop_scope/close_scopes emits the phase-1 marker with no
-        // source event (quickjs.c:24150-24169).
+        // source event.
         try Emitter.opU16NoSource(self, opcode.op.leave_scope, @intCast(scope));
     }
 
@@ -2016,7 +2007,7 @@ pub const State = struct {
         const scope_level: u16 = @intCast(self.scope_level);
         if (attach_source) {
             // qjs resolve_scope_var consumes the same atom+scope temp
-            // family (quickjs.c:33036-33052).
+            // family.
             try Emitter.opAtomU16(self, scope_op, atom_id, scope_level);
         } else {
             try Emitter.opAtomU16NoSource(self, scope_op, atom_id, scope_level);
@@ -2044,7 +2035,7 @@ pub const State = struct {
     }
 
     /// Emit `scope_put_var_init` for `let` / `const` initialisers.
-    /// Mirrors `quickjs.c:282` (scope init form). The pipeline
+    /// Mirrors `quickjs.c` (scope init form). The pipeline
     /// lowers this to `put_loc` when the var resolves locally, or
     /// to `put_var_init` when it's a top-level lexical global.
     pub inline fn emitScopePutVarInit(self: *State, atom_id: Atom) Error!void {
@@ -2068,8 +2059,8 @@ pub const State = struct {
                 self.curFunc().is_direct_eval))
         {
             // qjs TOK_THIS always emits OP_scope_get_var this
-            // (quickjs.c:26934-26939). Direct eval has no own ThisBinding
-            // (quickjs.c:37239); resolve against the caller seed so a
+            //. Direct eval has no own ThisBinding
+            //; resolve against the caller seed so a
             // root-eval-captured `this` cannot shadow the method's this.
             try self.emitScopeGetVar(atom_this);
         } else {
@@ -2150,7 +2141,7 @@ pub const State = struct {
         const snapshot = v2b.snapshot();
         errdefer v2b.rollback(snapshot);
         // qjs push_scope emits OP_enter_scope without a source event
-        // before js_parse_program (quickjs.c:24128-24135/31441).
+        // before js_parse_program.
         try v2b.emitOpU16(opcode.op.enter_scope, @intCast(self.curFunc().body_scope));
     }
     // ===== end Builder wrappers =====

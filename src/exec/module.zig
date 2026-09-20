@@ -6,7 +6,7 @@
 //! Asynchronous host loading and dynamic-import job ownership stay in
 //! `module_graph.zig`, while this file remains the authority for the registry
 //! and graph-link state. The corresponding QuickJS resolver/linker/evaluator
-//! spans quickjs.c:30525-30836 and quickjs.c:31423-31563.
+//! spans quickjs.c and quickjs.c.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -485,7 +485,7 @@ fn linkModuleInner(state: *LinkState, record: *core.module.ModuleRecord) !void {
 
     if (record.link_dfs_ancestor_index == record.link_dfs_index) {
         while (true) {
-            const member = state.stack orelse unreachable;
+            const member = state.stack.?;
             state.stack = member.link_stack_prev;
             member.status = .linked;
             member.resetLinkTransientNoFail();
@@ -878,7 +878,7 @@ fn defineCanonicalModuleNamespaceToStringTag(
     try object.defineOwnProperty(
         ctx.runtime,
         tag_atom,
-        core.Descriptor.data(tag_value, false, false, false),
+        core.Descriptor.data(tag_value, .none),
     );
 }
 

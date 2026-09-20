@@ -65,13 +65,8 @@ test "fulfilledWithPrototype roots direct function bytecode result while constru
     const function_proto = try core.Object.create(rt, core.class.ids.object, null);
     realm.cached_function_proto = function_proto;
 
-    const fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
-    var fb_published = false;
-    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-fulfilled-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
-    fb.publishFixtureNoFail(rt);
-    fb_published = true;
+    const fb = try core.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
 
     const result_value = core.JSValue.functionBytecode(&fb.header);
 
@@ -114,7 +109,7 @@ pub fn rejectedWithUnhandledPrototype(ctx: *core.JSContext, reason: core.JSValue
 }
 
 /// Mirrors qjs perform_promise_then on an already-rejected unhandled promise
-/// (quickjs.c:54224-54229, tracker fired with is_handled=TRUE →
+/// (quickjs.c, tracker fired with is_handled=TRUE →
 /// js_std_promise_rejection_tracker quickjs-libc.c:4259-4268): unreport THIS
 /// promise only. Handling one promise must not suppress the report of a
 /// different promise, even one rejected with a sameValue reason.
@@ -241,7 +236,7 @@ test "withResolvers roots promise and resolving functions while creating result"
 }
 
 fn defineData(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, value: core.JSValue) !void {
-    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, true, true, true));
+    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, .all));
 }
 
 pub fn enqueueReaction(ctx: *core.JSContext, job: jobs.Func, args: []const core.JSValue) !void {

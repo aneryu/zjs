@@ -88,7 +88,15 @@ pub fn runWithOutput(
 
     const global_object = try contextGlobal(ctx);
     const this_value = if (function.isModule() or function.runtimeStrictMode()) core.JSValue.undefinedValue() else global_object.value();
-    return runWithArgs(ctx, stack, function, this_value, &.{}, &.{}, output, global_object, true, false, false);
+    return runWithArgs(.{
+        .ctx = ctx,
+        .stack = stack,
+        .function = function,
+        .initial_this_value = this_value,
+        .output = output,
+        .global = global_object,
+        .break_var_ref_cycles_on_exit = true,
+    });
 }
 
 /// Lazily build and cache the per-context global object. Subsequent
@@ -148,47 +156,16 @@ pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
     return global_object;
 }
 
-pub fn runWithArgs(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    initial_this_value: core.JSValue,
-    args: []const core.JSValue,
-    var_refs: []const *core.VarRef,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    break_var_ref_cycles_on_exit: bool,
-    strict_unresolved_get_var: bool,
-    stop_on_yield: bool,
-) !core.JSValue {
-    const result = if (function.legacyBytecodeAdapter() == null and !function.isModule())
-        runCanonicalRootWithArgs(
-            ctx,
-            stack,
-            function,
-            initial_this_value,
-            args,
-            var_refs,
-            output,
-            global,
-            break_var_ref_cycles_on_exit,
-            strict_unresolved_get_var,
-            stop_on_yield,
-        )
+/// Embedder/test entry: run `env.function` as a root with explicit args and
+/// captures. Only the ctx/stack/function/this/args/var_refs/output/global
+/// and the three exit-behaviour flags of `env` are consulted; the remaining
+/// fields are owned by the canonical root builder.
+pub fn runWithArgs(env: CallEnv) !core.JSValue {
+    const ctx = env.ctx;
+    const result = if (env.function.legacyBytecodeAdapter() == null and !env.function.isModule())
+        runCanonicalRootWithArgs(env)
     else
-        runWithCallEnv(.{
-            .ctx = ctx,
-            .stack = stack,
-            .function = function,
-            .initial_this_value = initial_this_value,
-            .args = args,
-            .var_refs = var_refs,
-            .output = output,
-            .global = global,
-            .break_var_ref_cycles_on_exit = break_var_ref_cycles_on_exit,
-            .strict_unresolved_get_var = strict_unresolved_get_var,
-            .stop_on_yield = stop_on_yield,
-        });
+        runWithCallEnv(env);
     return result catch |err| {
         if (!ctx.preserve_uncaught_exception and err != error.JSException and err != error.Interrupted and ctx.hasException()) ctx.clearException();
         return err;
@@ -220,22 +197,13 @@ fn resolveSuppliedRootCapture(
 /// FB with explicit args/captures. It now constructs the same real root
 /// function/current-function used by parser.Result consumers; the bare-frame
 /// cell builder remains reachable only through the W1e legacy adapter.
-fn runCanonicalRootWithArgs(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    initial_this_value: core.JSValue,
-    args: []const core.JSValue,
-    var_refs: []const *core.VarRef,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    break_var_ref_cycles_on_exit: bool,
-    strict_unresolved_get_var: bool,
-    stop_on_yield: bool,
-) HostError!core.JSValue {
+fn runCanonicalRootWithArgs(env: CallEnv) HostError!core.JSValue {
+    const ctx = env.ctx;
+    const function = env.function;
+    const var_refs = env.var_refs;
     const realm = function.realmContext() orelse return error.InvalidBuiltinRegistry;
     const realm_global = realm.global orelse return error.InvalidBuiltinRegistry;
-    if (realm.runtime != ctx.runtime or realm_global != global) return error.InvalidBuiltinRegistry;
+    if (realm.runtime != ctx.runtime or realm_global != env.global) return error.InvalidBuiltinRegistry;
     if (var_refs.len != 0 and var_refs.len != function.closureVar().len) return error.InvalidBytecode;
 
     var supplied = SuppliedRootCaptures{ .cells = var_refs };
@@ -260,16 +228,16 @@ fn runCanonicalRootWithArgs(
 
     return runWithCallEnv(.{
         .ctx = realm,
-        .stack = stack,
+        .stack = env.stack,
         .function = function,
-        .initial_this_value = initial_this_value,
-        .args = args,
+        .initial_this_value = env.initial_this_value,
+        .args = env.args,
         .var_refs = root_object.functionCaptures(),
-        .output = output,
+        .output = env.output,
         .global = realm_global,
-        .break_var_ref_cycles_on_exit = break_var_ref_cycles_on_exit,
-        .strict_unresolved_get_var = strict_unresolved_get_var,
-        .stop_on_yield = stop_on_yield,
+        .break_var_ref_cycles_on_exit = env.break_var_ref_cycles_on_exit,
+        .strict_unresolved_get_var = env.strict_unresolved_get_var,
+        .stop_on_yield = env.stop_on_yield,
         .current_function_value = root_function_value,
         .direct_eval_vars_reach_global = true,
         .global_declarations_prevalidated = true,
@@ -380,91 +348,43 @@ pub fn runWithCallEnvAfterInterruptPoll(env: CallEnv) HostError!core.JSValue {
         effective.ctx = realm;
         effective.global = realm.global orelse return error.InvalidBuiltinRegistry;
     }
-    return runWithArgsState(
-        effective.ctx,
-        effective.stack,
-        effective.function,
-        effective.initial_this_value,
-        effective.args,
-        effective.var_refs,
-        effective.output,
-        effective.global,
-        effective.break_var_ref_cycles_on_exit,
-        effective.strict_unresolved_get_var,
-        effective.stop_on_yield,
-        effective.generator_state,
-        effective.resume_value,
-        effective.stop_before_pc,
-        effective.current_function_value,
-        effective.new_target_value,
-        effective.eval_global_var_bindings,
-        effective.direct_eval_vars_reach_global,
-        effective.is_eval_code,
-        effective.global_declarations_prevalidated,
-        effective.suspend_on_module_await,
-        effective.initial_pc,
-        effective.prepared_entry_frame,
-    );
+    return runWithArgsState(effective);
 }
 
-fn runWithArgsState(
-    ctx: *core.JSContext,
-    entry_stack: *stack_mod.Stack,
-    entry_function: *const bytecode.FunctionBytecode,
-    initial_this_value: core.JSValue,
-    args: []const core.JSValue,
-    var_refs: []const *core.VarRef,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    break_var_ref_cycles_on_exit: bool,
-    entry_strict_unresolved_get_var: bool,
-    entry_stop_on_yield: bool,
-    entry_generator_state: ?*core.Object,
-    resume_value: ?core.JSValue,
-    entry_stop_before_pc: ?usize,
-    current_function_value: core.JSValue,
-    new_target_value: core.JSValue,
-    entry_eval_global_var_bindings: bool,
-    entry_direct_eval_vars_reach_global: bool,
-    entry_is_eval_code: bool,
-    entry_global_declarations_prevalidated: bool,
-    entry_suspend_on_module_await: bool,
-    entry_initial_pc: usize,
-    entry_prepared_frame: ?*const PreparedEntryFrame,
-) HostError!core.JSValue {
+fn runWithArgsState(env: CallEnv) HostError!core.JSValue {
 
     // Ordinary canonical entry always has the real function object built by
     // closure2. Generator/async execution may instead carry its explicit
     // resident state, and legacy module/fixture adapters keep their W1e seam.
-    if (entry_function.legacyBytecodeAdapter() == null and
-        entry_generator_state == null and
-        current_function_value.is(.undefined_value)) return error.InvalidBytecode;
+    if (env.function.legacyBytecodeAdapter() == null and
+        env.generator_state == null and
+        env.current_function_value.is(.undefined_value)) return error.InvalidBytecode;
 
-    // qjs js_closure2 PASS1 (quickjs.c:17280-17296): validate the complete
+    // qjs js_closure2 PASS1: validate the complete
     // GLOBAL_DECL table before creating a single declaration cell. Direct eval
     // already ran this pass before constructing its caller-capture array.
-    if (entry_function.isGlobalVar() and !entry_global_declarations_prevalidated) {
-        try vm_property_globals.validateGlobalVarDeclarations(ctx, global, entry_function, entry_is_eval_code);
+    if (env.function.isGlobalVar() and !env.global_declarations_prevalidated) {
+        try vm_property_globals.validateGlobalVarDeclarations(env.ctx, env.global, env.function, env.is_eval_code);
     }
 
-    // Frame storage (locals/args/var_refs) may be carved from the VM stack
+    // Frame storage (locals/env.args/env.var_refs) may be carved from the VM stack
     // arena; reclaim the watermark after the frame has released its values.
-    const frame_arena_mark = ctx.runtime.vm_stack.mark();
-    defer ctx.runtime.vm_stack.restore(frame_arena_mark);
+    const frame_arena_mark = env.ctx.runtime.vm_stack.mark();
+    defer env.ctx.runtime.vm_stack.restore(frame_arena_mark);
 
-    const resident_binding_shell = entry_generator_state != null;
+    const resident_binding_shell = env.generator_state != null;
     var frame_storage = if (resident_binding_shell) blk: {
         // Generator/async functions are not constructors; arrow new.target is
         // an ordinary capture. A resident shell therefore never needs the cold
         // new-target slot moved out of the hot Frame header.
-        std.debug.assert(new_target_value.is(.undefined_value));
+        std.debug.assert(env.new_target_value.is(.undefined_value));
         break :blk frame_mod.Frame.initResidentExecution(
-            entry_function,
-            initial_this_value,
-            current_function_value,
-            entry_generator_state.?.generatorActualArgCount(),
+            env.function,
+            env.initial_this_value,
+            env.current_function_value,
+            env.generator_state.?.generatorActualArgCount(),
         );
-    } else frame_mod.Frame.init(entry_function);
+    } else frame_mod.Frame.init(env.function);
     defer {
         // This collection fires while engine native frames are live — most
         // importantly while the invocation's RETURN VALUE is held only by
@@ -474,40 +394,40 @@ fn runWithArgsState(
         // constructed Map was destroyFromHeader'd by this very collection).
         // Runtime teardown and host-explicit cycle removal keep the
         // declared-roots contract; this exit seam is the engine-active case.
-        if (break_var_ref_cycles_on_exit)
-            _ = ctx.runtime.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {};
+        if (env.break_var_ref_cycles_on_exit)
+            _ = env.ctx.runtime.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {};
     }
     defer {
-        if (entry_generator_state == null or !frame_storage.isEmptyResidentExecutionShell()) {
-            frame_storage.deinit(&ctx.runtime.memory, ctx.runtime);
+        if (env.generator_state == null or !frame_storage.isEmptyResidentExecutionShell()) {
+            frame_storage.deinit(&env.ctx.runtime.memory, env.ctx.runtime);
         }
     }
     var catch_target_storage: ?usize = null;
     const l0_state = inline_calls.L0State{
         .level = .{
             .frame = &frame_storage,
-            .stack = entry_stack,
+            .stack = env.stack,
             .catch_target = &catch_target_storage,
         },
-        .eval_global_var_bindings = entry_eval_global_var_bindings,
-        .direct_eval_vars_reach_global = entry_direct_eval_vars_reach_global,
-        .is_eval_code = entry_is_eval_code,
-        .strict_unresolved_get_var = entry_strict_unresolved_get_var,
-        .generator_state = entry_generator_state,
-        .stop_on_yield = entry_stop_on_yield,
-        .stop_before_pc = entry_stop_before_pc,
-        .suspend_on_module_await = entry_suspend_on_module_await,
+        .eval_global_var_bindings = env.eval_global_var_bindings,
+        .direct_eval_vars_reach_global = env.direct_eval_vars_reach_global,
+        .is_eval_code = env.is_eval_code,
+        .strict_unresolved_get_var = env.strict_unresolved_get_var,
+        .generator_state = env.generator_state,
+        .stop_on_yield = env.stop_on_yield,
+        .stop_before_pc = env.stop_before_pc,
+        .suspend_on_module_await = env.suspend_on_module_await,
     };
     // Construct Machine at its final address before publishing either borrowed
     // execution authority. Machine must not move until both scopes are gone.
-    var machine = inline_calls.Machine.init(ctx, output, global, &l0_state);
+    var machine = inline_calls.Machine.init(env.ctx, env.output, env.global, &l0_state);
     var root_backtrace_view = inline_calls.MachineBacktraceView.root(&machine);
     var active_backtrace_frame = core.ActiveBacktraceFrame{
         .data = &root_backtrace_view,
         .resolver = inline_calls.resolveMachineBacktraceView,
     };
-    ctx.pushActiveBacktraceFrame(&active_backtrace_frame);
-    defer ctx.popActiveBacktraceFrame(&active_backtrace_frame);
+    env.ctx.pushActiveBacktraceFrame(&active_backtrace_frame);
+    defer env.ctx.popActiveBacktraceFrame(&active_backtrace_frame);
 
     var invocation = inline_calls.ActiveInvocation{
         .machine = &machine,
@@ -515,27 +435,27 @@ fn runWithArgsState(
     };
     if (comptime core.runtime.value_root_frames_enabled) {
         invocation.header = .{ .traceRoots = active_invocation_trace.traceRoots };
-        invocation.previous = inline_calls.activeInvocation(ctx.runtime);
+        invocation.previous = inline_calls.activeInvocation(env.ctx.runtime);
     }
-    const previous_invocation = ctx.runtime.active_invocation;
-    ctx.runtime.active_invocation = &invocation;
-    defer ctx.runtime.active_invocation = previous_invocation;
+    const previous_invocation = env.ctx.runtime.active_invocation;
+    env.ctx.runtime.active_invocation = &invocation;
+    defer env.ctx.runtime.active_invocation = previous_invocation;
     // Register last so inline frames are drained while both the invocation
     // authority and its backtrace view remain observable.
     defer machine.deinit();
 
-    if (entry_generator_state == null) {
-        try frame_storage.initCallBindings(ctx.runtime, .{
-            .initial_this_value = initial_this_value,
-            .current_function_value = current_function_value,
-            .new_target_value = new_target_value,
+    if (env.generator_state == null) {
+        try frame_storage.initCallBindings(env.ctx.runtime, .{
+            .initial_this_value = env.initial_this_value,
+            .current_function_value = env.current_function_value,
+            .new_target_value = env.new_target_value,
         });
     }
     // A generator/async resume with a resident frame immediately frees any slab built
     // here and swaps in the generator's PRESERVED buffers (vm_gen_async.zig), so
-    // allocating + initializing a throwaway slab + re-duping args + rebuilding var_refs is
+    // allocating + initializing a throwaway slab + re-duping env.args + rebuilding env.var_refs is
     // pure waste — qjs allocates the generator frame ONCE at creation and resumes on it
-    // (JS_CALL_FLAG_GENERATOR early-out, quickjs.c:17790). `has_frame`, not pc, is the
+    // (JS_CALL_FLAG_GENERATOR early-out, quickjs.c). `has_frame`, not pc, is the
     // discriminator: internal marker-less generators have a valid resident frame at pc 0.
     //
     // The unmapped `arguments` snapshot is also creation-only. If the bytecode can observe
@@ -543,33 +463,33 @@ fn runWithArgsState(
     // parks it in the hidden arguments local, which is part of the preserved locals window.
     // Rebuilding `original_args` on every started resume therefore created a second snapshot
     // only for resumeExecutionStateRaw to release it immediately. The preserved buffers cover
-    // locals/args/var_refs for every started resume; the only remaining initArguments output
+    // locals/env.args/env.var_refs for every started resume; the only remaining initArguments env.output
     // is the mapped-arguments count (frame.args is already the preserved buffer), which we
-    // set directly — identical to what initArguments would store (`actual_arg_count = args.len`).
-    const skip_resume_slab = if (entry_generator_state) |gen| gen.generatorExecutionState().has_frame else false;
+    // set directly — identical to what initArguments would store (`actual_arg_count = env.args.len`).
+    const skip_resume_slab = if (env.generator_state) |gen| gen.generatorExecutionState().has_frame else false;
     if (!skip_resume_slab) {
-        try initFreshEntryFrame(ctx, entry_stack, entry_function, &frame_storage, global, args, var_refs, entry_generator_state, entry_prepared_frame);
+        try initFreshEntryFrame(env.ctx, env.stack, env.function, &frame_storage, env.global, env.args, env.var_refs, env.generator_state, env.prepared_entry_frame);
     }
-    if (entry_generator_state == null and entry_function.isGlobalVar() and !entry_global_declarations_prevalidated) {
-        try vm_property_globals.instantiateGlobalVarDeclarationCells(ctx, global, entry_function, &frame_storage, entry_is_eval_code);
+    if (env.generator_state == null and env.function.isGlobalVar() and !env.global_declarations_prevalidated) {
+        try vm_property_globals.instantiateGlobalVarDeclarationCells(env.ctx, env.global, env.function, &frame_storage, env.is_eval_code);
     }
 
-    frame_storage.pc = entry_initial_pc;
-    const resume_state = try vm_gen_async.resumeExecutionState(ctx, entry_stack, entry_function, &frame_storage, entry_generator_state, resume_value);
+    frame_storage.pc = env.initial_pc;
+    const resume_state = try vm_gen_async.resumeExecutionState(env.ctx, env.stack, env.function, &frame_storage, env.generator_state, env.resume_value);
     // If execution completes or fails, clear the payload's non-owning aliases
     // before the live Frame/Stack defers release their buffers. A yield/await
     // republished ownership already, so this is a no-op on suspension.
-    defer vm_gen_async.finishExecutionStateRun(ctx.runtime, entry_stack, &frame_storage, entry_generator_state);
+    defer vm_gen_async.finishExecutionStateRun(env.ctx.runtime, env.stack, &frame_storage, env.generator_state);
     // A parked frame already passed this full-capacity guard on its creation
     // run, and GeneratorExecutionState retains (or grows) that same backing.
     // QuickJS likewise resumes its preallocated stack directly.
-    if (!skip_resume_slab) try reserveEntryFrameCapacity(entry_stack, entry_function);
-    catch_target_storage = try vm_gen_async.completeResumeState(ctx, output, global, entry_stack, entry_function, &frame_storage, resume_state, resume_value);
+    if (!skip_resume_slab) try reserveEntryFrameCapacity(env.stack, env.function);
+    catch_target_storage = try vm_gen_async.completeResumeState(env.ctx, env.output, env.global, env.stack, env.function, &frame_storage, resume_state, env.resume_value);
     // Markerless internal generator bytecode has no OP_initial_yield boundary to
     // execute toward. Park its fully initialized frame before dispatch at pc 0.
-    if (entry_stop_before_pc) |stop_pc| {
+    if (env.stop_before_pc) |stop_pc| {
         if (frame_storage.pc == stop_pc) {
-            if (try vm_gen_async.stopBeforePc(ctx, entry_stack, &frame_storage, entry_generator_state, catch_target_storage, stop_pc)) |stopped| return stopped;
+            if (try vm_gen_async.stopBeforePc(env.ctx, env.stack, &frame_storage, env.generator_state, catch_target_storage, stop_pc)) |stopped| return stopped;
         }
     }
 
@@ -579,7 +499,7 @@ fn runWithArgsState(
             // handler. Unwind suspended inline frames (mirroring how the
             // error would propagate through the recursive call chain) and
             // resume the loop when an outer frame catches it.
-            if (machine.depth > 0 and try machine.unwindForError(global, err)) continue;
+            if (machine.depth > 0 and try machine.unwindForError(env.global, err)) continue;
             return err;
         };
         return machine.vm.return_value;
@@ -626,53 +546,31 @@ noinline fn initFreshEntryFrame(
         @as(usize, entry_function.stack_size) + 1
     else
         0;
+    const slab_layout: frame_mod.SlabLayout = .{
+        .args = frame_arg_count,
+        .original_args = frame_mod.originalArgCount(args.len, need_original_args),
+        .locals = entry_function.var_count,
+        .var_refs = frame_mod.frameVarRefStorageCount(entry_function, var_refs),
+        .open_var_refs = open_var_ref_count,
+    };
     const slab = if (entry_prepared_frame) |prepared| blk: {
         frame_storage.installResidentStorage(prepared.slab.storage);
         break :blk prepared.slab;
     } else if (resident_frame_storage.len != 0) blk: {
-        const windows = frame_mod.FrameSlab.partitionStorage(
-            resident_frame_storage,
-            frame_arg_count,
-            frame_mod.originalArgCount(args.len, need_original_args),
-            entry_function.var_count,
-            0,
-            frame_mod.frameVarRefStorageCount(entry_function, var_refs),
-            open_var_ref_count,
-        );
+        const windows = frame_mod.FrameSlab.partition(resident_frame_storage, slab_layout);
         frame_storage.installResidentStorage(resident_frame_storage);
         break :blk windows;
     } else if (frame_arena) |arena| blk: {
-        if (frame_mod.FrameSlab.carve(
-            &ctx.runtime.memory,
-            arena,
-            frame_arg_count,
-            frame_mod.originalArgCount(args.len, need_original_args),
-            entry_function.var_count,
-            stack_count,
-            frame_mod.frameVarRefStorageCount(entry_function, var_refs),
-            open_var_ref_count,
-        )) |windows| break :blk windows;
-        const heap_windows = try frame_mod.FrameSlab.allocHeap(
-            &ctx.runtime.memory,
-            frame_arg_count,
-            frame_mod.originalArgCount(args.len, need_original_args),
-            entry_function.var_count,
-            0,
-            frame_mod.frameVarRefStorageCount(entry_function, var_refs),
-            open_var_ref_count,
-        );
+        // The arena slab carries the operand stack; a heap fallback keeps it
+        // separate (`.stack = 0`), as in the arena-less entry below.
+        var arena_layout = slab_layout;
+        arena_layout.stack = stack_count;
+        if (frame_mod.FrameSlab.carve(&ctx.runtime.memory, arena, arena_layout)) |windows| break :blk windows;
+        const heap_windows = try frame_mod.FrameSlab.allocHeap(&ctx.runtime.memory, slab_layout);
         frame_storage.installOwnedStorage(heap_windows.storage);
         break :blk heap_windows;
     } else blk: {
-        const heap_windows = try frame_mod.FrameSlab.allocHeap(
-            &ctx.runtime.memory,
-            frame_arg_count,
-            frame_mod.originalArgCount(args.len, need_original_args),
-            entry_function.var_count,
-            0,
-            frame_mod.frameVarRefStorageCount(entry_function, var_refs),
-            open_var_ref_count,
-        );
+        const heap_windows = try frame_mod.FrameSlab.allocHeap(&ctx.runtime.memory, slab_layout);
         frame_storage.installOwnedStorage(heap_windows.storage);
         break :blk heap_windows;
     };

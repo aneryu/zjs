@@ -5,7 +5,7 @@
 //! the core Object contract states. Property-key conversion owns its temporary
 //! atom and byte buffer locally. Observable VM/proxy dispatch remains in the
 //! higher property modules; these helpers map to QuickJS's generic property
-//! operations around quickjs.c:8210-9172 and 9663 onward.
+//! operations around quickjs.c.
 
 const std = @import("std");
 const core = @import("../core/root.zig");
@@ -21,7 +21,7 @@ pub fn setProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom
 }
 
 pub fn defineDataProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, value: core.JSValue) !void {
-    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, true, true, true));
+    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, .all));
 }
 
 pub fn deleteProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) bool {

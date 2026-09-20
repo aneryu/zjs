@@ -6,7 +6,7 @@
 //! exec modules. Preserve the dedicated hot probes and fused dispatch arms:
 //! they discharge representation guards before raw slot access rather than
 //! sharing cold fallback code. QuickJS coordinates include dense array reads
-//! at quickjs.c:9047-9049 and integer-atom lookup at quickjs.c:12005.
+//! at quickjs.c and integer-atom lookup at quickjs.c.
 
 const std = @import("std");
 const bytecode = @import("../bytecode.zig");
@@ -147,8 +147,7 @@ pub fn canFuseGlobalDataWrite(
 
 pub fn frameHasVarRefBinding(function: *const bytecode.FunctionBytecode, frame: *const frame_mod.Frame, atom_id: core.Atom) bool {
     const count = @min(frame.var_refs.len, function.varRefNamesLen());
-    var idx: usize = 0;
-    while (idx < count) : (idx += 1) {
+    for (0..count) |idx| {
         const name = function.varRefName(idx);
         if (name == atom_id) return true;
     }
@@ -165,7 +164,7 @@ pub fn fastDenseArrayElementValue(value: core.JSValue, key: core.JSValue) ?core.
 
 /// qjs's JS_GetPropertyValue switches on class_id, and JS_CLASS_MAPPED_ARGUMENTS
 /// sits right beside the ARRAY/ARGUMENTS arms with its own cell-dereferencing
-/// read (quickjs.c:9047-9049). `fastDenseArrayElementValue` covers ARRAY and
+/// read. `fastDenseArrayElementValue` covers ARRAY and
 /// UNMAPPED arguments — both store JSValues inline — while a mapped arguments
 /// object stores JSVarRef pointers in the same union, so it needs a separate arm
 /// rather than a widened bounds check.
@@ -185,7 +184,7 @@ pub noinline fn fastMappedArgumentsElementValue(value: core.JSValue, key: core.J
 /// Own integer-element read for a NON-fast (sparse/slow) Array — the leg after
 /// fastDenseArrayElementValue misses. qjs JS_GetPropertyValue's JS_CLASS_ARRAY
 /// arm, when `idx >= u.array.count`, routes to JS_GetPropertyInternal with the
-/// int atom (quickjs.c:12005 / __JS_AtomFromUInt32); a slow array holds its
+/// int atom (quickjs.c / __JS_AtomFromUInt32); a slow array holds its
 /// elements as ordinary int-atom shape properties, so the overwhelmingly common
 /// case (sparse-array element, crypto BigInteger digit) is an own plain-data
 /// property that find_own_property resolves without a prototype walk. Read it

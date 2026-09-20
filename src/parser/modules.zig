@@ -40,7 +40,7 @@ const ModuleExportSpec = struct {
 };
 
 /// Parse import statement
-/// Mirrors `js_parse_import` in quickjs.c:31312
+/// Mirrors `js_parse_import` in quickjs.c
 pub fn parseImport(s: *State) Error!void {
     try s.advance();
     var default_local_name: ?Atom = null;
@@ -322,7 +322,7 @@ fn freeModuleExportSpecs(s: *State, exports: *std.ArrayList(ModuleExportSpec)) v
 }
 
 /// Parse export statement
-/// Mirrors `js_parse_export` in quickjs.c:31090
+/// Mirrors `js_parse_export` in quickjs.c
 pub fn parseExport(s: *State) Error!void {
     try s.advance();
 
@@ -596,7 +596,7 @@ fn hasExportDefaultClassName(s: *State) bool {
 }
 
 /// Parse from clause: from 'module'
-/// Mirrors `js_parse_from_clause` in quickjs.c:31039
+/// Mirrors `js_parse_from_clause` in quickjs.c
 fn parseFromClause(s: *State) Error!u32 {
     // Expect 'from' keyword
     if (!s.isIdent("from")) {
@@ -619,7 +619,7 @@ fn parseFromClause(s: *State) Error!u32 {
 }
 
 /// Parse with clause for import attributes
-/// Mirrors `js_parse_with_clause` in quickjs.c:30950
+/// Mirrors `js_parse_with_clause` in quickjs.c
 fn parseWithClause(s: *State, request_index: u32) Error!void {
     try s.advance();
     try s.expectToken(.lbrace);

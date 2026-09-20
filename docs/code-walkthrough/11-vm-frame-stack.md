@@ -24,19 +24,6 @@
 
 ## `src/exec/frame.zig` 函数
 
-### `FrameSlab.requiredStorageSlots` (`src/exec/frame.zig:35`)
-
-- **签名**：`pub fn requiredStorageSlots( arg_count: usize, original_arg_count: usize, local_count: usize, stack_count: usize, var_ref_count: usize, open_var_ref_count: usize, ) !usize`。
-- **作用**：算出一帧全部窗口所需的 JSValue 槽数——四段值槽加上两段指针尾按 `@sizeOf(JSValue)` 向上取整的槽数。
-- **实现**：用 `math.add/mul/divCeil` 算 JSValue 槽数：`args+original_args+locals+stack` 的值槽，加上 `var_refs`/`open_var_refs` 指针字节按 `@sizeOf(JSValue)` 向上取整出的槽数。任一步溢出返回 error。
-- **所有权 / 错误 / 调用**：错误：error union，由直接调用方处理。 调用：`FrameSlab.allocHeap`，以及 `object_ops.zig` 预算嵌套帧 slab 时。
-
-### `FrameSlab.partitionStorage` (`src/exec/frame.zig:56`)
-
-- **签名**：`pub fn partitionStorage( storage: []JSValue, arg_count: usize, original_arg_count: usize, local_count: usize, stack_count: usize, var_ref_count: usize, open_var_ref_count: usize, ) FrameSlab`。
-- **作用**：把调用方给的整块 backing 切成 FrameSlab 的六个 typed 窗口（backing 仍归调用方）。
-- **实现**：先断言 `storage.len` 正好等于值槽 + 指针尾槽，再按 `[args | original_args | locals | stack | var_refs | open_var_refs]` 顺序切 typed 窗口（指针两段由 `sliceAsBytes`/`bytesAsSlice` 重解释）；open_var_refs `@memset(null)`。调用方仍拥有 backing，Frame 只释放窗口里的值/cell。
-- **所有权 / 错误 / 调用**：错误：无（长度不符只在 Debug/Safe `assert`）。 调用：`FrameSlab.allocHeap`、`zjs_vm.initFreshEntryFrame` 切 generator 驻留 storage，以及 `object_ops.zig` 的预切帧。
 
 ### `FrameSlab.carve` (`src/exec/frame.zig:103`)
 
@@ -49,7 +36,7 @@
 
 - **签名**：`pub fn allocHeap( account: *memory.MemoryAccount, arg_count: usize, original_arg_count: usize, local_count: usize, stack_count: usize, var_ref_count: usize, open_var_ref_count: usize, ) !FrameSlab`。
 - **作用**：按所需槽数从 `MemoryAccount` 堆分配 backing，再切成与 `carve` 同形的窗口。
-- **实现**：`requiredStorageSlots` 后 `account.alloc`；0 槽直接返回空 slab；`errdefer` free，最后用 `partitionStorage` 切成同样的窗口。
+- **实现**：`layout.totalSlots()` 后 `account.alloc`；0 槽直接返回空 slab；`errdefer` free，最后用 `partition` 切成同样的窗口。
 - **所有权 / 错误 / 调用**：错误：error union，由直接调用方处理。 分配：`MemoryAccount`；整块 backing 由 Frame 的 `installOwnedStorage` 接手，`deinit`/`releaseOwnedStorage` 才 free。 调用：`zjs_vm.initFreshEntryFrame`（arena 切不动或没有 arena 时）与 `inline_calls.zig` 的同机帧构造。
 
 ### `argumentsNeedsOriginalSnapshot` (`src/exec/frame.zig:219`)

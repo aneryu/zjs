@@ -1,5 +1,6 @@
 //! Owned execution state parked while generators and async functions suspend.
 
+const gc_visit = @import("gc_visit.zig");
 const payloads = @import("object_payloads.zig");
 const runtime_mod = @import("runtime.zig");
 const var_ref_mod = @import("var_ref.zig");
@@ -8,20 +9,25 @@ const JSValue = @import("value.zig").JSValue;
 const std = @import("std");
 
 const closeOpenVarRefCellSlots = payloads.closeOpenVarRefCellSlots;
-const callVisitValue = payloads.callVisitValue;
-const destroyOptionalValue = payloads.destroyOptionalValue;
-const traceOptValue = payloads.traceOptValue;
-const destroyOwnedValue = payloads.destroyOwnedValue;
-const destroyValueSlice = payloads.destroyValueSlice;
-const destroyValueSliceValuesOnly = payloads.destroyValueSliceValuesOnly;
 const destroyValueSliceWithCapacity = payloads.destroyValueSliceWithCapacity;
-const clearVarRefCellSlice = payloads.clearVarRefCellSlice;
+
+pub const ResumeCompletion = enum(i32) { next = 0, return_ = 1, throw = 2 };
+
+/// Mirrors JSAsyncGeneratorStateEnum.
+pub const AsyncGeneratorState = enum(u8) {
+    suspended_start = 0,
+    suspended_yield = 1,
+    suspended_yield_star = 2,
+    executing = 3,
+    awaiting_return = 4,
+    completed = 5,
+};
 
 /// One queued async-generator request (mirrors qjs JSAsyncGeneratorRequest,
-/// quickjs.c:21354): completion type (GEN_MAGIC next=0 / return=1 / throw=2),
+/// quickjs.c): completion type (GEN_MAGIC next=0 / return=1 / throw=2),
 /// the completion argument, and the request's promise capability.
 pub const AsyncGeneratorRequest = struct {
-    completion_type: i32,
+    completion: ResumeCompletion,
     result: JSValue,
     promise: JSValue,
     resolve: JSValue,
@@ -30,7 +36,7 @@ pub const AsyncGeneratorRequest = struct {
 
 /// How a generator/async frame last suspended (zjs adaptation of qjs
 /// FUNC_RET_YIELD / FUNC_RET_YIELD_STAR / FUNC_RET_AWAIT return codes,
-/// quickjs.c:17735-17738): written by the save sites in vm_gen_async.zig,
+/// quickjs.c): written by the save sites in vm_gen_async.zig,
 /// read by the async-generator driver to discriminate the suspension.
 pub const GeneratorSuspendKind = enum(u8) {
     none = 0,
@@ -102,36 +108,23 @@ pub const SuspendedFrameStorage = struct {
     pub fn deinit(self: *SuspendedFrameStorage, rt: *JSRuntime) void {
         const owned = self.*;
         self.* = .{};
-        var locals = owned.locals;
-        var args = owned.args;
-        var var_refs = owned.var_refs;
         // Close while the aliased local/argument slots are still live, then
-        // release their values and finally the shared slab backing.
+        // release the backing: one shared slab, or the two separate windows.
         closeOpenVarRefCellSlots(rt, owned.open_var_refs);
         if (owned.storage.len != 0) {
-            destroyValueSliceValuesOnly(rt, &locals);
-            destroyValueSliceValuesOnly(rt, &args);
-            clearVarRefCellSlice(&var_refs);
             rt.memory.free(JSValue, owned.storage);
             return;
         }
-        destroyValueSlice(rt, &locals);
-        destroyValueSlice(rt, &args);
-        clearVarRefCellSlice(&var_refs);
+        if (owned.locals.len != 0) rt.memory.free(JSValue, owned.locals);
+        if (owned.args.len != 0) rt.memory.free(JSValue, owned.args);
     }
 
-    /// Release the live window contents while leaving the backing bytes to the
+    /// Close the live window while leaving the backing bytes to the
     /// surrounding GeneratorExecutionState FAM allocation.
     pub fn deinitResident(self: *SuspendedFrameStorage, rt: *JSRuntime) void {
         const owned = self.*;
         self.* = .{};
-        var locals = owned.locals;
-        var args = owned.args;
-        var var_refs = owned.var_refs;
         closeOpenVarRefCellSlots(rt, owned.open_var_refs);
-        destroyValueSliceValuesOnly(rt, &locals);
-        destroyValueSliceValuesOnly(rt, &args);
-        clearVarRefCellSlice(&var_refs);
     }
 
     pub fn isEmpty(self: *const SuspendedFrameStorage) bool {
@@ -400,17 +393,12 @@ pub const GeneratorExecutionState = struct {
         // and this_val. Keep the same ownership order; yield-star's separate
         // zjs root belongs to this execution record as well.
         if (!self.suspended.running_aliases and self.stackUsesCombinedStorage()) {
-            var live_values = self.suspended.storage.stack.values;
-            destroyValueSliceValuesOnly(rt, &live_values);
             self.suspended.storage.stack = .{};
         }
         if (!self.suspended.running_aliases and self.frameUsesCombinedStorage()) {
             self.suspended.storage.frame.deinitResident(rt);
         }
         self.suspended.deinit(rt);
-        destroyOwnedValue(rt, &self.current_function);
-        destroyOwnedValue(rt, &self.this_value);
-        destroyOwnedValue(rt, &self.yield_star_iterator);
         self.* = .{};
     }
 };
@@ -472,13 +460,14 @@ pub const GeneratorPayload = struct {
     execution: ?*GeneratorExecutionState = null,
     async_promise: ?JSValue = null,
     /// Async-generator request queue (mirrors JSAsyncGeneratorData.queue,
-    /// quickjs.c:21362): FIFO of pending next/return/throw requests.
-    async_queue: []AsyncGeneratorRequest = &.{},
-    async_queue_capacity: usize = 0,
-    resume_completion_type: i32 = 0,
-    /// Async-generator state machine (mirrors JSAsyncGeneratorStateEnum,
-    /// quickjs.c:21345). Only meaningful for JS_CLASS_ASYNC_GENERATOR objects.
-    async_state: u8 = 0,
+    /// quickjs.c): FIFO of pending next/return/throw requests.
+    async_queue: std.ArrayListUnmanaged(AsyncGeneratorRequest) = .empty,
+    /// How the pending resume completes; the value is also what a resumed
+    /// `yield` sees on the stack (qjs GEN_MAGIC_NEXT/RETURN/THROW).
+    resume_completion: ResumeCompletion = .next,
+    /// Async-generator state machine. Only meaningful for async generator
+    /// objects.
+    async_state: AsyncGeneratorState = .suspended_start,
     /// GeneratorSuspendKind of the last suspension.
     suspend_kind: u8 = 0,
     done: bool = false,
@@ -489,45 +478,40 @@ pub const GeneratorPayload = struct {
 
     pub fn destroy(self: *GeneratorPayload, rt: *JSRuntime) void {
         destroyGeneratorExecutionState(rt, &self.execution);
-        destroyOptionalValue(rt, &self.async_promise);
-        if (self.async_queue_capacity != 0) {
-            rt.memory.free(AsyncGeneratorRequest, self.async_queue.ptr[0..self.async_queue_capacity]);
-        }
-        self.async_queue = &.{};
-        self.async_queue_capacity = 0;
+        self.async_queue.deinit(rt.memory.persistent_allocator);
         self.* = .{};
     }
 
     pub fn traceChildEdges(self: *GeneratorPayload, visitor: anytype) !void {
         if (self.execution) |execution| {
-            try callVisitValue(visitor, &execution.this_value);
+            try gc_visit.value(visitor, &execution.this_value);
             if (!execution.suspended.running_aliases) {
-                for (execution.suspended.storage.stack.values) |*stored| try callVisitValue(visitor, stored);
-                for (execution.suspended.storage.frame.locals) |*stored| try callVisitValue(visitor, stored);
-                for (execution.suspended.storage.frame.args) |*stored| try callVisitValue(visitor, stored);
+                for (execution.suspended.storage.stack.values) |*stored| try gc_visit.value(visitor, stored);
+                for (execution.suspended.storage.frame.locals) |*stored| try gc_visit.value(visitor, stored);
+                for (execution.suspended.storage.frame.args) |*stored| try gc_visit.value(visitor, stored);
                 // qjs marks the resident JSAsyncFunctionState frame's var_refs;
                 // there is no second generator-payload capture array.
                 for (execution.suspended.storage.frame.var_refs) |cell| {
                     var cell_value = cell.valueRef();
-                    try callVisitValue(visitor, &cell_value);
+                    try gc_visit.value(visitor, &cell_value);
                 }
                 for (execution.suspended.storage.frame.open_var_refs) |maybe_cell| {
                     const cell = maybe_cell orelse continue;
                     var cell_value = cell.valueRef();
-                    try callVisitValue(visitor, &cell_value);
+                    try gc_visit.value(visitor, &cell_value);
                 }
             }
-            try callVisitValue(visitor, &execution.current_function);
-            try callVisitValue(visitor, &execution.yield_star_iterator);
+            try gc_visit.value(visitor, &execution.current_function);
+            try gc_visit.value(visitor, &execution.yield_star_iterator);
         }
-        try traceOptValue(visitor, &self.async_promise);
+        try gc_visit.optionalValue(visitor, &self.async_promise);
         // Async-generator request queue values (mirrors
-        // js_async_generator_mark, quickjs.c:21400-21418).
-        for (self.async_queue) |*req| {
-            try callVisitValue(visitor, &req.result);
-            try callVisitValue(visitor, &req.promise);
-            try callVisitValue(visitor, &req.resolve);
-            try callVisitValue(visitor, &req.reject);
+        // js_async_generator_mark, quickjs.c).
+        for (self.async_queue.items) |*req| {
+            try gc_visit.value(visitor, &req.result);
+            try gc_visit.value(visitor, &req.promise);
+            try gc_visit.value(visitor, &req.resolve);
+            try gc_visit.value(visitor, &req.reject);
         }
     }
 };

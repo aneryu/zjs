@@ -132,7 +132,7 @@ pub fn constructBuiltinSuperConstructor(
     if (std.mem.eql(u8, name, "String")) return try stringConstructWithPrototype(ctx, output, global, prototype.object(), args, caller_function, caller_frame);
     if (std.mem.eql(u8, name, "Number")) {
         if (args.len >= 1 and args[0].is(.symbol)) return error.TypeError;
-        // qjs js_number_constructor (quickjs.c:44822) uses JS_ToNumeric
+        // qjs js_number_constructor uses JS_ToNumeric
         // (qjs:13030 → JS_ToNumberHintFree TON_FLAG_NUMERIC, qjs:12946),
         // which ToPrimitive's objects (qjs:12975-12979) before ToNumber.
         const primitive = if (args.len >= 1) blk: {

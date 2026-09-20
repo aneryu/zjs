@@ -400,27 +400,27 @@ pub const builtin_method_ids = struct {
             to_string_tag = 465,
         };
 
-        /// qjs `js_uint8array_funcs` (quickjs.c:59820): the Uint8Array
+        /// qjs `js_uint8array_funcs`: the Uint8Array
         /// constructor's base64/hex decoders. Its own JSCFunctionListEntry
         /// array, so it takes its own id block in the shared `.buffer` domain,
         /// exactly like the ArrayBuffer / SharedArrayBuffer / DataView /
         /// %TypedArray% lists already do.
         pub const Uint8ArrayStaticMethod = enum(u32) {
-            /// qjs `js_uint8array_from_base64` (quickjs.c:59553).
+            /// qjs `js_uint8array_from_base64`.
             from_base64 = 501,
-            /// qjs `js_uint8array_from_hex` (quickjs.c:59610).
+            /// qjs `js_uint8array_from_hex`.
             from_hex = 502,
         };
 
-        /// qjs `js_uint8array_proto_funcs` (quickjs.c:59812).
+        /// qjs `js_uint8array_proto_funcs`.
         pub const Uint8ArrayPrototypeMethod = enum(u32) {
-            /// qjs `js_uint8array_to_base64` (quickjs.c:59467).
+            /// qjs `js_uint8array_to_base64`.
             to_base64 = 521,
-            /// qjs `js_uint8array_to_hex` (quickjs.c:59525).
+            /// qjs `js_uint8array_to_hex`.
             to_hex = 522,
-            /// qjs `js_uint8array_set_from_base64` (quickjs.c:59666).
+            /// qjs `js_uint8array_set_from_base64`.
             set_from_base64 = 523,
-            /// qjs `js_uint8array_set_from_hex` (quickjs.c:59723).
+            /// qjs `js_uint8array_set_from_hex`.
             set_from_hex = 524,
         };
     };
@@ -554,6 +554,20 @@ pub const builtin_method_ids = struct {
             // field args.
             set_year_with_captured_ms = 136,
             set_parts_with_captured_ms = 137,
+            // UTC/local twins and the qjs fmt=3 `toLocale*` shapes. QuickJS
+            // gives every name its own JS_CFUNC_MAGIC_DEF entry with an
+            // `is_local` magic bit (js_date_proto_funcs).
+            get_utc_day = 138,
+            set_utc_milliseconds = 139,
+            set_utc_seconds = 140,
+            set_utc_minutes = 141,
+            set_utc_hours = 142,
+            set_utc_date = 143,
+            set_utc_month = 144,
+            set_utc_full_year = 145,
+            to_locale_string = 146,
+            to_locale_date_string = 147,
+            to_locale_time_string = 148,
         };
     };
 
@@ -658,16 +672,16 @@ pub const builtin_method_ids = struct {
 
     /// `.weak_ref` domain: WeakRef.prototype + FinalizationRegistry.prototype.
     /// qjs keeps these in their own JSCFunctionListEntry arrays
-    /// (`js_weakref_proto_funcs` quickjs.c:61197,
-    /// `js_finrec_proto_funcs` quickjs.c:61376), so they share one id
+    /// (`js_weakref_proto_funcs` quickjs.c,
+    /// `js_finrec_proto_funcs` quickjs.c), so they share one id
     /// namespace here rather than borrowing the Map/Set `.collection` ids.
     pub const weak_ref = struct {
         pub const PrototypeMethod = enum(u32) {
-            /// qjs `js_weakref_deref` (quickjs.c:61186).
+            /// qjs `js_weakref_deref`.
             deref = 1,
-            /// qjs `js_finrec_register` (quickjs.c:61318).
+            /// qjs `js_finrec_register`.
             finrec_register = 2,
-            /// qjs `js_finrec_unregister` (quickjs.c:61348).
+            /// qjs `js_finrec_unregister`.
             finrec_unregister = 3,
         };
     };
@@ -686,16 +700,16 @@ pub const builtin_method_ids = struct {
             all_settled_keyed = 10,
         };
 
-        /// qjs `js_promise_proto_funcs` (quickjs.c:54376). Its own
+        /// qjs `js_promise_proto_funcs`. Its own
         /// JSCFunctionListEntry array, distinct from the statics, so it takes
         /// its own id block in the shared `.promise` domain (same layering the
         /// `.regexp` and `.buffer` domains use for static vs prototype).
         pub const PrototypeMethod = enum(u32) {
-            /// qjs `js_promise_then` (quickjs.c:54246).
+            /// qjs `js_promise_then`.
             then = 101,
-            /// qjs `js_promise_catch` (quickjs.c:54275).
+            /// qjs `js_promise_catch`.
             catch_ = 102,
-            /// qjs `js_promise_finally` (quickjs.c:54329).
+            /// qjs `js_promise_finally`.
             finally = 103,
         };
     };
@@ -825,47 +839,53 @@ pub const builtin_method_id_lookup = struct {
         pub const legacy_match_all_method_id: u32 = 43;
         pub const legacy_replace_method_id: u32 = 44;
 
+        const static_method_names = std.StaticStringMap(StaticMethod).initComptime(.{
+            .{ "fromCharCode", .from_char_code },
+            .{ "fromCodePoint", .from_code_point },
+            .{ "raw", .raw },
+        });
+
         pub fn staticMethodId(name: []const u8) ?u32 {
-            if (std.mem.eql(u8, name, "fromCharCode")) return @intFromEnum(StaticMethod.from_char_code);
-            if (std.mem.eql(u8, name, "fromCodePoint")) return @intFromEnum(StaticMethod.from_code_point);
-            if (std.mem.eql(u8, name, "raw")) return @intFromEnum(StaticMethod.raw);
-            return null;
+            return @intFromEnum(static_method_names.get(name) orelse return null);
         }
 
+        const prototype_method_names = std.StaticStringMap(PrototypeMethod).initComptime(.{
+            .{ "charAt", .char_at },
+            .{ "substring", .substring },
+            .{ "toUpperCase", .to_upper_case },
+            .{ "toLocaleUpperCase", .to_upper_case },
+            .{ "toLowerCase", .to_lower_case },
+            .{ "toLocaleLowerCase", .to_lower_case },
+            .{ "indexOf", .index_of },
+            .{ "includes", .includes },
+            .{ "startsWith", .starts_with },
+            .{ "endsWith", .ends_with },
+            .{ "trim", .trim },
+            .{ "concat", .concat },
+            .{ "lastIndexOf", .last_index_of },
+            .{ "charCodeAt", .char_code_at },
+            .{ "at", .at },
+            .{ "codePointAt", .code_point_at },
+            .{ "slice", .slice },
+            .{ "repeat", .repeat },
+            .{ "padStart", .pad_start },
+            .{ "padEnd", .pad_end },
+            .{ "localeCompare", .locale_compare },
+            .{ "normalize", .normalize },
+            .{ "isWellFormed", .is_well_formed },
+            .{ "toWellFormed", .to_well_formed },
+            .{ "trimStart", .trim_start },
+            .{ "trimEnd", .trim_end },
+            .{ "split", .split },
+            .{ "search", .search },
+            .{ "match", .match },
+            .{ "matchAll", .match_all },
+            .{ "replaceAll", .replace_all },
+            .{ "replace", .replace },
+        });
+
         pub fn prototypeMethodId(name: []const u8) ?u32 {
-            if (std.mem.eql(u8, name, "charAt")) return @intFromEnum(PrototypeMethod.char_at);
-            if (std.mem.eql(u8, name, "substring")) return @intFromEnum(PrototypeMethod.substring);
-            if (std.mem.eql(u8, name, "toUpperCase")) return @intFromEnum(PrototypeMethod.to_upper_case);
-            if (std.mem.eql(u8, name, "toLocaleUpperCase")) return @intFromEnum(PrototypeMethod.to_upper_case);
-            if (std.mem.eql(u8, name, "toLowerCase")) return @intFromEnum(PrototypeMethod.to_lower_case);
-            if (std.mem.eql(u8, name, "toLocaleLowerCase")) return @intFromEnum(PrototypeMethod.to_lower_case);
-            if (std.mem.eql(u8, name, "indexOf")) return @intFromEnum(PrototypeMethod.index_of);
-            if (std.mem.eql(u8, name, "includes")) return @intFromEnum(PrototypeMethod.includes);
-            if (std.mem.eql(u8, name, "startsWith")) return @intFromEnum(PrototypeMethod.starts_with);
-            if (std.mem.eql(u8, name, "endsWith")) return @intFromEnum(PrototypeMethod.ends_with);
-            if (std.mem.eql(u8, name, "trim")) return @intFromEnum(PrototypeMethod.trim);
-            if (std.mem.eql(u8, name, "concat")) return @intFromEnum(PrototypeMethod.concat);
-            if (std.mem.eql(u8, name, "lastIndexOf")) return @intFromEnum(PrototypeMethod.last_index_of);
-            if (std.mem.eql(u8, name, "charCodeAt")) return @intFromEnum(PrototypeMethod.char_code_at);
-            if (std.mem.eql(u8, name, "at")) return @intFromEnum(PrototypeMethod.at);
-            if (std.mem.eql(u8, name, "codePointAt")) return @intFromEnum(PrototypeMethod.code_point_at);
-            if (std.mem.eql(u8, name, "slice")) return @intFromEnum(PrototypeMethod.slice);
-            if (std.mem.eql(u8, name, "repeat")) return @intFromEnum(PrototypeMethod.repeat);
-            if (std.mem.eql(u8, name, "padStart")) return @intFromEnum(PrototypeMethod.pad_start);
-            if (std.mem.eql(u8, name, "padEnd")) return @intFromEnum(PrototypeMethod.pad_end);
-            if (std.mem.eql(u8, name, "localeCompare")) return @intFromEnum(PrototypeMethod.locale_compare);
-            if (std.mem.eql(u8, name, "normalize")) return @intFromEnum(PrototypeMethod.normalize);
-            if (std.mem.eql(u8, name, "isWellFormed")) return @intFromEnum(PrototypeMethod.is_well_formed);
-            if (std.mem.eql(u8, name, "toWellFormed")) return @intFromEnum(PrototypeMethod.to_well_formed);
-            if (std.mem.eql(u8, name, "trimStart")) return @intFromEnum(PrototypeMethod.trim_start);
-            if (std.mem.eql(u8, name, "trimEnd")) return @intFromEnum(PrototypeMethod.trim_end);
-            if (std.mem.eql(u8, name, "split")) return @intFromEnum(PrototypeMethod.split);
-            if (std.mem.eql(u8, name, "search")) return @intFromEnum(PrototypeMethod.search);
-            if (std.mem.eql(u8, name, "match")) return @intFromEnum(PrototypeMethod.match);
-            if (std.mem.eql(u8, name, "matchAll")) return @intFromEnum(PrototypeMethod.match_all);
-            if (std.mem.eql(u8, name, "replaceAll")) return @intFromEnum(PrototypeMethod.replace_all);
-            if (std.mem.eql(u8, name, "replace")) return @intFromEnum(PrototypeMethod.replace);
-            return null;
+            return @intFromEnum(prototype_method_names.get(name) orelse return null);
         }
 
         pub fn decodePrototypeMethodId(id: u32) ?u32 {
@@ -1110,101 +1130,11 @@ pub const builtin_method_id_lookup = struct {
         const StaticMethod = builtin_method_ids.date.StaticMethod;
         const PrototypeMethod = builtin_method_ids.date.PrototypeMethod;
 
-        pub fn staticMethodId(name: []const u8) ?u32 {
-            if (std.mem.eql(u8, name, "UTC")) return @intFromEnum(StaticMethod.utc);
-            if (std.mem.eql(u8, name, "parse")) return @intFromEnum(StaticMethod.parse);
-            if (std.mem.eql(u8, name, "now")) return @intFromEnum(StaticMethod.now);
+        pub fn staticMethod(name: []const u8) ?StaticMethod {
+            if (std.mem.eql(u8, name, "UTC")) return .utc;
+            if (std.mem.eql(u8, name, "parse")) return .parse;
+            if (std.mem.eql(u8, name, "now")) return .now;
             return null;
-        }
-
-        /// Map a `PrototypeMethod` record id to the legacy decoded method id
-        /// (1..34) the builtin date method bodies switch on. The record handler
-        /// (`exec/date_ops.zig` `dateCall`) uses this before delegating to the
-        /// exec date dispatcher / pure body. Returns null for non-prototype ids
-        /// (statics, constructor, the captured-setter internal selectors).
-        pub fn decodePrototypeMethodId(id: u32) ?u32 {
-            return switch (id) {
-                @intFromEnum(PrototypeMethod.get_time) => 1,
-                @intFromEnum(PrototypeMethod.value_of) => 2,
-                @intFromEnum(PrototypeMethod.get_full_year) => 3,
-                @intFromEnum(PrototypeMethod.get_month) => 4,
-                @intFromEnum(PrototypeMethod.get_date) => 5,
-                @intFromEnum(PrototypeMethod.get_hours) => 6,
-                @intFromEnum(PrototypeMethod.get_minutes) => 7,
-                @intFromEnum(PrototypeMethod.get_seconds) => 8,
-                @intFromEnum(PrototypeMethod.get_milliseconds) => 9,
-                @intFromEnum(PrototypeMethod.to_iso_string) => 10,
-                @intFromEnum(PrototypeMethod.to_json) => 11,
-                @intFromEnum(PrototypeMethod.get_utc_full_year) => 12,
-                @intFromEnum(PrototypeMethod.get_utc_month) => 13,
-                @intFromEnum(PrototypeMethod.get_utc_date) => 14,
-                @intFromEnum(PrototypeMethod.get_utc_hours) => 15,
-                @intFromEnum(PrototypeMethod.get_utc_minutes) => 16,
-                @intFromEnum(PrototypeMethod.get_utc_seconds) => 17,
-                @intFromEnum(PrototypeMethod.get_utc_milliseconds) => 18,
-                @intFromEnum(PrototypeMethod.get_day) => 19,
-                @intFromEnum(PrototypeMethod.to_string) => 20,
-                @intFromEnum(PrototypeMethod.to_utc_string) => 21,
-                @intFromEnum(PrototypeMethod.get_year) => 22,
-                @intFromEnum(PrototypeMethod.set_year) => 23,
-                @intFromEnum(PrototypeMethod.set_time) => 24,
-                @intFromEnum(PrototypeMethod.set_milliseconds) => 25,
-                @intFromEnum(PrototypeMethod.set_seconds) => 26,
-                @intFromEnum(PrototypeMethod.set_minutes) => 27,
-                @intFromEnum(PrototypeMethod.set_hours) => 28,
-                @intFromEnum(PrototypeMethod.set_date) => 29,
-                @intFromEnum(PrototypeMethod.set_month) => 30,
-                @intFromEnum(PrototypeMethod.set_full_year) => 31,
-                @intFromEnum(PrototypeMethod.get_timezone_offset) => 32,
-                @intFromEnum(PrototypeMethod.to_date_string) => 33,
-                @intFromEnum(PrototypeMethod.to_time_string) => 34,
-                else => null,
-            };
-        }
-
-        /// Inverse of `decodePrototypeMethodId`: map a legacy decoded method id
-        /// (1..34) back to its `PrototypeMethod` record id. The exec date glue
-        /// holds decoded ids; it uses this to build the `NativeBuiltinRef` for
-        /// the record-table dispatch (`builtin_dispatch.callInternalRecord`) so
-        /// it routes the body through the table instead of naming it directly.
-        pub fn encodePrototypeMethodId(decoded: u32) ?u32 {
-            return switch (decoded) {
-                1 => @intFromEnum(PrototypeMethod.get_time),
-                2 => @intFromEnum(PrototypeMethod.value_of),
-                3 => @intFromEnum(PrototypeMethod.get_full_year),
-                4 => @intFromEnum(PrototypeMethod.get_month),
-                5 => @intFromEnum(PrototypeMethod.get_date),
-                6 => @intFromEnum(PrototypeMethod.get_hours),
-                7 => @intFromEnum(PrototypeMethod.get_minutes),
-                8 => @intFromEnum(PrototypeMethod.get_seconds),
-                9 => @intFromEnum(PrototypeMethod.get_milliseconds),
-                10 => @intFromEnum(PrototypeMethod.to_iso_string),
-                11 => @intFromEnum(PrototypeMethod.to_json),
-                12 => @intFromEnum(PrototypeMethod.get_utc_full_year),
-                13 => @intFromEnum(PrototypeMethod.get_utc_month),
-                14 => @intFromEnum(PrototypeMethod.get_utc_date),
-                15 => @intFromEnum(PrototypeMethod.get_utc_hours),
-                16 => @intFromEnum(PrototypeMethod.get_utc_minutes),
-                17 => @intFromEnum(PrototypeMethod.get_utc_seconds),
-                18 => @intFromEnum(PrototypeMethod.get_utc_milliseconds),
-                19 => @intFromEnum(PrototypeMethod.get_day),
-                20 => @intFromEnum(PrototypeMethod.to_string),
-                21 => @intFromEnum(PrototypeMethod.to_utc_string),
-                22 => @intFromEnum(PrototypeMethod.get_year),
-                23 => @intFromEnum(PrototypeMethod.set_year),
-                24 => @intFromEnum(PrototypeMethod.set_time),
-                25 => @intFromEnum(PrototypeMethod.set_milliseconds),
-                26 => @intFromEnum(PrototypeMethod.set_seconds),
-                27 => @intFromEnum(PrototypeMethod.set_minutes),
-                28 => @intFromEnum(PrototypeMethod.set_hours),
-                29 => @intFromEnum(PrototypeMethod.set_date),
-                30 => @intFromEnum(PrototypeMethod.set_month),
-                31 => @intFromEnum(PrototypeMethod.set_full_year),
-                32 => @intFromEnum(PrototypeMethod.get_timezone_offset),
-                33 => @intFromEnum(PrototypeMethod.to_date_string),
-                34 => @intFromEnum(PrototypeMethod.to_time_string),
-                else => null,
-            };
         }
     };
 
@@ -1481,7 +1411,7 @@ pub const builtin_method_id_lookup = struct {
     // `bigint.staticUnsignedMode` retired: `BigInt.asIntN`/`asUintN` now carry
     // native builtin ids (`.primitive` domain, BigInt class-tag block) and
     // select their signedness from the record magic, mirroring qjs's
-    // `JS_CFUNC_MAGIC_DEF` entries in `js_bigint_funcs` (quickjs.c:56350).
+    // `JS_CFUNC_MAGIC_DEF` entries in `js_bigint_funcs`.
 };
 
 test "builtin method-id helpers preserve load-bearing id values" {
@@ -1516,8 +1446,8 @@ test "builtin method-id helpers preserve load-bearing id values" {
     try testing.expectEqual(@as(?u32, null), lookup.regexp.accessorMethodId("nope"));
 
     // date.
-    try testing.expectEqual(@as(?u32, null), lookup.date.staticMethodId("nope"));
-    try testing.expect(lookup.date.staticMethodId("now") != null);
+    try testing.expectEqual(@as(?builtin_method_ids.date.StaticMethod, null), lookup.date.staticMethod("nope"));
+    try testing.expectEqual(@as(?builtin_method_ids.date.StaticMethod, .now), lookup.date.staticMethod("now"));
 
     // buffer: record-id round trips. Get/set share one leftover walk;
     // set ids stay get + 20.

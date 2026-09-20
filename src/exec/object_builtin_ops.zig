@@ -4,8 +4,8 @@
 //! `RootedValueCopies` owns only its root/bits buffers, not the copied values.
 //! Generic property, proxy, iterator, and construction algorithms remain with
 //! their owning exec modules behind the alias wall below. The builtin domain
-//! follows `js_object_constructor` and its tables at quickjs.c:40098 and
-//! quickjs.c:41006-41054; per-property source maps stay beside each algorithm.
+//! follows `js_object_constructor` and its tables at quickjs.c and
+//! quickjs.c; per-property source maps stay beside each algorithm.
 
 const core = @import("../core/root.zig");
 const iterator_ops = @import("iterator_ops.zig");
@@ -372,7 +372,7 @@ pub fn literal(rt: *core.JSRuntime, names: []const core.Atom, values: []const co
     errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
 
     for (names, rooted.values) |name, value| {
-        try object.defineOwnProperty(rt, name, core.Descriptor.data(value, true, true, true));
+        try object.defineOwnProperty(rt, name, core.Descriptor.data(value, .all));
     }
     return object.value();
 }
@@ -384,13 +384,8 @@ test "object literal roots direct function bytecode values while creating object
     const key = try rt.internAtom("value");
     const names = [_]core.Atom{key};
 
-    const fb = try core.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
-    var fb_published = false;
-    errdefer if (!fb_published) fb.destroyUnpublishedFixture(rt);
     const symbol_atom = try rt.atoms.newValueSymbol("gc-object-literal-bytecode-symbol");
-    fb.cpoolSlice()[0] = try rt.takeSymbolValue(symbol_atom);
-    fb.publishFixtureNoFail(rt);
-    fb_published = true;
+    const fb = try core.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
 
     const literal_value = core.JSValue.functionBytecode(&fb.header);
     const values = [_]core.JSValue{literal_value};
@@ -495,16 +490,16 @@ pub fn objectAssignCall(
         defer core.Object.freeKeys(ctx.runtime, own_keys);
         if (assignSourceIsOrdinary(source)) {
             // qjs js_object_assign is ONE JS_CopyDataProperties walk with
-            // JS_GPN_ENUM_ONLY (quickjs.c:40654 -> 16920). For an ordinary
+            // JS_GPN_ENUM_ONLY. For an ordinary
             // (non-exotic, non-proxy) source the enumerability is filtered
-            // INLINE during the shape walk (quickjs.c:8628) and no per-key
+            // INLINE during the shape walk and no per-key
             // descriptor is materialized (the ~ENUM_ONLY descriptor branch
-            // at quickjs.c:16942 runs only for the exotic fallback). Mirror
+            // at quickjs.c runs only for the exotic fallback). Mirror
             // that single enumerable-only spec-ordered pass here.
             try objectAssignEnumOnly(ctx, output, global, target_value, source_value, source, own_keys, caller_function, caller_frame);
         } else {
             // Proxy / exotic source: qjs clears JS_GPN_ENUM_ONLY
-            // (quickjs.c:16924) and builds a per-key descriptor in the loop
+            // and builds a per-key descriptor in the loop
             // so the ownKeys + getOwnPropertyDescriptor traps fire in order.
             // Keep the descriptor-driven single pass that preserves the trap
             // sequence (symbol_pass = null = no extra traversal).
@@ -518,7 +513,7 @@ pub fn objectAssignCall(
 /// True when `Object.assign`'s source is an ordinary object — no proxy
 /// handler, no typed-array indexed exotic, no module-namespace bindings,
 /// and no exotic own-keys hook. This mirrors qjs's `!p->is_exotic ||
-/// !em->get_own_property_names` test (quickjs.c:16920-16927): only such a
+/// !em->get_own_property_names` test: only such a
 /// source keeps `JS_GPN_ENUM_ONLY` and reads the enumerable bit straight
 /// off the shape. Everything else falls through to the descriptor path so
 /// its traps/exotic enumeration fire exactly as qjs's ~ENUM_ONLY branch.
@@ -534,8 +529,8 @@ fn assignSourceIsOrdinary(source: *core.Object) bool {
 /// keys (already in spec order: integer indices ascending, then strings in
 /// insertion order, then symbols). Enumerability is filtered ONCE at walk
 /// time — exactly like qjs's JS_GPN_ENUM_ONLY GPN walk, which materializes
-/// only the enumerable keys (quickjs.c:8628) BEFORE any user code runs.
-/// The copy loop then does NO per-key enumerable re-check (quickjs.c:16933
+/// only the enumerable keys BEFORE any user code runs.
+/// The copy loop then does NO per-key enumerable re-check (quickjs.c
 /// skips the descriptor branch for ordinary sources): for each snapshotted
 /// key it runs JS_GetProperty (the source getter fires once, in key order)
 /// then JS_SetProperty on the target (target setters / Proxy traps fire).
@@ -543,7 +538,7 @@ fn assignSourceIsOrdinary(source: *core.Object) bool {
 /// mutate a later key's enumerability/existence, and qjs copies the key
 /// regardless because it was already in the enumerable list. This is the
 /// deliberate difference from Object.keys/values/entries, which re-check
-/// enumerability per key after getters (quickjs.c:40400) and which zjs
+/// enumerability per key after getters and which zjs
 /// keeps on its own descriptor path.
 fn objectAssignEnumOnly(
     ctx: *core.JSContext,
@@ -611,7 +606,7 @@ pub fn objectHasOwnCall(
     const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     const atom_id = try toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
     // qjs `js_object_hasOwn` -> `JS_GetOwnPropertyInternal(ctx, NULL, p, atom)`:
-    // the desc==NULL existence mode (quickjs.c:8854) -- no descriptor is built,
+    // the desc==NULL existence mode -- no descriptor is built,
     // no value is dup'd, and auto-init instantiation is delayed. Proxies still
     // route through the full getOwnPropertyDescriptor trap inside the wrapper.
     const present = try proxyAwareExistsOwnProperty(ctx, output, global, object, atom_id, caller_function, caller_frame);
@@ -619,7 +614,7 @@ pub fn objectHasOwnCall(
 }
 
 /// Exec-direct arm of `Object.prototype.hasOwnProperty` (qjs
-/// `js_object_hasOwnProperty`, quickjs.c:40536: JS_ToPropertyKey, then
+/// `js_object_hasOwnProperty`, quickjs.c: JS_ToPropertyKey, then
 /// JS_GetOwnPropertyInternal with desc==NULL). Hot leg: an ordinary object
 /// receiver (no proxy trap, no typed-array canonical-index rule) and a key
 /// that is already an atom (`propertyKeyAtomIfReady`), so neither the
@@ -712,10 +707,10 @@ pub fn objectPrototypeOwnPropertyCall(
 
     if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.TypeError;
     const object_value = if (objectFromValue(this_value)) |_| this_value else try primitiveObjectForAccess(ctx.runtime, global, this_value);
-    const object = property_ops.expectObject(object_value) catch return error.TypeError;
+    const object = try property_ops.expectObject(object_value);
     // `hasOwnProperty` is the desc==NULL existence mode of
     // `JS_GetOwnPropertyInternal` (qjs `js_object_hasOwnProperty`,
-    // quickjs.c:40536): probe presence with no descriptor materialization.
+    // quickjs.c): probe presence with no descriptor materialization.
     // `propertyIsEnumerable` (qjs `js_object_propertyIsEnumerable`) still
     // needs the enumerable flag, so it keeps the full-descriptor path.
     if (method_id == @intFromEnum(PrototypeMethod.has_own_property)) {
@@ -990,7 +985,7 @@ pub fn objectTestIntegrityCall(
 ) !?core.JSValue {
     const target_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const object = objectFromValue(target_value) orelse return core.JSValue.boolean(true);
-    // qjs js_object_isSealed (quickjs.c:40717) walks ownKeys + per-key gopd
+    // qjs js_object_isSealed walks ownKeys + per-key gopd
     // FIRST (short-circuiting false on a configurable/writable prop without
     // ever consulting extensibility) and calls JS_IsExtensible LAST — the
     // reverse of the spec's TestIntegrityLevel order.
@@ -1012,7 +1007,7 @@ pub fn objectIsExtensibleForIntegrity(
 ) !bool {
     if (object.proxyTarget() == null) return object.isExtensible();
     const target_value = object.proxyTarget() orelse return object.isExtensible();
-    const target = property_ops.expectObject(target_value) catch return error.TypeError;
+    const target = try property_ops.expectObject(target_value);
     const handler_value = object.proxyHandler() orelse return error.TypeError;
     const trap_key = core.atom.ids.isExtensible;
     const trap = try getValueProperty(ctx, output, global, handler_value, trap_key, null, null);

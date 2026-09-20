@@ -4,11 +4,12 @@
 //! trace both children and materialize a stable flat
 //! body on first borrowed-content read. Allocation and release always go
 //! through the originating Runtime. QuickJS source map:
-//! `JSString`/`JSStringRope` at quickjs.c:583-609. Core and higher layers may
+//! `JSString`/`JSStringRope` at quickjs.c. Core and higher layers may
 //! import this module; it has no exec/binding dependency.
 
 const atom_mod = @import("atom.zig");
 const gc = @import("gc.zig");
+const gc_visit = @import("gc_visit.zig");
 const gc_block_heap = @import("gc_block_heap.zig");
 const unicode = @import("../libs/unicode.zig");
 const JSRuntime = @import("runtime.zig").JSRuntime;
@@ -20,9 +21,9 @@ pub const StringError = error{
 };
 
 /// Maximum string length in code units, mirroring QuickJS `JS_STRING_LEN_MAX`
-/// ((1 << 30) - 1, quickjs.c:212). Every creation/concat path enforces it
+/// ((1 << 30) - 1, quickjs.c). Every creation/concat path enforces it
 /// (`error.StringTooLong` -> InternalError "string too long", the qjs
-/// JS_ThrowInternalError sites at quickjs.c:4078/4368/4655/4898); without it the
+/// JS_ThrowInternalError sites at quickjs.c); without it the
 /// packed u31 `len_meta.len` field wraps at 2^31 and `.length` goes negative.
 pub const max_length: usize = (1 << 30) - 1;
 
@@ -549,7 +550,7 @@ pub const String = struct {
     }
 
     /// Concatenate already-measured latin1 pieces into one freshly allocated
-    /// latin1 string. Mirrors qjs `JS_ConcatString1` (quickjs.c:4646): one
+    /// latin1 string. Mirrors qjs `JS_ConcatString1`: one
     /// `js_alloc_string`, then each source memcpy lands in the result payload.
     pub fn createLatin1Parts(rt: *JSRuntime, parts: []const []const u8, total: usize) !*String {
         const self = try createUninitialized(rt, .latin1, total);
@@ -567,7 +568,7 @@ pub const String = struct {
     }
 
     /// Concatenate already-flattened mixed-width pieces into one freshly
-    /// allocated string. Mirrors qjs `JS_ConcatString1` (quickjs.c:4646): the
+    /// allocated string. Mirrors qjs `JS_ConcatString1`: the
     /// result is wide iff any part is wide (`p1->is_wide_char ||
     /// p2->is_wide_char`), one `js_alloc_string`, then each part copies into
     /// the result payload — same-width parts memcpy, latin1 parts widen per
@@ -875,7 +876,7 @@ pub const String = struct {
 
     fn createUninitialized(rt: *JSRuntime, comptime tag: StorageTag, unit_count: usize) !*String {
         // Central allocation cap (qjs js_alloc_string / string_buffer_realloc,
-        // quickjs.c:4078): every flat creator funnels through here, so this one
+        // quickjs.c): every flat creator funnels through here, so this one
         // compare bounds all string construction.
         if (unit_count > max_length) return error.StringTooLong;
         const inline_layout = inlineAllocationLayout(tag, unit_count) orelse return error.OutOfMemory;
@@ -920,8 +921,8 @@ pub const String = struct {
     fn destroyFlat(rt: *JSRuntime, self: *String) void {
         const tag: StorageTag = if (self.len_meta.is_wide) .utf16 else .latin1;
         const inline_layout = switch (tag) {
-            .latin1 => inlineAllocationLayout(.latin1, self.len_meta.len) orelse unreachable,
-            .utf16 => inlineAllocationLayout(.utf16, self.len_meta.len) orelse unreachable,
+            .latin1 => inlineAllocationLayout(.latin1, self.len_meta.len).?,
+            .utf16 => inlineAllocationLayout(.utf16, self.len_meta.len).?,
         };
         if (gc.Registry.isBlockCellHeader(@ptrCast(@alignCast(self)))) {
             rt.memory.destroyStringCell(self, inline_layout.total_size);
@@ -985,8 +986,7 @@ fn compareLatin1Utf16(a: []const u8, b: []const u16) i32 {
 
 fn compareUtf16Latin1(a: []const u16, b: []const u8) i32 {
     const shared_len = @min(a.len, b.len);
-    var i: usize = 0;
-    while (i < shared_len) : (i += 1) {
+    for (0..shared_len) |i| {
         const a_unit = a[i];
         const b_unit: u16 = b[i];
         if (a_unit < b_unit) return -1;
@@ -1116,11 +1116,11 @@ pub fn stringValueCodeUnitAtUnchecked(value: JSValue, index: usize) u16 {
 
 /// QJS `js_string_rope_compare`: compare flat and rope strings a leaf chunk at
 /// a time. `eq_only` permits the same early length mismatch used by equality.
-/// QJS `js_string_eq` (quickjs.c:4605-4613): length test, pointer identity, then
-/// one body comparison through `js_string_memcmp` (quickjs.c:4586-4603).
+/// QJS `js_string_eq`: length test, pointer identity, then
+/// one body comparison through `js_string_memcmp`.
 ///
 /// Flat strings only. qjs's inline OP_CMP_EQ / OP_CMP_STRICT_EQ arms fire on
-/// `JS_TAG_STRING` (quickjs.c:20321, 20382), and a rope carries the distinct
+/// `JS_TAG_STRING`, and a rope carries the distinct
 /// `JS_TAG_STRING_ROPE`, so ropes never reach `js_string_eq` from the dispatch
 /// loop. Keeping the same restriction here is what lets this stay allocation-,
 /// iterator- and frame-free: `compareStringValues` below must open a 60-slot
@@ -1130,7 +1130,7 @@ pub fn flatStringsEq(a: *const String, b: *const String) bool {
     return flatStringsEqNear(a, b) orelse flatStringsEqMixedWidth(a, b);
 }
 
-/// qjs `js_string_eq` (quickjs.c:4605-4613) for a same-width flat pair:
+/// qjs `js_string_eq` for a same-width flat pair:
 /// length, pointer identity, then one body scan. Returns `null` when the
 /// encodings differ so the caller can keep the framed mixed-width helper
 /// (qjs `js_string_memcmp` 4586-4599) off the leftover leaf.
@@ -1138,7 +1138,7 @@ pub inline fn flatStringsEqNear(a: *const String, b: *const String) ?bool {
     if (a.len_meta.len != b.len_meta.len) return false; // qjs:4607
     if (a == b) return true; // qjs:4609
     if (a.len_meta.is_wide != b.len_meta.is_wide) return null;
-    // Same-width scan in place of `memcmp` / `memcmp16` (quickjs.c:4593, 4600).
+    // Same-width scan in place of `memcmp` / `memcmp16`.
     // A libcall here would open a frame on the leftover mixed leaf (硬门 #9).
     const n: u32 = a.len_meta.len;
     const pa = a.inlineBytesPtr();
@@ -1213,7 +1213,7 @@ pub fn compareStringValues(a: JSValue, b: JSValue, eq_only: bool) ?i32 {
 /// nothing — callers coerce first when they need ToString.
 ///
 /// This is the single owner of the operation qjs spells `JS_ToCStringLen2`
-/// (quickjs.c:4458). Eight hand-written copies of it existed, and their
+///. Eight hand-written copies of it existed, and their
 /// comments record the same defect being repaired independently six times:
 /// latin1 0x80-0xFF must WIDEN to UTF-8 rather than land as raw bytes, and
 /// UTF-16 surrogate pairs must combine into one 4-byte sequence rather than
@@ -1286,7 +1286,7 @@ fn createRopeNode(
     right_info: StringValueInfo,
 ) !*StringRope {
     const total = try std.math.add(usize, left_info.len, right_info.len);
-    // Rope-concat length cap (qjs JS_ConcatString rope path, quickjs.c:4898).
+    // Rope-concat length cap (qjs JS_ConcatString rope path, quickjs.c).
     if (total > max_length) return error.StringTooLong;
     const node = try allocRopeNode(rt);
     node.* = .{
@@ -1300,7 +1300,7 @@ fn createRopeNode(
     return node;
 }
 
-// Fibonacci buckets from QuickJS `rope_bucket_len` (quickjs.c:4934). The last
+// Fibonacci buckets from QuickJS `rope_bucket_len`. The last
 // entry is greater than `max_length`, so every valid string has a bucket.
 const rope_bucket_len = [_]usize{
     1,         2,         3,         5,
@@ -1557,7 +1557,7 @@ fn allocRopeNode(rt: *JSRuntime) !*StringRope {
     // TGC S2-f (3): same allocation-threshold boundary as flat bodies (see
     // `String.createUninitialized`). Before the cell pointer is taken.
     rt.collectBeforeObjectAllocation(rope_node_alloc_size);
-    const base = (try rt.memory.createStringCell(gc.representation.rope_kind_tag, rope_node_alloc_size)) orelse unreachable;
+    const base = (try rt.memory.createStringCell(gc.representation.rope_kind_tag, rope_node_alloc_size)).?;
     const node: *StringRope = @ptrCast(@alignCast(base + StringRope.metadata_prefix_size));
     rt.gc.addInitializedWithSizeNoFail(@ptrCast(node), gc_block_heap.accountedBodyBytesForRequest(rope_node_alloc_size, StringRope.metadata_prefix_size).?);
     return node;
@@ -1639,9 +1639,9 @@ pub fn accountedAllocationSizeFromHeader(header: *const gc.Header) usize {
     } else blk: {
         const body: *const String = @ptrCast(@alignCast(header));
         const layout = if (body.len_meta.is_wide)
-            inlineAllocationLayout(.utf16, body.len_meta.len) orelse unreachable
+            inlineAllocationLayout(.utf16, body.len_meta.len).?
         else
-            inlineAllocationLayout(.latin1, body.len_meta.len) orelse unreachable;
+            inlineAllocationLayout(.latin1, body.len_meta.len).?;
         break :blk layout.total_size;
     };
     if (gc.Registry.isBlockCellHeader(header)) {
@@ -1694,9 +1694,9 @@ pub fn destroyCellFromHeader(rt: *JSRuntime, header: *gc.Header) void {
         rt.atoms.onSymbolBodyDead(atom_id, body);
     }
     const layout = if (body.len_meta.is_wide)
-        inlineAllocationLayout(.utf16, body.len_meta.len) orelse unreachable
+        inlineAllocationLayout(.utf16, body.len_meta.len).?
     else
-        inlineAllocationLayout(.latin1, body.len_meta.len) orelse unreachable;
+        inlineAllocationLayout(.latin1, body.len_meta.len).?;
     rt.gc.unpublishStringCell(header, gc_block_heap.accountedBodyBytesForRequest(layout.total_size, gc.string_prefix_size).?);
     rt.memory.destroyStringCell(body, layout.total_size);
 }
@@ -1826,38 +1826,10 @@ pub fn traceRopeEdges(rt: *JSRuntime, visitor: anytype, header: *gc.Header) !voi
     // visits below stay unconditional and branch-free.
     if (node.buffer) |buf| {
         std.debug.assert(buf.header().metaConst().flags.kind == .string_buffer);
-        try callVisitStorageCell(visitor, buf.header());
+        try gc_visit.storageCell(visitor, buf.header());
     }
-    try callVisitValue(visitor, &node.left);
-    try callVisitValue(visitor, &node.right);
-}
-
-/// Visitor shim for the storage-cell edge (TGC S4 spec 2.2). Visitors that
-/// do not declare `storageCell` -- the root adaptors, which never enumerate
-/// heap edges -- compile this away entirely.
-inline fn callVisitStorageCell(vis: anytype, header: *gc.Header) !void {
-    const VisType = @TypeOf(vis);
-    const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
-    if (comptime !@hasDecl(CleanType, "storageCell")) return;
-    const ReturnType = @typeInfo(@TypeOf(CleanType.storageCell)).@"fn".return_type.?;
-    if (comptime @typeInfo(ReturnType) == .error_union) {
-        try vis.storageCell(header);
-    } else {
-        vis.storageCell(header);
-    }
-}
-
-/// Visitors come in two shapes (`visitValue` returning void or an error
-/// union); mirror shape.zig's helper so one trace body serves both.
-inline fn callVisitValue(vis: anytype, slot: *JSValue) !void {
-    const VisType = @TypeOf(vis);
-    const CleanType = comptime if (@typeInfo(VisType) == .pointer) @typeInfo(VisType).pointer.child else VisType;
-    const ReturnType = @typeInfo(@TypeOf(CleanType.visitValue)).@"fn".return_type.?;
-    if (comptime @typeInfo(ReturnType) == .error_union) {
-        try vis.visitValue(slot);
-    } else {
-        vis.visitValue(slot);
-    }
+    try gc_visit.value(visitor, &node.left);
+    try gc_visit.value(visitor, &node.right);
 }
 
 fn inlineAllocationLayout(comptime tag: String.StorageTag, unit_count: usize) ?InlineAllocationLayout {

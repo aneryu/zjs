@@ -97,7 +97,7 @@ pub fn main(init: std.process.Init) !void {
         // attribution table.
         var diag_buf: [4096]u8 = undefined;
         var diag_writer = std.Io.File.stderr().writer(io, &diag_buf);
-        try test262_root.core.gc_conservative.reportGlobal(&diag_writer.interface);
+        try test262_root.core.gc_conservative_diag.reportGlobal(&diag_writer.interface);
         try diag_writer.interface.flush();
     }
     const has_unexpected = summary.failed != 0 or summary.fixed != 0;

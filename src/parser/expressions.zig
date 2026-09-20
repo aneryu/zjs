@@ -90,12 +90,12 @@ fn parseArrowAssignment(s: *State, flags: ParseFlags) Error!bool {
     return true;
 }
 
-/// `js_parse_expr` (`quickjs.c:27645`).
+/// `js_parse_expr`.
 pub fn parseExpr(s: *State) Error!void {
     return parseExpr2(s, ParseFlags.default) catch |err| s.propagateFailureHere(err);
 }
 
-/// `js_parse_expr2` (`quickjs.c:27621`). Comma operator.
+/// `js_parse_expr2`. Comma operator.
 pub fn parseExpr2(s: *State, flags: ParseFlags) Error!void {
     s.features.insert(.expression);
     var operand_flags = flags;
@@ -117,12 +117,12 @@ pub fn parseExpr2(s: *State, flags: ParseFlags) Error!void {
     }
 }
 
-/// `js_parse_assign_expr` (`quickjs.c:27615`).
+/// `js_parse_assign_expr`.
 pub fn parseAssignExpr(s: *State) Error!void {
     return parseAssignExpr2(s, ParseFlags.default) catch |err| s.propagateFailureHere(err);
 }
 
-/// `js_parse_assign_expr2` (`quickjs.c:27311`). Assignment-target check
+/// `js_parse_assign_expr2`. Assignment-target check
 /// and compound-assignment lowering for identifiers, member targets,
 /// destructuring, and arrow cover forms.
 pub fn parseAssignExpr2(s: *State, flags: ParseFlags) Error!void {
@@ -190,7 +190,7 @@ pub fn parseAssignExpr2(s: *State, flags: ParseFlags) Error!void {
     const rhs_flags = ParseFlags{ .in_accepted = flags.in_accepted };
     try parseAssignExpr2(s, rhs_flags);
     if (assign_opcode) |op_byte| {
-        // qjs js_parse_assign_expr2 (quickjs.c:28218-28219): the
+        // qjs js_parse_assign_expr2: the
         // compound op is pinned to the operator's source event.
         try Emitter.opAt(s, op_byte, operator_source.line_num, operator_source.col_num);
     }
@@ -199,7 +199,7 @@ pub fn parseAssignExpr2(s: *State, flags: ParseFlags) Error!void {
         lvalue.name == direct_lhs_atom.?)
     {
         // qjs js_parse_assign_expr2 / set_object_name
-        // (quickjs.c:28207-28210,24918-24943): patch only a directly
+        //: patch only a directly
         // trailing anonymous placeholder.
         try functions.setObjectName(s, lvalue.name);
     }
@@ -365,48 +365,47 @@ fn hasWithScopeFrom(fd_start: *const function_def_mod.FunctionDef, scope_start: 
 fn reemitLValueGetter(s: *State, lvalue: *const LValue) Error!void {
     switch (lvalue.opcode) {
         .scope_var => {
-            // qjs get_lvalue (quickjs.c:26009-26013): re-emit the retained
+            // qjs get_lvalue: re-emit the retained
             // scope getter while preserving the assignment target.
             try Emitter.opAtomU16NoSource(s, opcode.op.scope_get_var, lvalue.name, lvalue.scope);
         },
         .field => {
-            // qjs get_lvalue (quickjs.c:26015-26018): get_field2 preserves
+            // qjs get_lvalue: get_field2 preserves
             // the base object beneath the loaded value.
             try Emitter.opAtomNoSource(s, opcode.op.get_field2, lvalue.name);
         },
         .private_field => {
-            // qjs get_lvalue (quickjs.c:26019-26023): the private-field
+            // qjs get_lvalue: the private-field
             // getter retains its base and phase-1 scope operand.
             try Emitter.opAtomU16NoSource(s, opcode.op.scope_get_private_field2, lvalue.name, lvalue.scope);
         },
         .array_element => {
-            // qjs get_lvalue (quickjs.c:26024-26026): get_array_el3 keeps
+            // qjs get_lvalue: get_array_el3 keeps
             // both base and property key for the later setter.
             try Emitter.opNoSource(s, opcode.op.get_array_el3);
         },
         .super_value => {
-            // qjs get_lvalue (quickjs.c:26027-26030): preserve the super
+            // qjs get_lvalue: preserve the super
             // receiver/base/key triple around the value load.
             try Emitter.opNoSource(s, opcode.op.to_propkey);
             try Emitter.opU8(s, opcode.op.ext0, opcode.ext0_sub.dup3);
             try Emitter.opNoSource(s, opcode.op.get_super_value);
         },
         .ref_value => {
-            // qjs get_lvalue (quickjs.c:26007-26008): load through the
+            // qjs get_lvalue: load through the
             // with-scope reference while retaining the ref pair.
             try Emitter.opNoSource(s, opcode.op.get_ref_value);
         },
     }
 }
 
-/// Assignment-target capture — qjs get_lvalue (quickjs.c:25933).
+/// Assignment-target capture — qjs get_lvalue.
 /// Builder.last_opcode_pos is the sole target fact;
 /// getter removal is the qjs `fd->byte_code.size = fd->last_opcode_pos`
 /// rewind (Builder.truncateLastOpcodePreserveSources after the ledger take-back).
 pub fn getLValue(s: *State, keep: bool) Error!LValue {
     const v2b = s.activeBuilder();
-    if (v2b.last_opcode_pos < 0) return Error.InvalidAssignmentTarget;
-    const pos: u32 = @intCast(v2b.last_opcode_pos);
+    const pos = v2b.last_opcode_pos orelse return Error.InvalidAssignmentTarget;
     const op_id = v2b.code[pos];
     const fd = s.curFunc();
 
@@ -428,7 +427,7 @@ pub fn getLValue(s: *State, keep: bool) Error!LValue {
     errdefer if (lvalue_initialized) lvalue.deinit(s);
     switch (op_id) {
         opcode.op.scope_get_var => {
-            // qjs get_lvalue (quickjs.c:25948-26013): decode the phase-1
+            // qjs get_lvalue: decode the phase-1
             // scope getter and retain its atom across the rewind.
             if (pos + 7 != v2b.code_len) return Error.InvalidAssignmentTarget;
             const name: Atom = Atom.fromRaw(std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little));
@@ -477,7 +476,7 @@ pub fn getLValue(s: *State, keep: bool) Error!LValue {
             if (needs_reference) {
                 lvalue.opcode = .ref_value;
                 lvalue.depth = 2;
-                // qjs get_lvalue (quickjs.c:26000-26006): scope_make_ref carries the label
+                // qjs get_lvalue: scope_make_ref carries the label
                 // as an aux operand; update_label(fd, label, 1) is the emitter's ref_count
                 // bump. The operand receives a borrowed duplicate; the descriptor keeps the
                 // retained atom (legacy emitScopeMakeRefForLValueAssumeCapacity contract).
@@ -487,7 +486,7 @@ pub fn getLValue(s: *State, keep: bool) Error!LValue {
             }
         },
         opcode.op.get_field => {
-            // qjs get_lvalue (quickjs.c:25963-25966,26015-26018): take the
+            // qjs get_lvalue: take the
             // field-name retain back before removing the getter.
             // W1: `get_field` is `atom_cache_u8` (opcode + atom + cache_idx).
             if (pos + 6 != v2b.code_len) return Error.InvalidAssignmentTarget;
@@ -497,7 +496,7 @@ pub fn getLValue(s: *State, keep: bool) Error!LValue {
             lvalue_initialized = true;
         },
         opcode.op.scope_get_private_field => {
-            // qjs get_lvalue (quickjs.c:25967-25971,26019-26023): retain
+            // qjs get_lvalue: retain
             // the private name and scope across the getter rewind.
             if (pos + 7 != v2b.code_len) return Error.InvalidAssignmentTarget;
             const name: Atom = Atom.fromRaw(std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little));
@@ -513,7 +512,7 @@ pub fn getLValue(s: *State, keep: bool) Error!LValue {
             lvalue_initialized = true;
         },
         opcode.op.get_array_el => {
-            // qjs get_lvalue (quickjs.c:25972-25974,26024-26026): remove
+            // qjs get_lvalue: remove
             // the one-byte array getter; its base/key remain on the stack.
             if (pos + 1 != v2b.code_len) return Error.InvalidAssignmentTarget;
             try v2b.truncateLastOpcodePreserveSources(pos);
@@ -521,7 +520,7 @@ pub fn getLValue(s: *State, keep: bool) Error!LValue {
             lvalue_initialized = true;
         },
         opcode.op.get_super_value => {
-            // qjs get_lvalue (quickjs.c:25975-25977,26027-26030): remove
+            // qjs get_lvalue: remove
             // the super getter and preserve its three-value target depth.
             if (pos + 1 != v2b.code_len) return Error.InvalidAssignmentTarget;
             try v2b.truncateLastOpcodePreserveSources(pos);
@@ -535,7 +534,7 @@ pub fn getLValue(s: *State, keep: bool) Error!LValue {
     return lvalue;
 }
 
-/// QuickJS `put_lvalue` (quickjs.c:26077), with LabelId binding
+/// QuickJS `put_lvalue`, with LabelId binding
 /// instead of a deferred absolute-target publish.
 pub fn putLValue(s: *State, lvalue: *LValue, mode: PutLValueMode) Error!void {
     const shuffle_op: ?u8 = switch (lvalue.opcode) {
@@ -574,7 +573,7 @@ pub fn putLValue(s: *State, lvalue: *LValue, mode: PutLValueMode) Error!void {
     }
 
     if (lvalue.opcode == .ref_value) {
-        // qjs put_lvalue (quickjs.c:26118-26123): JS_FreeAtom(name) then
+        // qjs put_lvalue: JS_FreeAtom(name) then
         // emit_label(label) — the ref target binds here, before the mode
         // shuffle; the bind is the provenance boundary the legacy arm expressed
         // as invalidateLastOpcode + deferred absolute publish.
@@ -586,7 +585,7 @@ pub fn putLValue(s: *State, lvalue: *LValue, mode: PutLValueMode) Error!void {
         try Emitter.bindParser(s, lvalue.ref_label.?);
     }
 
-    // qjs put_lvalue (quickjs.c:26081-26161): apply the selected stack
+    // qjs put_lvalue: apply the selected stack
     // preservation shuffle before emitting the setter. insert4 was
     // reclaimed for fusion v4 and emits as using+sub.
     if (lvalue.opcode == .super_value and mode == .keep_top)
@@ -599,41 +598,41 @@ pub fn putLValue(s: *State, lvalue: *LValue, mode: PutLValueMode) Error!void {
 
     switch (lvalue.opcode) {
         .scope_var => {
-            // qjs put_lvalue (quickjs.c:26167-26170): transfer the retained
+            // qjs put_lvalue: transfer the retained
             // binding atom into scope_put_var's phase-1 operand ledger.
             lvalue.owns_name = false;
             try Emitter.opAtomU16NoSource(s, opcode.op.scope_put_var, lvalue.name, lvalue.scope);
         },
         .field => {
-            // qjs put_lvalue (quickjs.c:26172-26175): transfer the retained
+            // qjs put_lvalue: transfer the retained
             // field-name atom into put_field.
             lvalue.owns_name = false;
             try Emitter.opAtomNoSource(s, opcode.op.put_field, lvalue.name);
         },
         .private_field => {
-            // qjs put_lvalue (quickjs.c:26176-26179): transfer the retained
+            // qjs put_lvalue: transfer the retained
             // private name and scope into the phase-1 setter.
             lvalue.owns_name = false;
             try Emitter.opAtomU16NoSource(s, opcode.op.scope_put_private_field, lvalue.name, lvalue.scope);
         },
         .array_element => {
-            // qjs put_lvalue (quickjs.c:26181-26183): consume base/key/value.
+            // qjs put_lvalue: consume base/key/value.
             try Emitter.opNoSource(s, opcode.op.put_array_el);
         },
         .ref_value => {
-            // qjs put_lvalue (quickjs.c:26184-26186): store through the
+            // qjs put_lvalue: store through the
             // reference pair whose label was bound above.
             try Emitter.opNoSource(s, opcode.op.put_ref_value);
         },
         .super_value => {
-            // qjs put_lvalue (quickjs.c:26187-26189): store through the
+            // qjs put_lvalue: store through the
             // preserved super receiver/base/key triple.
             try Emitter.opU8NoSource(s, opcode.op.ext0, opcode.ext0_sub.put_super_value);
         },
     }
 }
 
-/// `js_parse_cond_expr` (`quickjs.c:27282`). `a ? b : c`.
+/// `js_parse_cond_expr`. `a ? b: c`.
 pub fn parseCondExpr(s: *State, flags: ParseFlags) Error!void {
     try parseCoalesceExpr(s, flags);
     if (s.peekKind() == .question) {
@@ -655,7 +654,7 @@ pub fn parseCondExpr(s: *State, flags: ParseFlags) Error!void {
     }
 }
 
-/// `js_parse_coalesce_expr` (`quickjs.c:27254`). `a ?? b`.
+/// `js_parse_coalesce_expr`. `a ?? b`.
 pub fn parseCoalesceExpr(s: *State, flags: ParseFlags) Error!void {
     try parseLogicalAndOr(s, .lor, flags);
     if (s.peekKind() == .double_question_mark) {
@@ -676,7 +675,7 @@ pub fn parseCoalesceExpr(s: *State, flags: ParseFlags) Error!void {
     }
 }
 
-/// `js_parse_logical_and_or` (`quickjs.c:27213`). `a && b` / `a || b`.
+/// `js_parse_logical_and_or`. `a && b` / `a || b`.
 pub fn parseLogicalAndOr(s: *State, op_kind: tok.TokenKind, flags: ParseFlags) Error!void {
     if (op_kind == .lor) {
         try parseLogicalAndOr(s, .land, flags);
@@ -719,7 +718,7 @@ pub fn parseLogicalAndOr(s: *State, op_kind: tok.TokenKind, flags: ParseFlags) E
     }
 }
 
-/// `js_parse_expr_binary` (`quickjs.c:27049`). Pratt-style with hand
+/// `js_parse_expr_binary`. Pratt-style with hand
 /// rolled level table. Levels 1..8 covered, including private-name `in`.
 pub fn parseExprBinary(s: *State, level: u32, flags: ParseFlags) Error!void {
     if (level == 0) {
@@ -765,12 +764,12 @@ pub fn parseExprBinary(s: *State, level: u32, flags: ParseFlags) Error!void {
         if (s.ctx.in_generator and s.peekKind() == .kw_yield) return s.failUnexpectedToken();
         try parseExprBinary(s, level - 1, flags);
         // qjs js_parse_expr_binary pins the selected operator to its token
-        // after parsing the RHS (quickjs.c:27889-27894).
+        // after parsing the RHS.
         try Emitter.opAt(s, op_byte, operator_source.line_num, operator_source.col_num);
     }
 }
 
-/// `js_parse_unary` (`quickjs.c:26922`). Covers prefix `+`, `-`, `~`,
+/// `js_parse_unary`. Covers prefix `+`, `-`, `~`,
 /// `!`, `void`, `typeof`, `delete`, prefix `++`/`--`, right-associative
 /// `**`, contextual `yield`, and contextual `await`.
 // Keep this hot successor on a stable fetch boundary when the preceding
@@ -831,8 +830,8 @@ pub fn parseUnary(s: *State, flags: ParseFlags) align(16) Error!void {
         // QuickJS patches only the actual last phase-1 scope getter. A
         // member/call/comma/control tail therefore remains untouched.
         const v2b = s.activeBuilder();
-        if (v2b.last_opcode_pos >= 0) {
-            const pos: usize = @intCast(v2b.last_opcode_pos);
+        if (v2b.last_opcode_pos) |last_pos| {
+            const pos: usize = last_pos;
             if (pos < v2b.code_len and v2b.code[pos] == opcode.op.scope_get_var) {
                 v2b.code[pos] = opcode.op.scope_get_var_undef;
             }
@@ -864,7 +863,7 @@ pub fn parseUnary(s: *State, flags: ParseFlags) align(16) Error!void {
     }
 }
 
-/// `++x` / `--x` (qjs js_parse_unary TOK_INC/TOK_DEC, quickjs.c:27648).
+/// `++x` / `--x` (qjs js_parse_unary TOK_INC/TOK_DEC, quickjs.c).
 fn parsePrefixUpdate(s: *State, flags: ParseFlags, k: tok.TokenKind) Error!void {
     const update_op: u8 = if (k == .inc) opcode.op.inc else opcode.op.dec;
     const operator_source = s.currentSourcePosition();
@@ -876,7 +875,7 @@ fn parsePrefixUpdate(s: *State, flags: ParseFlags, k: tok.TokenKind) Error!void 
         try emitInvalidAssignmentTarget(s);
         return;
     }
-    // qjs js_parse_unary (quickjs.c:27648-27649): prefix update is
+    // qjs js_parse_unary: prefix update is
     // pinned to the operator's source event.
     try Emitter.opAt(s, update_op, operator_source.line_num, operator_source.col_num);
     try putLValue(s, &lvalue, .keep_top);
@@ -884,7 +883,7 @@ fn parsePrefixUpdate(s: *State, flags: ParseFlags, k: tok.TokenKind) Error!void 
         const exponent_source = s.currentSourcePosition();
         try s.advance();
         try parseUnary(s, ParseFlags{ .in_accepted = flags.in_accepted, .pow_allowed = true });
-        // qjs js_parse_unary (quickjs.c:27720-27726): emit the
+        // qjs js_parse_unary: emit the
         // exponentiation tail after its right operand.
         try Emitter.opAt(s, opcode.op.pow, exponent_source.line_num, exponent_source.col_num);
     }
@@ -985,7 +984,7 @@ fn parseAwaitExpression(s: *State, flags: ParseFlags) Error!void {
 }
 
 /// LabelId-native mirror of QuickJS yield-star delegation
-/// (quickjs.c:28038-28131); no absolute parser PC enters the v2 stream.
+///; no absolute parser PC enters the v2 stream.
 fn emitYieldStarDelegation(s: *State, is_async: bool) Error!void {
     const done_atom = atom_module.predefinedId("done", .string) orelse return Error.ParserInvariant;
     const value_atom = atom_module.predefinedId("value", .string) orelse return Error.ParserInvariant;
@@ -1098,14 +1097,13 @@ fn emitSuperThisAndHomeObject(s: *State) Error!void {
 
 fn discardTrailingGetSuper(s: *State) Error!void {
     const builder = s.activeBuilder();
-    if (builder.last_opcode_pos < 0) return Error.ParserInvariant;
-    const pos: u32 = @intCast(builder.last_opcode_pos);
+    const pos = builder.last_opcode_pos orelse return Error.ParserInvariant;
     if (pos + 1 != builder.code_len or builder.code[pos] != opcode.op.get_super)
         return Error.ParserInvariant;
     try builder.truncateLastOpcodePreserveSources(pos);
 }
 
-/// `js_parse_delete` (`quickjs.c:26829`). Generic implementation: parse
+/// `js_parse_delete`. Generic implementation: parse
 /// a unary-style operand normally, then classify the trailing emission
 /// and rewrite it into a delete shape:
 ///
@@ -1187,10 +1185,8 @@ fn compactAppendedTailReplacement(
             return Error.ParserInvariant;
         }
     }
-    if (v2b.last_opcode_pos >= 0 and
-        @as(u64, @intCast(v2b.last_opcode_pos)) < snapshot.code_len)
-    {
-        return Error.ParserInvariant;
+    if (v2b.last_opcode_pos) |last_pos| {
+        if (last_pos < snapshot.code_len) return Error.ParserInvariant;
     }
 
     const old_code_len = v2b.code_len;
@@ -1219,7 +1215,7 @@ fn compactAppendedTailReplacement(
         v2b.source_slots[old_source_keep + source_index] = slot;
     }
     v2b.source_len = old_source_keep + new_source_count;
-    if (v2b.last_opcode_pos >= 0) v2b.last_opcode_pos -= removed_len;
+    if (v2b.last_opcode_pos) |last_pos| v2b.last_opcode_pos = last_pos - removed_len;
 }
 
 /// Recover the shared optional-chain exit from Builder label identity.
@@ -1272,8 +1268,7 @@ fn emitDeleteNonReference(s: *State) Error!void {
 /// compacting only after every allocation succeeds.
 fn finishDelete(s: *State, delete_position: diagnostics.Position) Error!void {
     const v2b = s.activeBuilder();
-    if (v2b.last_opcode_pos < 0) return emitDeleteNonReference(s);
-    const pos: u32 = @intCast(v2b.last_opcode_pos);
+    const pos = v2b.last_opcode_pos orelse return emitDeleteNonReference(s);
     if (pos >= v2b.code_len) return Error.ParserInvariant;
 
     switch (v2b.code[pos]) {
@@ -1387,7 +1382,7 @@ fn rewriteOptionalChainDeleteBuilder(s: *State, pos: u32) Error!void {
 }
 
 /// `js_parse_delete` OP_get_field_opt_chain / OP_get_array_el_opt_chain
-/// handling (`quickjs.c:27512-27562`): delete of an optional-chain
+/// handling: delete of an optional-chain
 /// member access. qjs reads the chain label out of the `*_opt_chain`
 /// opcode, truncates the access, emits `OP_delete`, then routes the
 /// chain's short-circuit path through a `drop ; push_true` pad:
@@ -1424,9 +1419,7 @@ fn prepareCallReference(
     has_optional_site: bool,
 ) Error!PreparedCallReference {
     const v2b = s.activeBuilder();
-    if (v2b.last_opcode_pos < 0)
-        return .{ .kind = .plain, .optional_drop_count = 1 };
-    const pos: u32 = @intCast(v2b.last_opcode_pos);
+    const pos = v2b.last_opcode_pos orelse return .{ .kind = .plain, .optional_drop_count = 1 };
     if (pos >= v2b.code_len) return Error.ParserInvariant;
 
     switch (v2b.code[pos]) {
@@ -1444,7 +1437,7 @@ fn prepareCallReference(
                 if (v2b.atom_operands[v2b.atom_len - 1] != atom_id) return Error.ParserInvariant;
             }
 
-            // qjs js_parse_postfix_expr (quickjs.c:26771-26790): a
+            // qjs js_parse_postfix_expr: a
             // call on a closed optional-chain reference preserves the
             // receiver, bypasses the undefined pad on the live path,
             // and moves the shared chain exit to that pad. v2 carries
@@ -1514,7 +1507,6 @@ fn emitPreparedCall(
     errdefer s.activeBuilder().rollback(snapshot);
     // qjs call emission pins one source event to the callee and emits
     // the selected call/apply tail without further markers
-    // (quickjs.c:26623-26763).
     try Emitter.addSourceMarker(s, line_num, col_num);
     switch (shape) {
         .direct => |argc| switch (prepared.kind) {
@@ -1544,14 +1536,14 @@ fn emitPreparedCall(
     if (prepared.kind == .direct_eval) try s.markDirectEvalCall();
 }
 
-/// `js_parse_postfix_expr` (`quickjs.c:26176`). Wraps `parseLhsExpr`
+/// `js_parse_postfix_expr`. Wraps `parseLhsExpr`
 /// with the postfix `++` / `--` update operators.
 pub fn parsePostfixExpr(s: *State, flags: ParseFlags) Error!void {
     try parseLhsExpr(s, flags);
 
     const k = s.peekKind();
     if (k != .inc and k != .dec) return;
-    // ASI: per QuickJS (`quickjs.c:26206`), a postfix `++` / `--` after
+    // ASI: per QuickJS, a postfix `++` / `--` after
     // a LineTerminator is forbidden. The lexer's `got_lf` flag tracks that.
     if (s.lex.got_lf) return;
 
@@ -1565,13 +1557,13 @@ pub fn parsePostfixExpr(s: *State, flags: ParseFlags) Error!void {
         try emitInvalidAssignmentTarget(s);
         return;
     }
-    // qjs js_parse_unary postfix arm (quickjs.c:27700-27702): postfix
+    // qjs js_parse_unary postfix arm: postfix
     // update is pinned to the operator's source event.
     try Emitter.opAt(s, update_op, operator_source.line_num, operator_source.col_num);
     try putLValue(s, &lvalue, .keep_second);
 }
 
-/// `js_parse_left_hand_side_expr` (`quickjs.c:24487`). Primary
+/// `js_parse_left_hand_side_expr`. Primary
 /// expression followed by zero or more member accesses (`.x`, `[x]`),
 /// function calls (`(...)`), and `new` constructions.
 ///
@@ -1595,8 +1587,8 @@ pub fn parseLhsExpr(s: *State, flags: ParseFlags) Error!void {
         const v2b = s.activeBuilder();
         const getter_end = v2b.code_len;
         try Emitter.bindParserRaw(s, label);
-        if (v2b.last_opcode_pos >= 0) {
-            const pos: usize = @intCast(v2b.last_opcode_pos);
+        if (v2b.last_opcode_pos) |last_pos| {
+            const pos: usize = last_pos;
             if (pos + 6 == getter_end and v2b.code[pos] == opcode.op.get_field) {
                 v2b.code[pos] = opcode.op.get_field_opt_chain;
             } else if (pos + 1 == getter_end and v2b.code[pos] == opcode.op.get_array_el) {
@@ -1702,7 +1694,7 @@ fn parseCapturedSuperConstructorCall(s: *State, flags: ParseFlags, loc: ?SourceL
 /// `super()` receives the ordinary threaded captures.
 pub fn emitClassFieldInitCall(s: *State) Error!void {
     try s.emitScopeGetVar(atom_class_fields_init);
-    // qjs emit_class_field_init (quickjs.c:25184-25207): the skip
+    // qjs emit_class_field_init: the skip
     // target is born as a label bound at the shared drop.
     try Emitter.op(s, opcode.op.dup);
     const skip_call = try Emitter.newLabel(s);
@@ -1739,7 +1731,7 @@ fn parseNewExpr(s: *State, flags: ParseFlags) Error!void {
         // The member tail following the inner NewExpression binds to the
         // inner `new`'s result: `new new F().m` is `new ((new F()).m)`.
         // qjs gets this from the recursive `js_parse_postfix_expr(s, 0)`
-        // (`quickjs.c:27016`) whose postfix loop consumes `.x`/`[x]`
+        // whose postfix loop consumes `.x`/`[x]`
         // before the outer `new` applies.
         try parseNewCalleeMemberAccess(s);
     } else if (s.peekKind() == .kw_import) {
@@ -1765,7 +1757,7 @@ fn parseNewExpr(s: *State, flags: ParseFlags) Error!void {
             .applied => {
                 // `new X(...args)`. Stack here: [func, func(dup =
                 // new.target), array]. QuickJS FUNC_CALL_NEW emits
-                // `perm3 ; apply 1` (`quickjs.c:27359-27364`,
+                // `perm3; apply 1` (`quickjs.c`,
                 // "obj func array -> func obj array") so apply consumes
                 // the dup'd callee as the new.target slot.
                 try Emitter.op(s, opcode.op.perm3);
@@ -1777,7 +1769,7 @@ fn parseNewExpr(s: *State, flags: ParseFlags) Error!void {
         const call_line = s.token.line_num;
         const call_col = s.token.col_num;
         // qjs's no-parentheses arm emits one source event before both
-        // `dup` and `call_constructor` (quickjs.c:27020-27025).
+        // `dup` and `call_constructor`.
         try emitter.emitGrammarSource(s, .{ .line_num = call_line, .col_num = call_col });
         try Emitter.op(s, opcode.op.dup);
         try Emitter.opU16(s, opcode.op.call_constructor, 0);
@@ -2056,11 +2048,11 @@ const CallArgsShape = union(enum) {
     /// (above whatever was there: func / obj+func / etc.). Caller is
     /// responsible for the final `apply <is_new>` opcode and any
     /// stack-rearrange (`undefined ; swap` for plain calls;
-    /// `perm3` for method calls / `new`). Mirrors `quickjs.c:26667-26706`.
+    /// `perm3` for method calls / `new`). Mirrors `quickjs.c`.
     applied,
 };
 
-/// Emit the QuickJS `optional_chain_test` sequence (`quickjs.c:26158`):
+/// Emit the QuickJS `optional_chain_test` sequence:
 ///
 ///     dup
 ///     is_undefined_or_null
@@ -2080,7 +2072,7 @@ fn emitOptionalChainTest(
     optional_chain_label: *?OptionalChainLabel,
     drop_count: u8,
 ) Error!void {
-    // qjs optional_chain_test (quickjs.c:26814), labels born as LabelIds.
+    // qjs optional_chain_test, labels born as LabelIds.
     const v2b = s.activeBuilder();
     const snap = v2b.snapshot();
     const old_label = optional_chain_label.*;
@@ -2110,7 +2102,7 @@ fn parseCallArgs(s: *State, flags: ParseFlags) Error!CallArgsShape {
     _ = flags;
     try s.expectToken(.lparen);
     // Call arguments always parse with `PF_IN_ACCEPTED`
-    // (`js_parse_assign_expr`, quickjs.c:26630/26744) — argument
+    // (`js_parse_assign_expr`, quickjs.c) — argument
     // positions reset the for-init no-`in` restriction.
     const arg_flags = ParseFlags.default;
     var argc: u16 = 0;
@@ -2133,7 +2125,7 @@ fn parseCallArgs(s: *State, flags: ParseFlags) Error!CallArgsShape {
         return .{ .direct = argc };
     }
     s.features.insert(.spread_rest);
-    // Spread path mirrors `quickjs.c:26633..26664`. The leading args
+    // Spread path mirrors `quickjs.c`. The leading args
     // become an array, then each remaining arg is appended (via the
     // iterator protocol for spread, via define_array_el+inc otherwise).
     try Emitter.opU16(s, opcode.op.array_from, argc);
@@ -2177,19 +2169,18 @@ fn parseRegExpLiteral(s: *State) Error!void {
     try Emitter.pushConst(s, pattern_string.value());
 
     var compiled = regexp_lib.compilePatternAndFlagsWithOptions(s.function.memory.allocator, pattern, flags, .{
-        .@"opaque" = s.runtime.?,
-        .check_stack_overflow = parse_state.lreCheckStackOverflow,
+        .host = core.regexp.libraryHost(s.runtime.?),
     }) catch |err| switch (err) {
         error.OutOfMemory => return Error.OutOfMemory,
-        // qjs:libregexp.c:2411 re_parse_error "stack overflow" -> JS_ThrowSyntaxError
+        // qjs:libregexp.c re_parse_error "stack overflow" -> JS_ThrowSyntaxError
         error.StackOverflow => return Error.StackOverflow,
         else => return Error.InvalidRegExp,
     };
     defer compiled.deinit(s.function.memory.allocator);
     // qjs compiles a literal once while parsing, stores the lre bytecode as
     // an 8-bit JSString constant, and lets OP_regexp share that immutable
-    // string with each fresh RegExp instance (quickjs.c:26891-26913,
-    // 47565-47668). ZJS used to discard this validation result and emit the
+    // string with each fresh RegExp instance (quickjs.c,
+    // ZJS used to discard this validation result and emit the
     // flags string, forcing the runtime constructor to compile on every
     // literal evaluation.
     const compiled_string = core.string.String.createLatin1(s.runtime.?, compiled.bytecode) catch |err| switch (err) {
@@ -2201,7 +2192,7 @@ fn parseRegExpLiteral(s: *State) Error!void {
 }
 
 /// Parse a primary expression. `js_parse_primary_expr` lives inside
-/// `js_parse_postfix_expr` in QuickJS (`quickjs.c:25500..25800`).
+/// `js_parse_postfix_expr` in QuickJS.
 fn parsePrimary(s: *State, flags: ParseFlags) Error!void {
     const k = s.peekKind();
     switch (k) {
@@ -2350,7 +2341,7 @@ fn parsePrimary(s: *State, flags: ParseFlags) Error!void {
             if (k == .lparen) {
                 try s.advance();
                 // Parenthesized group: mirrors `js_parse_expr_paren`
-                // (`quickjs.c:26195`) -> `js_parse_expr` which parses
+                // -> `js_parse_expr` which parses
                 // with `PF_IN_ACCEPTED` set — grouping resets the
                 // for-init no-`in` restriction (and unary-context
                 // restrictions like the yield guard).
@@ -2391,7 +2382,7 @@ fn parseDynamicImportCall(s: *State, flags: ParseFlags) Error!void {
     try Emitter.op(s, opcode.op.import);
 }
 
-/// `js_parse_template` (`quickjs.c:23880`). Non-tagged template literals
+/// `js_parse_template`. Non-tagged template literals
 /// lower `\`a${b}c${d}e\`` to:
 ///
 ///     push_atom_value "a"
@@ -2492,7 +2483,7 @@ const TaggedTemplateObjectBuilder = struct {
 
     pub fn init(rt: *core.JSRuntime) Error!TaggedTemplateObjectBuilder {
         // qjs js_parse_template builds the cooked/raw arrays with
-        // JS_NewArray (quickjs.c:26820-26840) — realm Array.prototype.
+        // JS_NewArray — realm Array.prototype.
         // After deleting the Get miss fallback, a null proto makes
         // `strings.map` in assert.deepEqual.format a TypeError.
         const prototype = realmArrayPrototype(rt);
@@ -2505,7 +2496,7 @@ const TaggedTemplateObjectBuilder = struct {
 
         const raw_value = raw_array.value();
         const raw_atom = atom_module.ids.raw;
-        template_object.defineOwnProperty(rt, raw_atom, core.Descriptor.data(raw_value, false, false, false)) catch return Error.ParserInvariant;
+        template_object.defineOwnProperty(rt, raw_atom, core.Descriptor.data(raw_value, .none)) catch return Error.ParserInvariant;
         return .{
             .rt = rt,
             .template_value = template_object.value(),
@@ -2528,7 +2519,7 @@ const TaggedTemplateObjectBuilder = struct {
         self.template_object.defineOwnProperty(
             self.rt,
             core.Atom.taggedInt(self.depth),
-            core.Descriptor.data(cooked_value, true, true, true),
+            core.Descriptor.data(cooked_value, .all),
         ) catch return Error.ParserInvariant;
 
         if (comptime @import("builtin").is_test) {
@@ -2541,7 +2532,7 @@ const TaggedTemplateObjectBuilder = struct {
         self.raw_array.defineOwnProperty(
             self.rt,
             core.Atom.taggedInt(self.depth),
-            core.Descriptor.data(raw_value, true, true, true),
+            core.Descriptor.data(raw_value, .all),
         ) catch return Error.ParserInvariant;
         self.depth += 1;
     }
@@ -2552,7 +2543,7 @@ const TaggedTemplateObjectBuilder = struct {
     }
 };
 
-/// `js_parse_array_literal` (`quickjs.c:25194`). The QuickJS strategy
+/// `js_parse_array_literal`. The QuickJS strategy
 /// switches dynamically: leading
 /// non-spread elements collect into an `array_from <count>`; on the
 /// first spread, the parser pushes `<count>` as the running index,
@@ -2596,7 +2587,7 @@ fn parseArrayLiteral(s: *State, flags: ParseFlags) Error!void {
             }
             try s.advance();
             // Array elements always parse with `PF_IN_ACCEPTED`
-            // (`js_parse_assign_expr`, quickjs.c:28283) — the bracket
+            // (`js_parse_assign_expr`, quickjs.c) — the bracket
             // resets the for-init no-`in` restriction.
             try parseAssignExpr2(s, ParseFlags.default);
             try Emitter.op(s, opcode.op.append);
@@ -2634,12 +2625,11 @@ fn parseArrayLiteral(s: *State, flags: ParseFlags) Error!void {
     }
 }
 
-/// `js_parse_object_literal` (`quickjs.c:24361`). Supports ordinary,
+/// `js_parse_object_literal`. Supports ordinary,
 /// shorthand, computed, method, accessor, spread, and `__proto__` forms.
 fn parseObjectLiteral(s: *State, flags: ParseFlags) Error!void {
     try s.advance(); // consume '{'
     // qjs js_parse_object_literal starts with OP_object
-    // (quickjs.c:24361-24383).
     const object_opcode_pos = s.activeBuilder().code_len;
     try Emitter.op(s, opcode.op.object);
     var proto_field_seen = false;
@@ -2694,7 +2684,7 @@ fn parseObjectProperty(
     const k = s.peekKind();
     const property_source_start = s.currentFunctionSourceStart();
     // Property keys/values always parse with `PF_IN_ACCEPTED`
-    // (`js_parse_assign_expr`, quickjs.c:28283) — the object literal
+    // (`js_parse_assign_expr`, quickjs.c) — the object literal
     // resets the for-init no-`in` restriction.
     const computed_flags = ParseFlags.default;
 
@@ -2790,7 +2780,7 @@ fn parseObjectProperty(
         const is_getter = !name_info.has_escape and identifiers.atomNameEquals(s, name, "get");
         const is_setter = !name_info.has_escape and identifiers.atomNameEquals(s, name, "set");
         // qjs js_parse_property_name retreats to a shorthand ident when
-        // the next token is `:`, `,`, `}`, `(`, or `=` (quickjs.c:24643-24646).
+        // the next token is `:`, `,`, `}`, `(`, or `=`.
         if ((is_getter or is_setter) and
             s.peekKind() != .colon and
             s.peekKind() != .lparen and
@@ -2956,7 +2946,7 @@ pub fn logicalAssignKind(k: tok.TokenKind) ?LogicalAssignKind {
     };
 }
 
-/// Mirror `quickjs.c:27083..27201` — token-to-opcode level table.
+/// Mirror `quickjs.c` — token-to-opcode level table.
 fn matchBinaryOp(k: tok.TokenKind, level: u32, flags: ParseFlags) u8 {
     return switch (level) {
         1 => switch (k) {

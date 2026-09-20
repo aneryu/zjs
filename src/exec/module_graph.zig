@@ -6,8 +6,8 @@
 //! JSValues and hold a `RealmRef` until completion. Parser artifacts and the
 //! static module registry remain owned by `module.zig`; this file drives their
 //! asynchronous graph lifecycle without absorbing the linker. The protocol
-//! follows `js_dynamic_import` and its job at quickjs.c:31037-31169, plus
-//! module evaluation at quickjs.c:31423-31563.
+//! follows `js_dynamic_import` and its job at quickjs.c, plus
+//! module evaluation at quickjs.c.
 
 const std = @import("std");
 const atomics_ops = @import("atomics_ops.zig");
@@ -166,7 +166,7 @@ pub const ImportLoaderType = enum { none, json, text };
 fn importLoaderTypeFromAttributes(ctx: *core.JSContext, attributes: core.JSValue) ImportLoaderType {
     if (!attributes.is(.object)) return .none;
     const type_atom = core.atom.ids.type_;
-    const object = exec.property_ops.expectObject(attributes) catch return .none;
+    const object = core.value_semantics.objectFromValue(attributes) orelse return .none;
     const type_value = object.getOwnDataPropertyValue(type_atom) orelse return .none;
     if (!type_value.isString()) return .none;
     var buf = std.ArrayList(u8).empty;
@@ -200,7 +200,7 @@ pub const DynamicImportState = struct {
     /// dispatched, set by dynamicImportJobCall before invoking the callback
     /// (jobs run one at a time on this thread, so a single slot suffices —
     /// mirrors qjs threading `attributes` through js_dynamic_import_job to
-    /// js_module_loader, quickjs.c:31059 / quickjs-libc.c:703).
+    /// js_module_loader, quickjs.c / quickjs-libc.c:703).
     pending_import_type: ImportLoaderType = .none,
 
     fn continuationList(self: *DynamicImportState) *std.ArrayList(ModuleContinuation) {
@@ -279,7 +279,7 @@ pub const DynamicImportState = struct {
             state.pending_import_type,
         ) catch |err| {
             // Any pending JS exception must reach the import() promise as-is
-            // (js_dynamic_import_job quickjs.c:31063: exception → reject).
+            // (js_dynamic_import_job quickjs.c: exception → reject).
             if (ctx.hasException()) return error.JSException;
             return err;
         };
@@ -346,7 +346,7 @@ fn settleModuleEvaluationWaiters(
 
     var index: usize = 0;
     while (index < waiters.items.len) {
-        const waiter_context = waiters.items[index].realm.borrow() orelse unreachable;
+        const waiter_context = waiters.items[index].realm.borrow().?;
         if (waiter_context != context or !std.mem.eql(u8, waiters.items[index].path, path)) {
             index += 1;
             continue;
@@ -516,22 +516,22 @@ pub const DynamicImportHostState = struct {
             state.allocator,
         ) catch |err| {
             // Any pending JS exception must reach the import() promise as-is
-            // (js_dynamic_import_job quickjs.c:31063: exception → reject).
+            // (js_dynamic_import_job quickjs.c: exception → reject).
             if (ctx.hasException()) return error.JSException;
             return dynamicImportHostError(err);
         };
     }
 };
 
-/// Mirror of qjs js_dynamic_import (quickjs.c:31073): the runtime semantics
+/// Mirror of qjs js_dynamic_import: the runtime semantics
 /// of the `import(specifier, options)` expression. `specifier` has already
 /// been ToString-coerced by the caller (the "string conversion must occur
-/// here", quickjs.c:31096). This validates `options` and its `with`
-/// attributes bag synchronously (quickjs.c:31100-31145), building a
+/// here", quickjs.c). This validates `options` and its `with`
+/// attributes bag synchronously, building a
 /// null-prototype attributes object whose values are all strings, then
-/// enqueues the load/evaluate job (JS_EnqueueJob quickjs.c:31155) bound to
+/// enqueues the load/evaluate job (JS_EnqueueJob quickjs.c) bound to
 /// that attributes object. Any validation failure rejects the returned
-/// promise capability (quickjs.c:31163 `exception:`) instead of throwing.
+/// promise capability (quickjs.c `exception:`) instead of throwing.
 pub fn evaluateImportCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -543,20 +543,20 @@ pub fn evaluateImportCall(
     function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
 ) exec.exceptions.HostError!core.JSValue {
-    // quickjs.c:31100 — `if (!JS_IsUndefined(options))`.
+    // quickjs.c — `if (!JS_IsUndefined(options))`.
     var attributes = core.JSValue.undefinedValue();
     if (!options.is(.undefined_value)) {
-        // quickjs.c:31101 — options must be an object.
+        // quickjs.c — options must be an object.
         if (!options.is(.object)) {
             return rejectedImportTypeError(ctx, global, prototype, "options must be an object");
         }
         const with_atom = core.atom.ids.with;
-        // quickjs.c:31105 — `attributes_obj = JS_GetProperty(options, "with")`.
+        // quickjs.c — `attributes_obj = JS_GetProperty(options, "with")`.
         const attributes_obj = exec.object_ops.getValueProperty(ctx, output, global, options, with_atom, function, frame) catch |err|
             return rejectedImportRuntimeError(ctx, global, prototype, err);
-        // quickjs.c:31108 — `if (!JS_IsUndefined(attributes_obj))`.
+        // quickjs.c — `if (!JS_IsUndefined(attributes_obj))`.
         if (!attributes_obj.is(.undefined_value)) {
-            // quickjs.c:31113 — options.with must be an object.
+            // quickjs.c — options.with must be an object.
             if (!attributes_obj.is(.object)) {
                 return rejectedImportTypeError(ctx, global, prototype, "options.with must be an object");
             }
@@ -568,11 +568,11 @@ pub fn evaluateImportCall(
     return enqueueDynamicImportJobWithAttributes(ctx, global, prototype, referrer_path, specifier, attributes);
 }
 
-/// Mirror of qjs js_dynamic_import's attributes loop (quickjs.c:31117-31138):
+/// Mirror of qjs js_dynamic_import's attributes loop:
 /// create a null-prototype attributes object; enumerate the source's own
 /// enumerable string keys (JS_GetOwnPropertyNamesInternal with
 /// JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY); Get each value; reject with a
-/// TypeError if any value is not a String (quickjs.c:31126); otherwise copy
+/// TypeError if any value is not a String; otherwise copy
 /// it onto the attributes object (JS_PROP_C_W_E). Returns the built
 /// attributes object; the caller owns it. A thrown Get (or the proxy ownKeys
 /// trap) propagates as a runtime error so the caller can reject.
@@ -587,11 +587,11 @@ fn buildImportAttributes(
     const rt = ctx.runtime;
     const source = try exec.property_ops.expectObject(attributes_obj);
 
-    // quickjs.c:31117 — `attributes = JS_NewObjectProto(ctx, JS_NULL)`.
+    // quickjs.c — `attributes = JS_NewObjectProto(ctx, JS_NULL)`.
     const attributes_object = try core.Object.create(rt, core.class.ids.object, null);
     const attributes = attributes_object.value();
 
-    // quickjs.c:31118 — JS_GetOwnPropertyNamesInternal(STRING_MASK|ENUM_ONLY).
+    // quickjs.c — JS_GetOwnPropertyNamesInternal(STRING_MASK|ENUM_ONLY).
     // The proxy ownKeys trap runs here; a throwing trap propagates (mirrors
     // IfAbruptRejectPromise on the keys list).
     const keys = try exec.object_ops.objectRestOwnKeys(ctx, output, global, source);
@@ -605,16 +605,16 @@ fn buildImportAttributes(
         const enumerable = desc.enumerable orelse false;
         if (!enumerable) continue;
 
-        // quickjs.c:31123 — `val = JS_GetProperty(attributes_obj, key)`.
+        // quickjs.c — `val = JS_GetProperty(attributes_obj, key)`.
         const val = try exec.object_ops.getValueProperty(ctx, output, global, attributes_obj, key, function, frame);
-        // quickjs.c:31126 — module attribute values must be strings.
+        // quickjs.c — module attribute values must be strings.
         if (!val.isString()) {
             return exec.exception_ops.throwTypeErrorMessage(ctx, global, "module attribute values must be strings");
         }
-        // quickjs.c:31131 — `JS_DefinePropertyValue(attributes, key, val, C_W_E)`.
+        // quickjs.c — `JS_DefinePropertyValue(attributes, key, val, C_W_E)`.
         // Object.defineOwnProperty duplicates descriptor values; keep and
         // release the Get result instead of pretending ownership moved.
-        try attributes_object.defineOwnProperty(rt, key, core.Descriptor.data(val, true, true, true));
+        try attributes_object.defineOwnProperty(rt, key, core.Descriptor.data(val, .all));
     }
 
     return attributes;
@@ -622,7 +622,7 @@ fn buildImportAttributes(
 
 /// Reject the import() capability with a freshly-built TypeError (mirrors
 /// js_dynamic_import's `exception:` label after JS_ThrowTypeError,
-/// quickjs.c:31163). Returns the pending-then-rejected promise value.
+/// quickjs.c). Returns the pending-then-rejected promise value.
 fn rejectedImportTypeError(
     ctx: *core.JSContext,
     global: *core.Object,
@@ -635,7 +635,7 @@ fn rejectedImportTypeError(
 
 /// Reject the import() capability with the current pending JS exception (or a
 /// mapped runtime error), mirroring js_dynamic_import's `exception:` label
-/// (JS_GetException → JS_Call(reject), quickjs.c:31164-31169).
+/// (JS_GetException → JS_Call(reject), quickjs.c).
 fn rejectedImportRuntimeError(
     ctx: *core.JSContext,
     global: *core.Object,
@@ -646,10 +646,10 @@ fn rejectedImportRuntimeError(
     return exec.exception_ops.rejectedPromiseForRuntimeError(ctx, global, err, prototype);
 }
 
-/// Mirror of qjs js_dynamic_import's job-enqueue tail (quickjs.c:31147): build
+/// Mirror of qjs js_dynamic_import's job-enqueue tail: build
 /// a promise capability, retain [resolve, reject, basename, specifier,
 /// attributes] in a typed FIFO payload, and enqueue it on the runtime job queue
-/// (JS_EnqueueJob quickjs.c:31155 — "cannot run JS_LoadModuleInternal
+/// (JS_EnqueueJob quickjs.c — "cannot run JS_LoadModuleInternal
 /// synchronously because it would cause an unexpected recursion in
 /// js_evaluate_module()"). The returned pending promise is the value of the
 /// import() expression; the module loads and evaluates only when the job
@@ -701,7 +701,7 @@ fn enqueueDynamicImportJobWithAttributes(
     return promise_value;
 }
 
-/// Mirror of qjs js_dynamic_import_job (quickjs.c:31037): run the module
+/// Mirror of qjs js_dynamic_import_job: run the module
 /// loader and settle the import() capability — any failure (including a
 /// pending JS exception) rejects the promise instead of aborting evaluation.
 fn dynamicImportJobRun(
@@ -726,7 +726,7 @@ fn dynamicImportJobRun(
 
     // Thread the load-relevant `type` attribute to the file loader through the
     // installed DynamicImportState (mirrors qjs passing `attributes` into
-    // js_dynamic_import_job → js_module_loader, quickjs.c:31059 /
+    // js_dynamic_import_job → js_module_loader, quickjs.c /
     // quickjs-libc.c:703). Host-hook loaders resolve their own module kind and
     // ignore this. Jobs run one at a time on this thread, so restoring the
     // previous value keeps re-entrant graph drains correct.
@@ -784,7 +784,7 @@ fn dynamicImportJobRun(
 }
 
 /// Rejection reason for a failed dynamic import: the pending JS exception
-/// verbatim when one exists (js_dynamic_import_job quickjs.c:31063
+/// verbatim when one exists (js_dynamic_import_job quickjs.c
 /// JS_GetException → reject), otherwise the loader's ReferenceError shape
 /// (js_module_loader quickjs-libc.c:699) or a generic mapped error.
 fn dynamicImportRejectionValue(
@@ -909,7 +909,7 @@ pub fn evalFileModuleGraphWithOutput(
     defer dynamic_import_scope.deinit();
     for (module_postorder.items) |path| {
         if (std.mem.eql(u8, path, normalized_filename)) continue;
-        if (!preloadedModuleNeedsEvaluation(context, path)) continue;
+        if (!try preloadedModuleNeedsEvaluation(context, path)) continue;
         if (try hasActiveAsyncDependency(context, &continuations, path)) {
             try enqueueDeferredModuleStart(context, allocator, &continuations, path, false);
             continue;
@@ -919,7 +919,7 @@ pub fn evalFileModuleGraphWithOutput(
         if (context.hasUnhandledRejection() or context.hasException()) return error.UnhandledPromiseRejection;
     }
     var result = core.JSValue.undefinedValue();
-    if (preloadedModuleNeedsEvaluation(context, normalized_filename)) {
+    if (try preloadedModuleNeedsEvaluation(context, normalized_filename)) {
         if (try hasActiveAsyncDependency(context, &continuations, normalized_filename)) {
             try enqueueDeferredModuleStart(context, allocator, &continuations, normalized_filename, true);
         } else {
@@ -938,10 +938,10 @@ pub fn evalFileModuleGraphWithOutput(
 /// Status gate shared by the postorder evaluation loops: modules already
 /// evaluated (e.g. by a dynamic import job that ran between steps) or
 /// currently evaluating are never re-run (mirrors js_inner_module_evaluation
-/// quickjs.c:31441).
-fn preloadedModuleNeedsEvaluation(context: *core.JSContext, path: []const u8) bool {
+/// quickjs.c).
+fn preloadedModuleNeedsEvaluation(context: *core.JSContext, path: []const u8) !bool {
     const runtime = context.runtime;
-    const module_name = runtime.internAtom(path) catch return true;
+    const module_name = try runtime.internAtom(path);
     // TGC S3 §4 class B: bare module-name id held across module work.
     var module_name_roots = core.runtime.rootAtoms(.{&module_name});
     module_name_roots.activate(runtime);
@@ -1006,7 +1006,7 @@ pub fn evalFileModuleGraphWithHostHooks(
 
     for (module_postorder.items) |path| {
         if (std.mem.eql(u8, path, filename)) continue;
-        if (!preloadedModuleNeedsEvaluation(context, path)) continue;
+        if (!try preloadedModuleNeedsEvaluation(context, path)) continue;
 
         if (try hasActiveAsyncDependency(context, &continuations, path)) {
             try enqueueDeferredModuleStart(context, allocator, &continuations, path, false);
@@ -1018,7 +1018,7 @@ pub fn evalFileModuleGraphWithHostHooks(
     }
 
     var result = core.JSValue.undefinedValue();
-    if (preloadedModuleNeedsEvaluation(context, filename)) {
+    if (try preloadedModuleNeedsEvaluation(context, filename)) {
         if (try hasActiveAsyncDependency(context, &continuations, filename)) {
             try enqueueDeferredModuleStart(context, allocator, &continuations, filename, true);
         } else {
@@ -1096,7 +1096,7 @@ fn evalPreloadedFileModuleStep(
         if (record.status == .evaluating) {
             // Cache the evaluation exception on the record so later imports
             // rethrow it instead of re-running the body (mirrors qjs setting
-            // m->eval_exception, quickjs.c:31279/31563).
+            // m->eval_exception, quickjs.c).
             record.status = .errored;
             if (context.hasException()) {
                 record.setEvalException(runtime, context.runtime.current_exception);
@@ -1338,7 +1338,7 @@ fn prepareModuleContinuationAwait(
     continuations: *const std.ArrayList(ModuleContinuation),
     continuation: *ModuleContinuation,
 ) !void {
-    const context = continuation.realm.borrow() orelse unreachable;
+    const context = continuation.realm.borrow().?;
     std.debug.assert(context.runtime == runtime);
     if (continuation.completed or continuation.ready) return;
     if (continuation.deferred_start) {
@@ -1470,7 +1470,7 @@ fn retainRemovedModuleStep(
     }
 
     appendModuleEvalStepRetainingOnError(
-        current.realm.borrow() orelse unreachable,
+        current.realm.borrow().?,
         allocator,
         continuations,
         step,
@@ -1521,7 +1521,7 @@ fn drainOneModuleContinuation(
     var restore_current = true;
     // On errors, restore list ownership before the root window is unlinked.
     errdefer if (restore_current) continuations.insertAssumeCapacity(index, current);
-    const context = current.realm.borrow() orelse unreachable;
+    const context = current.realm.borrow().?;
     std.debug.assert(context.runtime == runtime);
 
     if (current.completed) {
@@ -1590,7 +1590,7 @@ fn drainOneModuleContinuation(
         unreachable;
     };
     const continuation_object = try exec.property_ops.expectObject(continuation);
-    try exec.call_runtime.setGeneratorResumeCompletionType(runtime, continuation_object, if (promise.promiseIsRejected()) 2 else 0);
+    exec.call_runtime.setGeneratorResumeCompletion(continuation_object, if (promise.promiseIsRejected()) .throw else .next);
     const step = evalPreloadedFileModuleStep(
         runtime,
         context,
@@ -1780,7 +1780,7 @@ fn evalDynamicImportModule(
     }
 
     // Evaluate-once via the module status machine (mirrors
-    // js_inner_module_evaluation quickjs.c:31441): an errored module
+    // js_inner_module_evaluation quickjs.c): an errored module
     // rethrows its cached exception (before relinking — linking artifacts of
     // an errored record must stay untouched); evaluating/evaluated modules
     // never re-run their body.
@@ -1871,7 +1871,7 @@ fn evalDynamicImportModule(
 }
 
 /// Rethrow a module's cached evaluation exception (mirrors
-/// js_inner_module_evaluation quickjs.c:31442: `JS_DupValue(ctx,
+/// js_inner_module_evaluation quickjs.c: `JS_DupValue(ctx,
 /// m->eval_exception)` for an evaluated module with eval_has_exception).
 fn throwCachedModuleEvalException(
     runtime: *core.JSRuntime,
@@ -1886,7 +1886,7 @@ fn throwCachedModuleEvalException(
 }
 
 /// Throw the qjs-shaped SyntaxError for a module link failure (mirrors
-/// js_resolve_export_throw_error quickjs.c:30232).
+/// js_resolve_export_throw_error quickjs.c).
 pub fn throwModuleLinkError(
     runtime: *core.JSRuntime,
     context: *core.JSContext,
