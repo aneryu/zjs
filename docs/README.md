@@ -48,8 +48,7 @@ recover them from git history when needed.
 - [Compiler Contract](compiler-contract.md): normative compiler identity rules.
 - [Parser: TypeScript as the grammar](parser-ts-first-class-design.md): one
   grammar for `.js` and `.ts`, the emission-free type parser, the three
-  tsc-resolved ambiguities, and the `zjs --bytecode-fingerprint` identity gate
-  (`tools/gates/bytecode_fingerprint.sh`).
+  tsc-resolved ambiguities, and the `zjs --bytecode-fingerprint` identity check.
 - [Borrowed Atom Audit](borrowed_atom_audit.md): atom-rooting contract and
   the `-Dzjs_ownership_audit` build.
 

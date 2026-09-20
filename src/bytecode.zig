@@ -11989,3 +11989,10 @@ test "dynamic shape index preserves all declared effects and absent forms" {
         try std.testing.expectEqualDeep(D.dynamic_by_form[@intFromEnum(form)], SparseDecodeTestOracle.dynamicShape(form));
     }
 }
+
+// Unified-suite tests only (`build_options.zjs_unified_test_suite`).
+comptime {
+    if (@import("builtin").is_test and @import("build_options").zjs_unified_test_suite) {
+        _ = @import("bytecode/tests.zig");
+    }
+}

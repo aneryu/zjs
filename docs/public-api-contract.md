@@ -2,7 +2,7 @@
 
 This document is the active public Zig API authority for embedders. Keep it in
 sync with `src/root.zig`, `src/js_context.zig`, `src/native.zig`, and `src/event_loop.zig`. The
-name lists in `src/tests/embedding_examples.zig` are the executable check:
+name lists in `tests/embedding_examples.zig` are the executable check:
 adding or removing a public name must update those arrays in the same
 commit. They are not a freeze of the API, and they are not the removed
 `check_public_api.zig` / `architecture-update-api-snapshot` tool.
@@ -423,11 +423,11 @@ dynamic plugin loader; host functions register through `zjs.native`.
 The current public API contract is covered by:
 
 - `docs/embedding-cookbook.md`;
-- `src/tests/embedding_examples.zig`, including the public-surface name
+- `tests/embedding_examples.zig`, including the public-surface name
   snapshot (active only when `zjs` is the true public facade), the native
   function contract test (arguments, receiver, error mapping, finalizer
   timing), the CallSite cookbook test, and the PropertySite cookbook test
   (own hit, shape-change re-capture, prototype holder, native getter,
   refused write, polymorphic retirement);
 - public API contract and production failure-path tests in
-  `src/tests/engine_production.zig`.
+  `src/core/tests.zig`.

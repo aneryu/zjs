@@ -199,7 +199,7 @@ working profiler on the
 `zjs-profile` artifact: profiling builds call `noteDispatch` from `cont` /
 `next` (`src/exec/vm_profile.zig`), `build.zig` ships `zjs-profile` plus
 nine `perf-*-profile` steps with exact opcode pins, and
-`src/tests/smoke_test.zig` asserts `--profile-opcodes` output. The default
+`tests/smoke_test.zig` asserts `--profile-opcodes` output. The default
 `zjs` binary still fail-closes `--profile-opcodes`.
 
 ## Host event loop — `src/event_loop.zig`
@@ -228,10 +228,12 @@ exactly like a builtin (`src/exec/vm_native.zig`); native -> JS goes through
   source assembly. `run_test262_host.zig` owns Test262 globals and the
   `$262.agent` coordinator. `run_test262_reporter.zig` owns synchronized
   stderr, failure buckets, directory summaries, and report files
-- `src/tests/`: Zig unit and integration entrypoints
-- `tests/fixtures/`: test262 harness and override fixtures. CLI smoke
-  coverage lives in `src/tests/smoke_test.zig` (inline scripts, `zig build
-  smoke`), not in a fixture tree.
+- Zig unit tests sit next to the code they exercise: package `tests.zig`
+  (`src/core/tests.zig`, `src/exec/tests.zig`, `src/parser/tests.zig`,
+  `src/bytecode/tests.zig`, `src/compiler/tests.zig`) plus colocated
+  `test` blocks
+- `tests/`: public-root embedding examples, CLI smoke, OOM-injection, plus
+  `tests/fixtures/` (test262 harness and override fixtures)
 
 Layering rules: [api-boundary.md](api-boundary.md).
 

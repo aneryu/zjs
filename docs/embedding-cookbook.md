@@ -4,7 +4,7 @@ This cookbook shows the public Zig-native embedding shape. It is not a
 `libquickjs` C API compatibility guide, and it does not use repository-internal
 modules.
 
-The examples below are covered by `src/tests/embedding_examples.zig`.
+The examples below are covered by `tests/embedding_examples.zig`.
 
 ## Basic Script Eval
 

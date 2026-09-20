@@ -121,7 +121,7 @@ undefined），同名再次声明复用既有绑定（声明合并）。namespac
 
 1. `zig build test`（含新增 TS 语料单测）。
 2. `zig build test262-check -Doptimize=ReleaseFast`：0 失败。
-3. `zjs --bytecode-fingerprint`（`tools/gates/bytecode_fingerprint.sh`）在 test262
+3. `zjs --bytecode-fingerprint` 在 test262
    全部用例 + jetstream3 + fixtures 上与改动前逐行一致（含 SyntaxError 的行列与消息）。
    落地时唯一的差异是诊断文本/位置：装饰器改报专用消息；类体内的词法错误改在出错
    token 处报告。

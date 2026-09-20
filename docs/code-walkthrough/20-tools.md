@@ -25,7 +25,7 @@
 
 统一套件与 CLI smoke 还读 `tests/perf/`、`.zig-cache/smoke-*` 临时脚本；那些由测试自己写。
 
-旁路：`tools/timing_test_runner.zig` 是统一套件的 test runner（分片、`--skip-prefix`、多 `--filter`、leak-census）。属工具树，函数级讲解不在本册重复。
+旁路：日常 `zig build test` 用 Zig 默认 test runner。`tools/leak_census_runner.zig` 只给夜间 `test-leak-census` 做两遍 in-process 跑。属工具树，函数级讲解不在本册重复。
 
 ---
 

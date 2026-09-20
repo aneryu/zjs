@@ -1,21 +1,24 @@
-//! Shared test harness consumed by Class-B roots (roots that pull the engine
-//! through the `zjs` module). Top-level declarations are the former
-//! `exec.zig` `helpers` namespace so `helpers.foo` call sites stay unchanged.
+//! Shared test harness. Top-level declarations are the former `exec.zig`
+//! `helpers` namespace so `helpers.foo` call sites stay unchanged.
 //!
-//! Rule D: this file `@import("zjs")` internally, so only Class-B roots may
-//! consume it. `src/compiler/tests.zig` and in-tree runtime tests must
-//! never import this file — those roots already span the engine subtree by
-//! relative path, and pulling helpers in would be a file-exists-in-two-modules
-//! error.
+//! Relative imports only: package `tests.zig` files and `src/stress.zig`
+//! import this from the unified suite. Do not import it from Class-B roots
+//! that already pull the engine as module `zjs` through a different file.
 
 const std = @import("std");
-const zjs = @import("zjs");
-const engine = zjs;
-const core = zjs.core;
-const QjsLexer = zjs.parser.Lexer;
-const parser_core = zjs.parser.Parser;
+const engine = struct {
+    pub const core = @import("core/root.zig");
+    pub const exec = @import("exec/root.zig");
+    pub const parser = @import("parser.zig");
+    pub const bytecode = @import("bytecode.zig");
+    pub const runtime = @import("event_loop.zig");
+};
+const core = engine.core;
+const QjsLexer = engine.parser.Lexer;
+const parser_core = engine.parser.Parser;
 const ParseState = parser_core.ParseState;
-const op = zjs.bytecode.opcode.op;
+const op = engine.bytecode.opcode.op;
+const JSContext = @import("js_context.zig").JSContext;
 
 const helpers = @This();
 
@@ -300,11 +303,11 @@ pub const TestEngine = struct {
     }
 
     pub fn deinit(self: *TestEngine) void {
-        var wrapper = zjs.JSContext.borrowCore(self.context);
+        var wrapper = JSContext.borrowCore(self.context);
         wrapper.runJobs(null) catch {};
         self.event_loop.deinit();
         self.allocator.destroy(self.event_loop);
-        const run_test262 = @import("../cli/run_test262.zig");
+        const run_test262 = @import("cli/run_test262.zig");
         _ = run_test262.cleanupTest262Agents(self.runtime);
         engine.exec.zjs_vm.cleanupAtomicsWaitersForContext(self.context);
         self.context.destroy();
@@ -326,8 +329,8 @@ pub const TestEngine = struct {
     pub fn ensureTest262GlobalsInstalled(self: *TestEngine) !void {
         if (self.context.global == null) {
             const global_obj = try engine.exec.zjs_vm.contextGlobal(self.context);
-            const run_test262 = @import("../cli/run_test262.zig");
-            var wrapper = zjs.JSContext.borrowCore(self.context);
+            const run_test262 = @import("cli/run_test262.zig");
+            var wrapper = JSContext.borrowCore(self.context);
             try run_test262.installTest262Globals(self.runtime, &wrapper, global_obj);
         }
     }
@@ -336,7 +339,7 @@ pub const TestEngine = struct {
         const filename = options.filename;
         const mode = options.mode;
         self.ensureTest262GlobalsInstalled() catch |err| return @errorCast(err);
-        var wrapper = zjs.JSContext.borrowCore(self.context);
+        var wrapper = JSContext.borrowCore(self.context);
         return wrapper.eval(source_text, .{
             .mode = mode,
             .filename = filename,
@@ -395,7 +398,7 @@ pub const TestEngine = struct {
     }
 
     pub fn runJobs(self: *TestEngine) !void {
-        var wrapper = zjs.JSContext.borrowCore(self.context);
+        var wrapper = JSContext.borrowCore(self.context);
         try wrapper.runJobs(null);
     }
 
@@ -497,10 +500,30 @@ var shared_engine_baseline_allocated_bytes: usize = 0;
 var shared_engine_baseline_module_count: usize = 0;
 var shared_engine_teardown_registered: bool = false;
 
-extern var zjs_test_runner_current_name_ptr: [*]const u8;
-extern var zjs_test_runner_current_name_len: usize;
-extern var zjs_test_runner_current_pass: usize;
-extern var zjs_test_runner_leak_census: bool;
+const test_runner_root = @import("root");
+
+fn leakCensusEnabled() bool {
+    return std.c.getenv("ZJS_LEAK_CENSUS") != null;
+}
+
+fn runnerPass() usize {
+    if (@hasDecl(test_runner_root, "zjs_test_runner_current_pass")) return test_runner_root.zjs_test_runner_current_pass;
+    return 0;
+}
+
+fn runnerTestName() []const u8 {
+    if (@hasDecl(test_runner_root, "zjs_test_runner_current_name_ptr")) {
+        return test_runner_root.zjs_test_runner_current_name_ptr[0..test_runner_root.zjs_test_runner_current_name_len];
+    }
+    return "";
+}
+
+/// Long-running stress tests stay in the unified binary so they share one
+/// engine compile, but `zig build test` must not run them. `test-stress`
+/// sets `ZJS_RUN_STRESS=1`.
+pub fn skipUnlessStress() error{SkipZigTest}!void {
+    if (std.c.getenv("ZJS_RUN_STRESS") == null) return error.SkipZigTest;
+}
 
 pub fn sharedTestEngine() *TestEngine {
     if (shared_engine_storage == null) {
@@ -618,11 +641,12 @@ pub fn endSharedTest() void {
     const count_delta = @as(i128, @intCast(allocation_count)) - @as(i128, @intCast(shared_engine_baseline_allocation_count));
     const bytes_delta = @as(i128, @intCast(allocated_bytes)) - @as(i128, @intCast(shared_engine_baseline_allocated_bytes));
     const module_delta = @as(i128, @intCast(module_count)) - @as(i128, @intCast(shared_engine_baseline_module_count));
-    const test_name = zjs_test_runner_current_name_ptr[0..zjs_test_runner_current_name_len];
+    const test_name = runnerTestName();
+    const current_pass = runnerPass();
 
-    if (zjs_test_runner_leak_census) {
+    if (leakCensusEnabled()) {
         std.debug.print("leak-census: pass={} test=\"{s}\" count_delta={d} bytes_delta={d} module_count={} module_delta={d} count={} bytes={}\n", .{
-            zjs_test_runner_current_pass,
+            current_pass,
             test_name,
             count_delta,
             bytes_delta,
@@ -638,7 +662,7 @@ pub fn endSharedTest() void {
     // its own monotonic count; every other test must stay within the measured
     // bounded property-capacity noise floor.
     const module_count_grew = module_count > shared_engine_baseline_module_count;
-    if (zjs_test_runner_current_pass != 0 and !module_count_grew) {
+    if (current_pass != 0 and !module_count_grew) {
         const limit = std.math.add(usize, shared_engine_baseline_allocation_count, shared_engine_allocation_tolerance) catch std.math.maxInt(usize);
         if (allocation_count > limit) {
             std.debug.panic(
@@ -849,7 +873,7 @@ pub fn createTailOpcodeFixture(
     stack_size: u16,
 ) !core.JSValue {
     const name = try js.runtime.internAtom(name_bytes);
-    const fb = try zjs.bytecode.FunctionBytecode.createFixture(js.runtime, .{
+    const fb = try engine.bytecode.FunctionBytecode.createFixture(js.runtime, .{
         .name = name,
         .realm = js.context,
         .flags = .{
@@ -861,7 +885,7 @@ pub fn createTailOpcodeFixture(
     });
     fb.publishFixtureNoFail(js.runtime);
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
-    return zjs.exec.object_ops.createRootBytecodeFunctionObject(
+    return engine.exec.object_ops.createRootBytecodeFunctionObject(
         js.context,
         global,
         core.JSValue.functionBytecode(&fb.header),

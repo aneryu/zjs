@@ -1,7 +1,7 @@
 //! Exercises lexer/parser semantics and emitted bytecode invariants.
 const std = @import("std");
 const zjs = @import("zjs");
-const helpers = @import("helpers.zig");
+const helpers = @import("../testing.zig");
 const engine = zjs;
 const core = zjs.core;
 const parser = zjs.parser;

@@ -7,8 +7,8 @@ const core = zjs.core;
 const compiler = zjs.compiler;
 const frame_mod = zjs.exec.frame;
 const parser = zjs.parser;
-const parser_tests = @import("parser.zig");
-const helpers = @import("helpers.zig");
+const parser_tests = @import("../parser/tests.zig");
+const helpers = @import("../testing.zig");
 
 test "constant pool retains and releases values" {
     const rt = try core.JSRuntime.create(std.testing.allocator);

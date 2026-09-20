@@ -6,7 +6,7 @@
 `src/parser.zig` 里以 `ts` 为前缀的函数分两类：
 
 - **纯解析函数**（`tsParse*` / `tsSkip*` / `tsAt*` / `tsPeek*`）：只推进 lexer，不发射字节码、不登记作用域、不改 `features`。
-  这保证 JS 输入的字节码逐位不变（门禁：`zjs --bytecode-fingerprint`，`tools/gates/bytecode_fingerprint.sh`），
+  这保证 JS 输入的字节码逐位不变（用 `zjs --bytecode-fingerprint` 前后对比），
   也让每一次投机解析都能用 parser 快照回退。
 - **降级函数**（`parseEnumDeclaration` / `parseNamespaceDeclaration*` / `tsParseImportAlias` / 参数属性）：
   有运行时语义，按 tsc 输出的形状发射普通字节码。

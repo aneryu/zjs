@@ -109,3 +109,10 @@ pub const Vm = struct {
         return zjs_vm.runWithOutput(self.ctx, &self.stack, function, self.output);
     }
 };
+
+// Unified-suite tests only (`build_options.zjs_unified_test_suite`).
+comptime {
+    if (@import("builtin").is_test and @import("build_options").zjs_unified_test_suite) {
+        _ = @import("tests.zig");
+    }
+}

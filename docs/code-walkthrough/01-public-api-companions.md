@@ -6,7 +6,7 @@
 
 ## `src/internal_root.zig`
 
-编译根链的中段：`src/root.zig` ⊂ `src/internal_root.zig` ⊂ `src/all_tests.zig`。CLI 对着这个文件编。
+内部编译根：`src/root.zig` ⊂ `src/internal_root.zig`。CLI 和统一 Zig 单测都对着这个文件编。
 
 ### 类型与 re-export
 

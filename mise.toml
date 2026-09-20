@@ -24,7 +24,7 @@ description = "Run the checkpoint gate"
 run = 'zig build checkpoint-gate "$ZJS_BUILD_JOBS" --summary all'
 
 [tasks.test-fast]
-description = "Run a required test-name substring using the unified test binary (mise run test-fast -- name)"
+description = "Run tests whose names contain a required substring (mise run test-fast -- name)"
 run = 'zig build test-fast "$ZJS_BUILD_JOBS" --summary all --'
 
 # Reclaim build-cache and worktree debris. The Zig local cache has no

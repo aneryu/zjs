@@ -1,7 +1,6 @@
-//! Internal engine root. Middle of the compile-root chain
-//! `src/root.zig` ⊂ `src/internal_root.zig` ⊂ `src/all_tests.zig`.
-//! CLI and ReleaseFast artifacts compile against this file.
-//! The unified suite imports it and adds the public-surface mirrors.
+//! Internal engine root. Public embedder surface is `src/root.zig`;
+//! CLI, ReleaseFast artifacts, and the unified Zig test suite compile
+//! against this file.
 
 const public_root = @import("root.zig");
 
@@ -69,4 +68,27 @@ test {
     _ = exec;
     _ = libs;
     _ = runtime;
+}
+
+// Stress + CLI tests are not on the core/exec/parser package graph.
+comptime {
+    if (@import("builtin").is_test and @import("build_options").zjs_unified_test_suite) {
+        _ = @import("stress.zig");
+        _ = @import("cli/zjs.zig");
+        _ = @import("cli/run_test262.zig");
+    }
+}
+
+test "zjs.pull_test_modules" {
+    const std = @import("std");
+    const builtin = @import("builtin");
+    const raw = std.c.getenv("ZJS_TEST_FILTER") orelse return;
+    const filter = std.mem.span(raw);
+    if (filter.len == 0) return;
+    var matched: usize = 0;
+    for (builtin.test_functions) |t| {
+        if (std.mem.endsWith(u8, t.name, "zjs.pull_test_modules")) continue;
+        if (std.mem.indexOf(u8, t.name, filter) != null) matched += 1;
+    }
+    if (matched == 0) return error.TestUnexpectedResult;
 }

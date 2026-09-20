@@ -83,7 +83,7 @@ management, JSON parse source context, promise combinators, Set methods,
 RegExp match indices/modifiers/escape/property escapes, and modern Array,
 String, Object, and Promise additions listed in `test262.conf`.
 
-Additional smoke fixtures in `src/tests/smoke_test.zig` cover CLI behavior,
+Additional smoke fixtures in `tests/smoke_test.zig` cover CLI behavior,
 QuickJS parity markers, host module behavior, and targeted regressions that are
 faster to run than the full test262 gate.
 

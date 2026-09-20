@@ -306,36 +306,34 @@ Gate obligations and ablation routing are defined solely by
 instruments for that policy. Do not weaken skips, excludes, or assertions.
 
 **Inner loop.** Use `zig build check` for compile errors, then the direct
-reproducer or a runtime-filtered selection from the unified test binary:
+reproducer or a filtered selection from the unified test root:
 
 ```bash
 mise run test-fast -- 'test-name substring'
 git diff --check
 ```
 
-`test-fast` runs one process, requires a nonempty matching substring, and
-does not change the compiled test selection or enable DWARF. Changing the
-substring reuses the same binary; source edits still require rebuilding it.
-Use `-Dtest-filter=<substring>` when a separate symbolised diagnostic build
-is needed. Also run the JS fixture or `run-test262 -d` / `-f`
-slice that directly reproduces the changed behavior. Area selection is a
-runtime filter on the unified binary (`test-fast -- 'tests.core.'`); do not
-add a second compile root per subsystem.
+`test-fast` compiles the unified root with Zig `--test-filter` for the
+given substring and keeps DWARF. A missing, empty, or unmatched substring
+fails. Changing the substring is a new compile (the engine objects usually
+cache). `-Dtest-filter=<substring>` on `zig build test` is the same kind of
+compile-time selection on the close-out binary. Also run the JS fixture or
+`run-test262 -d` / `-f` slice that directly reproduces the changed behavior.
+Area selection is a name substring (`test-fast -- 'exec.tests.'` matches
+the `src/exec/tests.zig` family); do not add a second compile root per
+subsystem.
 
 Run `mise run quick-gate` for CLI/runtime glue that targeted tests do not
 exercise. `quick-gate` does not compile the separate test262 runner.
 
-`zig build test` compiles the unified suite once and runs it as sixteen
-parallel shard processes (`tools/timing_test_runner.zig --shard i/N`,
-round-robin over the test index; `-Dtest-shards=N` changes the count, `1`
-restores the single process). Shard output is captured and replayed only for
-a shard that fails, so a green run prints just the step tree; a run with
-nothing changed is a cache hit and does not re-execute. `-Dtest-filter=<substring>`
-is a separately compiled single-process diagnostic selection.
+`zig build test` compiles the unified suite and runs it with Zig's default
+test runner, one process. Long-running `src/stress.zig` cases `SkipZigTest`
+unless `ZJS_RUN_STRESS=1`. `-Dtest-filter=<substring>` is a separately
+compiled diagnostic selection.
 The full run builds the test binary without debug info (`-Dtest-strip`
-defaults to true; a `-Dtest-filter` run keeps DWARF so a red can be
-diagnosed with a symbolised trace, and `-Dtest-strip=false` forces DWARF on
-the full run). Cache-hit, changed-source, and cold-cache timings differ.
+defaults to true; a `-Dtest-filter` or `test-fast` run keeps DWARF so a red
+can be diagnosed with a symbolised trace, and `-Dtest-strip=false` forces
+DWARF on the full run). Cache-hit, changed-source, and cold-cache timings differ.
 
 `build.zig` pins the Zig 0.16 build/test seed to `0` so the compile graph
 stays cacheable. CLI `--seed` is not required. Pass `-Dzjs_test_seed=<u32>`
@@ -353,10 +351,10 @@ smoke, and the sema-only public-root check (`check-embedding`); measured
 2026-09-06 at 33 s after an engine edit on the big-core build pool. Default
 `zig build` is Debug, so this does not compile ReleaseFast `zjs`. It also
 excludes the long-running stress tier (`zig build test-stress`: stack
-exhaustion and bigint kernel sweeps in `src/tests/stress.zig`, selected out
-of the same unified binary by `--only-prefix tests.stress.`) — that tier
-runs on the merge gate, the engine-production gate and primary-platform CI
-(docs/verification-policy.md). Run `test-stress` locally when a change
+exhaustion and bigint kernel sweeps in `src/stress.zig`, a
+compile-time filtered run of the same root with `ZJS_RUN_STRESS=1`) — that
+tier runs on the merge gate, the engine-production gate and primary-platform
+CI (docs/verification-policy.md). Run `test-stress` locally when a change
 touches stack unwinding, call teardown, or the bigint division kernels. Add
 the relevant focused test262 directory or file set; do not run `quick-gate`
 first because checkpoint already supersedes it.

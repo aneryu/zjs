@@ -8,9 +8,8 @@
 | `build/config.zig` | 8 | [20-build.md](20-build.md) |
 | `build/gates.zig` | 1 | [20-build.md](20-build.md) |
 | `build/perf.zig` | 1 | [20-build.md](20-build.md) |
-| `build/tests.zig` | 5 | [20-build.md](20-build.md) |
+| `build/tests.zig` | 4 | [20-build.md](20-build.md) |
 | `build.zig` | 1 | [20-build.md](20-build.md) |
-| `src/all_tests.zig` | 2 | [20-tests.md](20-tests.md) |
 | `src/bytecode.zig` | 507 | [05-bytecode-binding.md](05-bytecode-binding.md), [05-bytecode-function-def.md](05-bytecode-function-def.md), [05-bytecode-function.md](05-bytecode-function.md), [05-bytecode-opcodes.md](05-bytecode-opcodes.md), [05-bytecode-pipeline.md](05-bytecode-pipeline.md), [05-bytecode.md](05-bytecode.md) |
 | `src/cli/cli_process.zig` | 3 | [18-cli.md](18-cli.md) |
 | `src/cli/panic_policy.zig` | 0 | [18-cli.md](18-cli.md) |

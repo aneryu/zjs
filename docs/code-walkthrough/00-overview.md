@@ -138,7 +138,7 @@ zjs **已经是**栈式字节码解释器，没有迁到寄存器机的证据支
 
 - `src/libs/`：regexp 引擎、unicode 表与属性、bigint、dtoa/number format。这些是移植/生成代码，函数名常保留上游拼写。
 - `src/cli/zjs.zig`：CLI。`run_test262*.zig` 把 test262 跑法拆开：options / config / names / metadata / known errors / source / host / reporter。
-- `src/tests/`：Zig 单测与集成入口；`tests/fixtures/` 是 harness 与覆盖夹具。
+- 各包 `tests.zig`：Zig 单测（`src/core/tests.zig` 等）；`tests/`：嵌入 / smoke / OOM 与 `tests/fixtures/`。
 - `build.zig` + `build/`：产物、配置、gates、perf、测试步骤。Zig 钉 0.16.0。
 
 ## 10. 怎样用后面的分册

@@ -113,3 +113,10 @@ pub const ActiveBacktraceSnapshot = context.ActiveBacktraceSnapshot;
 pub const BacktraceLocation = context.BacktraceLocation;
 pub const BacktraceLocationResolver = context.BacktraceLocationResolver;
 pub const OpcodeProfile = profile.OpcodeProfile;
+
+// Unified-suite tests only (`build_options.zjs_unified_test_suite`).
+comptime {
+    if (@import("builtin").is_test and @import("build_options").zjs_unified_test_suite) {
+        _ = @import("tests.zig");
+    }
+}

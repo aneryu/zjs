@@ -10,7 +10,7 @@ pub const Ctx = struct {
     optimize: std.builtin.OptimizeMode,
     engine_inputs: EngineOptionInputs,
     engine_options: *std.Build.Step.Options,
-    /// Optional taskset CPU list for the graph's Run steps (test shards,
+    /// Optional taskset CPU list for the graph's Run steps (unit tests,
     /// test262); "" leaves them unpinned.
     gate_run_cpus: []const u8,
 };
@@ -20,7 +20,7 @@ pub const Ctx = struct {
 /// An empty string disables pinning. Linux only (`taskset`); elsewhere the
 /// Run steps are always unpinned.
 pub fn gateRunCpus(b: *std.Build) []const u8 {
-    const opt = b.option([]const u8, "gate-run-cpus", "optional taskset CPU list for the graph's Run steps: test shards, test262 (default: ZJS_GATE_RUN_CPUS, else ZJS_BUILD_CPUS, else unpinned)");
+    const opt = b.option([]const u8, "gate-run-cpus", "optional taskset CPU list for the graph's Run steps: unit tests, test262 (default: ZJS_GATE_RUN_CPUS, else ZJS_BUILD_CPUS, else unpinned)");
     if (opt) |v| return v;
     if (b.graph.environ_map.get("ZJS_GATE_RUN_CPUS")) |v| return v;
     if (b.graph.environ_map.get("ZJS_BUILD_CPUS")) |v| return v;
@@ -56,6 +56,10 @@ pub const EngineOptionInputs = struct {
     /// suite, so every test measured a heap the shipped build never has. Only
     /// the `test-oom` step turns it on.
     oom_injection: bool = false,
+    /// Package `tests.zig` files import themselves only when this is true.
+    /// Default false so `test-embedding` / `test-oom` do not analyze the
+    /// eval families. The unified `test` module turns it on.
+    unified_test_suite: bool = false,
     force_gc: bool,
     ownership_audit: bool,
     /// R3 roots diagnosis build. Default false; diag artifacts only.
@@ -66,6 +70,12 @@ pub const EngineOptionInputs = struct {
         out.oom_injection = oom_injection;
         return out;
     }
+
+    pub fn withUnifiedTestSuite(self: EngineOptionInputs, unified_test_suite: bool) EngineOptionInputs {
+        var out = self;
+        out.unified_test_suite = unified_test_suite;
+        return out;
+    }
 };
 
 pub fn addEngineOptions(b: *std.Build, in: EngineOptionInputs) *std.Build.Step.Options {
@@ -74,6 +84,7 @@ pub fn addEngineOptions(b: *std.Build, in: EngineOptionInputs) *std.Build.Step.O
     options.addOption([]const u8, "zjs_compiler_layout", in.compiler_layout);
     options.addOption(bool, "zjs_oom_coverage", in.oom_coverage);
     options.addOption(bool, "zjs_oom_injection", in.oom_injection);
+    options.addOption(bool, "zjs_unified_test_suite", in.unified_test_suite);
     options.addOption(bool, "zjs_force_gc", in.force_gc);
     options.addOption(bool, "zjs_ownership_audit", in.ownership_audit);
     options.addOption(bool, "zjs_gc_roots_diag", in.gc_roots_diag);

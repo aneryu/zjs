@@ -26,7 +26,7 @@ Owner 裁决（2026-09-20）：**不再要求对齐 QuickJS；优先处理「不
 ## 2. 刀序
 
 每刀一个 commit；验证 = `zig build check` → 定向 `test-fast` → `zig build test`；
-触及 parser/compiler/bytecode 的加 `tools/gates/bytecode_fingerprint.sh`；
+触及 parser/compiler/bytecode 的加 `zjs --bytecode-fingerprint` 前后对比；
 触及热路径的加 ReleaseFast 构建 + Octane≥0.95 回归门（perf-line-closed 裁决）。
 
 ### 第 0 波：零风险删除与顺手 bug

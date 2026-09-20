@@ -13,10 +13,11 @@ const engine = zjs;
 const core = zjs.core;
 const bytecode = zjs.bytecode;
 const op = zjs.bytecode.opcode.op;
-const helpers = @import("helpers.zig");
+const helpers = @import("testing.zig");
 const createTailOpcodeFixture = helpers.createTailOpcodeFixture;
 
 test "raw tail call opcodes share the bounded tail-chain stack contract" {
+    try helpers.skipUnlessStress();
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
     js.runtime.setNativeStackSize(128 * 1024);
@@ -85,6 +86,7 @@ test "raw tail call opcodes share the bounded tail-chain stack contract" {
 }
 
 test "sloppy tail recursion still overflows like QuickJS" {
+    try helpers.skipUnlessStress();
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
@@ -100,6 +102,7 @@ test "sloppy tail recursion still overflows like QuickJS" {
 }
 
 test "missing-argument abrupt teardown releases supplied args and pads exactly once" {
+    try helpers.skipUnlessStress();
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
 
@@ -141,6 +144,7 @@ test "missing-argument abrupt teardown releases supplied args and pads exactly o
 }
 
 test "strict arrow tails stay constant while method recursion exhausts the logical stack budget" {
+    try helpers.skipUnlessStress();
 
     // In a STRICT script, plain / arrow `return f()` is a proper tail call
     // and stays in constant stack. Method tails (`return this.m()`) still
@@ -205,6 +209,7 @@ fn referenceSubMul(
 }
 
 test "fused multiply-subtract matches the reference limb for limb" {
+    try helpers.skipUnlessStress();
     const bigint = engine.libs.bigint;
     const Limb = bigint.Limb;
     const alloc = std.testing.allocator;

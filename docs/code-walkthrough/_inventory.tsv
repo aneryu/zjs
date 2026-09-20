@@ -13,11 +13,10 @@ build/config.zig	71	pub		addEngineOptions
 build/config.zig	88	pub		forceLlvmBackendOnDebug
 build/gates.zig	6	pub		addGates
 build/perf.zig	4	pub		addPerfSteps
-build/tests.zig	21	priv		forwardArgs
-build/tests.zig	25	priv		addZjsTest
-build/tests.zig	44	priv		addShardedUnifiedRuns
-build/tests.zig	74	priv		addSmokeStep
-build/tests.zig	96	pub		addTestGraph
+build/tests.zig	21	priv		addZjsTest
+build/tests.zig	36	priv		runUnifiedTests
+build/tests.zig	50	priv		addSmokeStep
+build/tests.zig	71	pub		addTestGraph
 src/all_tests.zig	81	priv		refAllDeclsRecursive
 src/all_tests.zig	120	priv		isInternalDeclException
 src/binding/binding.zig	35	priv		deinit

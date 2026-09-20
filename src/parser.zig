@@ -926,3 +926,10 @@ test "pending diagnostic syntax error allocation propagates OOM" {
     try std.testing.expect(failing.has_induced_failure);
     try std.testing.expect(!account.hasOutstandingAllocations());
 }
+
+// Unified-suite tests only (`build_options.zjs_unified_test_suite`).
+comptime {
+    if (@import("builtin").is_test and @import("build_options").zjs_unified_test_suite) {
+        _ = @import("parser/tests.zig");
+    }
+}

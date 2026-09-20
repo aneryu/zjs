@@ -89,7 +89,11 @@ See `docs/architecture.md`. Short map:
 - `src/event_loop.zig`: host event loop (`zjs.runtime`).
 - `src/js_context.zig`: public `JSContext` facade over core + exec.
 - `src/native.zig`: host-function registration (`zjs.native.managed`).
-- `src/libs/`, `src/cli/`, `src/tests/`.
+- `src/libs/`, `src/cli/`. Zig unit tests live next to the code they
+  exercise: a package `tests.zig` pulled from the package root (same
+  shape as `src/compiler/tests.zig`), plus colocated `test` blocks.
+  Public-root embedding, CLI smoke, and OOM-injection tests live under
+  `tests/`.
 
 ## Commands
 

@@ -20,8 +20,8 @@ size-screen / 场锁 / 强制 PMU ABBA;验证摊销仍从批内扩到批间)。�
 不随每次编辑构建。Debug 结果不能替代生产配置的最终验证。
 
 1. 迭代验证用 `zig build check` 判编译错误;定向测试用
-   `mise run test-fast -- '<测试名子串>'`，运行时过滤复用统一测试产物，空选择失败。
-   需要符号化失败栈时再用 `-Dtest-filter` 或 `-Dtest-strip=false`;
+   `mise run test-fast -- '<测试名子串>'`，编译期 `--test-filter`，空选择失败。
+   需要符号化失败栈时 `test-fast` 已带 DWARF；全量收口要符号化用 `-Dtest-strip=false`;
 2. 为改动写针对性测试(新行为/新不变量);
 3. 收尾跑**一次** `zig build test`(pipefail)全绿;
 4. 注入验证:**仅**对守护新不变量的检查器;用「一次构建多注入点」模式

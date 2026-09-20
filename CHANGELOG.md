@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **Tests:** Zig unit tests sit in package `tests.zig` files pulled from
+  the package root (`src/core/tests.zig`, `src/exec/tests.zig`,
+  `src/parser/tests.zig`, `src/bytecode/tests.zig`, matching
+  `src/compiler/tests.zig`), plus colocated `test` blocks. Shared harness
+  is `src/testing.zig`. Deleted `src/all_tests.zig` and `src/tests/`;
+  embedding / smoke / OOM-injection live under `tests/`. Unified suite
+  root is `src/internal_root.zig`.
+
+- **Tests:** `zig build test` uses Zig's default test runner (no custom
+  sharding runner). `test-fast` is a compile-time `--test-filter`. Stress
+  tests in `src/stress.zig` `SkipZigTest` unless `ZJS_RUN_STRESS=1`;
+  `test-stress` is a filtered compile of the same root. `test-leak-census`
+  keeps a small dedicated two-pass runner (`tools/leak_census_runner.zig`).
+  Deleted `tools/timing_test_runner.zig`.
+
+- **Tools:** removed `tools/gates/bytecode_fingerprint.sh`. Parser/compiler
+  identity checks stay on `zjs --bytecode-fingerprint` against two binaries.
+
 - **Compiler/Parser:** the legacy emitter mode is retired. `ParseState`
   no longer has `emit_phase1_temp`: the parser always emits the phase-1
   temp stream (`enter_scope` / `leave_scope` markers, `scope_get_var` /

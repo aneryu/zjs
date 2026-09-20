@@ -13,7 +13,7 @@ shortcuts. Do not rerun them as prerequisites for the aggregate release gate.
 
 - Public Zig API matches `docs/public-api-contract.md`.
 - Public embedding cookbook examples compile and pass through
-  `src/tests/embedding_examples.zig`.
+  `tests/embedding_examples.zig`.
 - Public native-function registration (`zjs.native`) failure paths preserve
   host-owned state and leave no half-installed binding.
 - Ownership-bearing values have documented free paths.
