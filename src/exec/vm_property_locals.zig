@@ -5,6 +5,8 @@ const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const stack_mod = @import("stack.zig");
+const Vm = @import("tailcall_dispatch.zig").Vm;
+const HostError = @import("exceptions.zig").HostError;
 
 const call_runtime = @import("call_runtime.zig");
 const exception_ops = @import("exception_ops.zig");
@@ -17,13 +19,11 @@ const Step = vm_property.Step;
 const varRefReadableBorrowed = vm_property.varRefReadableBorrowed;
 
 const op = bytecode.opcode.op;
-pub noinline fn loc(
-    ctx: *core.JSContext,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    stack: *stack_mod.Stack,
-    opc: u8,
-) !void {
+pub noinline fn loc(vm: *Vm, opc: u8) HostError!void {
+    const ctx = vm.ctx;
+    const function = vm.function;
+    const frame = vm.frame;
+    const stack = vm.stack;
     switch (opc) {
         op.get_loc => {
             const idx = readInt(u16, function.byteCode()[frame.pc..][0..2]);
@@ -63,17 +63,14 @@ pub noinline fn loc(
     }
 }
 
-pub noinline fn arg(
-    ctx: *core.JSContext,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    stack: *stack_mod.Stack,
-    opc: u8,
-) !void {
+pub noinline fn arg(vm: *Vm, opc: u8) HostError!void {
+    const ctx = vm.ctx;
+    const frame = vm.frame;
+    const stack = vm.stack;
     switch (opc) {
-        op.get_arg => try slot_ops.execGetArg(ctx, frame, stack, readInt(u16, function.byteCode()[frame.pc..][0..2]), 2, opc),
-        op.put_arg => try slot_ops.execPutArg(frame, stack, readInt(u16, function.byteCode()[frame.pc..][0..2]), 2, opc),
-        op.set_arg => try slot_ops.execSetArg(frame, stack, readInt(u16, function.byteCode()[frame.pc..][0..2]), 2, opc),
+        op.get_arg => try slot_ops.execGetArg(ctx, frame, stack, readInt(u16, vm.function.byteCode()[frame.pc..][0..2]), 2, opc),
+        op.put_arg => try slot_ops.execPutArg(frame, stack, readInt(u16, vm.function.byteCode()[frame.pc..][0..2]), 2, opc),
+        op.set_arg => try slot_ops.execSetArg(frame, stack, readInt(u16, vm.function.byteCode()[frame.pc..][0..2]), 2, opc),
         op.get_arg0 => try slot_ops.execGetArg(ctx, frame, stack, 0, 0, opc),
         op.get_arg1 => try slot_ops.execGetArg(ctx, frame, stack, 1, 0, opc),
         op.get_arg2 => try slot_ops.execGetArg(ctx, frame, stack, 2, 0, opc),
@@ -90,16 +87,19 @@ pub noinline fn arg(
     }
 }
 
-pub noinline fn checkedLocVm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    function: *const bytecode.FunctionBytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    stack: *stack_mod.Stack,
-    opc: u8,
-    catch_target: *?usize,
-) !Step {
+/// `get_arg0..3`: the short forms encode the index in the opcode.
+pub fn getArgShort(vm: *Vm, opc: u8) HostError!void {
+    try slot_ops.execGetArg(vm.ctx, vm.frame, vm.stack, @as(u16, @intCast(opc - op.get_arg0)), 0, opc);
+}
+
+pub noinline fn checkedLocVm(vm: *Vm, opc: u8) HostError!void {
+    const ctx = vm.ctx;
+    const output = vm.output;
+    const function = vm.function;
+    const global = vm.global;
+    const frame = vm.frame;
+    const stack = vm.stack;
+    const catch_target = vm.catch_target;
     const idx = readInt(u16, function.byteCode()[frame.pc..][0..2]);
     frame.pc += 2;
     if (idx >= frame.locals.len) return error.InvalidBytecode;
@@ -120,7 +120,7 @@ pub noinline fn checkedLocVm(
                     _ = exception_ops.throwReferenceErrorMessage(ctx, global, "this is not initialized") catch |err| break :blk err;
                     unreachable;
                 } else exception_ops.throwTdzReferenceError(ctx);
-                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
                 return err;
             }
             try stack.push(frame.locals[idx]);
@@ -138,12 +138,12 @@ pub noinline fn checkedLocVm(
         op.put_loc_check => {
             if (frame.locals[idx].is(.uninitialized)) {
                 const err = exception_ops.throwTdzReferenceError(ctx);
-                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
                 return err;
             }
             const value = try stack.pop();
             if (idx < function.varDefs().len and function.varDefs()[idx].isConst()) {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return;
                 return error.TypeError;
             }
             frame.locals[idx] = value;
@@ -151,7 +151,7 @@ pub noinline fn checkedLocVm(
         op.set_loc_check => {
             if (frame.locals[idx].is(.uninitialized)) {
                 const err = exception_ops.throwTdzReferenceError(ctx);
-                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
                 return err;
             }
             const value = stack.peek() orelse return error.StackUnderflow;
@@ -168,7 +168,7 @@ pub noinline fn checkedLocVm(
                 function.varDefs()[idx].var_name == core.atom.ids.this_;
             if (is_derived_this and !frame.locals[idx].is(.uninitialized)) {
                 _ = exception_ops.throwReferenceErrorMessage(ctx, global, "'this' can be initialized only once") catch |err| {
-                    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+                    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
                     return err;
                 };
                 unreachable;
@@ -178,7 +178,6 @@ pub noinline fn checkedLocVm(
         },
         else => unreachable,
     }
-    return .done;
 }
 
 pub fn varRef(
@@ -237,18 +236,9 @@ pub fn varRef(
     return .done;
 }
 
-pub noinline fn varRefVm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    function: *const bytecode.FunctionBytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    stack: *stack_mod.Stack,
-    opc: u8,
-    catch_target: *?usize,
-) !Step {
-    return varRef(ctx, output, function, global, frame, stack, opc, catch_target) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+pub noinline fn varRefVm(vm: *Vm, opc: u8) HostError!void {
+    _ = varRef(vm.ctx, vm.output, vm.function, vm.global, vm.frame, vm.stack, opc, vm.catch_target) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
         return err;
     };
 }
@@ -261,12 +251,8 @@ fn tryFastDirectVarRefGet(function: *const bytecode.FunctionBytecode, frame: *fr
     return true;
 }
 
-pub noinline fn closeLoc(
-    ctx: *core.JSContext,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-) !void {
-    const idx = readInt(u16, function.byteCode()[frame.pc..][0..2]);
-    frame.pc += 2;
-    try frame.closeLocalBinding(ctx.runtime, idx);
+pub noinline fn closeLoc(vm: *Vm) HostError!void {
+    const idx = readInt(u16, vm.function.byteCode()[vm.frame.pc..][0..2]);
+    vm.frame.pc += 2;
+    try vm.frame.closeLocalBinding(vm.ctx.runtime, idx);
 }

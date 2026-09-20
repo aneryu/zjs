@@ -20,6 +20,8 @@ const exception_ops = @import("exception_ops.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const inline_calls = @import("inline_calls.zig");
 const stack_mod = @import("stack.zig");
+const HostError = @import("exceptions.zig").HostError;
+const Vm = @import("tailcall_dispatch.zig").Vm;
 
 const op = bytecode.opcode.op;
 
@@ -324,18 +326,9 @@ fn allocFrameVarRefWindow(ctx: *core.JSContext, frame: *frame_mod.Frame, count: 
     return std.mem.bytesAsSlice(*core.VarRef, std.mem.sliceAsBytes(values)[0..ptr_bytes]);
 }
 
-pub noinline fn closure(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    opc: u8,
-) !Step {
-    _ = output;
-    _ = catch_target;
+pub noinline fn closure(vm: *Vm, opc: u8) HostError!void {
+    const function = vm.function;
+    const frame = vm.frame;
     const index: u32 = if (opc == op.fclosure) blk: {
         const value = readInt(u32, function.byteCode()[frame.pc..][0..4]);
         frame.pc += 4;
@@ -345,8 +338,7 @@ pub noinline fn closure(
         frame.pc += 1;
         break :blk value;
     };
-    try array_ops.pushFunctionClosure(ctx, frame, stack, function, global, index);
-    return .done;
+    try array_ops.pushFunctionClosure(vm.ctx, frame, vm.stack, function, vm.global, index);
 }
 
 pub fn call(
@@ -782,19 +774,11 @@ pub fn checkCtor(ctx: *core.JSContext, global: *core.Object, frame: *frame_mod.F
     }
 }
 
-pub noinline fn checkCtorVm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    stack: *stack_mod.Stack,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    global: *core.Object,
-) !Step {
-    checkCtor(ctx, global, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+pub noinline fn checkCtorVm(vm: *Vm) HostError!void {
+    checkCtor(vm.ctx, vm.global, vm.frame) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
         return err;
     };
-    return .done;
 }
 
 pub fn checkCtorReturn(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
@@ -812,19 +796,11 @@ pub fn checkCtorReturn(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     }
 }
 
-pub noinline fn checkCtorReturnVm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    stack: *stack_mod.Stack,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    global: *core.Object,
-) !Step {
-    checkCtorReturn(ctx, stack) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+pub noinline fn checkCtorReturnVm(vm: *Vm) HostError!void {
+    checkCtorReturn(vm.ctx, vm.stack) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
         return err;
     };
-    return .done;
 }
 
 pub fn initCtor(
@@ -856,20 +832,11 @@ pub fn initCtor(
     try stack.pushOwned(result);
 }
 
-pub noinline fn initCtorVm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-) !Step {
-    initCtor(ctx, output, global, stack, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+pub noinline fn initCtorVm(vm: *Vm) HostError!void {
+    initCtor(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
         return err;
     };
-    return .done;
 }
 
 fn maxNativeJsCallDepth(ctx: *const core.JSContext) usize {

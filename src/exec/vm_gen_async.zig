@@ -18,6 +18,8 @@ const HostError = @import("exceptions.zig").HostError;
 const forof_ops = @import("forof_ops.zig");
 const promise_ops = @import("promise_ops.zig");
 const stack_mod = @import("stack.zig");
+const dispatch = @import("tailcall_dispatch.zig");
+const Vm = dispatch.Vm;
 
 pub const Result = union(enum) {
     none,
@@ -448,17 +450,12 @@ fn parkGeneratorStartBoundary(
     generator.generatorSuspendKindSlot().* = @intFromEnum(core.object.GeneratorSuspendKind.none);
 }
 
-pub fn initialYield(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    frame: *frame_mod.Frame,
-    generator: ?*core.Object,
-    catch_target: ?usize,
-    stop_on_yield: bool,
-) !Result {
-    if (stop_on_yield) {
-        if (generator) |generator_object| {
-            try parkGeneratorStartBoundary(ctx, stack, frame, generator_object, frame.pc, catch_target);
+pub fn initialYield(vm: *Vm) !Result {
+    const stack = vm.stack;
+    if (dispatch.stopOnYield(vm)) {
+        if (dispatch.generatorState(vm)) |generator_object| {
+            const frame = vm.frame;
+            try parkGeneratorStartBoundary(vm.ctx, stack, frame, generator_object, frame.pc, vm.catch_target.*);
         }
         return .{ .return_value = core.JSValue.undefinedValue() };
     }
@@ -466,18 +463,13 @@ pub fn initialYield(
     return .none;
 }
 
-pub noinline fn yieldValue(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    frame: *frame_mod.Frame,
-    generator: ?*core.Object,
-    catch_target: ?usize,
-    stop_on_yield: bool,
-) !Result {
+pub noinline fn yieldValue(vm: *Vm) !Result {
+    const stack = vm.stack;
     const value = try stack.pop();
-    if (stop_on_yield) {
-        if (generator) |generator_object| {
-            try saveGeneratorExecutionState(ctx, stack, frame, generator_object, frame.pc, catch_target);
+    if (dispatch.stopOnYield(vm)) {
+        if (dispatch.generatorState(vm)) |generator_object| {
+            const frame = vm.frame;
+            try saveGeneratorExecutionState(vm.ctx, stack, frame, generator_object, frame.pc, vm.catch_target.*);
             const payload = generator_object.generatorPayloadPtr();
             payload.suspend_kind = @intFromEnum(core.object.GeneratorSuspendKind.yield);
             payload.started = true;
@@ -490,18 +482,14 @@ pub noinline fn yieldValue(
     return .none;
 }
 
-pub noinline fn yieldStar(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    generator: ?*core.Object,
-    stop_on_yield: bool,
-    catch_target: *?usize,
-) !Result {
-    return yieldStarRaw(ctx, output, global, stack, function, frame, generator, stop_on_yield, catch_target.*) catch |err| {
+pub noinline fn yieldStar(vm: *Vm) !Result {
+    const ctx = vm.ctx;
+    const output = vm.output;
+    const global = vm.global;
+    const stack = vm.stack;
+    const frame = vm.frame;
+    const catch_target = vm.catch_target;
+    return yieldStarRaw(ctx, output, global, stack, vm.function, frame, dispatch.generatorState(vm), dispatch.stopOnYield(vm), catch_target.*) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
             return .continue_loop;
         }
@@ -587,19 +575,15 @@ fn yieldStarRaw(
     return .none;
 }
 
-pub noinline fn awaitValue(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    generator: ?*core.Object,
-    suspend_on_module_await: bool,
-    stop_on_yield: bool,
-    catch_target: *?usize,
-) HostError!Result {
-    return awaitValueRaw(ctx, output, global, stack, function, frame, generator, suspend_on_module_await, stop_on_yield, catch_target.*) catch |err| {
+pub noinline fn awaitValue(vm: *Vm) HostError!Result {
+    const ctx = vm.ctx;
+    const output = vm.output;
+    const global = vm.global;
+    const stack = vm.stack;
+    const function = vm.function;
+    const frame = vm.frame;
+    const catch_target = vm.catch_target;
+    return awaitValueRaw(ctx, output, global, stack, function, frame, dispatch.generatorState(vm), dispatch.suspendOnModuleAwait(vm), dispatch.stopOnYield(vm), catch_target.*) catch |err| {
         if (try handleAwaitError(ctx, output, global, stack, function, frame, catch_target, err)) {
             return .continue_loop;
         }

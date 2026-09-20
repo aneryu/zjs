@@ -16,8 +16,9 @@ const module_graph = @import("module_graph.zig");
 const promise_ops = @import("promise_ops.zig");
 const string_ops = @import("string_ops.zig");
 const stack_mod = @import("stack.zig");
-
-pub const Step = enum { done, continue_loop };
+const dispatch = @import("tailcall_dispatch.zig");
+const HostError = @import("exceptions.zig").HostError;
+const Vm = @import("tailcall_dispatch.zig").Vm;
 
 pub const EvalStep = union(enum) {
     done,
@@ -61,50 +62,36 @@ pub noinline fn directEval(
     };
 }
 
-pub noinline fn applyEval(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    caller_eval_global_var_bindings: bool,
-) !Step {
-    const eval_scope = readInt(u16, function.byteCode()[frame.pc..][0..2]);
-    frame.pc += 2;
+pub noinline fn applyEval(vm: *Vm) HostError!void {
+    const eval_scope = readInt(u16, vm.function.byteCode()[vm.frame.pc..][0..2]);
+    vm.frame.pc += 2;
     const eval_scope_head = @as(i32, eval_scope) + bytecode.function_bytecode.arg_scope_end;
-    return switch (try eval_ops.execApplyEval(
-        ctx,
-        stack,
-        function,
-        frame,
-        catch_target,
-        output,
-        global,
+    switch (try eval_ops.execApplyEval(
+        vm.ctx,
+        vm.stack,
+        vm.function,
+        vm.frame,
+        vm.catch_target,
+        vm.output,
+        vm.global,
         eval_scope_head,
-        caller_eval_global_var_bindings,
+        dispatch.directEvalVarsReachGlobal(vm),
     )) {
-        .done => .done,
-        .continue_loop => .continue_loop,
+        .done, .continue_loop => {},
         // eval_ops.execApplyEval never requests tail-call inlining.
         .tail_inline => unreachable,
-    };
+    }
 }
 
-pub noinline fn dynamicImport(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-) !void {
+pub noinline fn dynamicImport(vm: *Vm) HostError!void {
+    const ctx = vm.ctx;
+    const global = vm.global;
+    const stack = vm.stack;
     const options = try stack.pop();
     const specifier = try stack.pop();
 
     const prototype = promise_ops.promisePrototypeFromGlobal(ctx.runtime, global);
-    const specifier_string = string_ops.toStringForAnnexB(ctx, output, global, specifier, function, frame) catch |err| {
+    const specifier_string = string_ops.toStringForAnnexB(ctx, vm.output, global, specifier, vm.function, vm.frame) catch |err| {
         const rejected = try exception_ops.rejectedPromiseForRuntimeError(ctx, global, err, prototype);
         try stack.pushOwned(rejected);
         return;
@@ -121,8 +108,8 @@ pub noinline fn dynamicImport(
     // GetActiveScriptOrModule, qjs JS_GetScriptOrModuleName quickjs.c).
     // Direct eval retains this separately from its "<eval>" display filename,
     // so escaped eval-created functions do not depend on live caller frames.
-    const referrer_path = ctx.runtime.atoms.name(function.scriptOrModule()) orelse "";
-    const promise = module_graph.evaluateImportCall(ctx, output, global, prototype, referrer_path, specifier_string, options, function, frame) catch |err| {
+    const referrer_path = ctx.runtime.atoms.name(vm.function.scriptOrModule()) orelse "";
+    const promise = module_graph.evaluateImportCall(ctx, vm.output, global, prototype, referrer_path, specifier_string, options, vm.function, vm.frame) catch |err| {
         const rejected = try exception_ops.rejectedPromiseForRuntimeError(ctx, global, err, prototype);
         try stack.pushOwned(rejected);
         return;

@@ -6,6 +6,8 @@ const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
 const stack_mod = @import("stack.zig");
+const Vm = @import("tailcall_dispatch.zig").Vm;
+const HostError = @import("exceptions.zig").HostError;
 
 const call_runtime = @import("call_runtime.zig");
 const exception_ops = @import("exception_ops.zig");
@@ -17,7 +19,6 @@ const varRefCellFromValue = slot_ops.varRefCellFromValue;
 
 // Helpers that remain in vm_property.zig (shared with the leftover handlers).
 const vm_property = @import("vm_property.zig");
-const Step = vm_property.Step;
 const hasObjectBinding = vm_property.hasObjectBinding;
 
 const op = bytecode.opcode.op;
@@ -26,20 +27,12 @@ const op = bytecode.opcode.op;
 /// binding for the operand atom and, if it does, run the operation named by
 /// the flags byte and jump to the operand label. The five with_*/eval
 /// variable-object opcodes this replaces differed only in that operation.
-pub noinline fn dynEnvProbe(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-) !Step {
-    const flags = bytecode.opcode.dyn_env.decode(function.byteCode()[frame.pc + 8]) orelse
+pub noinline fn dynEnvProbe(vm: *Vm) HostError!void {
+    const flags = bytecode.opcode.dyn_env.decode(vm.function.byteCode()[vm.frame.pc + 8]) orelse
         return error.InvalidBytecode;
     return switch (flags.kind) {
-        .put => dynEnvProbeStore(ctx, output, global, stack, function, frame, catch_target, flags.is_with),
-        else => dynEnvProbeAccess(ctx, output, global, stack, function, frame, catch_target, flags),
+        .put => dynEnvProbeStore(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, flags.is_with),
+        else => dynEnvProbeAccess(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame, vm.catch_target, flags),
     };
 }
 
@@ -52,7 +45,7 @@ fn dynEnvProbeAccess(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     flags: bytecode.opcode.dyn_env.Flags,
-) !Step {
+) HostError!void {
     const atom_id = core.Atom.fromRaw(readInt(u32, function.byteCode()[frame.pc..][0..4]));
     const diff = readInt(i32, function.byteCode()[frame.pc + 4 ..][0..4]);
     const is_with = flags.is_with;
@@ -61,33 +54,33 @@ fn dynEnvProbeAccess(
     const obj_value = stack.peek() orelse return error.StackUnderflow;
     const object = core.value_semantics.objectFromValue(obj_value) orelse {
         _ = try stack.pop();
-        return .continue_loop;
+        return;
     };
     const has_binding = object_ops.hasPropertyForWith(ctx, output, global, obj_value, atom_id, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
         return err;
     };
     const blocked = if (is_with and has_binding)
         call_runtime.isBlockedByUnscopables(ctx, output, global, obj_value, atom_id, function, frame) catch |err| {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
             return err;
         }
     else
         false;
     if (!has_binding or blocked) {
         _ = try stack.pop();
-        return .continue_loop;
+        return;
     }
     const still_has_binding = if (flags.kind == .read or flags.kind == .get_ref)
         object_ops.hasPropertyForWith(ctx, output, global, obj_value, atom_id, function, frame) catch |err| {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
             return err;
         }
     else
         true;
     if (flags.kind == .read and !still_has_binding and (function.isStrictMode() or function.runtimeStrictMode())) {
         _ = exception_ops.throwReferenceErrorNotDefined(ctx, global, atom_id) catch |err| {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
             return err;
         };
         return error.ReferenceError;
@@ -123,7 +116,7 @@ fn dynEnvProbeAccess(
                 }
             }
             if (!deleted and function.isStrictMode()) {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return;
                 return error.TypeError;
             }
             _ = try stack.pop();
@@ -143,18 +136,13 @@ fn dynEnvProbeAccess(
         .put => unreachable,
     }
     frame.pc = @intCast(@as(i64, @intCast(operand_pc + 4)) + diff);
-    return .done;
 }
 
-pub noinline fn makeSlotRef(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    opc: u8,
-) !void {
-    const atom_id = core.Atom.fromRaw(readInt(u32, function.byteCode()[frame.pc..][0..4]));
-    const idx = readInt(u16, function.byteCode()[frame.pc + 4 ..][0..2]);
+pub noinline fn makeSlotRef(vm: *Vm, opc: u8) HostError!void {
+    const ctx = vm.ctx;
+    const frame = vm.frame;
+    const atom_id = core.Atom.fromRaw(readInt(u32, vm.function.byteCode()[frame.pc..][0..4]));
+    const idx = readInt(u16, vm.function.byteCode()[frame.pc + 4 ..][0..2]);
     frame.pc += 6;
 
     const cell: *core.VarRef = switch (opc) {
@@ -174,8 +162,8 @@ pub noinline fn makeSlotRef(
     };
     const ref_value = cell.valueRef();
     const key_value = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
-    try stack.push(ref_value);
-    try stack.pushOwned(key_value);
+    try vm.stack.push(ref_value);
+    try vm.stack.pushOwned(key_value);
 }
 
 pub fn makeVarRef(
@@ -219,20 +207,11 @@ pub fn makeVarRef(
     try stack.push(key_value);
 }
 
-pub noinline fn makeVarRefVm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-) !Step {
-    makeVarRef(ctx, output, global, stack, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+pub noinline fn makeVarRefVm(vm: *Vm) HostError!void {
+    makeVarRef(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
         return err;
     };
-    return .done;
 }
 
 pub fn getRefValue(
@@ -274,20 +253,11 @@ pub fn getRefValue(
     try stack.pushOwned(value);
 }
 
-pub noinline fn getRefValueVm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-) !Step {
-    getRefValue(ctx, output, global, stack, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+pub noinline fn getRefValueVm(vm: *Vm) HostError!void {
+    getRefValue(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
         return err;
     };
-    return .done;
 }
 
 pub fn putRefValue(
@@ -339,20 +309,11 @@ pub fn putRefValue(
     _ = try object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame);
 }
 
-pub noinline fn putRefValueVm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-) !Step {
-    putRefValue(ctx, output, global, stack, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+pub noinline fn putRefValueVm(vm: *Vm) HostError!void {
+    putRefValue(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
         return err;
     };
-    return .done;
 }
 
 fn dynEnvProbeStore(
@@ -364,101 +325,93 @@ fn dynEnvProbeStore(
     frame: *frame_mod.Frame,
     catch_target: *?usize,
     is_with: bool,
-) !Step {
+) HostError!void {
     const atom_id = core.Atom.fromRaw(readInt(u32, function.byteCode()[frame.pc..][0..4]));
     const diff = readInt(i32, function.byteCode()[frame.pc + 4 ..][0..4]);
     const operand_pc = frame.pc;
     frame.pc += 9;
     const obj = try stack.pop();
-    if (obj.is(.undefined_value)) return .continue_loop;
+    if (obj.is(.undefined_value)) return;
     {
         const has_binding = object_ops.hasPropertyForWith(ctx, output, global, obj, atom_id, function, frame) catch |err| {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
             return err;
         };
-        if (!has_binding) return .continue_loop;
+        if (!has_binding) return;
         if (is_with) {
             const blocked = call_runtime.isBlockedByUnscopables(ctx, output, global, obj, atom_id, function, frame) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
                 return err;
             };
-            if (blocked) return .continue_loop;
+            if (blocked) return;
         }
     }
     const still_exists = object_ops.hasPropertyForWith(ctx, output, global, obj, atom_id, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
         return err;
     };
     if (!still_exists and (function.isStrictMode() or function.runtimeStrictMode())) {
         _ = exception_ops.throwReferenceErrorNotDefined(ctx, global, atom_id) catch |err| {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
             return err;
         };
         return error.ReferenceError;
     }
     const value = try stack.pop();
     _ = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
         return err;
     };
     frame.pc = @intCast(@as(i64, @intCast(operand_pc + 4)) + diff);
-    return .done;
 }
 
-pub noinline fn deleteVar(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-) !void {
-    const atom_id = core.Atom.fromRaw(readInt(u32, function.byteCode()[frame.pc..][0..4]));
-    frame.pc += 4;
+pub noinline fn deleteVar(vm: *Vm) HostError!void {
+    const global = vm.global;
+    const atom_id = core.Atom.fromRaw(readInt(u32, vm.function.byteCode()[vm.frame.pc..][0..4]));
+    vm.frame.pc += 4;
     // qjs JS_DeleteGlobalVar: declarative globals are not deletable; every
     // object-environment binding goes through the ordinary global property
     // delete, which also parks a captured VARREF cell at UNINITIALIZED.
-    const deleted = if (call_runtime.globalLexicalHasForGlobal(ctx, global, atom_id))
+    const deleted = if (call_runtime.globalLexicalHasForGlobal(vm.ctx, global, atom_id))
         false
     else if (global.hasProperty(atom_id))
-        global.deleteProperty(ctx.runtime, atom_id)
+        global.deleteProperty(vm.ctx.runtime, atom_id)
     else
         true;
-    try stack.pushOwned(core.JSValue.boolean(deleted));
+    try vm.stack.pushOwned(core.JSValue.boolean(deleted));
 }
 
-pub noinline fn deletePropertyVm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-) !Step {
+pub noinline fn deletePropertyVm(vm: *Vm) HostError!void {
+    const ctx = vm.ctx;
+    const output = vm.output;
+    const global = vm.global;
+    const stack = vm.stack;
+    const frame = vm.frame;
+    const catch_target = vm.catch_target;
     const prop = try stack.pop();
     const obj = try stack.pop();
     // qjs js_operator_delete runs JS_ValueToAtom on the key
     // FIRST: user toString/Symbol.toPrimitive side effects (and their
     // exceptions) fire before any base check.
-    const atom_id = object_ops.toPropertyKeyAtom(ctx, output, global, prop, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+    const atom_id = object_ops.toPropertyKeyAtom(ctx, output, global, prop, vm.function, frame) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
         return err;
     };
     if (obj.is(.null_value) or obj.is(.undefined_value)) {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return;
         return error.TypeError;
     }
     // JS_DeleteProperty converts the base via JS_ToObject and
     // runs the real delete on the wrapper, so string-exotic non-configurable
     // props (indices, .length) report false and strict mode throws.
     const obj_value = if (obj.is(.object)) obj else object_ops.primitiveObjectForAccess(ctx.runtime, global, obj) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
         return err;
     };
     const object = try property_ops.expectObject(obj_value);
     const deleted = if (object.proxyTarget() != null) blk: {
-        break :blk object_ops.deleteValueProperty(ctx, output, global, obj_value, object, atom_id, function, frame) catch |err| {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+        break :blk object_ops.deleteValueProperty(ctx, output, global, obj_value, object, atom_id, vm.function, frame) catch |err| {
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
             return err;
         };
     } else if (object.isArray() and atom_id == core.atom.ids.length)
@@ -467,10 +420,9 @@ pub noinline fn deletePropertyVm(
         typed_deleted
     else
         object.deleteProperty(ctx.runtime, atom_id);
-    if (!deleted and function.isStrictMode()) {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+    if (!deleted and vm.function.isStrictMode()) {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return;
         return error.TypeError;
     }
     try stack.pushOwned(core.JSValue.boolean(deleted));
-    return .done;
 }

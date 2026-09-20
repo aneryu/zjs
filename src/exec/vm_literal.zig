@@ -18,32 +18,24 @@ const call_runtime = @import("call_runtime.zig");
 const array_ops = @import("array_ops.zig");
 const object_ops = @import("object_ops.zig");
 const stack_mod = @import("stack.zig");
+const HostError = @import("exceptions.zig").HostError;
+const Vm = @import("tailcall_dispatch.zig").Vm;
 
 const special_object_subtype = bytecode.opcode.special_object_subtype;
 
-pub const Step = enum { done, continue_loop };
-
-pub noinline fn object(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    global: *core.Object,
-) !void {
-    const created = try core.Object.create(ctx.runtime, core.class.ids.object, object_ops.objectPrototypeFromGlobal(ctx.runtime, global));
+pub noinline fn object(vm: *Vm) HostError!void {
+    const created = try core.Object.create(vm.ctx.runtime, core.class.ids.object, object_ops.objectPrototypeFromGlobal(vm.ctx.runtime, vm.global));
     const value = created.value();
-    try stack.pushOwned(value);
+    try vm.stack.pushOwned(value);
 }
 
-pub noinline fn objectReserved2(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    global: *core.Object,
-) !void {
+pub noinline fn objectReserved2(vm: *Vm) HostError!void {
     const created = try core.Object.createPlainObjectReserved2(
-        ctx.runtime,
-        object_ops.objectPrototypeFromGlobal(ctx.runtime, global),
+        vm.ctx.runtime,
+        object_ops.objectPrototypeFromGlobal(vm.ctx.runtime, vm.global),
     );
     const value = created.value();
-    try stack.pushOwned(value);
+    try vm.stack.pushOwned(value);
 }
 
 /// Frameless OP_object fast path (qjs CASE(OP_object): `*sp++ = JS_NewObject(ctx)`,
@@ -109,15 +101,10 @@ pub inline fn defineFieldFast(rt: *core.JSRuntime, obj: core.JSValue, atom_id: c
     return true;
 }
 
-pub noinline fn arrayFrom(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    global: *core.Object,
-) !void {
-    const argc = readInt(u16, function.byteCode()[frame.pc..][0..2]);
-    frame.pc += 2;
+pub noinline fn arrayFrom(vm: *Vm) HostError!void {
+    const ctx = vm.ctx;
+    const argc = readInt(u16, vm.function.byteCode()[vm.frame.pc..][0..2]);
+    vm.frame.pc += 2;
     var stack_values: [8]core.JSValue = undefined;
     const values = if (argc <= stack_values.len)
         stack_values[0..argc]
@@ -127,26 +114,20 @@ pub noinline fn arrayFrom(
     var remaining: usize = argc;
     while (remaining > 0) {
         remaining -= 1;
-        values[remaining] = try stack.pop();
+        values[remaining] = try vm.stack.pop();
     }
-    const array = try core.array.constructLiteralWithPrototype(ctx.runtime, values, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global));
-    try stack.pushOwned(array);
+    const array = try core.array.constructLiteralWithPrototype(ctx.runtime, values, array_ops.arrayPrototypeFromGlobal(ctx.runtime, vm.global));
+    try vm.stack.pushOwned(array);
 }
 
-pub noinline fn defineField(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-) !Step {
-    const atom_id = core.Atom.fromRaw(readInt(u32, function.byteCode()[frame.pc..][0..4]));
+pub noinline fn defineField(vm: *Vm) HostError!void {
+    const ctx = vm.ctx;
+    const frame = vm.frame;
+    const atom_id = core.Atom.fromRaw(readInt(u32, vm.function.byteCode()[frame.pc..][0..4]));
     frame.pc += 4;
     if (ctx.runtime.atoms.kind(atom_id) == .private) return error.InvalidBytecode;
-    const value = try stack.pop();
-    const obj = stack.peekBorrowed() orelse return error.StackUnderflow;
+    const value = try vm.stack.pop();
+    const obj = vm.stack.peekBorrowed() orelse return error.StackUnderflow;
     if (!value.isTracerOwned()) {
         if (property_ops.expectObject(obj)) |target| {
             // flags.extensible gate: qjs OP_define_field goes
@@ -160,7 +141,7 @@ pub noinline fn defineField(
                 target.flags.extensible)
             {
                 try target.definePlainDataPropertyKnownFast(ctx.runtime, atom_id, value);
-                return .done;
+                return;
             }
         } else |_| {}
     }
@@ -183,12 +164,12 @@ pub noinline fn defineField(
             // Arrays carrying index properties fall through to defineArrayLength.
             target.truncateArrayElements(ctx.runtime, new_len);
             target.setArrayLength(new_len);
-            return .done;
+            return;
         }
     }
     if (target.isArray()) {
         if (core.array.arrayIndexFromAtom(&ctx.runtime.atoms, atom_id)) |index| {
-            if (try target.defineDenseArrayDataProperty(ctx.runtime, index, rooted_value)) return .done;
+            if (try target.defineDenseArrayDataProperty(ctx.runtime, index, rooted_value)) return;
         }
     }
     if (target.class_id == core.class.ids.object and
@@ -199,13 +180,12 @@ pub noinline fn defineField(
         target.shape_ref.prop_count == 0)
     {
         try target.defineOwnPropertyAssumingNew(ctx.runtime, atom_id, core.Descriptor.data(rooted_value, .all));
-        return .done;
+        return;
     }
-    object_ops.createDataPropertyOrThrow(ctx, output, global, rooted_obj, target, atom_id, rooted_value, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+    object_ops.createDataPropertyOrThrow(ctx, vm.output, vm.global, rooted_obj, target, atom_id, rooted_value, vm.function, frame) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, vm.output, vm.stack, frame, vm.catch_target, vm.global, err)) return;
         return err;
     };
-    return .done;
 }
 
 pub noinline fn setProto(
@@ -222,15 +202,12 @@ pub noinline fn setProto(
     }
 }
 
-pub noinline fn defineArrayEl(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-) !Step {
+pub noinline fn defineArrayEl(vm: *Vm) HostError!void {
+    const ctx = vm.ctx;
+    const output = vm.output;
+    const global = vm.global;
+    const stack = vm.stack;
+    const frame = vm.frame;
     const value = try stack.pop();
     var rooted_value = value;
     const index = try stack.pop();
@@ -243,13 +220,12 @@ pub noinline fn defineArrayEl(
     defer root_frame.deactivate(ctx.runtime);
 
     const object_value = property_ops.expectObject(rooted_array) catch |err|
-        return try handleLiteralRuntimeError(ctx, output, stack, frame, catch_target, global, err);
-    const atom_id = object_ops.toPropertyKeyAtom(ctx, output, global, rooted_index, function, frame) catch |err|
-        return try handleLiteralRuntimeError(ctx, output, stack, frame, catch_target, global, err);
-    object_ops.createDataPropertyOrThrow(ctx, output, global, rooted_array, object_value, atom_id, rooted_value, function, frame) catch |err|
-        return try handleLiteralRuntimeError(ctx, output, stack, frame, catch_target, global, err);
+        return try handleLiteralRuntimeError(ctx, output, stack, frame, vm.catch_target, global, err);
+    const atom_id = object_ops.toPropertyKeyAtom(ctx, output, global, rooted_index, vm.function, frame) catch |err|
+        return try handleLiteralRuntimeError(ctx, output, stack, frame, vm.catch_target, global, err);
+    object_ops.createDataPropertyOrThrow(ctx, output, global, rooted_array, object_value, atom_id, rooted_value, vm.function, frame) catch |err|
+        return try handleLiteralRuntimeError(ctx, output, stack, frame, vm.catch_target, global, err);
     try stack.push(rooted_index);
-    return .done;
 }
 
 pub fn appendSpreadValues(
@@ -273,32 +249,22 @@ pub fn appendSpreadValues(
     try stack.pushOwned(core.JSValue.int32(out_index));
 }
 
-pub noinline fn appendSpreadValuesVm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    opc: u8,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-) !Step {
-    appendSpreadValues(ctx, output, global, stack, opc) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+pub noinline fn appendSpreadValuesVm(vm: *Vm, opc: u8) HostError!void {
+    appendSpreadValues(vm.ctx, vm.output, vm.global, vm.stack, opc) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
         return err;
     };
-    return .done;
 }
 
-pub noinline fn copyDataProperties(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    mask: u8,
-    caller_function: ?*const bytecode.FunctionBytecode,
-    caller_frame: *frame_mod.Frame,
-    catch_target: *?usize,
-) !Step {
+pub noinline fn copyDataProperties(vm: *Vm) HostError!void {
+    const ctx = vm.ctx;
+    const output = vm.output;
+    const global = vm.global;
+    const stack = vm.stack;
+    const caller_frame = vm.frame;
+    const catch_target = vm.catch_target;
+    const mask = vm.function.byteCode()[vm.frame.pc];
+    vm.frame.pc += 1;
     const rt = ctx.runtime;
     const target_value = try stackValueFromTop(stack, mask & 3);
     var rooted_target_value = target_value;
@@ -322,7 +288,7 @@ pub noinline fn copyDataProperties(
     // before OP_copy_data_properties, both engines.) The former
     // null/undefined-only skip let a primitive source fall into expectObject's
     // TypeError — a divergence from qjs, not a spec-ordering guard.
-    if (!rooted_source_value.is(.object)) return .done;
+    if (!rooted_source_value.is(.object)) return;
 
     const target = property_ops.expectObject(rooted_target_value) catch |err|
         return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
@@ -381,7 +347,7 @@ pub noinline fn copyDataProperties(
         }
         for (keys, copy_flags) |key, copy| {
             if (!copy) continue;
-            const value = object_ops.getValueProperty(ctx, output, global, rooted_source_value, key, caller_function, caller_frame) catch |err|
+            const value = object_ops.getValueProperty(ctx, output, global, rooted_source_value, key, vm.function, caller_frame) catch |err|
                 return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
             var rooted_value = value;
             var value_root_values = [_]core.runtime.ValueRootValue{
@@ -395,7 +361,7 @@ pub noinline fn copyDataProperties(
             property_ops.defineDataProperty(rt, target, key, rooted_value) catch |err|
                 return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
         }
-        return .done;
+        return;
     }
 
     for (keys) |key| {
@@ -406,7 +372,7 @@ pub noinline fn copyDataProperties(
             return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
         const desc = maybe_desc orelse continue;
         if (!(desc.enumerable orelse false)) continue;
-        const value = object_ops.getValueProperty(ctx, output, global, rooted_source_value, key, caller_function, caller_frame) catch |err|
+        const value = object_ops.getValueProperty(ctx, output, global, rooted_source_value, key, vm.function, caller_frame) catch |err|
             return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
         var rooted_value = value;
         var value_root_frame = core.runtime.rootValues(.{&rooted_value});
@@ -415,7 +381,6 @@ pub noinline fn copyDataProperties(
         property_ops.defineDataProperty(rt, target, key, rooted_value) catch |err|
             return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
     }
-    return .done;
 }
 
 fn handleLiteralRuntimeError(
@@ -426,22 +391,18 @@ fn handleLiteralRuntimeError(
     catch_target: *?usize,
     global: *core.Object,
     err: anytype,
-) !Step {
-    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+) HostError!void {
+    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
     return err;
 }
 
-pub noinline fn specialObject(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    global: *core.Object,
-) !void {
-    const subtype = function.byteCode()[frame.pc];
+pub noinline fn specialObject(vm: *Vm) HostError!void {
+    const stack = vm.stack;
+    const frame = vm.frame;
+    const subtype = vm.function.byteCode()[frame.pc];
     frame.pc += 1;
     if (subtype == 0 or subtype == 1) {
-        const arguments = try object_ops.frameArgumentsObjectForSpecialObject(ctx, global, frame, subtype);
+        const arguments = try object_ops.frameArgumentsObjectForSpecialObject(vm.ctx, vm.global, frame, subtype);
         try stack.pushOwned(arguments);
     } else if (subtype == 2) {
         try stack.push(frame.current_function);
@@ -456,10 +417,10 @@ pub noinline fn specialObject(
         } else |_| {}
         try stack.pushOwned(core.JSValue.undefinedValue());
     } else if (subtype == special_object_subtype.import_meta) {
-        const import_meta = try object_ops.importMetaObject(ctx, function);
+        const import_meta = try object_ops.importMetaObject(vm.ctx, vm.function);
         try stack.pushOwned(import_meta);
     } else if (subtype == special_object_subtype.var_object) {
-        const var_object = try core.Object.create(ctx.runtime, core.class.ids.object, null);
+        const var_object = try core.Object.create(vm.ctx.runtime, core.class.ids.object, null);
         const value = var_object.value();
         try stack.pushOwned(value);
     } else {
@@ -467,36 +428,23 @@ pub noinline fn specialObject(
     }
 }
 
-pub noinline fn getLength(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-) !Step {
-    const value = try stack.pop();
-    const length = object_ops.getValueProperty(ctx, output, global, value, core.atom.ids.length, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+pub noinline fn getLength(vm: *Vm) HostError!void {
+    const value = try vm.stack.pop();
+    const length = object_ops.getValueProperty(vm.ctx, vm.output, vm.global, value, core.atom.ids.length, vm.function, vm.frame) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
         return err;
     };
-    try stack.pushOwned(length);
-    return .done;
+    try vm.stack.pushOwned(length);
 }
 
-pub noinline fn rest(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-) !void {
-    const first_arg_idx = readInt(u16, function.byteCode()[frame.pc..][0..2]);
+pub noinline fn rest(vm: *Vm) HostError!void {
+    const frame = vm.frame;
+    const first_arg_idx = readInt(u16, vm.function.byteCode()[frame.pc..][0..2]);
     frame.pc += 2;
     // qjs OP_rest uses js_create_array → JS_NewArray (quickjs.c,
     // 5841-5844), whose shape proto is the realm Array.prototype. Rest arrays
     // must walk that real chain; the deleted class-name Get fallback is gone.
-    const prototype = if (ctx.global) |global| array_ops.arrayPrototypeFromGlobal(ctx.runtime, global) else null;
+    const prototype = if (vm.ctx.global) |global| array_ops.arrayPrototypeFromGlobal(vm.ctx.runtime, global) else null;
     // Copy the borrowed actual-argument slice into one fresh dense array, as
     // qjs js_create_array does. Per-index descriptor definitions would turn
     // it sparse and disable the dense iterator path at the next spread.
@@ -504,9 +452,9 @@ pub noinline fn rest(
     const start = @min(@as(usize, first_arg_idx), end);
     // Reserve before construction: no allocation may separate the helper's
     // rooted result from publication on the operand stack.
-    try stack.reserveAdditional(1);
-    const array_value = try core.array.constructLiteralWithPrototype(ctx.runtime, frame.args[start..end], prototype);
-    stack.pushOwnedAssumeCapacity(array_value);
+    try vm.stack.reserveAdditional(1);
+    const array_value = try core.array.constructLiteralWithPrototype(vm.ctx.runtime, frame.args[start..end], prototype);
+    vm.stack.pushOwnedAssumeCapacity(array_value);
 }
 
 fn stackValueFromTop(stack: *const stack_mod.Stack, offset: u8) !core.JSValue {

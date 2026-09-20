@@ -26,6 +26,7 @@ const zjs_vm = @import("zjs_vm.zig");
 const value_ops = @import("value_ops.zig");
 const vm_property_globals = @import("vm_property_globals.zig");
 const stack_mod = @import("stack.zig");
+const Vm = @import("tailcall_dispatch.zig").Vm;
 const HostError = exceptions.HostError;
 const exceptions = @import("exceptions.zig");
 const exception_ops = @import("exception_ops.zig");
@@ -40,8 +41,6 @@ const property_direct = @import("property_direct.zig");
 const regexp_fastpath = @import("regexp_fastpath.zig");
 const slot_ops = @import("slot_ops.zig");
 const string_ops = @import("string_ops.zig");
-
-pub const Step = enum { done, continue_loop };
 
 // --- Dynamically gathered call_runtime aliases (excluding local definitions) ---
 const DataViewConstructorArgs = builtin_glue.DataViewConstructorArgs;
@@ -2691,7 +2690,6 @@ pub fn setPrivateValueProperty(
         }
     }
     _ = try throwPrivateBrandTypeError(ctx, global, atom_id, caller_frame);
-    return;
 }
 
 pub fn getPrimitiveProperty(
@@ -3887,13 +3885,10 @@ pub fn atomPropertyName(rt: *core.JSRuntime, atom_id: core.Atom) ![]const u8 {
 
 // --- Combined from class.zig ---
 
-pub noinline fn getSuper(
-    _: *core.JSContext,
-    stack: *stack_mod.Stack,
-    frame: *frame_mod.Frame,
-) !void {
+pub noinline fn getSuper(vm: *Vm) HostError!void {
+    const stack = vm.stack;
     const source_from_stack = stack.len() != 0;
-    const source = if (source_from_stack) try stack.pop() else frame.current_function;
+    const source = if (source_from_stack) try stack.pop() else vm.frame.current_function;
     const function_object = core.value_semantics.objectFromValue(source) orelse {
         try stack.pushOwned(core.JSValue.undefinedValue());
         return;
@@ -3921,82 +3916,74 @@ pub noinline fn getSuper(
     }
 }
 
-pub noinline fn getSuperValue(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-) !Step {
+pub noinline fn getSuperValue(vm: *Vm) HostError!void {
+    const ctx = vm.ctx;
+    const output = vm.output;
+    const global = vm.global;
+    const stack = vm.stack;
+    const frame = vm.frame;
+    const catch_target = vm.catch_target;
     const prop_value = try stack.pop();
     const obj = try stack.pop();
     const receiver = try stack.pop();
     if (slot_ops.adapterValueIsUninitialized(receiver)) {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return;
         return error.ReferenceError;
     }
-    const atom_id = toPropertyKeyAtom(ctx, output, global, prop_value, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+    const atom_id = toPropertyKeyAtom(ctx, output, global, prop_value, vm.function, frame) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
         return err;
     };
     if (obj.is(.undefined_value) or obj.is(.null_value)) {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return;
         return error.TypeError;
     }
 
     const prototype = try property_ops.expectObject(obj);
-    const value = getSuperPropertyValue(ctx, output, global, receiver, prototype, atom_id, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+    const value = getSuperPropertyValue(ctx, output, global, receiver, prototype, atom_id, vm.function, frame) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
         return err;
     };
     try stack.push(value);
-    return .done;
 }
 
-pub noinline fn putSuperValue(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-) !Step {
+pub noinline fn putSuperValue(vm: *Vm) HostError!void {
+    const ctx = vm.ctx;
+    const output = vm.output;
+    const global = vm.global;
+    const stack = vm.stack;
+    const function = vm.function;
+    const frame = vm.frame;
+    const catch_target = vm.catch_target;
     const value = try stack.pop();
     const prop_value = try stack.pop();
     const obj = try stack.pop();
     const receiver = try stack.pop();
     if (slot_ops.adapterValueIsUninitialized(receiver)) {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return;
         return error.ReferenceError;
     }
     if (obj.is(.undefined_value) or obj.is(.null_value)) {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return;
         return error.TypeError;
     }
     const atom_id = toPropertyKeyAtom(ctx, output, global, prop_value, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
         return err;
     };
     const prototype = try property_ops.expectObject(obj);
     setSuperPropertyValue(ctx, output, global, receiver, prototype, atom_id, value, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
         return err;
     };
-    return .done;
 }
 
-pub noinline fn setHomeObject(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-) !void {
-    const func_value = try stackValueFromTop(stack, 0);
-    const home_value = try stackValueFromTop(stack, 1);
+pub noinline fn setHomeObject(vm: *Vm) HostError!void {
+    const func_value = try stackValueFromTop(vm.stack, 0);
+    const home_value = try stackValueFromTop(vm.stack, 1);
     if (func_value.is(.object) and home_value.is(.object)) {
         const func_object = try property_ops.expectObject(func_value);
-        try func_object.setFunctionHomeObject(ctx.runtime, try property_ops.expectObject(home_value));
+        try func_object.setFunctionHomeObject(vm.ctx.runtime, try property_ops.expectObject(home_value));
     }
 }
 
@@ -4007,34 +3994,28 @@ pub fn checkBrand(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     if (!try hasPrivateBrand(ctx.runtime, obj, func)) return error.TypeError;
 }
 
-pub noinline fn checkBrandVm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    stack: *stack_mod.Stack,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    global: *core.Object,
-) !Step {
-    checkBrand(ctx, stack) catch |err| {
+pub noinline fn checkBrandVm(vm: *Vm) HostError!void {
+    const ctx = vm.ctx;
+    const global = vm.global;
+    checkBrand(ctx, vm.stack) catch |err| {
         // OP_check_brand is responsible for throwing at the failing access
         // site.  Leaving a bare TypeError sentinel here lets an outer caller
         // materialize it with the caller's TypeError constructor instead of
         // the constructor from the bytecode function's realm.
         if (err == error.TypeError and !exception_ops.pendingExceptionMatchesError(ctx, err)) {
-            const error_global = if (objectFromValue(frame.current_function)) |function_object|
+            const error_global = if (objectFromValue(vm.frame.current_function)) |function_object|
                 objectRealmGlobal(function_object) orelse global
             else
                 global;
             _ = throwTypeErrorMessage(ctx, error_global, "invalid brand on object") catch |throw_err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, throw_err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, vm.output, vm.stack, vm.frame, vm.catch_target, global, throw_err)) return;
                 return throw_err;
             };
             unreachable;
         }
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, vm.output, vm.stack, vm.frame, vm.catch_target, global, err)) return;
         return err;
     };
-    return .done;
 }
 
 pub fn addBrand(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
@@ -4062,19 +4043,11 @@ pub fn addBrand(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     }
 }
 
-pub noinline fn addBrandVm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    stack: *stack_mod.Stack,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    global: *core.Object,
-) !Step {
-    addBrand(ctx, stack) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+pub noinline fn addBrandVm(vm: *Vm) HostError!void {
+    addBrand(vm.ctx, vm.stack) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
         return err;
     };
-    return .done;
 }
 
 pub fn privateIn(
@@ -4101,32 +4074,22 @@ pub fn privateIn(
     try stack.pushOwned(core.JSValue.boolean(found));
 }
 
-pub noinline fn privateInVm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-) !Step {
-    privateIn(ctx, output, global, stack, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+pub noinline fn privateInVm(vm: *Vm) HostError!void {
+    privateIn(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
         return err;
     };
-    return .done;
 }
 
-pub noinline fn defineClass(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    is_computed_name: bool,
-) !Step {
+pub noinline fn defineClass(vm: *Vm, opc: u8) HostError!void {
+    const ctx = vm.ctx;
+    const output = vm.output;
+    const global = vm.global;
+    const stack = vm.stack;
+    const function = vm.function;
+    const frame = vm.frame;
+    const catch_target = vm.catch_target;
+    const is_computed_name = opc == bytecode.opcode.op.define_class_computed;
     const atom_id = core.Atom.fromRaw(readInt(u32, function.byteCode()[frame.pc..][0..4]));
     const flags = function.byteCode()[frame.pc + 4];
     frame.pc += 5;
@@ -4166,7 +4129,7 @@ pub noinline fn defineClass(
             superclass_value = try stack.pop();
         }
         if (!(superclass_value.is(.object) or superclass_value.is(.null_value))) {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return;
             return error.TypeError;
         }
     }
@@ -4177,7 +4140,7 @@ pub noinline fn defineClass(
     if (is_computed_name) {
         computed_key = try stackValueFromTop(stack, 0);
         const name_atom = toPropertyKeyAtom(ctx, output, global, computed_key, function, frame) catch |err| {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
             return err;
         };
         name_value = try functionNameValueFromAtom(ctx.runtime, name_atom, null);
@@ -4189,19 +4152,19 @@ pub noinline fn defineClass(
     if (superclass_value_active) {
         if (superclass_value.is(.object)) {
             if (!(try isConstructorLike(ctx, superclass_value))) {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return;
                 return error.TypeError;
             }
             const superclass_object = try property_ops.expectObject(superclass_value);
             try ctor_object.setPrototype(ctx.runtime, superclass_object);
             superclass_proto = getValueProperty(ctx, output, global, superclass_value, core.atom.ids.prototype, function, frame) catch |err| {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
                 return err;
             };
             if (superclass_proto.is(.object)) {
                 proto_parent = try property_ops.expectObject(superclass_proto);
             } else if (!superclass_proto.is(.null_value)) {
-                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+                if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return;
                 return error.TypeError;
             }
         } else {
@@ -4218,51 +4181,36 @@ pub noinline fn defineClass(
     }
     try stack.push(ctor);
     try stack.push(proto_value);
-    return .done;
 }
 
-pub noinline fn defineMethod(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-) !Step {
-    const atom_id = core.Atom.fromRaw(readInt(u32, function.byteCode()[frame.pc..][0..4]));
+pub noinline fn defineMethod(vm: *Vm) HostError!void {
+    const frame = vm.frame;
+    const atom_id = core.Atom.fromRaw(readInt(u32, vm.function.byteCode()[frame.pc..][0..4]));
     frame.pc += 4;
-    const flags = function.byteCode()[frame.pc];
+    const flags = vm.function.byteCode()[frame.pc];
     frame.pc += 1;
-    defineObjectMethod(ctx.runtime, stack, atom_id, flags) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+    defineObjectMethod(vm.ctx.runtime, vm.stack, atom_id, flags) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, frame, vm.catch_target, vm.global, err)) return;
         return err;
     };
-    return .done;
 }
 
-pub noinline fn defineMethodComputed(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-) !Step {
-    const flags = function.byteCode()[frame.pc];
+pub noinline fn defineMethodComputed(vm: *Vm) HostError!void {
+    const ctx = vm.ctx;
+    const stack = vm.stack;
+    const frame = vm.frame;
+    const flags = vm.function.byteCode()[frame.pc];
     frame.pc += 1;
     const value = try stack.pop();
     const key_value = try stack.pop();
-    const atom_id = toPropertyKeyAtom(ctx, output, global, key_value, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+    const atom_id = toPropertyKeyAtom(ctx, vm.output, vm.global, key_value, vm.function, frame) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(ctx, vm.output, stack, frame, vm.catch_target, vm.global, err)) return;
         return err;
     };
     defineObjectMethodValue(ctx.runtime, stack, atom_id, value, flags) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+        if (try call_runtime.handleCatchableRuntimeError(ctx, vm.output, stack, frame, vm.catch_target, vm.global, err)) return;
         return err;
     };
-    return .done;
 }
 
 fn defineObjectMethod(

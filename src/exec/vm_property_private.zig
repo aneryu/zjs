@@ -9,9 +9,10 @@ const call_runtime = @import("call_runtime.zig");
 const exception_ops = @import("exception_ops.zig");
 const object_ops = @import("object_ops.zig");
 const stack_mod = @import("stack.zig");
+const Vm = @import("tailcall_dispatch.zig").Vm;
+const HostError = @import("exceptions.zig").HostError;
 
 const vm_property = @import("vm_property.zig");
-const Step = vm_property.Step;
 
 fn privateFieldAtom(
     ctx: *core.JSContext,
@@ -48,20 +49,11 @@ pub fn getPrivateField(
     try stack.pushOwned(value);
 }
 
-pub noinline fn getPrivateFieldVm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-) !Step {
-    getPrivateField(ctx, output, global, stack, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+pub noinline fn getPrivateFieldVm(vm: *Vm) HostError!void {
+    getPrivateField(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
         return err;
     };
-    return .done;
 }
 
 pub fn putPrivateField(
@@ -79,20 +71,11 @@ pub fn putPrivateField(
     _ = try object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame);
 }
 
-pub noinline fn putPrivateFieldVm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-) !Step {
-    putPrivateField(ctx, output, global, stack, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+pub noinline fn putPrivateFieldVm(vm: *Vm) HostError!void {
+    putPrivateField(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
         return err;
     };
-    return .done;
 }
 
 pub fn definePrivateField(
@@ -111,18 +94,9 @@ pub fn definePrivateField(
     try object_ops.defineClassFieldDataProperty(ctx.runtime, object, atom_id, value);
 }
 
-pub noinline fn definePrivateFieldVm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-) !Step {
-    definePrivateField(ctx, output, global, stack, function, frame) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+pub noinline fn definePrivateFieldVm(vm: *Vm) HostError!void {
+    definePrivateField(vm.ctx, vm.output, vm.global, vm.stack, vm.function, vm.frame) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
         return err;
     };
-    return .done;
 }

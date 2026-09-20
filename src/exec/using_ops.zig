@@ -8,8 +8,9 @@ const std = @import("std");
 
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
-const frame_mod = @import("frame.zig");
 const stack_mod = @import("stack.zig");
+const HostError = @import("exceptions.zig").HostError;
+const Vm = @import("tailcall_dispatch.zig").Vm;
 
 const call_runtime = @import("call_runtime.zig");
 const disposable_ops = @import("disposable_ops.zig");
@@ -19,11 +20,6 @@ const vm_call = @import("vm_call.zig");
 const vm_literal = @import("vm_literal.zig");
 const vm_property_field = @import("vm_property_field.zig");
 const vm_value = @import("vm_value.zig");
-
-pub const Step = enum {
-    done,
-    continue_loop,
-};
 
 pub const DisposalDisposition = enum {
     normal,
@@ -37,75 +33,55 @@ fn popOwnedOperands(_: *core.JSRuntime, stack: *stack_mod.Stack, count: usize) !
     }
 }
 
-fn routeRuntimeError(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    err: anytype,
-) !Step {
-    if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) {
-        return .continue_loop;
+fn routeRuntimeError(vm: *Vm, err: anytype) HostError!void {
+    if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) {
+        return;
     }
     return err;
 }
 
-pub noinline fn createStackVm(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    output: ?*std.Io.Writer,
-) !Step {
+pub noinline fn createStackVm(vm: *Vm) HostError!void {
+    const stack = vm.stack;
     try stack.reserveAdditional(1);
-    const value = promise_ops.usingCreateAsyncDisposableStack(ctx, global) catch |err| {
-        return routeRuntimeError(ctx, output, global, stack, frame, catch_target, err);
+    const value = promise_ops.usingCreateAsyncDisposableStack(vm.ctx, vm.global) catch |err| {
+        return routeRuntimeError(vm, err);
     };
     stack.pushOwnedAssumeCapacity(value);
-    return .done;
 }
 
-pub noinline fn execVm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-) !Step {
+pub noinline fn execVm(vm: *Vm) HostError!void {
+    const ctx = vm.ctx;
+    const output = vm.output;
+    const global = vm.global;
+    const stack = vm.stack;
+    const function = vm.function;
+    const frame = vm.frame;
+    const catch_target = vm.catch_target;
     const code = function.byteCode();
     if (frame.pc >= code.len) return error.InvalidBytecode;
     const sub = code[frame.pc];
     frame.pc += 1;
     if (bytecode.opcode.ext0_sub.isAdd(sub)) {
-        return addResourceWithHint(ctx, output, global, stack, frame, catch_target, bytecode.opcode.ext0_sub.addHint(sub));
+        try addResourceWithHint(vm, bytecode.opcode.ext0_sub.addHint(sub));
+        return;
     }
-    return switch (sub) {
-        bytecode.opcode.ext0_sub.create => createStackVm(ctx, global, stack, frame, catch_target, output),
-        bytecode.opcode.ext0_sub.dispose => disposeStackVm(ctx, output, global, stack, frame, catch_target, .normal),
-        bytecode.opcode.ext0_sub.dispose_throw => disposeStackVm(ctx, output, global, stack, frame, catch_target, .throw),
+    switch (sub) {
+        bytecode.opcode.ext0_sub.create => try createStackVm(vm),
+        bytecode.opcode.ext0_sub.dispose => try disposeStackVm(vm, .normal),
+        bytecode.opcode.ext0_sub.dispose_throw => try disposeStackVm(vm, .throw),
         // Cold-plane reclamation (opcode-space survey §7): zero executions
         // in the benchmark suite, so the second-level branch is free.
         bytecode.opcode.ext0_sub.put_super_value => {
-            _ = try object_ops.putSuperValue(ctx, output, global, stack, function, frame, catch_target);
-            return .done;
+            try object_ops.putSuperValue(vm);
         },
         bytecode.opcode.ext0_sub.to_object => {
-            _ = try vm_value.toObjectVm(ctx, output, stack, frame, catch_target, global);
-            return .done;
+            try vm_value.toObjectVm(vm);
         },
         // C0 late-encoding resident: the canonical final encoding of
         // to_propkey. Identical semantics to the direct id 112, which
         // stays executable for the D11 alias window only.
         bytecode.opcode.ext0_sub.to_propkey => {
-            return switch (try vm_property_field.toPropKeyVm(ctx, output, global, stack, function, frame, catch_target)) {
-                .done => .done,
-                .continue_loop => .continue_loop,
-            };
+            _ = try vm_property_field.toPropKeyVm(ctx, output, global, stack, function, frame, catch_target);
         },
         // C1-1 resident: identical semantics to the direct id 75, which
         // stays executable for its D11 window only. The opcode constant is
@@ -113,77 +89,56 @@ pub noinline fn execVm(
         // computed arm from it, never from the stream byte.
         bytecode.opcode.ext0_sub.set_name_computed => {
             try vm_property_field.setName(ctx, output, global, stack, function, frame, bytecode.opcode.op.set_name_computed);
-            return .done;
         },
         bytecode.opcode.ext0_sub.set_proto => {
             try vm_literal.setProto(ctx, stack);
-            return .done;
         },
         bytecode.opcode.ext0_sub.check_ctor_return => {
-            _ = try vm_call.checkCtorReturnVm(ctx, output, stack, frame, catch_target, global);
-            return .done;
+            try vm_call.checkCtorReturnVm(vm);
         },
         bytecode.opcode.ext0_sub.is_undefined => {
             try vm_value.isUndefined(ctx.runtime, stack);
-            return .done;
         },
         bytecode.opcode.ext0_sub.typeof_is_undefined => {
             try vm_value.typeOfIsUndefined(ctx.runtime, stack);
-            return .done;
         },
         bytecode.opcode.ext0_sub.typeof_is_function => {
             try vm_value.typeOfIsFunction(ctx.runtime, stack);
-            return .done;
         },
         bytecode.opcode.ext0_sub.insert4 => {
             try vm_value.insert4(ctx, stack);
-            return .done;
         },
         bytecode.opcode.ext0_sub.rot5l => {
             try vm_value.rot5l(ctx, stack);
-            return .done;
         },
         bytecode.opcode.ext0_sub.perm5 => {
             try vm_value.perm5(ctx, stack);
-            return .done;
         },
         bytecode.opcode.ext0_sub.dup2 => {
             try vm_value.dup2(ctx, stack);
-            return .done;
         },
         bytecode.opcode.ext0_sub.swap2 => {
             try vm_value.swap2(ctx, stack);
-            return .done;
         },
         bytecode.opcode.ext0_sub.rot3r => {
             try vm_value.rot3r(ctx, stack);
-            return .done;
         },
         bytecode.opcode.ext0_sub.rot4l => {
             try vm_value.rot4l(ctx, stack);
-            return .done;
         },
         bytecode.opcode.ext0_sub.dup3 => {
             try vm_value.dup3(ctx, stack);
-            return .done;
         },
         bytecode.opcode.ext0_sub.dup1 => {
             try vm_value.dup1(ctx, stack);
-            return .done;
         },
-        else => error.InvalidBytecode,
-    };
+        else => return error.InvalidBytecode,
+    }
 }
 
-fn addResourceWithHint(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    hint_byte: u8,
-) !Step {
+fn addResourceWithHint(vm: *Vm, hint_byte: u8) HostError!void {
+    const ctx = vm.ctx;
+    const stack = vm.stack;
     const hint: core.object.DisposalHint = switch (hint_byte) {
         @intFromEnum(core.object.DisposalHint.sync) => .sync,
         @intFromEnum(core.object.DisposalHint.async) => .async,
@@ -194,14 +149,13 @@ fn addResourceWithHint(
     const args = stack.values[stack_len - 2 .. stack_len];
 
     _ = switch (hint) {
-        .sync => disposable_ops.usingAddSyncResource(ctx, output, global, args),
-        .async => promise_ops.usingAddAsyncResource(ctx, output, global, args),
+        .sync => disposable_ops.usingAddSyncResource(ctx, vm.output, vm.global, args),
+        .async => promise_ops.usingAddAsyncResource(ctx, vm.output, vm.global, args),
     } catch |err| {
-        try popOwnedOperands(ctx.runtime, stack, 2);
-        return routeRuntimeError(ctx, output, global, stack, frame, catch_target, err);
+        try popOwnedOperands(vm.rt, stack, 2);
+        return routeRuntimeError(vm, err);
     };
-    try popOwnedOperands(ctx.runtime, stack, 2);
-    return .done;
+    try popOwnedOperands(vm.rt, stack, 2);
 }
 
 fn disposeStack(
@@ -229,15 +183,8 @@ fn disposeStack(
     return promise_ops.usingDisposeAsyncStack(ctx, output, global, &args);
 }
 
-pub noinline fn disposeStackVm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    disposition: DisposalDisposition,
-) !Step {
+pub noinline fn disposeStackVm(vm: *Vm, disposition: DisposalDisposition) HostError!void {
+    const stack = vm.stack;
     const operand_count: usize = switch (disposition) {
         .normal => 1,
         .throw => 2,
@@ -248,11 +195,10 @@ pub noinline fn disposeStackVm(
     const stack_value = stack.values[operand_base];
     const completion = if (disposition == .throw) stack.values[operand_base + 1] else null;
 
-    const result = disposeStack(ctx, output, global, stack_value, completion) catch |err| {
-        try popOwnedOperands(ctx.runtime, stack, operand_count);
-        return routeRuntimeError(ctx, output, global, stack, frame, catch_target, err);
+    const result = disposeStack(vm.ctx, vm.output, vm.global, stack_value, completion) catch |err| {
+        try popOwnedOperands(vm.rt, stack, operand_count);
+        return routeRuntimeError(vm, err);
     };
-    try popOwnedOperands(ctx.runtime, stack, operand_count);
+    try popOwnedOperands(vm.rt, stack, operand_count);
     stack.pushOwnedAssumeCapacity(result);
-    return .done;
 }

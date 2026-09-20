@@ -15,10 +15,10 @@ const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 const call_runtime = @import("call_runtime.zig");
 const coercion_ops = @import("coercion_ops.zig");
+const HostError = @import("exceptions.zig").HostError;
+const Vm = @import("tailcall_dispatch.zig").Vm;
 
 const op = bytecode.opcode.op;
-
-pub const Step = enum { done, continue_loop };
 
 pub fn binary(
     ctx: *core.JSContext,
@@ -70,20 +70,11 @@ pub fn binary(
     try stack.pushOwned(result);
 }
 
-pub noinline fn binaryVm(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    binop: u8,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-) !Step {
-    binary(ctx, stack, binop, output, global) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+pub noinline fn binaryVm(vm: *Vm, opc: u8) HostError!void {
+    binary(vm.ctx, vm.stack, opc, vm.output, vm.global) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
         return err;
     };
-    return .done;
 }
 
 pub fn compare(
@@ -137,20 +128,11 @@ pub fn compare(
     try stack.pushOwned(result);
 }
 
-pub noinline fn compareVm(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    cmp: u8,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-) !Step {
-    compare(ctx, stack, cmp, output, global) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+pub noinline fn compareVm(vm: *Vm, opc: u8) HostError!void {
+    compare(vm.ctx, vm.stack, opc, vm.output, vm.global) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
         return err;
     };
-    return .done;
 }
 
 /// Register-resident slow compare (qjs OP_lt/OP_le/… → js_relational_slow /
@@ -264,20 +246,11 @@ pub fn unary(
     try stack.pushOwned(result);
 }
 
-pub noinline fn unaryVm(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    opcode_id: u8,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-) !Step {
-    unary(ctx, stack, opcode_id, output, global) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+pub noinline fn unaryVm(vm: *Vm, opc: u8) HostError!void {
+    unary(vm.ctx, vm.stack, opc, vm.output, vm.global) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
         return err;
     };
-    return .done;
 }
 
 pub fn bitNot(
@@ -292,19 +265,11 @@ pub fn bitNot(
     try stack.pushOwned(result);
 }
 
-pub noinline fn bitNotVm(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-) !Step {
-    bitNot(ctx, stack, output, global) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+pub noinline fn bitNotVm(vm: *Vm) HostError!void {
+    bitNot(vm.ctx, vm.stack, vm.output, vm.global) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
         return err;
     };
-    return .done;
 }
 
 pub fn postUpdate(
@@ -340,20 +305,11 @@ pub fn postUpdate(
     try stack.push(updated);
 }
 
-pub noinline fn postUpdateVm(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    opcode_id: u8,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-) !Step {
-    postUpdate(ctx, stack, opcode_id, output, global) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+pub noinline fn postUpdateVm(vm: *Vm, opc: u8) HostError!void {
+    postUpdate(vm.ctx, vm.stack, opc, vm.output, vm.global) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
         return err;
     };
-    return .done;
 }
 
 pub fn updateLocal(
@@ -401,21 +357,11 @@ pub fn updateLocal(
     frame.locals[idx] = updated;
 }
 
-pub noinline fn updateLocalVm(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    opcode_id: u8,
-    output: ?*std.Io.Writer,
-) !Step {
-    updateLocal(ctx, function, global, frame, opcode_id, output) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+pub noinline fn updateLocalVm(vm: *Vm, opc: u8) HostError!void {
+    updateLocal(vm.ctx, vm.function, vm.global, vm.frame, opc, vm.output) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
         return err;
     };
-    return .done;
 }
 
 /// Register-resident slow inc_loc/dec_loc (qjs OP_inc_loc/OP_dec_loc's non-int
@@ -425,13 +371,8 @@ pub noinline fn updateLocalVm(
 /// memory round-trip. inc_loc/dec_loc are stack-neutral (they rewrite the local in
 /// place), so there is nothing to pop. Body is `updateLocal`'s, re-parameterized on
 /// (slot, opcode_id).
-pub fn updateLocalAt(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    output: ?*std.Io.Writer,
-    slot: *core.JSValue,
-    opcode_id: u8,
-) !void {
+pub fn updateLocalAt(vm: *Vm, opcode_id: u8, slot: *core.JSValue) HostError!void {
+    const ctx = vm.ctx;
     // Frame locals are plain ValueSlots. The numeric fast paths read `slot.*`
     // without a dup and replace it with store-before-free ownership ordering;
     // qjs likewise reads sp[-1] directly and JS_DupValue on a number is a no-op.
@@ -472,7 +413,7 @@ pub fn updateLocalAt(
     // (valueOf) cannot free the accumulator underneath us (qjs OP_inc_loc's
     // `op1 = JS_DupValue(op1)`).
     const value = slot.*;
-    const primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, value);
+    const primitive = try coercion_ops.toPrimitiveForNumber(ctx, vm.output, vm.global, value);
     if (primitive.is(.symbol)) return error.TypeError;
     const op_id = switch (opcode_id) {
         op.inc_loc => op.inc,
@@ -591,20 +532,11 @@ noinline fn addLocalString(
     frame.locals[idx] = updated;
 }
 
-pub noinline fn addLocalVm(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    global: *core.Object,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    output: ?*std.Io.Writer,
-) !Step {
-    addLocal(ctx, stack, function, global, frame, output) catch |err| {
-        if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
+pub noinline fn addLocalVm(vm: *Vm) HostError!void {
+    addLocal(vm.ctx, vm.stack, vm.function, vm.global, vm.frame, vm.output) catch |err| {
+        if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, err)) return;
         return err;
     };
-    return .done;
 }
 
 /// Register-resident slow add for OP_add_loc, the faithful analog of qjs's
@@ -624,13 +556,10 @@ pub noinline fn addLocalVm(
 /// (or the primitive derived from it) is freed, so the caller publishes the popped
 /// sp and the catch unwinder never double-frees the now-dead stack slot. The body
 /// is byte-for-byte `addLocal`'s, only re-parameterized on (slot, rhs).
-pub fn addLocalAt(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    output: ?*std.Io.Writer,
-    slot: *core.JSValue,
-    rhs: core.JSValue,
-) !void {
+pub fn addLocalAt(vm: *Vm, slot: *core.JSValue, rhs: core.JSValue) HostError!void {
+    const ctx = vm.ctx;
+    const global = vm.global;
+    const output = vm.output;
     const lhs_borrowed = slot.*;
     if (lhs_borrowed.isString()) {
         return addLocalStringAt(ctx, output, global, slot, rhs);

@@ -17,13 +17,19 @@ const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 
 const array_ops = @import("array_ops.zig");
+const HostError = @import("exceptions.zig").HostError;
+const Vm = @import("tailcall_dispatch.zig").Vm;
+
+const op = bytecode.opcode.op;
 
 pub const ThrowResult = enum {
     handled,
 };
 
-pub inline fn returnTop(ctx: *core.JSContext, stack: *stack_mod.Stack, frame: *frame_mod.Frame, generator: ?*core.Object) !core.JSValue {
-    if (generator) |generator_object| generator_object.completeGeneratorExecution(ctx.runtime);
+pub inline fn returnTop(vm: *Vm) !core.JSValue {
+    const ctx = vm.ctx;
+    const stack = vm.stack;
+    if (vm.machine.l0.generator_state) |generator_object| generator_object.completeGeneratorExecution(ctx.runtime);
     // qjs OP_return is an ownership MOVE off the operand stack, never a dup:
     // `ret_val = *--sp;`. The done: epilogue then frees
     // only local_buf..sp, which no longer includes the
@@ -35,7 +41,7 @@ pub inline fn returnTop(ctx: *core.JSContext, stack: *stack_mod.Stack, frame: *f
         stack.setLen(values.len - 1);
         break :blk values[values.len - 1];
     } else core.JSValue.undefinedValue();
-    return finishFunctionReturn(ctx, frame, value);
+    return finishFunctionReturn(ctx, vm.frame, value);
 }
 
 pub inline fn returnUndefined(ctx: *core.JSContext, frame: *frame_mod.Frame, generator: ?*core.Object) !core.JSValue {
@@ -71,6 +77,35 @@ pub fn jump8(function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame
     frame.pc = relativePc(operand_pc, diff);
 }
 
+/// `goto*` cold bodies: take the jump, then poll (qjs polls interrupts on
+/// every goto; the back edge is a pure loop's only poll point).
+pub fn gotoPoll32(vm: *Vm) HostError!void {
+    jump32(vm.function, vm.frame);
+    try exception_ops.pollInterrupt(vm.ctx, vm.global);
+}
+
+pub fn gotoPoll16(vm: *Vm) HostError!void {
+    jump16(vm.function, vm.frame);
+    try exception_ops.pollInterrupt(vm.ctx, vm.global);
+}
+
+pub fn gotoPoll8(vm: *Vm) HostError!void {
+    jump8(vm.function, vm.frame);
+    try exception_ops.pollInterrupt(vm.ctx, vm.global);
+}
+
+/// `if_false` / `if_true` cold bodies: branch, then poll.
+pub fn branchPoll32(vm: *Vm, opc: u8) HostError!void {
+    try branch32(vm.ctx, vm.stack, vm.function, vm.frame, opc == op.if_true);
+    try exception_ops.pollInterrupt(vm.ctx, vm.global);
+}
+
+/// `if_false8` / `if_true8` cold bodies: branch, then poll.
+pub fn branchPoll8(vm: *Vm, opc: u8) HostError!void {
+    try branch8(vm.ctx, vm.stack, vm.function, vm.frame, opc == op.if_true8);
+    try exception_ops.pollInterrupt(vm.ctx, vm.global);
+}
+
 pub fn branch32(_: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, branch_if_true: bool) !void {
     const operand_pc = frame.pc;
     const diff = readInt(i32, function.byteCode()[frame.pc..][0..4]);
@@ -93,16 +128,12 @@ pub fn branch8(_: *core.JSContext, stack: *stack_mod.Stack, function: *const byt
     }
 }
 
-pub noinline fn throwTop(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-) !ThrowResult {
+pub noinline fn throwTop(vm: *Vm) !ThrowResult {
+    const ctx = vm.ctx;
+    const stack = vm.stack;
+    const catch_target = vm.catch_target;
     const value = try stack.pop();
-    try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, output, global, stack);
+    try forof_ops.closeStackTopForOfIteratorForPendingError(ctx, vm.output, vm.global, stack);
     try stack.reserveAdditional(1);
     if (catch_target.* == null) {
         if (try array_ops.popCatchMarker(ctx.runtime, stack)) |restored| {
@@ -112,7 +143,7 @@ pub noinline fn throwTop(
     if (catch_target.*) |target| {
         const restored = (try array_ops.popCatchMarker(ctx.runtime, stack)) orelse null;
         stack.pushOwnedAssumeCapacity(value);
-        frame.pc = target;
+        vm.frame.pc = target;
         catch_target.* = restored;
         return .handled;
     }
@@ -168,17 +199,15 @@ fn deliverPendingThrow(
     return err;
 }
 
-pub noinline fn throwErrorVm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    global: *core.Object,
-) !ThrowResult {
-    const atom_id = core.Atom.fromRaw(std.mem.readInt(u32, function.byteCode()[frame.pc..][0..4], .little));
-    const error_type = function.byteCode()[frame.pc + 4];
+pub noinline fn throwErrorVm(vm: *Vm) !ThrowResult {
+    const ctx = vm.ctx;
+    const output = vm.output;
+    const stack = vm.stack;
+    const frame = vm.frame;
+    const catch_target = vm.catch_target;
+    const global = vm.global;
+    const atom_id = core.Atom.fromRaw(std.mem.readInt(u32, vm.function.byteCode()[frame.pc..][0..4], .little));
+    const error_type = vm.function.byteCode()[frame.pc + 4];
     frame.pc += 5;
     const error_value = try createThrowErrorValue(ctx, global, atom_id, error_type);
     _ = ctx.throwValue(error_value);
@@ -202,22 +231,23 @@ pub noinline fn catchTarget(function: *const bytecode.FunctionBytecode, frame: *
     try stack.pushOwned(core.JSValue.catchOffset(previous_target));
 }
 
-pub fn gosub(function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, stack: *stack_mod.Stack) !void {
+pub fn gosub(vm: *Vm) HostError!void {
+    const frame = vm.frame;
     const operand_pc = frame.pc;
-    const diff = readInt(i32, function.byteCode()[frame.pc..][0..4]);
+    const diff = readInt(i32, vm.function.byteCode()[frame.pc..][0..4]);
     const return_pc = frame.pc + 4;
     if (return_pc > @as(usize, @intCast(std.math.maxInt(i32)))) return error.InvalidBytecode;
-    try stack.pushOwned(core.JSValue.int32(@intCast(return_pc)));
+    try vm.stack.pushOwned(core.JSValue.int32(@intCast(return_pc)));
     frame.pc = relativePc(operand_pc, diff);
 }
 
-pub fn ret(_: *core.JSContext, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, stack: *stack_mod.Stack) !void {
-    const target = try stack.pop();
+pub fn ret(vm: *Vm) HostError!void {
+    const target = try vm.stack.pop();
     const pc_i32 = target.as(.int) orelse return error.InvalidBytecode;
     if (pc_i32 < 0) return error.InvalidBytecode;
     const pc: usize = @intCast(pc_i32);
-    if (pc >= function.byteCode().len) return error.InvalidBytecode;
-    frame.pc = pc;
+    if (pc >= vm.function.byteCode().len) return error.InvalidBytecode;
+    vm.frame.pc = pc;
 }
 
 fn relativePc(operand_pc: usize, diff: anytype) usize {

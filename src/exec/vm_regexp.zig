@@ -7,7 +7,8 @@
 //! binding, matching QuickJS `OP_regexp` at quickjs.c.
 
 const core = @import("../core/root.zig");
-const stack_mod = @import("stack.zig");
+const HostError = @import("exceptions.zig").HostError;
+const Vm = @import("tailcall_dispatch.zig").Vm;
 
 /// qjs OP_regexp consumes `[pattern, compiled-bytecode]` constants and creates
 /// a fresh object from the realm's fixed regexp shape. It does not call or
@@ -37,14 +38,10 @@ fn constructCompiledLiteralInRealm(
     return object.value();
 }
 
-pub noinline fn pushLiteral(
-    ctx: *core.JSContext,
-    stack: *stack_mod.Stack,
-    global: *core.Object,
-) !void {
-    const compiled = try stack.pop();
-    const pattern = try stack.pop();
+pub noinline fn pushLiteral(vm: *Vm) HostError!void {
+    const compiled = try vm.stack.pop();
+    const pattern = try vm.stack.pop();
 
-    const value = try constructCompiledLiteralInRealm(ctx.runtime, global, pattern, compiled);
-    try stack.pushOwned(value);
+    const value = try constructCompiledLiteralInRealm(vm.rt, vm.global, pattern, compiled);
+    try vm.stack.pushOwned(value);
 }

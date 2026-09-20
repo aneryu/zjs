@@ -18,36 +18,38 @@ const object_ops = @import("object_ops.zig");
 const call_runtime = @import("call_runtime.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
+const HostError = @import("exceptions.zig").HostError;
+const Vm = @import("tailcall_dispatch.zig").Vm;
+
+const op = bytecode.opcode.op;
 
 pub const DropResult = union(enum) {
     value,
     catch_target: ?usize,
 };
 
-pub const Step = enum { done, continue_loop };
-
-pub fn pushInt32Operand(stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame) !void {
-    const value = readInt(i32, function.byteCode()[frame.pc..][0..4]);
-    frame.pc += 4;
-    try pushSmallInt(stack, value);
+pub fn pushInt32Operand(vm: *Vm) HostError!void {
+    const value = readInt(i32, vm.function.byteCode()[vm.frame.pc..][0..4]);
+    vm.frame.pc += 4;
+    vm.stack.pushOwnedAssumeCapacity(core.JSValue.int32(value));
 }
 
-pub fn pushBigIntI32Operand(stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame) !void {
-    const value = readInt(i32, function.byteCode()[frame.pc..][0..4]);
-    frame.pc += 4;
-    stack.pushOwnedAssumeCapacity(core.JSValue.shortBigInt(value));
+pub fn pushBigIntI32Operand(vm: *Vm) HostError!void {
+    const value = readInt(i32, vm.function.byteCode()[vm.frame.pc..][0..4]);
+    vm.frame.pc += 4;
+    vm.stack.pushOwnedAssumeCapacity(core.JSValue.shortBigInt(value));
 }
 
-pub fn pushI16Operand(stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame) !void {
-    const value = readInt(i16, function.byteCode()[frame.pc..][0..2]);
-    frame.pc += 2;
-    try pushSmallInt(stack, value);
+pub fn pushI16Operand(vm: *Vm) HostError!void {
+    const value = readInt(i16, vm.function.byteCode()[vm.frame.pc..][0..2]);
+    vm.frame.pc += 2;
+    vm.stack.pushOwnedAssumeCapacity(core.JSValue.int32(value));
 }
 
-pub fn pushI8Operand(stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame) !void {
-    const value: i8 = @bitCast(function.byteCode()[frame.pc]);
-    frame.pc += 1;
-    try pushSmallInt(stack, value);
+pub fn pushI8Operand(vm: *Vm) HostError!void {
+    const value: i8 = @bitCast(vm.function.byteCode()[vm.frame.pc]);
+    vm.frame.pc += 1;
+    vm.stack.pushOwnedAssumeCapacity(core.JSValue.int32(value));
 }
 
 /// Plain immediate-integer push, no fusion of any kind.
@@ -57,43 +59,44 @@ pub fn pushI8Operand(stack: *stack_mod.Stack, function: *const bytecode.Function
 /// The threaded fast path (zjs_vm.zig push_i32/i16/i8) already
 /// pushes the immediate inline; this is the non-threaded fallback, kept
 /// byte-identical to it — a plain push, no stack-lhs fold.
-pub fn pushSmallInt(stack: *stack_mod.Stack, value: i32) !void {
-    stack.pushOwnedAssumeCapacity(core.JSValue.int32(value));
+/// `push_minus1` .. `push_7`: the opcode number encodes the value.
+pub fn pushSmallInt(vm: *Vm, opc: u8) HostError!void {
+    const value: i32 = @as(i32, opc) - @as(i32, op.push_0);
+    vm.stack.pushOwnedAssumeCapacity(core.JSValue.int32(value));
 }
 
-pub fn pushUndefined(stack: *stack_mod.Stack) !void {
-    stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
+pub fn pushUndefined(vm: *Vm) HostError!void {
+    vm.stack.pushOwnedAssumeCapacity(core.JSValue.undefinedValue());
 }
 
-pub fn pushNull(stack: *stack_mod.Stack) !void {
-    stack.pushOwnedAssumeCapacity(core.JSValue.nullValue());
+pub fn pushNull(vm: *Vm) HostError!void {
+    vm.stack.pushOwnedAssumeCapacity(core.JSValue.nullValue());
 }
 
-pub fn pushBoolean(stack: *stack_mod.Stack, value: bool) !void {
-    stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value));
+/// `push_false` / `push_true`.
+pub fn pushBoolean(vm: *Vm, opc: u8) HostError!void {
+    vm.stack.pushOwnedAssumeCapacity(core.JSValue.boolean(opc == op.push_true));
 }
 
-pub noinline fn pushConst(_: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, opc: u8) !void {
-    _ = opc;
-    const index = readInt(u32, function.byteCode()[frame.pc..][0..4]);
-    frame.pc += 4;
-    const value = function.constantAt(index) orelse return error.TypeError;
-    stack.pushAssumeCapacity(value);
+pub noinline fn pushConst(vm: *Vm) HostError!void {
+    const index = readInt(u32, vm.function.byteCode()[vm.frame.pc..][0..4]);
+    vm.frame.pc += 4;
+    const value = vm.function.constantAt(index) orelse return error.TypeError;
+    vm.stack.pushAssumeCapacity(value);
 }
 
-pub noinline fn pushConst8(_: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, opc: u8) !void {
-    _ = opc;
-    const index = function.byteCode()[frame.pc];
-    frame.pc += 1;
-    const value = function.constantAt(index) orelse return error.TypeError;
-    stack.pushAssumeCapacity(value);
+pub noinline fn pushConst8(vm: *Vm) HostError!void {
+    const index = vm.function.byteCode()[vm.frame.pc];
+    vm.frame.pc += 1;
+    const value = vm.function.constantAt(index) orelse return error.TypeError;
+    vm.stack.pushAssumeCapacity(value);
 }
 
-pub fn pushAtomValue(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame) !void {
-    const atom_id = core.Atom.fromRaw(readInt(u32, function.byteCode()[frame.pc..][0..4]));
-    frame.pc += 4;
-    const value = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
-    stack.pushOwnedAssumeCapacity(value);
+pub fn pushAtomValue(vm: *Vm) HostError!void {
+    const atom_id = core.Atom.fromRaw(readInt(u32, vm.function.byteCode()[vm.frame.pc..][0..4]));
+    vm.frame.pc += 4;
+    const value = try vm.rt.atoms.toStringValue(vm.rt, atom_id);
+    vm.stack.pushOwnedAssumeCapacity(value);
 }
 
 pub noinline fn pushPrivateSymbol(ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame) !void {
@@ -111,9 +114,9 @@ pub noinline fn pushPrivateSymbol(ctx: *core.JSContext, stack: *stack_mod.Stack,
     stack.pushOwnedAssumeCapacity(value);
 }
 
-pub noinline fn pushEmptyString(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
-    const value = (try ctx.runtime.emptyString()).value();
-    stack.pushOwnedAssumeCapacity(value);
+pub noinline fn pushEmptyString(vm: *Vm) HostError!void {
+    const value = (try vm.rt.emptyString()).value();
+    vm.stack.pushOwnedAssumeCapacity(value);
 }
 
 pub fn pushThis(stack: *stack_mod.Stack, this_value: core.JSValue) !void {
@@ -122,28 +125,20 @@ pub fn pushThis(stack: *stack_mod.Stack, this_value: core.JSValue) !void {
     stack.pushAssumeCapacity(value);
 }
 
-pub noinline fn pushThisVm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    stack: *stack_mod.Stack,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    global: *core.Object,
-) !Step {
-    const this_value = object_ops.materializeFrameThisBinding(ctx, global, frame) catch |err| switch (err) {
+pub noinline fn pushThisVm(vm: *Vm) HostError!void {
+    const this_value = object_ops.materializeFrameThisBinding(vm.ctx, vm.global, vm.frame) catch |err| switch (err) {
         error.TypeError => {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, error.TypeError)) return;
             return error.TypeError;
         },
         else => return err,
     };
-    pushThis(stack, this_value) catch |err| switch (err) {
+    pushThis(vm.stack, this_value) catch |err| switch (err) {
         error.ReferenceError => {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.ReferenceError)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, error.ReferenceError)) return;
             return error.ReferenceError;
         },
     };
-    return .done;
 }
 
 pub fn toObject(ctx: *core.JSContext, global: *core.Object, stack: *stack_mod.Stack) !void {
@@ -155,26 +150,18 @@ pub fn toObject(ctx: *core.JSContext, global: *core.Object, stack: *stack_mod.St
     stack.pushOwnedAssumeCapacity(object_value);
 }
 
-pub noinline fn toObjectVm(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    stack: *stack_mod.Stack,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
-    global: *core.Object,
-) !Step {
-    toObject(ctx, global, stack) catch |err| switch (err) {
+pub noinline fn toObjectVm(vm: *Vm) HostError!void {
+    toObject(vm.ctx, vm.global, vm.stack) catch |err| switch (err) {
         error.TypeError => {
-            if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, error.TypeError)) return .continue_loop;
+            if (try call_runtime.handleCatchableRuntimeError(vm.ctx, vm.output, vm.stack, vm.frame, vm.catch_target, vm.global, error.TypeError)) return;
             return error.TypeError;
         },
         else => return err,
     };
-    return .done;
 }
 
-pub noinline fn typeOf(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
-    const value = try stack.pop();
+pub noinline fn typeOf(vm: *Vm) HostError!void {
+    const value = try vm.stack.pop();
     // qjs `js_operator_typeof` returns a predefined atom and OP_typeof pushes
     // `JS_AtomToString` of it — a refcount dup of the interned atom string, not
     // a fresh allocation. The `typeof` result strings are all predefined string
@@ -197,8 +184,8 @@ pub noinline fn typeOf(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
         core.atom.ids.type_function
     else
         core.atom.ids.type_object;
-    const out = try ctx.runtime.atoms.toStringValue(ctx.runtime, atom_id);
-    stack.pushOwnedAssumeCapacity(out);
+    const out = try vm.rt.atoms.toStringValue(vm.rt, atom_id);
+    vm.stack.pushOwnedAssumeCapacity(out);
 }
 
 pub noinline fn typeOfIsUndefined(_: *core.JSRuntime, stack: *stack_mod.Stack) !void {
@@ -219,9 +206,9 @@ pub noinline fn typeOfIsFunction(_: *core.JSRuntime, stack: *stack_mod.Stack) !v
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(is_func));
 }
 
-pub noinline fn logicalNot(_: *core.JSRuntime, stack: *stack_mod.Stack) !void {
-    const value = try stack.pop();
-    stack.pushOwnedAssumeCapacity(core.JSValue.boolean(!value_ops.isTruthy(value)));
+pub noinline fn logicalNot(vm: *Vm) HostError!void {
+    const value = try vm.stack.pop();
+    vm.stack.pushOwnedAssumeCapacity(core.JSValue.boolean(!value_ops.isTruthy(value)));
 }
 
 pub noinline fn drop(_: *core.JSRuntime, stack: *stack_mod.Stack) !DropResult {
@@ -239,36 +226,34 @@ pub noinline fn drop(_: *core.JSRuntime, stack: *stack_mod.Stack) !DropResult {
     return .value;
 }
 
-pub noinline fn nipCatch(_: *core.JSRuntime, stack: *stack_mod.Stack) !DropResult {
+/// Pop the return value, unwind to the nearest catch offset, push the value
+/// back, and re-arm `vm.catch_target` when the offset was a real handler
+/// (not an iterator marker or a zero offset).
+pub noinline fn nipCatch(vm: *Vm) HostError!void {
+    const stack = vm.stack;
     const ret_value = try stack.pop();
 
     while (stack.len() != 0) {
         const value = try stack.pop();
         if (value.is(.catch_offset)) {
-            const result: DropResult = if (forof_ops.isIteratorCatchMarker(value) or
-                (value.as(.catch_offset) orelse -1) == 0)
-                .value
-            else
-                .{ .catch_target = value.catchTarget() };
-            stack.pushOwned(ret_value) catch |err| {
-                return err;
-            };
-            return result;
+            const is_marker = forof_ops.isIteratorCatchMarker(value) or
+                (value.as(.catch_offset) orelse -1) == 0;
+            try stack.pushOwned(ret_value);
+            if (!is_marker) vm.catch_target.* = value.catchTarget();
+            return;
         }
     }
 
     return error.InvalidBytecode;
 }
 
-pub fn dup(ctx: *core.JSContext, stack: *stack_mod.Stack, opc: u8) !void {
-    _ = ctx;
-    _ = opc;
-    const value = stack.peekBorrowed() orelse return error.StackUnderflow;
-    stack.pushAssumeCapacity(value);
+pub fn dup(vm: *Vm) HostError!void {
+    const value = vm.stack.peekBorrowed() orelse return error.StackUnderflow;
+    vm.stack.pushAssumeCapacity(value);
 }
 
-pub fn swap(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
-    _ = ctx;
+pub fn swap(vm: *Vm) HostError!void {
+    const stack = vm.stack;
     try requireStackLen(stack, 2);
     const a = try stack.pop();
     const b = try stack.pop();
@@ -276,7 +261,8 @@ pub fn swap(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(b);
 }
 
-pub fn nip(_: *core.JSContext, stack: *stack_mod.Stack) !void {
+pub fn nip(vm: *Vm) HostError!void {
+    const stack = vm.stack;
     try requireStackLen(stack, 2);
     const top = try stack.pop();
     _ = try stack.pop();
@@ -318,8 +304,8 @@ pub fn dup3(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(c);
 }
 
-pub fn insert2(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
-    _ = ctx;
+pub fn insert2(vm: *Vm) HostError!void {
+    const stack = vm.stack;
     try requireStackLen(stack, 2);
     const b = try stack.pop();
     const a = try stack.pop();
@@ -328,8 +314,8 @@ pub fn insert2(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(b);
 }
 
-pub fn insert3(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
-    _ = ctx;
+pub fn insert3(vm: *Vm) HostError!void {
+    const stack = vm.stack;
     try requireStackLen(stack, 3);
     const c = try stack.pop();
     const b = try stack.pop();
@@ -354,8 +340,8 @@ pub fn insert4(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(d);
 }
 
-pub fn rot3l(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
-    _ = ctx;
+pub fn rot3l(vm: *Vm) HostError!void {
+    const stack = vm.stack;
     try requireStackLen(stack, 3);
     const c = try stack.pop();
     const b = try stack.pop();
@@ -404,8 +390,8 @@ pub fn rot5l(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(a);
 }
 
-pub fn perm3(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
-    _ = ctx;
+pub fn perm3(vm: *Vm) HostError!void {
+    const stack = vm.stack;
     try requireStackLen(stack, 3);
     const c = try stack.pop();
     const b = try stack.pop();
@@ -415,8 +401,8 @@ pub fn perm3(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(c);
 }
 
-pub fn perm4(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
-    _ = ctx;
+pub fn perm4(vm: *Vm) HostError!void {
+    const stack = vm.stack;
     try requireStackLen(stack, 4);
     const d = try stack.pop();
     const c = try stack.pop();
@@ -456,9 +442,9 @@ pub fn swap2(ctx: *core.JSContext, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(b);
 }
 
-pub noinline fn isUndefinedOrNull(_: *core.JSRuntime, stack: *stack_mod.Stack) !void {
-    const value = try stack.pop();
-    stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value.is(.undefined_value) or value.is(.null_value)));
+pub noinline fn isUndefinedOrNull(vm: *Vm) HostError!void {
+    const value = try vm.stack.pop();
+    vm.stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value.is(.undefined_value) or value.is(.null_value)));
 }
 
 pub noinline fn isUndefined(_: *core.JSRuntime, stack: *stack_mod.Stack) !void {
@@ -466,9 +452,9 @@ pub noinline fn isUndefined(_: *core.JSRuntime, stack: *stack_mod.Stack) !void {
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value.is(.undefined_value)));
 }
 
-pub noinline fn isNull(_: *core.JSRuntime, stack: *stack_mod.Stack) !void {
-    const value = try stack.pop();
-    stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value.is(.null_value)));
+pub noinline fn isNull(vm: *Vm) HostError!void {
+    const value = try vm.stack.pop();
+    vm.stack.pushOwnedAssumeCapacity(core.JSValue.boolean(value.is(.null_value)));
 }
 
 fn adapterValueBorrow(slot: core.JSValue) core.JSValue {

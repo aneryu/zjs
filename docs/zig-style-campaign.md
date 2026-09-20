@@ -149,3 +149,63 @@ Owner 裁决（2026-09-20）：**不再要求对齐 QuickJS；优先处理「不
 发现的既有缺陷（非本战役引入，未修）：Debug 构建的 `run-test262` 在每个用例结束的 `JSRuntime.deinit` 触发 `allocation_count == 1` 断言（探针读数：490 个未释放分配 / 35,904 B），战役基线 3993cad5 同样复现；同一 harness+用例用 Debug `zjs` 直接跑干净退出，问题在 runner 的 `$262`/agent/动态导入安装或拆除顺序。仓库门禁只跑 ReleaseFast runner（断言关闭），所以从未被门禁看到。单独立项。
 
 欠账：`docs/code-walkthrough/` 的函数级条目已与源码大面积漂移（36 个文件，多数早于本战役：value/atom/string/parser 拆分/event_loop）；本战役只删除了已移除函数的条目。整册重同步单独立项。
+
+## 5. tailcall_dispatch 整理（2026-09-20 晚，分支 `refactor/tailcall-dispatch-tidy`）
+
+Owner：「代码十分丑陋、不像 Zig」→ worktree 内整理，kiln 双臂 A/B 验收，退化即停。
+
+- 机械整理：`vb`→`var_buf`、匿名 handler/body 统一命名、中段 import 上移、三个同形 result union 合成 `PushResult`、`coldPlain` 别名删除。
+- 注释 2465→1211 行：SHA/战役代号/quickjs.c 行号/insn·cycle 数字/「former/retired」叙述全部移出，只留不变量与一句话「为什么」；被删的测量事实按函数归档到 `docs/perf/tailcall-dispatch-notes.md`。`.text` 逐字节一致。
+- cold helper 收 `vm: *Vm`：`cold/coldOp/coldStd` 三种适配器，17 个模块约 97 个 helper 改签名，colds 表项 220 行 struct 包装压成一行（colds.zig 1044→554）；保留原签名的只有有 Vm 之外调用者的 `pollInterrupt`/`catchTarget`/`execGetArg`/`setName`/`pushPrivateSymbol` 与 using_ops 共享的栈操作。⚠️`inline fn` 不能作 comptime fn 形参（`putArrayElementAfterFastMiss` 去 inline）。
+- 布局技巧收拢：10 个 `export var zjs_*: Handler` + volatile 槽 → `Opaque(h).get()`（非导出 volatile 静态，机器码逐指令相同）；6 处 `.space` 垫片 → `sizePad(N)`。垫片本身保留，删除需另测。
+- `op_call_method` 的字节码方法臂抽成 `callBytecodeMethod`（机器码相同）；把原生臂也抽出并让通用回退走 Handler 签名尾调用的方案被否：LLVM 全函数重新分配寄存器，1841→2129 insn。⚠️`@call(.always_tail)` 出现在返回 `?Outcome` 的 inline fn 里会让 zig 0.16 编译器 SEGV。
+- 返回路径去重：`popAndResume` 的 empty-leaf / exact-args-leaf / forwarded-leaf 三臂与 `op_return_slow` 的 forwarded 臂各自重复同样七条「发布调用者层级」的字段存储，四处 `reloadAfterPop(null)` + push + dispatch 三连也相同 → `republishCaller` / `resumeAtL0`。机器码逐指令相同。
+- `opCall` 的字节码被调方臂抽成 `callBytecodeCallee`（与 `callBytecodeMethod` 同构，带 `comptime argc_source`，逐指令相同）；`op_call_constructor` 两处相同的「装内联窗口 + 派发」折成 `enterInlineConstructorWindow`（−8 insn：`code_base` 的发布移到装窗口之前；全二进制指令总数不变）。
+- **撤回**：`op_call_constructor` 的 `.instance` 臂抽成 `enterSameMachineConstruction`（10 参 inline fn）。该函数自身 909 insn 逐指令不变，但整程序代码生成状态翻转——1240 个函数体变化，`parser.classes.parseClass` ±148、`value_ops.binary` ±127，全在未触碰的文件里，静态 +562 insn。8 对交替样本：Air 动态指令数 1.0002 而 cycles +0.69%，first-inspector-code-load cycles +0.78%。同工作量下的纯放置劣化，收益（155→~100 行）不抵，撤回。⚠️这类翻转是双稳态的：K3 曾把这批函数从 A 态翻到 B 态，此刀又翻回 A 态。
+- 验收（kiln-zjs ReleaseFast，基线与候选同一 worktree 构建，11 项 × 4 样本交替）：分支尾重测耗时 10/11 持平或更快（proxy-vue −1.9%、threejs −1.2%、first-inspector −1.0%、doxbee/bigint −0.9%），Air 差异 < 0.1%，splay +1.0%（10.69 → 10.80 s）。splay 是已知的双峰项：中途一次 8 样本专测为 10.70 / 10.69 s 持平，分数差全在 JetStream 的 `First` 首轮子项，稳态 `Average` 两臂重合。整批 perf stat 复核指令数比值在 1.0000-1.0002。Owner 裁「只看耗时可以接受」。
+- cold helper 第二波：第一波只覆盖走冷表的 helper，漏了**只从 dispatch 直接调用**的与**只从已转换的 `using_ops` 调用**的。两个并行组改了 20 个：`vm_arith` 的 `compareVm`/`updateLocalVm`/`updateLocalAt`/`addLocalVm`/`addLocalAt`、`vm_control` 的 `returnTop`/`throwTop`/`throwErrorVm`、`vm_gen_async` 的 `initialYield`/`yieldValue`/`yieldStar`/`awaitValue`、`vm_native.dispatch`、`using_ops` 内部四个与只被它调用的 `vm_value.toObjectVm`/`vm_call.checkCtorReturnVm`/`object_ops.putSuperValue`。顺带删掉五个模块里各自重复声明且已无人使用的 `pub const Step`。其中一组逐函数对照：净 −404 insn，所有被转换的 helper 都变短，无一变长。dispatch 里还剩 43 处 ≥4 个 `vm.*` 实参的调用，全都有 dispatcher 之外的调用者（`handleCatchableRuntimeError` 有 19 个模块在用），收拢它们需单独立项。
+- `op_call_constructor` 的 `.instance` 臂重新抽成 `enterSameMachineConstruction`（155 → 116 行）。**先前撤回的判断是错的**，见下面的方法论一条。
+- dispatcher 本地包装：`handleCatchableRuntimeError` 被摊开写了 22 次（6 个 vm 派生实参）、`callNativeAccessorTarget` 4 次。这两个共享 helper 有 dispatcher 之外的调用者，所以不动它们的签名，改为在 dispatch.zig 内加 `deliverCatchable(vm, err)` / `callNativeAccessor(vm, target, receiver, args, kind)` 两个 inline 包装。两处把错误投递到 `vm.stack` 以外的栈的冷臂保留完整写法——让例外可见。机器码逐指令相同。
+
+### handler 岛的定价（owner 令「测」，2026-09-20 夜）
+
+`src/exec/tail_hot_layout_aarch64.ld` 把 175 个 handler 收进 `.text.zjs.op_handlers`。
+⚠️**kiln 的 build.zig 不套这个脚本**，所以本战役此前全部 A/B 都跑在没有岛的二进制上，
+而产品 CLI 一直带岛。给 kiln 加 `-Disland` 开关后，同一份源码的两臂静态对照：
+
+| | 同一批 303 个 handler 符号 | 地址跨度 | 跨页 | 密度 |
+|---|---|---|---|---|
+| 带岛 | 143.4 KiB | 147.6 KiB | **37** | 0.971 |
+| 不带岛 | 143.2 KiB | 2825.0 KiB | **706** | 0.051 |
+
+即脚本确实在做它声称的事：把解释器热代码从 706 页压到 37 页。
+
+动态（CPU19 独占、每臂 4-7 轮交替、`armv8_pmuv3_1` 计数器）。⚠️zoo 的 Octane 跑法
+不是定量工作（两臂 retired 指令差 1-2%），所以按 **CPI**（cycles/insn）归一化比较：
+
+| 套件 | 用例 | island/plain CPI |
+|---|---|---|
+| Octane | richards | **0.981** |
+| Octane | deltablue | 0.992 |
+| Octane | zlib | 0.998 |
+| Octane | crypto | 0.999 |
+| JetStream | Air | 1.001 |
+| JetStream | json-parse-inspector | 1.003 |
+| JetStream | first-inspector-code-load | **1.017** |
+
+取指侧：Air 的 L1I 重填 −17%、前端停顿 −6.5%（但 cycles 纹丝不动，IPC ~4.9 的核把它吸收了）；
+`l1i_tlb_refill` 两臂绝对值都只有一两万次，**706 → 37 页的收益兑现不了，iTLB 根本没有压力**。
+
+**结论：岛不能退役。** 它在当初调优的 Octane 紧循环上仍付费（richards −1.9% CPI、deltablue −0.8%），
+在 code-load/启动型用例上倒贴（first-inspector +1.7% CPI）。两边大致相抵，但删掉它不是免费清理，
+而是一次真实的性能取舍。因此 175 个 `linksection` 标注、6 处 `sizePad` 与 ld 脚本**保留**。
+若将来要重开此议题，正确的问法是「岛该收哪些 handler」而不是「岛要不要」。
+
+### 方法论（本战役最重要的两条产出）
+
+1. **整程序代码生成是双稳态的，翻转不能记在某一刀头上。** 标志是 `parser.classes.parseClass` 在 5175 / 5323 条指令之间跳、`value_ops.binary` 在 2280 / 2407 之间跳——都在未触碰的文件里。一刀「造成」翻转时看起来像 +562 静态指令、Air cycles +0.69%，据此撤回了 `enterSameMachineConstruction`。但在后续树上原样重新应用同一段改动，机器码**逐字节相同、零函数体变化**——翻转早已因别的改动发生过。**判据**：一刀的代价必须在当前树状态下重测；看到大范围无关函数变化时，先确认是不是状态翻转，再决定去留。
+2. **kiln 4 样本耗时口径的单项分辨率是 ±1.5% 到 4%。** 一次操作失误让同一对二进制被完整测了两遍，两次结果：proxy-vue −1.9% / −5.9%，json-stringify <0.1% / +1.5%，FlightPlanner −0.5% / +0.1%（符号翻转），splay +1.0% / +1.6%；只有 threejs −1.2% 和 first-inspector −1.0% 两次一致。**判据**：单项耗时差小于约 2% 不构成证据；可信的尺是 `perf stat` 指令数（噪声 ~0.01%）与逐函数机器码对照，耗时只用来看整体方向。
+
+- 重门（独立 worktree、分支尾）：`checkpoint-gate` + `test-stress` 4770/4794 通过（24 skip）、ReleaseFast `test262-check` 成功。
+- 工装：`/tmp/kiln-wt/`（kiln build.zig 副本 + `zjs` 符号链接指向 worktree；`disnorm.sh` 归一化反汇编按函数比对；`insn.sh` perf stat 指令数，首轮冷跑要丢弃）。⚠️kiln 的 build.zig 不套 `tail_hot_layout_aarch64.ld`，kiln-zjs 没有 handler 岛。
+- 未做：拆文件（owner 裁「先不拆」）。dispatch 内还剩约 20 处带 2-3 个 vm 派生实参的调用（`machine.pushMethodCall`、`*ForFastPath`、`callMethod`、`execCall`、`small_inline.*` 各 2-4 次），都不到摊开 6 个实参的程度，暂不再包。

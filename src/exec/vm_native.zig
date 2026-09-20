@@ -11,12 +11,12 @@
 
 const std = @import("std");
 const core = @import("../core/root.zig");
-const bytecode = @import("../bytecode.zig");
 const frame_mod = @import("frame.zig");
 const stack_mod = @import("stack.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const call_runtime = @import("call_runtime.zig");
 const vm_call = @import("vm_call.zig");
+const Vm = @import("tailcall_dispatch.zig").Vm;
 
 pub const Shape = enum { plain, method };
 
@@ -30,17 +30,14 @@ pub const Outcome = enum { hit, caught, miss };
 /// realm switch) sits at the top; everything else takes the full terminal.
 /// Entry and callee realm come from one payload walk (`nativeCallTarget`).
 pub noinline fn dispatch(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: *core.Object,
-    stack: *stack_mod.Stack,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    catch_target: *?usize,
+    vm: *Vm,
     func_obj: *core.Object,
     argc: u16,
     shape: Shape,
 ) align(32) core.errors.HostError!Outcome {
+    const ctx = vm.ctx;
+    const stack = vm.stack;
+    const frame = vm.frame;
     const window_head: usize = if (shape == .method) 2 else 1;
     const total: usize = @as(usize, argc) + window_head;
     if (shape == .method and stack.len() < total) return error.StackUnderflow;
@@ -64,22 +61,22 @@ pub noinline fn dispatch(
         const this_value = if (shape == .method) stack.values[region_base] else core.JSValue.undefinedValue();
         result = builtin_dispatch.nativeFromBits(builtin_dispatch.callRecordFromVmInRealm(
             ctx,
-            output,
-            global,
+            vm.output,
+            vm.global,
             func_obj,
             entry,
             target.realm,
             this_value,
             args,
-            function,
+            vm.function,
             frame,
         ));
         if (builtin_dispatch.nativeIsExc(ctx, result)) {
-            return failure(ctx, output, stack, frame, catch_target, global, region_base, builtin_dispatch.nativeHostError(ctx));
+            return failure(ctx, vm.output, stack, frame, vm.catch_target, vm.global, region_base, builtin_dispatch.nativeHostError(ctx));
         }
     }
     stack.setLen(region_base);
-    if (vm_call.dropUnusedCallResult(ctx, function, frame, result)) return .hit;
+    if (vm_call.dropUnusedCallResult(ctx, vm.function, frame, result)) return .hit;
     stack.pushOwnedAssumeCapacity(result);
     return .hit;
 }
