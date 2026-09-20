@@ -10,14 +10,12 @@
 CLI / 仓内测试
     │  const zjs = @import("zjs");
     ▼
-src/root.zig                          门面（导出、包装与部分宿主操作实现）
+src/root.zig                          CLI / run-test262 门面（类型再导出 + scriptArgs）
     JSRuntime / JSValue               ← core
     JSContext                         ← js_context.zig
     zjs.native                        ← native.zig（仅 managed）
-    zjs.host                          ← defineScriptArgs 等 CLI 形全局助手
-    zjs.value                         ← 立即数构造、句柄别名、String/Bytes
-    zjs.object                        ← opaque Object + Buffer 零拷贝借阅
-    zjs.context / module / job        ← 调用 / 模块图 / Promise job 排水
+    zjs.host.defineScriptArgs         ← CLI `scriptArgs`
+    zjs.context                       ← EvalMode / EvalTiming / Options
     zjs.runtime                       ← event_loop.zig（事件循环；18 册）
     │
     ▼
@@ -48,8 +46,8 @@ _ = result;
 | 跑脚本 | `JSContext.eval` / `evalScriptSource` | `js_context.zig` → `exec/eval_entry.zig` |
 | 注册宿主函数 | `zjs.native.managed` + `defineFunction` | `native.zig` + `js_context.zig` |
 | native → JS | `JSContext.callFunction` | `js_context.zig` → `exec/call_site.zig` |
-| 跨调用保住值 | `zjs.value.Persistent` / `Scope` / `Local` | core 句柄；root 只起别名 |
-| 排 Promise job | `zjs.job.drain` 或 `JSContext.runJobs` | `root.zig` / `context.zig` |
+| 跨调用保住值 | `rt.createPersistentValue` / `enterHandleScope` | core 句柄 |
+| 排 Promise job | `JSContext.runJobs` | `js_context.zig` → `promise_ops` |
 
 `JSContext.destroy` 清理该 context 的 Atomics waiters、撤销宿主持有的 realm 根，并释放公共门面分配；core realm 的回收由 GC 决定，并非在这里立即销毁。`Call.ctx` 是 `borrowCore` 出来的非拥有门面，禁止 `deinit` 或 `destroy`。
 
@@ -57,7 +55,7 @@ _ = result;
 
 | 文件 | 覆盖 |
 | --- | --- |
-| [01-public-api-root.md](01-public-api-root.md) | `src/root.zig`：value / host / object / Buffer / context / module / job |
+| [01-public-api-root.md](01-public-api-root.md) | `src/root.zig`：CLI / run-test262 再导出与 `defineScriptArgs` |
 | [01-public-api-companions.md](01-public-api-companions.md) | `internal_root.zig`、`platform_clock.zig` |
 | [01-public-api-context.md](01-public-api-context.md) | `js_context.zig`：`JSContext` |
 | [01-public-api-native.md](01-public-api-native.md) | `native.zig`：`Call` / `managed` |

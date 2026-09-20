@@ -1,5 +1,5 @@
 //! Validates host eval, managed functions, handles, and realm teardown
-//! against the remaining `src/root.zig` facade used by CLI and in-repo tests.
+//! against `src/root.zig` (the CLI / run-test262 facade).
 const std = @import("std");
 const zjs = @import("zjs");
 const HostState = struct {
@@ -74,12 +74,12 @@ test "embedding cookbook host-held values example compiles and roots correctly" 
 
     const object = try ctx.eval("({ answer: 42 })", .{});
 
-    var scope: zjs.value.Scope = rt.enterHandleScope();
+    var scope = rt.enterHandleScope();
     defer scope.deinit();
 
-    const local: zjs.value.Local = try scope.localDup(object);
+    const local = try scope.localDup(object);
 
-    var persistent: zjs.value.Persistent = try rt.createPersistentValue(local.get());
+    var persistent = try rt.createPersistentValue(local.get());
     defer persistent.deinit();
 
     scope.deinit();
@@ -200,7 +200,7 @@ test "embedding cookbook strings and bytes examples compile and run" {
     const backing = try allocator.alloc(u8, 4);
     @memcpy(backing, &[_]u8{ 1, 2, 3, 4 });
 
-    var store = zjs.value.Bytes.Store.owned(backing, .{
+    var store = zjs.JSValue.Bytes.Store.owned(backing, .{
         .context = &bytes_state,
         .deinit = BytesState.deinit,
     });
@@ -267,7 +267,7 @@ test "embedding public API core signatures stay source-compatible" {
     const define_function: fn (*zjs.JSContext, []const u8, zjs.native.Spec, zjs.native.Options) anyerror!zjs.JSValue = zjs.JSContext.defineFunction;
     const create_function: fn (*zjs.JSContext, []const u8, zjs.native.Spec, zjs.native.Options) anyerror!zjs.JSValue = zjs.JSContext.createFunction;
     const eval_script: fn (*zjs.JSContext, []const u8, zjs.context.EvalOptions) anyerror!zjs.JSValue = zjs.JSContext.eval;
-    const array_buffer: fn (*zjs.JSContext, *zjs.value.Bytes.Store) anyerror!zjs.JSValue = zjs.JSContext.arrayBuffer;
+    const array_buffer: fn (*zjs.JSContext, *zjs.JSValue.Bytes.Store) anyerror!zjs.JSValue = zjs.JSContext.arrayBuffer;
     const to_owned_utf8: fn (*zjs.JSContext, zjs.JSValue, std.mem.Allocator) anyerror![]u8 = zjs.JSContext.toOwnedUtf8;
 
     _ = create_runtime;
@@ -278,8 +278,10 @@ test "embedding public API core signatures stay source-compatible" {
     _ = array_buffer;
     _ = to_owned_utf8;
 
-    try std.testing.expect(zjs.value.Bytes.Store == zjs.JSValue.Bytes.Store);
-    try std.testing.expect(@typeInfo(zjs.object.Object) == .@"opaque");
+    try std.testing.expect(!@hasDecl(zjs, "value"));
+    try std.testing.expect(!@hasDecl(zjs, "object"));
+    try std.testing.expect(!@hasDecl(zjs, "module"));
+    try std.testing.expect(!@hasDecl(zjs, "job"));
     if (!@hasDecl(zjs, "printSmallInlineProbe")) {
         try std.testing.expect(!@hasDecl(zjs, "JSBytes"));
         try std.testing.expect(!@hasDecl(zjs, "JSString"));

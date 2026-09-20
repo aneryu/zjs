@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Public API:** `src/root.zig` is the CLI / `run-test262` host facade, not
+  a second object model. Removed `zjs.value` (constructors and handle
+  aliases), `zjs.object` (opaque Object, Buffer borrows), `zjs.module`,
+  `zjs.job`, `host.defineArgvGlobals`, and `host.evalGlobalScript*`. Kept
+  `JSRuntime` / `JSContext` / `JSValue`, `zjs.native`, `zjs.runtime`,
+  `zjs.context` eval options, opcode-profile helpers, and
+  `host.defineScriptArgs`. Handles come from `JSRuntime` methods; byte
+  stores from `JSValue.Bytes.Store`.
 - **Build:** the CLI executable builds again. 617e6941 imported the CLI and
   stress test families from `src/internal_root.zig` behind a comptime `if`;
   Zig assigns files to modules when it collects imports, so `zig build zjs`

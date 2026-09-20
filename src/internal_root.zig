@@ -1,6 +1,6 @@
-//! Internal engine root. Public embedder surface is `src/root.zig`;
-//! CLI, ReleaseFast artifacts, and the unified Zig test suite compile
-//! against this file.
+//! Internal engine root. `src/root.zig` is the CLI / run-test262 host
+//! facade (`public_api`); CLI, ReleaseFast artifacts, and the unified Zig
+//! test suite compile against this file.
 
 const public_root = @import("root.zig");
 
@@ -66,7 +66,8 @@ test {
 
     try std.testing.expect(Object == core.Object);
     try std.testing.expect(@hasDecl(Object, "create"));
-    try std.testing.expect(!@hasDecl(public_api.object.Object, "create"));
+    try std.testing.expect(!@hasDecl(public_api, "object"));
+    try std.testing.expect(!@hasDecl(public_api, "core"));
 
     _ = core;
     _ = parser;

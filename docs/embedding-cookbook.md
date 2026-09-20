@@ -50,12 +50,12 @@ state.
 ```zig
 const object = try ctx.eval("({ answer: 42 })", .{});
 
-var scope: zjs.value.Scope = rt.enterHandleScope();
+var scope = rt.enterHandleScope();
 defer scope.deinit();
 
-const local: zjs.value.Local = try scope.localDup(object);
+const local = try scope.localDup(object);
 
-var persistent: zjs.value.Persistent = try rt.createPersistentValue(local.get());
+var persistent = try rt.createPersistentValue(local.get());
 defer persistent.deinit();
 
 scope.deinit();
@@ -169,8 +169,8 @@ holding `JSValue`s are:
   the heap (an `ArrayList` of callbacks, a struct field, a slice handed to
   `callFunction` from heap storage) must be pinned before anything can run
   GC -- and any call into the engine can. Pin each element in a
-  `zjs.value.Persistent`, or keep the values in a JS Array that is itself
-  held by one `Persistent`.
+  persistent handle (`rt.createPersistentValue`), or keep the values in a JS
+  Array that is itself held by one persistent handle.
 - **Cross-call retention uses `Persistent`.** A callback stored for a later
   tick, a cached object, host object state, or anything referenced from a
   native function's `state` goes into a `Persistent` (or a `Weak` when the
@@ -192,7 +192,7 @@ const text = try ctx.toOwnedUtf8(value, allocator);
 defer allocator.free(text);
 ```
 
-Use `zjs.value.Bytes.Store` for ArrayBuffer backing memory that should be
+Use `zjs.JSValue.Bytes.Store` for ArrayBuffer backing memory that should be
 transferred to the engine without copying.
 
 ```zig
@@ -209,7 +209,7 @@ var bytes_state = BytesState{ .allocator = allocator };
 const backing = try allocator.alloc(u8, 4);
 @memcpy(backing, &[_]u8{ 1, 2, 3, 4 });
 
-var store = zjs.value.Bytes.Store.owned(backing, .{
+var store = zjs.JSValue.Bytes.Store.owned(backing, .{
     .context = &bytes_state,
     .deinit = BytesState.deinit,
 });

@@ -33,11 +33,12 @@ the event loop.
 
 ## Public entry — `src/root.zig`
 
-Embedders import `zjs`. The remaining host surface is `JSRuntime`, `JSContext`,
-`JSValue`, `zjs.value` handles, `zjs.native.managed` (host functions),
-and `zjs.runtime` (the host event loop).
-Contract: [public-api-contract.md](public-api-contract.md). Examples:
-[embedding-cookbook.md](embedding-cookbook.md).
+Embedders import `zjs`. The host surface is `JSRuntime`, `JSContext`,
+`JSValue`, `zjs.native.managed` (host functions), `zjs.host.defineScriptArgs`
+(CLI `scriptArgs`), `zjs.context` eval options, and `zjs.runtime` (the host
+event loop). Handle types come from `JSRuntime` methods; byte stores from
+`JSValue.Bytes`. Contract: [public-api-contract.md](public-api-contract.md).
+Examples: [embedding-cookbook.md](embedding-cookbook.md).
 
 `src/internal_root.zig` aggregates CLI, test262, and in-repo tests. It is not
 the public embedding contract.

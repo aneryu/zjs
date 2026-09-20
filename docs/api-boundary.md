@@ -61,9 +61,7 @@ zjs.JSContext
 zjs.JSValue
 zjs.native.managed
 zjs.native.Call / Spec / Options
-zjs.object.Object
-zjs.value.String
-zjs.value.Bytes
+zjs.host.defineScriptArgs
 zjs.runtime
 ```
 

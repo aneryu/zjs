@@ -17,16 +17,16 @@
 | `platform_clock` | 单调/墙上时钟。CLI 自己的模块图碰不到 `src/platform_clock.zig`，所以从这里转口。 |
 | `RuntimeError` / `HostError` | `exec.exceptions` 的 error set。 |
 | `JSRuntime` / `JSContext` / `JSValue` | 与公共门面同一批类型；`JSContext` 来自 `js_context.zig`。 |
-| `Object` | **core** `Object`，不是门面 `zjs.object.Object`（后者是 opaque）。文件级 test 断言它等于 `core.Object`、带 `create`，而 opaque 类型没有 `create`。 |
+| `Object` | **core** `Object`。公共 `root.zig` 不再导出 opaque `zjs.object.Object`。文件级 test 断言它等于 `core.Object`、带 `create`，且 `public_api` 没有 `object` / `core`。 |
 | `Descriptor` / `Atom` / `NativePin` / `GCPolicy` / `GCStats` | core 类型；公共 root **不**导出 `Atom` / `NativePin`。 |
-| `JSValueHandle` / `LocalHandle` / `HandleScope` / `WeakPersistent` / `WeakPersistentValue` | 句柄族。公共拼写走 `zjs.value.*`。 |
-| `JSString` / `JSBytes` | 内部拼写；门面走 `zjs.value.String`。 |
+| `JSValueHandle` / `LocalHandle` / `HandleScope` / `WeakPersistent` / `WeakPersistentValue` | 句柄族。公共门面不另起别名；调用 `JSRuntime` 方法即可。 |
+| `JSString` / `JSBytes` | 内部拼写；公共面走 `JSValue.String` / `JSValue.Bytes`。 |
 | `EvalOptions` / `EvalTiming` / `DataPropertyOptions` | 选项类型。 |
 | `RuntimeMemoryUsage` | core 内存用量记录，包含账户统计和按类别估算的字节字段。 |
 | `core` / `parser` / `simple_token` / `bytecode` / `exec` / `libs` / `runtime` / `compiler` | 整层模块。公共 root 故意没有这些。 |
 | `sort_erased` | 类型擦除堆，非嵌入 API。 |
 
-文件级 `test` 块：确认内部 `Object` 有 `create`，而 `public_api.object.Object` 没有；再把各层模块拉进编译。
+文件级 `test` 块：确认内部 `Object` 有 `create`，而 `public_api` 没有 `object` / `core`；再把各层模块拉进编译。
 
 ### `printSmallInlineProbe` (`src/internal_root.zig:54`)
 

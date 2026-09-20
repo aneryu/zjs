@@ -16813,13 +16813,10 @@ test "production public API contract exposes Zig-native embedding spellings" {
     try std.testing.expect(!@hasDecl(public_zjs.JSValue, "Local"));
     try std.testing.expect(!@hasDecl(public_zjs.JSValue, "Persistent"));
     try std.testing.expect(!@hasDecl(public_zjs.JSValue, "Weak"));
-    try std.testing.expect(@hasDecl(public_zjs.value, "Scope"));
-    try std.testing.expect(@hasDecl(public_zjs.value, "Local"));
-    try std.testing.expect(@hasDecl(public_zjs.value, "Persistent"));
-    try std.testing.expect(@hasDecl(public_zjs.value, "Weak"));
-    try std.testing.expect(public_zjs.value.String == public_zjs.JSValue.String);
-    try std.testing.expect(public_zjs.value.Bytes == public_zjs.JSValue.Bytes);
-    try std.testing.expect(@typeInfo(public_zjs.object.Object) == .@"opaque");
+    try std.testing.expect(!@hasDecl(public_zjs, "value"));
+    try std.testing.expect(!@hasDecl(public_zjs, "object"));
+    try std.testing.expect(!@hasDecl(public_zjs, "module"));
+    try std.testing.expect(!@hasDecl(public_zjs, "job"));
     try std.testing.expect(!@hasDecl(public_zjs, "internal"));
     try std.testing.expect(!@hasDecl(public_zjs, "kernel"));
     try std.testing.expect(!@hasDecl(public_zjs, "CallSite"));
@@ -16830,6 +16827,7 @@ test "production public API contract exposes Zig-native embedding spellings" {
     try std.testing.expect(!@hasDecl(public_zjs, "binding"));
     try std.testing.expect(!@hasDecl(public_zjs, "binding_root"));
     try std.testing.expect(!@hasDecl(public_zjs, "js_context"));
+    try std.testing.expect(@hasDecl(public_zjs.host, "defineScriptArgs"));
     try std.testing.expect(!@hasDecl(public_zjs.host, "NativeBinding"));
     try std.testing.expect(!@hasDecl(public_zjs.host, "PropName"));
     try std.testing.expect(!@hasDecl(public_zjs.native, "leaf"));
@@ -17044,7 +17042,7 @@ test "production embedding can inspect own property descriptors by JS key" {
 
     try std.testing.expect(try ctx.hasOwnPropertyKey(object, key, .{}));
     var desc = (try ctx.ownPropertyDescriptor(object, key, .{})) orelse return error.TestExpectedEqual;
-    try std.testing.expectEqual(public_zjs.context.PropertyDescriptor.data(zjs.JSValue.int32(17), .{ .configurable = true }).kind, desc.kind);
+    try std.testing.expectEqual(core.PropertyDescriptor.data(zjs.JSValue.int32(17), .{ .configurable = true }).kind, desc.kind);
     try std.testing.expectEqual(@as(?i32, 17), desc.value.as(.int));
     try std.testing.expectEqual(false, desc.writable.?);
     try std.testing.expectEqual(false, desc.enumerable.?);
@@ -17213,14 +17211,14 @@ test "production embedding roots host-held values with public handles" {
 
     const object = try ctx.eval("({ answer: 42 })", .{});
 
-    var scope: public_zjs.value.Scope = rt.enterHandleScope();
-    const local: public_zjs.value.Local = try scope.localDup(object);
+    var scope = rt.enterHandleScope();
+    const local = try scope.localDup(object);
 
     try std.testing.expectEqual(@as(usize, 1), rt.localRootCountForTest());
     try std.testing.expectEqual(@as(usize, 0), rt.persistentRootCountForTest());
     try std.testing.expect(local.get().is(.object));
 
-    var persistent: public_zjs.value.Persistent = try rt.createPersistentValue(local.get());
+    var persistent = try rt.createPersistentValue(local.get());
     defer persistent.deinit();
 
     scope.deinit();

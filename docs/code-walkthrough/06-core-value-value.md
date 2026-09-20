@@ -10,7 +10,7 @@
 
 表示测试（tag 表、NaN-box 前缀、构造器、立即数分支、payload 指针、谓词、int32/float、cycleMarkHeader、asInt64）写在本文件末尾，由统一套件 `zig build test` 拉取。需要 Runtime 的堆 BigInt 会计与 FAM 乘法合同在 `src/core/bigint.zig`；分配无关的乘除内核合同在 `src/libs/bigint.zig`。
 
-嵌套：`Int32Pair { lhs, rhs }`；`String`/`Bytes` 是 view 泛型实例。句柄 `Scope`/`Local`/`Persistent`/`Weak` 在 `zjs.value`，不在 `JSValue` 上。`abi_encoding_revision = 2`。`short_big_int_bits = 48`，范围是 48-bit 有符号立即数。
+嵌套：`Int32Pair { lhs, rhs }`；`String`/`Bytes` 是 view 泛型实例。句柄在 `JSRuntime`（`enterHandleScope` / `createPersistentValue`），不在 `JSValue` 上。`abi_encoding_revision = 2`。`short_big_int_bits = 48`，范围是 48-bit 有符号立即数。
 
 ### `JSValue.shortBigIntFits` (`src/core/value.zig:89`)
 

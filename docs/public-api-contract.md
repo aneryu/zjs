@@ -20,21 +20,21 @@ The remaining host groups are:
 - `zjs.JSRuntime`, `zjs.JSContext`, `zjs.JSValue`;
 - `zjs.native` for host functions callable from JavaScript:
   `managed`, `Call`, `Spec`, `Options`;
-- `zjs.value` for value constructors, handle aliases, string views, and byte
-  views;
-- `zjs.object` for low-level object helpers;
-- `zjs.host` for the CLI-shaped global helpers
-  (`defineScriptArgs`, `defineArgvGlobals`, `evalGlobalScriptSource` /
-  `evalGlobalScriptValue`);
-- `zjs.context`, `zjs.module`, and `zjs.job` for explicit helper
-  families;
+- `zjs.host.defineScriptArgs` for the CLI `scriptArgs` global;
+- `zjs.context` for eval option types (`Options`, `EvalMode`, `EvalOptions`,
+  `EvalTiming`);
 - `zjs.runtime` for the host event loop (`EventLoop`, `runUntilIdle`).
 
-Removed (no longer compiled): `zjs.CallSite`, `zjs.PropertySite`,
+Removed (no longer compiled): `zjs.value`, `zjs.object` (including the opaque
+`Object` and `Buffer` borrow helpers), `zjs.module`, `zjs.job`,
+`host.defineArgvGlobals`, `host.evalGlobalScriptSource` /
+`evalGlobalScriptValue`, `zjs.CallSite`, `zjs.PropertySite`,
 `zjs.native.leaf` / `leafWithState` / `Class`, `zjs.host.NativeBinding`,
 `zjs.host.PropName` / `PropNameID`, and `src/binding/binding.zig`.
-Repeated native → JS calls use `JSContext.callFunction`; property IC lives
-only in the VM `PropSiteCache`.
+Value constructors live on `JSValue`; handles are the types returned by
+`JSRuntime` methods; byte stores are `JSValue.Bytes.Store`. The CLI and
+`run-test262` are the in-tree consumers. Repeated native → JS calls use
+`JSContext.callFunction`; property IC lives only in the VM `PropSiteCache`.
 
 The intended groups above are the contract. The embedding snapshot test
 lists every current public declaration on those groups. Update the list when
@@ -57,10 +57,9 @@ callback family `zjs.host.Call` / `Function` / `Finalizer` /
 - New public helper families should have cookbook or production tests when they
   carry ownership, allocation, or runtime policy.
 
-Current public spellings matter. For example, the public string/bytes spellings
-are `zjs.value.String` and `zjs.value.Bytes`, with nested aliases on
-`zjs.JSValue`. Root spellings such as `zjs.JSBytes` are intentionally not part
-of the current contract.
+Current public spellings matter. String and byte views are nested on
+`zjs.JSValue` (`JSValue.String`, `JSValue.Bytes`). Root spellings such as
+`zjs.JSBytes` are intentionally not part of the current contract.
 
 ## Known surface deviations
 
@@ -161,10 +160,9 @@ Host state that keeps JavaScript values across callbacks, ticks, or object
 lifetimes must use one of the documented handle types:
 
 ```zig
-zjs.value.Scope
-zjs.value.Local
-zjs.value.Persistent
-zjs.value.Weak
+rt.enterHandleScope()           // HandleScope
+scope.localDup(value)           // LocalHandle
+rt.createPersistentValue(value) // JSValueHandle
 ```
 
 Do not store raw `JSValue` fields in long-lived host state unless they are
@@ -190,15 +188,15 @@ Public lifetime methods use three verbs:
 
 - `deinit` destroys the receiver. Use it for handle scopes, persistent
   handles, weak handles, and native pins.
-- `take` transfers ownership out of the receiver. `zjs.value.Persistent.take`
-  removes the persistent root and returns the rooted `JSValue`.
+- `take` transfers ownership out of the receiver. A persistent handle's
+  `take` removes the persistent root and returns the rooted `JSValue`.
 - `release` decrements a reference count or drops a borrowed pin. Keep this
-  spelling on `zjs.value.Bytes.Store` and `zjs.object.Buffer.BorrowGuard`.
+  spelling on `JSValue.Bytes.Store`.
 
 `HandleScope.deinit` is idempotent: an early `scope.deinit()` before a
 `defer scope.deinit()` is the supported way to close a scope early.
 
-`zjs.value.Persistent.destroy(rt)` is a by-value compatibility wrapper. It
+A persistent handle's `destroy(rt)` is a by-value compatibility wrapper. It
 asserts that `rt` matches the handle's runtime, then drops the root. Prefer
 `deinit` on a mutable handle. It is not a transfer (`take`) and is not
 equivalent to `deinit` as a method signature.
@@ -208,13 +206,13 @@ self-destruct spelling is gone.
 
 ## Strings, Bytes, And Property Names
 
-`zjs.value.String` is a JavaScript string view. Tag checks, contiguous
+`JSValue.String` is a JavaScript string view. Tag checks, contiguous
 latin1/utf16 unit views, callback-scoped UTF-8 borrows, and owned UTF-8
 conversion are distinct operations. `asString()` is a tag check; it does not run
 ECMAScript `ToString`.
 
-`zjs.value.Bytes` is the public byte view for ArrayBuffer and typed-array
-backing memory. `zjs.value.Bytes.Store` supports owned and shared stores with
+`JSValue.Bytes` is the public byte view for ArrayBuffer and typed-array
+backing memory. `JSValue.Bytes.Store` supports owned and shared stores with
 explicit deinit/release semantics. Borrowed byte slices are callback-local; keep
 a JS value rooted and reacquire the view, or copy the bytes, when data must
 survive across callbacks or ticks.
@@ -411,10 +409,9 @@ must use explicit hook policy.
 - `EventLoop`, `EventLoopOptions`, `EventLoopRunResult`;
 - `runUntilIdle`.
 
-Module file graphs (`zjs.module` / `src/exec/module_graph.zig`), Atomics
-waiter wake/cleanup (`src/exec/atomics_ops.zig`), and ArrayBuffer detach
-(`src/exec/buffer_ops.zig`, `zjs.object.Buffer.detachBackingBuffer`) are not
-part of this namespace. It must not become an `Engine` facade and must not
+Module file graphs (`src/exec/module_graph.zig`), Atomics waiter
+wake/cleanup (`src/exec/atomics_ops.zig`), and ArrayBuffer detach
+(`src/exec/buffer_ops.zig`) are not part of this namespace. It must not become an `Engine` facade and must not
 re-export internal runtime modules as public contract. There is no in-tree
 dynamic plugin loader; host functions register through `zjs.native`.
 

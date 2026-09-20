@@ -120,9 +120,10 @@ modules. The examples are covered by the embedding test target.
 ## Runtime And Ownership Boundary
 
 The runtime is single-threaded. Host-owned `JSValue`s must remain in a
-`zjs.value.Scope` / local handle for the duration of a call, or in a
-`zjs.value.Persistent` handle when they cross callbacks, ticks, or host object
-state. Embedders must release owning values with the runtime that created them.
+handle scope / local handle for the duration of a call, or in a persistent
+handle (`rt.createPersistentValue`) when they cross callbacks, ticks, or host
+object state. Embedders must release owning values with the runtime that
+created them.
 
 Memory and interrupt limits are reliability controls for trusted embeddings;
 they are not a security boundary for untrusted JavaScript. See the Security
