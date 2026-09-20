@@ -285,7 +285,6 @@ pub inline fn initFrameLocals(
 
 pub inline fn initFrameVarRefs(
     ctx: *core.JSContext,
-    global: *core.Object,
     function: *const bytecode.FunctionBytecode,
     frame: *frame_mod.Frame,
     var_refs: []const *core.VarRef,
@@ -309,74 +308,10 @@ pub inline fn initFrameVarRefs(
         return;
     }
 
-    if (function.closureVar().len > 0) {
-        // Canonical functions receive their complete capture array from their
-        // function object. Reconstructing cells at frame entry would create a
-        // second identity and revive the retired placeholder/copy/replace
-        // path. Only the W1e legacy mutable module/fixture adapter may enter
-        // without closure2 captures.
-        if (function.legacyBytecodeAdapter() == null) return error.InvalidBytecode;
-        const owned_refs = if (windows.var_refs) |cells| blk: {
-            std.debug.assert(cells.len == function.closureVar().len);
-            break :blk cells;
-        } else blk: {
-            if (use_inline_storage) {
-                if (ctx.runtime.vm_stack.carveTyped(&ctx.runtime.memory, *core.VarRef, function.closureVar().len)) |window| break :blk window;
-            }
-            break :blk try allocFrameVarRefWindow(ctx, frame, function.closureVar().len);
-        };
-        for (function.closureVar(), 0..) |cv, idx| {
-            owned_refs[idx] = try legacyInitialClosureVarRef(ctx, global, cv);
-        }
-        frame.var_refs = owned_refs;
-        return;
-    }
-
-    if (function.varRefNamesLen() == 0) return;
-    if (function.legacyBytecodeAdapter() == null) return error.InvalidBytecode;
-    const owned_refs = if (windows.var_refs) |cells| blk: {
-        std.debug.assert(cells.len == function.varRefNamesLen());
-        break :blk cells;
-    } else blk: {
-        if (use_inline_storage) {
-            if (ctx.runtime.vm_stack.carveTyped(&ctx.runtime.memory, *core.VarRef, function.varRefNamesLen())) |window| break :blk window;
-        }
-        break :blk try allocFrameVarRefWindow(ctx, frame, function.varRefNamesLen());
-    };
-    for (0..function.varRefNamesLen()) |idx| {
-        const var_name = function.varRefName(idx);
-        // Top-level script let/const: share the cell that already lives in the
-        // ctx.lexicals VARREF slot (qjs frame.var_refs[idx] aliases the global
-        // lexical cell, js_closure_define_global_var). Falls back to building a
-        // fresh cell for ordinary globals (and before the VARREF slot exists).
-        // In the var_ref_names path (top-level script frame only; module/closure
-        // frames take the var_refs-passed path above), a lexical var-ref is a
-        // .global_decl top-level let/const (the top frame has no .ref captures).
-        const is_global_decl = function.varRefIsGlobalDeclAt(idx);
-        if (is_global_decl) {
-            // qjs check-before-create: the redeclaration gate (check_define_var,
-            // mirrors JS_CheckDefineGlobalVar PASS1) must run BEFORE the
-            // ctx.lexicals cell exists — otherwise a fresh `let foo` would see
-            // its own cell via globalLexicalHas and falsely throw. Reserve an
-            // uninitialized (TDZ) placeholder cell here. The define_var opcode
-            // creates/shares the real ctx.lexicals VARREF cell after the check
-            // passes and rebinds frame.var_refs[idx] to alias it (qjs
-            // js_closure_define_global_var PASS2).
-            const is_const = function.varRefIsConstAt(idx);
-            const cell = try core.VarRef.createClosed(ctx.runtime, core.JSValue.uninitialized());
-            cell.varRefIsConstSlot().* = is_const;
-            cell.is_lexical = true;
-            owned_refs[idx] = cell;
-        } else if (call_runtime.globalLexicalCell(ctx, var_name)) |cell_value| {
-            // Owned ref to the shared ctx.lexicals cell (already a cell by
-            // construction; the JSValue handle transfers its refcount).
-            owned_refs[idx] = core.VarRef.fromValue(cell_value).?;
-        } else {
-            const val = call_runtime.globalLexicalValueForGlobal(ctx, global, var_name) orelse try global.getProperty(var_name);
-            owned_refs[idx] = try core.VarRef.createClosed(ctx.runtime, val);
-        }
-    }
-    frame.var_refs = owned_refs;
+    // Canonical functions receive their complete capture array from their
+    // function object. Reconstructing cells at frame entry would create a
+    // second identity and revive the retired placeholder/copy/replace path.
+    if (function.closureVar().len > 0) return error.InvalidBytecode;
 }
 
 /// Heap fallback for an owned frame var_refs array: a []JSValue storage
@@ -387,28 +322,6 @@ fn allocFrameVarRefWindow(ctx: *core.JSContext, frame: *frame_mod.Frame, count: 
     const value_slots = try std.math.divCeil(usize, ptr_bytes, @sizeOf(core.JSValue));
     const values = try frame.allocOwnedStorage(&ctx.runtime.memory, value_slots);
     return std.mem.bytesAsSlice(*core.VarRef, std.mem.sliceAsBytes(values)[0..ptr_bytes]);
-}
-
-fn legacyInitialClosureVarRef(ctx: *core.JSContext, global: *core.Object, cv: bytecode.function_bytecode.BytecodeClosureVar) !*core.VarRef {
-    switch (cv.closureType()) {
-        .global, .global_ref, .global_decl => {
-            const cell_value = try call_runtime.selectOrdinaryGlobalClosureCell(ctx, global, cv.var_name);
-            return core.VarRef.fromValue(cell_value) orelse {
-                return error.InvalidBytecode;
-            };
-        },
-        else => {},
-    }
-    const initial_value = switch (cv.closureType()) {
-        .global, .global_ref, .global_decl => core.JSValue.uninitialized(),
-        .module_decl, .module_import => core.JSValue.uninitialized(),
-        .local, .arg, .ref => call_runtime.globalLexicalValueForGlobal(ctx, global, cv.var_name) orelse try global.getProperty(cv.var_name),
-    };
-    const cell = try core.VarRef.createClosed(ctx.runtime, initial_value);
-    cell.varRefIsConstSlot().* = cv.isConst();
-    cell.is_lexical = cv.isLexical();
-    cell.varRefIsFunctionNameSlot().* = cv.varKind() == .function_name;
-    return cell;
 }
 
 pub noinline fn closure(
@@ -450,7 +363,7 @@ pub fn call(
     const argc = switch (opc) {
         op.call => blk: {
             const value = readInt(u16, function.byteCode()[frame.pc..][0..2]);
-            frame.pc += 3; // argc + cache_idx
+            frame.pc += 2; // argc
             break :blk value;
         },
         op.call0 => 0,
@@ -545,7 +458,7 @@ pub noinline fn callMethod(
     req_out: *call_runtime.InlineCallRequest,
 ) !CallStep {
     const argc = readInt(u16, function.byteCode()[frame.pc..][0..2]);
-    frame.pc += 3; // argc + cache_idx
+    frame.pc += 2; // argc
     // Inline frame fast path: a method call whose callable is a plain bytecode
     // function runs as an inline frame (like op.call), so method-position
     // recursion gets the logical call-depth limit instead of the shallow

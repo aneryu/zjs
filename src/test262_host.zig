@@ -4,7 +4,7 @@
 //! cleanup, and the assertion helper reused by engine integration tests.
 
 const std = @import("std");
-const test262_root = @import("zjs");
+const test262_root = @import("internal_root.zig");
 
 const zjs = test262_root;
 const Object = test262_root.core.Object;
@@ -304,7 +304,7 @@ fn test262AgentRun(agent: *Test262Agent) void {
     }
 
     const allocator = test262PageAllocator();
-    const rt = zjs.JSRuntime.create(allocator) catch return;
+    const rt = zjs.JSRuntime.create(allocator, .{}) catch return;
     defer rt.destroy();
     rt.setCanBlock(true);
     rt.setInterruptHandler(test262AgentInterruptHandler, agent);
@@ -316,7 +316,7 @@ fn test262AgentRun(agent: *Test262Agent) void {
         test262_agents.mutex.unlock(io);
     }
 
-    const ctx = zjs.JSContext.create(rt) catch return;
+    const ctx = zjs.JSContext.create(rt, .{}) catch return;
     defer ctx.destroy();
     var event_loop = runtime_layer.EventLoop.init(ctx, .{});
     event_loop.install();
@@ -1050,9 +1050,9 @@ fn test262AgentStringValue(ctx: *zjs.JSContext, value: zjs.JSValue) ![]u8 {
 }
 
 test "test262 globals do not retain local namespace object reference" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try ctx.globalObject();
 
@@ -1070,9 +1070,9 @@ test "test262 globals do not retain local namespace object reference" {
 }
 
 test "test262 evalScript uses the installed function realm" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try ctx.globalObject();
 
@@ -1089,9 +1089,9 @@ test "test262 evalScript uses the installed function realm" {
 }
 
 test "test262 agent string conversion follows JavaScript ToString" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const numeric = try test262AgentStringValue(ctx, zjs.JSValue.int32(123));
@@ -1105,9 +1105,9 @@ test "test262 agent string conversion follows JavaScript ToString" {
 }
 
 test "test262 timer integer conversion follows JavaScript ToNumber" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const object = try ctx.eval("({ valueOf() { return 7.9; } })", .{});

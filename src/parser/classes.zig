@@ -364,7 +364,7 @@ fn registerClassPrivateElement(s: *State, atom_id: Atom, kind: ClassPrivateEleme
             return s.failUnexpectedToken();
         }
     }
-    try s.class_private_elements.append(s.function.memory.allocator, .{
+    try s.class_private_elements.append(s.memory.allocator, .{
         .atom = atom_id,
         .kind = kind,
         .is_static = s.class.is_static,
@@ -402,13 +402,13 @@ fn preparePrivateAccessorBinding(s: *State, atom_id: Atom, is_getter: bool) Erro
 }
 
 fn privateSetterAtom(s: *State, private_atom: Atom) Error!Atom {
-    const name = s.function.atoms.name(private_atom) orelse return Error.InvalidIdentifier;
+    const name = s.atoms.name(private_atom) orelse return Error.InvalidIdentifier;
     const suffix = "<set>";
-    const bytes = try s.function.memory.alloc(u8, name.len + suffix.len);
-    defer s.function.memory.free(u8, bytes);
+    const bytes = try s.memory.alloc(u8, name.len + suffix.len);
+    defer s.memory.free(u8, bytes);
     @memcpy(bytes[0..name.len], name);
     @memcpy(bytes[name.len..], suffix);
-    return s.function.atoms.newSymbol(bytes, .private);
+    return s.atoms.newSymbol(bytes, .private);
 }
 
 fn markPrivateBrandNeeded(s: *State) Error!void {
@@ -463,10 +463,9 @@ fn escapedIdentifierIsReservedClassName(s: *State, atom_id: Atom, has_escape: bo
 /// displaces. `enterFieldInitFunction` takes it and installs the initializer
 /// context; `leaveFieldInitFunction` puts it back and pops the function.
 ///
-/// `StaticBlockContext` explicitly extends these ten fields with the four
+/// `StaticBlockContext` explicitly extends these fields with the
 /// additional displacements unique to a class static block.
 const FieldInitContext = struct {
-    emit_to_function_def: bool,
     last_opcode_source_offset: ?u32,
     scope_level: i32,
     is_strict: bool,
@@ -482,7 +481,6 @@ const StaticBlockContext = struct {
 
 fn enterFieldInitFunction(s: *State, init_fd: *function_def_mod.FunctionDef) Error!FieldInitContext {
     const saved: FieldInitContext = .{
-        .emit_to_function_def = s.emit_to_function_def,
         .last_opcode_source_offset = s.last_opcode_source_offset,
         .scope_level = s.scope_level,
         .is_strict = s.is_strict,
@@ -493,7 +491,6 @@ fn enterFieldInitFunction(s: *State, init_fd: *function_def_mod.FunctionDef) Err
     // Nothing below `pushFunction` can fail, so a caller that received a
     // context is always paired with exactly one `leaveFieldInitFunction`.
     try s.pushFunction(init_fd);
-    s.emit_to_function_def = true;
     s.last_opcode_source_offset = null;
     s.scope_level = 0;
     s.is_strict = true;
@@ -507,7 +504,6 @@ fn enterFieldInitFunction(s: *State, init_fd: *function_def_mod.FunctionDef) Err
 
 fn leaveFieldInitFunction(s: *State, saved: FieldInitContext) void {
     _ = s.popFunction();
-    s.emit_to_function_def = saved.emit_to_function_def;
     s.last_opcode_source_offset = saved.last_opcode_source_offset;
     s.scope_level = saved.scope_level;
     s.is_strict = saved.is_strict;
@@ -675,7 +671,6 @@ fn finishClassInitFunction(s: *State, child_index: usize) Error!void {
     } else true;
     if (needs_return) {
         try v2b.emitOp(opcode.op.return_undef);
-        try v2b.recordControl(.terminal);
     }
 }
 
@@ -684,7 +679,7 @@ fn registerClassPrivateBoundName(s: *State, atom_id: Atom) Error!void {
         if (existing == atom_id) return;
     }
     // The atom id is borrowed; the enclosing CompileAtomScope is its root.
-    try s.class_private_bound_names.append(s.function.memory.allocator, atom_id);
+    try s.class_private_bound_names.append(s.memory.allocator, atom_id);
 }
 
 pub fn classPrivateNameIsBound(s: *State, atom_id: Atom) bool {
@@ -732,8 +727,8 @@ pub fn findClassPrivateBoundName(s: *State, atom_id: Atom, bound_start: usize) ?
 }
 
 fn privateAtomMatchesName(s: *State, private_atom: Atom, atom_id: Atom) bool {
-    const private_name = s.function.atoms.name(private_atom) orelse return false;
-    const name = s.function.atoms.name(atom_id) orelse return false;
+    const private_name = s.atoms.name(private_atom) orelse return false;
+    const name = s.atoms.name(atom_id) orelse return false;
     if (std.mem.eql(u8, private_name, name)) return true;
     if (name.len > 0 and name[0] == '#') return false;
     return private_name.len == name.len + 1 and
@@ -742,22 +737,22 @@ fn privateAtomMatchesName(s: *State, private_atom: Atom, atom_id: Atom) bool {
 }
 
 fn newClassPrivateAtom(s: *State, atom_id: Atom) Error!Atom {
-    const name = s.function.atoms.name(atom_id) orelse return Error.InvalidIdentifier;
+    const name = s.atoms.name(atom_id) orelse return Error.InvalidIdentifier;
     if (name.len > 0 and name[0] == '#') {
-        return s.function.atoms.newSymbol(name, .private);
+        return s.atoms.newSymbol(name, .private);
     }
-    const bytes = try s.function.memory.alloc(u8, name.len + 1);
-    defer s.function.memory.free(u8, bytes);
+    const bytes = try s.memory.alloc(u8, name.len + 1);
+    defer s.memory.free(u8, bytes);
     bytes[0] = '#';
     @memcpy(bytes[1..], name);
-    return s.function.atoms.newSymbol(bytes, .private);
+    return s.atoms.newSymbol(bytes, .private);
 }
 
 fn classComputedFieldTempAtom(s: *State) Error!Atom {
-    const temp_name = try std.fmt.allocPrint(s.function.memory.allocator, "__class_computed_field_{d}", .{s.with_scope_id});
-    defer s.function.memory.allocator.free(temp_name);
+    const temp_name = try std.fmt.allocPrint(s.memory.allocator, "__class_computed_field_{d}", .{s.with_scope_id});
+    defer s.memory.allocator.free(temp_name);
     s.with_scope_id += 1;
-    return s.function.atoms.internString(temp_name);
+    return s.atoms.internString(temp_name);
 }
 
 fn parseClassElementFunction(s: *State, kind: ParseFunctionKind, source_start: FunctionSourceStart) Error!void {
@@ -1143,7 +1138,7 @@ fn parseClassTail(s: *State, is_decl: bool, class_name: ?Atom, class_source_star
     // its truncate removes body source slots before the runtime block
     // is appended. Preserve that exact pc2line product in v2.
     Emitter.discardDetachedSources(s, &runtime_seg);
-    const default_constructor_name = class_name orelse if (is_decl) s.function.name else atom_module.ids.empty_string;
+    const default_constructor_name = class_name orelse if (is_decl) s.root_name else atom_module.ids.empty_string;
     const constructor_cpool_idx = s.class.constructor_cpool_idx orelse
         try appendDefaultClassConstructor(s, default_constructor_name);
     const private_scope_level = s.scope_level;
@@ -1329,7 +1324,7 @@ fn appendClassFieldInitCallToFunctionDef(
     try v2b.emitJump(opcode.op.if_false, skip);
     try v2b.emitOpU16(this_read_op, this_idx);
     try v2b.emitOp(opcode.op.swap);
-    try v2b.emitCallOp(opcode.op.call_method, 0);
+    try v2b.emitOpU16(opcode.op.call_method, 0);
     try v2b.bindLabel(skip);
     v2b.invalidateLastOpcode();
     try v2b.emitOp(opcode.op.drop);
@@ -1386,13 +1381,11 @@ fn appendDefaultClassConstructor(s: *State, name_atom: Atom) Error!u16 {
         // derived this value after running instance field setup.
         try v2b.emitOpU16(opcode.op.get_loc_checkthis, this_idx);
         try v2b.emitOp(opcode.op.@"return");
-        try v2b.recordControl(.terminal);
     } else {
         try appendClassFieldInitCallToFunctionDef(child_fd, this_idx);
         // qjs js_parse_class_default_ctor: a base default constructor
         // completes with return_undef after instance field setup.
         try v2b.emitOp(opcode.op.return_undef);
-        try v2b.recordControl(.terminal);
     }
     const cpool_idx: u16 = @intCast(try parent_fd.appendCpool(JSValue.undefinedValue()));
     child_fd.parent_cpool_idx = cpool_idx;

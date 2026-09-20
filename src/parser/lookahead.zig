@@ -355,10 +355,6 @@ pub const ParserSnapshot = struct {
     last_token_line_num: u32,
     last_token_col_num: u32,
     last_opcode_source_offset: ?u32,
-    code_len: usize,
-    atom_len: usize,
-    source_loc_len: usize,
-    label_count: u32,
     features: std.EnumSet(FeatureImpl),
 };
 
@@ -378,13 +374,6 @@ pub fn takeParserSnapshot(s: *State) Error!ParserSnapshot {
         .last_token_line_num = s.last_token_line_num,
         .last_token_col_num = s.last_token_col_num,
         .last_opcode_source_offset = s.last_opcode_source_offset,
-        .code_len = s.currentCodeLen(),
-        .atom_len = s.currentAtomOperandLen(),
-        .source_loc_len = if (s.emit_to_function_def)
-            s.curFunc().source_loc_slots.len
-        else
-            s.function.source_loc_slots.len,
-        .label_count = s.currentParserLabelCount(),
         .features = s.features,
     };
 }

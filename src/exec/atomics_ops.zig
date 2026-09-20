@@ -660,9 +660,9 @@ pub fn atomicsUnlinkWaiter(waiter: *AtomicsWaiter) void {
 }
 
 test "foreign Atomics notify only publishes a no-allocation completion" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const key = AtomicsWaiterKey{ .offset_or_ptr = @intFromPtr(ctx) };
@@ -701,9 +701,9 @@ test "foreign Atomics notify only publishes a no-allocation completion" {
 }
 
 test "waitAsync finite deadline is driven by the owner host clock queue" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const promise = try core.Object.create(rt, core.class.ids.promise, null);
 
@@ -734,9 +734,9 @@ test "waitAsync finite deadline is driven by the owner host clock queue" {
 
 test "waitAsync owner settlement OOM relinks the frozen completion outside the waiter mutex" {
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    const rt = try core.JSRuntime.create(failing_allocator.allocator());
+    const rt = try core.JSRuntime.create(failing_allocator.allocator(), .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
@@ -1313,9 +1313,9 @@ pub fn atomicsWaitAsyncResult(ctx: *core.JSContext, is_async: bool, value: core.
 }
 
 test "atomicsWaitAsyncResult roots direct function bytecode value while creating result object" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-atomics-wait-async-result-bytecode-symbol");

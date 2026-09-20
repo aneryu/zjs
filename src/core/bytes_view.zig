@@ -318,9 +318,9 @@ test "JSBytes.Store transfers owned bytes to ArrayBuffer without copying" {
         }
     };
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     var state = State{ .allocator = std.testing.allocator };
@@ -360,9 +360,9 @@ test "JSBytes.Store ArrayBuffer detach releases owned bytes immediately" {
         }
     };
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     var state = State{ .allocator = std.testing.allocator };
@@ -393,9 +393,9 @@ test "JSBytes.Store transfers shared bytes to SharedArrayBuffer without copying"
         }
     };
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     var state = State{ .allocator = std.testing.allocator };
@@ -445,9 +445,9 @@ test "JSBytes.Store shared transfer failure frees the host bytes once" {
         }
     };
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     // Warm the external-token table (capacity grows to 8 on first use) so the
@@ -486,7 +486,7 @@ test "JSBytes.Store shared transfer failure frees the host bytes once" {
 
 test "JSBytes views ArrayBuffer storage without copying" {
     const core = @import("root.zig");
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const object = try @import("object.zig").Object.create(rt, @import("class.zig").ids.array_buffer, null);
@@ -510,7 +510,7 @@ test "JSBytes views ArrayBuffer storage without copying" {
 
 test "JSBytes views TypedArray byte range without copying" {
     const core = @import("root.zig");
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const Object = @import("object.zig").Object;
@@ -535,7 +535,7 @@ test "JSBytes views TypedArray byte range without copying" {
 
 test "JSBytes floors length-tracking Uint16Array byteLength to element size" {
     const core = @import("root.zig");
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const Object = @import("object.zig").Object;
@@ -566,7 +566,7 @@ test "JSBytes floors length-tracking Uint16Array byteLength to element size" {
 
 test "JSBytes drops trailing partial element for odd-remaining length-tracking view" {
     const core = @import("root.zig");
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const Object = @import("object.zig").Object;
@@ -591,7 +591,7 @@ test "JSBytes drops trailing partial element for odd-remaining length-tracking v
 
 test "JSBytes views DataView byte range without copying" {
     const core = @import("root.zig");
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const Object = @import("object.zig").Object;
@@ -613,7 +613,7 @@ test "JSBytes views DataView byte range without copying" {
 
 test "JSBytes views length-tracking DataView to end of buffer" {
     const core = @import("root.zig");
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const Object = @import("object.zig").Object;

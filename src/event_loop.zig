@@ -603,10 +603,10 @@ fn hostTimerIo() std.Io {
 }
 
 test "runtime.EventLoop drains queued JS callbacks" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try js_context.JSContext.create(rt);
+    const ctx = try js_context.JSContext.create(rt, .{});
     defer ctx.destroy();
     var loop = EventLoop.init(ctx, .{});
     loop.install();
@@ -627,9 +627,9 @@ test "runtime.EventLoop drains queued JS callbacks" {
 }
 
 test "runtime.EventLoop removes timers without allocation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try js_context.JSContext.create(rt);
+    const ctx = try js_context.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     var loop = EventLoop.init(ctx, .{});
@@ -670,9 +670,9 @@ test "runtime.EventLoop removes timers without allocation" {
 }
 
 test "runtime.EventLoop removes rw handlers without allocation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try js_context.JSContext.create(rt);
+    const ctx = try js_context.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     var loop = EventLoop.init(ctx, .{});
@@ -709,9 +709,9 @@ test "runtime.EventLoop removes rw handlers without allocation" {
 }
 
 test "runtime.EventLoop removes signal handlers without allocation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try js_context.JSContext.create(rt);
+    const ctx = try js_context.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     var loop = EventLoop.init(ctx, .{});
@@ -746,9 +746,9 @@ test "runtime.EventLoop removes signal handlers without allocation" {
 }
 
 test "runtime.EventLoop keeps host-held unique symbol atoms until release" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try js_context.JSContext.create(rt);
+    const ctx = try js_context.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     var loop = EventLoop.init(ctx, .{});
@@ -835,8 +835,8 @@ test "runtime.root tracer visits EventLoop host roots" {
 test "runtime.EventLoop roots one-shot function bytecode timer callback after dequeue" {
     const bytecode = @import("bytecode.zig");
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    const ctx = try js_context.JSContext.create(rt);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const ctx = try js_context.JSContext.create(rt, .{});
     const global = try ctx.globalObject();
     defer {
         ctx.destroy();

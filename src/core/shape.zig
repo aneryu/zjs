@@ -1519,7 +1519,7 @@ pub fn shapeHash(seed: u32, value: u32) u32 {
 const std = @import("std");
 
 test "shapes keep property atoms addressable after a transition" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name_atom = try rt.internAtom("shapeProp");
@@ -1538,7 +1538,7 @@ test "shapes keep property atoms addressable after a transition" {
 }
 
 test "shape shared bit and prototype transitions are tracked" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name_atom = try rt.internAtom("shapeProtoProp");
@@ -1560,7 +1560,7 @@ test "shape shared bit and prototype transitions are tracked" {
 }
 
 test "restorePropertyLayout rebuilds a baseline layout after FAM relocation" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const flags: u6 = 0b000111; // data property: writable/enumerable/configurable
@@ -1596,7 +1596,7 @@ test "restorePropertyLayout rebuilds a baseline layout after FAM relocation" {
 }
 
 test "shape registry create publishes hashed live shapes" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const hashed_baseline = rt.shapes.shape_hash_count;
@@ -1614,7 +1614,7 @@ test "shape registry create publishes hashed live shapes" {
 }
 
 test "shape registry hash grows and reuses object root shapes" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var shapes: [70]*Shape = undefined;
@@ -1631,7 +1631,7 @@ test "shape registry hash grows and reuses object root shapes" {
 }
 
 test "createObjectRoot leftover reserved flag shares hashed proto roots" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const first = try rt.shapes.createObjectRoot(null);
@@ -1652,7 +1652,7 @@ test "createObjectRoot leftover reserved flag shares hashed proto roots" {
 }
 
 test "reserved object root shapes reuse only an exact property capacity" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const four = try rt.shapes.createObjectRootWithPropertyCapacity(null, 4);
@@ -1671,7 +1671,7 @@ test "reserved object root shapes reuse only an exact property capacity" {
 }
 
 test "ordinary object additions reuse transition shapes" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const first = try Object.create(rt, class.ids.object, null);

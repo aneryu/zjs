@@ -211,9 +211,9 @@ pub fn constructValue(ctx: *core.JSContext, callee: core.JSValue, args: []const 
 }
 
 test "constructValue fallback roots callee while defining constructor property" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
@@ -303,7 +303,7 @@ pub fn constructErrorObject(rt: *core.JSRuntime, name: []const u8, constructor: 
 }
 
 test "constructErrorObject roots direct symbol message while creating error" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const message_atom = try rt.atoms.newValueSymbol("gc-construct-error-message-symbol");
@@ -358,7 +358,7 @@ pub fn constructDOMExceptionObject(rt: *core.JSRuntime, prototype: ?*core.Object
 }
 
 test "constructDOMExceptionObject roots direct symbol args while creating error" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const message_atom = try rt.atoms.newValueSymbol("gc-dom-exception-message-symbol");
@@ -528,7 +528,7 @@ fn constructFinalizationRegistry(ctx: *core.JSContext, cleanup_callback: core.JS
 }
 
 test "constructWeakRef roots direct symbol target while creating weak ref" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-construct-weak-ref-symbol");
@@ -565,7 +565,7 @@ fn constructPrimitiveWrapper(rt: *core.JSRuntime, class_id: core.class.ClassId, 
 }
 
 test "constructPrimitiveWrapper roots direct symbol while creating wrapper" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-construct-wrapper-symbol");
@@ -1039,7 +1039,7 @@ fn expectConstructor(value: core.JSValue) !*core.Object {
 }
 
 test "legacy constructor gate follows four-class bytecode constructability" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const Case = struct {

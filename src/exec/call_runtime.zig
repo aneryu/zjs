@@ -1422,10 +1422,10 @@ noinline fn callNativeCallableByName(
 }
 
 test "callValueOrBytecodeRoot roots inline args before bytecode frame allocation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     @import("standard_globals.zig").configureRuntime(rt);
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try zjs_vm.contextGlobal(ctx);
 
@@ -2426,7 +2426,7 @@ fn constructExternalHostFunction(
 }
 
 test "constructWeakRefWithPrototype roots direct symbol target while creating weak ref" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-qjs-weak-ref-symbol");
@@ -2451,9 +2451,9 @@ test "constructWeakRefWithPrototype roots direct symbol target while creating we
 }
 
 test "constructFinalizationRegistryWithPrototype roots function bytecode cleanup while creating registry" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-finalization-cleanup-bytecode-symbol");
@@ -2480,7 +2480,7 @@ test "constructFinalizationRegistryWithPrototype roots function bytecode cleanup
 }
 
 test "finalizationRegistryAppendCell roots direct symbol fields while allocating cell" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
@@ -3127,44 +3127,6 @@ pub fn ensureGlobalObjectVarRefCell(
     return cell.valueRef();
 }
 
-/// qjs js_closure_define_global_var for one non-lexical GLOBAL_DECL slot: ensure
-/// the global object owns the VARREF property cell and bind this exact closure
-/// slot before the next declaration is constructed.
-pub fn defineGlobalDeclVarCell(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    ref_idx: u16,
-    atom_id: core.Atom,
-    configurable: bool,
-    is_function: bool,
-) !bool {
-    if (ref_idx >= function.closureVar().len) return false;
-    const declaration = function.closureVar()[ref_idx];
-    if (declaration.closureType() != .global_decl or declaration.isLexical()) return false;
-    if (!atomIdOrNameEql(ctx.runtime, declaration.var_name, atom_id)) return false;
-    const cell_value = (try ensureGlobalObjectVarRefCell(ctx, global, atom_id, configurable, is_function)) orelse return false;
-    if (ref_idx >= frame.var_refs.len) {
-        try frame_mod.ensureVarRefsCapacity(ctx, frame, ref_idx);
-    }
-    slot_ops.storeVarRefSlot(frame, ref_idx, cell_value);
-
-    const local_count = @min(function.varDefs().len, frame.locals.len);
-    const global_cell = core.VarRef.fromValue(cell_value) orelse return error.InvalidBytecode;
-    for (function.varDefs()[0..local_count], 0..) |vd, local_idx| {
-        if (!atomIdOrNameEql(ctx.runtime, vd.var_name, atom_id)) continue;
-        if (!varDefIsEvalHoistedVar(vd)) continue;
-        // This is a compatibility mirror used by direct eval lookup. Keep the
-        // frame plane raw; the authoritative global identity remains in the
-        // typed frame.var_refs/global property cell.
-        frame.locals[local_idx] = global_cell.varRefValue();
-    }
-    // The slot IS bound at this point (the `storeVarRefSlot` above). `false`
-    // is reserved for the declaration-mismatch early returns at the top.
-    return true;
-}
-
 /// Create-or-fetch the VarRef cell for a top-level lexical in ctx.lexicals,
 /// stored as a JS_PROP_VARREF slot (qjs js_closure_define_global_var, lexical
 /// arm, quickjs.c). Returns a fresh ref the caller owns (for
@@ -3399,7 +3361,6 @@ pub fn indirectEval(
             .eval_global_var_bindings = !function.isStrictMode(),
             .direct_eval_vars_reach_global = !function.isStrictMode(),
             .is_eval_code = true,
-            .global_declarations_prevalidated = true,
         }) catch |err| exception_ops.normalizeEvalRuntimeError(err);
     };
 
@@ -3452,9 +3413,9 @@ pub fn freeArgs(rt: *core.JSRuntime, args: []core.JSValue) void {
 }
 
 test "argsFromArrayLike roots initialized prefix while reading source" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try zjs_vm.contextGlobal(ctx);
 
@@ -3754,11 +3715,9 @@ pub fn runGeneratorParameterInit(
     // Canonical generators suspend on their explicit OP_initial_yield after
     // parameter initialization. Ordinary async functions have no such opcode:
     // keep their resident frame parked at pc 0 until the promise driver starts
-    // the body. Legacy mutable-bytecode and empty packed fixtures likewise
-    // retain their pc-0 entry contract without reintroducing a production
-    // bytecode scan.
+    // the body. Empty packed fixtures likewise retain their pc-0 entry
+    // contract without reintroducing a production bytecode scan.
     const stop_before_pc: ?usize = if (fb.functionKind() == .async or
-        fb.legacyBytecodeAdapter() != null or
         fb.byteCode().len == 0)
         0
     else
@@ -4323,10 +4282,10 @@ pub fn wrapIteratorFromIterator(ctx: *core.JSContext, global: *core.Object, iter
 }
 
 test "wrapIteratorFromIterator roots direct function bytecode next method while creating wrapper" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     global.promoteToGlobalObjectClass(rt);
@@ -4386,9 +4345,9 @@ pub fn enqueuePendingMicrotask(ctx: *core.JSContext, callback: core.JSValue) !vo
 }
 
 test "iterator_ops.createIteratorResult roots direct function bytecode value while creating result" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
@@ -4489,9 +4448,9 @@ pub fn isConstructibleBytecodeFunctionObject(function_object: *const core.Object
 }
 
 test "four-class bytecode constructability follows class and function flags" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const Case = struct {

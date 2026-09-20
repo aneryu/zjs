@@ -121,7 +121,7 @@ pub fn tokenCanStartSlashRegexp(k: tok.TokenKind) bool {
 /// null/false/true/await/yield checks already live in this walk.
 pub noinline fn escapedIdentifierIsReservedWordForBinding(s: *State, atom_id: Atom, has_escape: bool) bool {
     if (!has_escape) return false;
-    const name = s.function.atoms.name(atom_id) orelse return false;
+    const name = s.atoms.name(atom_id) orelse return false;
     const strict = s.is_strict or s.curFunc().is_strict_mode;
     return std.mem.eql(u8, name, "null") or
         std.mem.eql(u8, name, "false") or
@@ -173,7 +173,7 @@ pub noinline fn escapedIdentifierIsReservedWordForBinding(s: *State, atom_id: At
 
 pub fn escapedIdentifierIsReservedWordForShorthandBinding(s: *State, atom_id: Atom, has_escape: bool) bool {
     if (!has_escape) return false;
-    const name = s.function.atoms.name(atom_id) orelse return false;
+    const name = s.atoms.name(atom_id) orelse return false;
     return escapedIdentifierIsReservedWordForBinding(s, atom_id, has_escape) or
         std.mem.eql(u8, name, "implements") or
         std.mem.eql(u8, name, "interface") or
@@ -267,13 +267,13 @@ pub fn identifierLikeHasInvalidEscapeForBinding(s: *State) bool {
 }
 
 pub fn atomNameEquals(s: *State, atom_id: Atom, name: []const u8) bool {
-    return if (s.function.atoms.name(atom_id)) |atom_name| std.mem.eql(u8, atom_name, name) else false;
+    return if (s.atoms.name(atom_id)) |atom_name| std.mem.eql(u8, atom_name, name) else false;
 }
 
 fn atomsNameEqual(s: *State, left: Atom, right: Atom) bool {
     if (left == right) return true;
-    const left_name = s.function.atoms.name(left) orelse return false;
-    const right_name = s.function.atoms.name(right) orelse return false;
+    const left_name = s.atoms.name(left) orelse return false;
+    const right_name = s.atoms.name(right) orelse return false;
     return std.mem.eql(u8, left_name, right_name);
 }
 
@@ -285,23 +285,23 @@ pub fn evalAnnexBBlockedFunctionName(s: *State, atom_id: Atom) bool {
 }
 
 pub fn atomNameIsPrivate(s: *State, atom_id: Atom) bool {
-    return s.function.atoms.kind(atom_id) == .private;
+    return s.atoms.kind(atom_id) == .private;
 }
 
 pub fn formatBigIntPropertyName(s: *State, text: []const u8) Error![]const u8 {
     const parse_text = if (std.mem.indexOfScalar(u8, text, '_')) |_| blk: {
         var normalized = std.ArrayList(u8).empty;
-        errdefer normalized.deinit(s.function.memory.allocator);
+        errdefer normalized.deinit(s.memory.allocator);
         for (text) |ch| {
-            if (ch != '_') try normalized.append(s.function.memory.allocator, ch);
+            if (ch != '_') try normalized.append(s.memory.allocator, ch);
         }
-        break :blk try normalized.toOwnedSlice(s.function.memory.allocator);
+        break :blk try normalized.toOwnedSlice(s.memory.allocator);
     } else text;
-    defer if (parse_text.ptr != text.ptr) s.function.memory.allocator.free(parse_text);
+    defer if (parse_text.ptr != text.ptr) s.memory.allocator.free(parse_text);
 
-    var parsed = libs_bignum.parseAutoAlloc(s.function.memory.allocator, parse_text) catch return Error.InvalidNumberLiteral;
+    var parsed = libs_bignum.parseAutoAlloc(s.memory.allocator, parse_text) catch return Error.InvalidNumberLiteral;
     defer parsed.deinit();
-    return parsed.formatBase10Alloc(s.function.memory.allocator) catch |err| switch (err) {
+    return parsed.formatBase10Alloc(s.memory.allocator) catch |err| switch (err) {
         error.OutOfMemory => Error.OutOfMemory,
         // Base 10 is always a valid radix.
         error.InvalidRadix => Error.ParserInvariant,

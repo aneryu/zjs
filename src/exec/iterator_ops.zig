@@ -204,10 +204,10 @@ fn testAsyncFromSyncIsCallable(value: core.JSValue) bool {
 }
 
 test "createAsyncFromSyncIterator roots direct function bytecode next method while creating wrapper" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
@@ -1182,10 +1182,10 @@ fn testArrayIteratorGetValueProperty(
 }
 
 test "arrayIteratorValue roots entry value while creating pair array" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     const target = try core.Object.createArray(rt, null);
@@ -1446,10 +1446,10 @@ fn testIteratorConcatGetIteratorMethod(
 }
 
 test "iteratorConcatCall roots direct function bytecode iterator method while creating helper" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     global.promoteToGlobalObjectClass(rt);
@@ -1922,7 +1922,7 @@ pub fn iteratorZipStoreIndex(rt: *core.JSRuntime, object: *core.Object, index: u
 }
 
 test "iteratorZipStoreIndex roots direct function bytecode value while defining property" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
@@ -1953,7 +1953,7 @@ test "iteratorZipStoreIndex roots direct function bytecode value while defining 
 }
 
 test "iteratorZipStoreIndex roots direct symbol value while defining property" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
@@ -2508,10 +2508,10 @@ fn iteratorCreateHelper(
 }
 
 test "iteratorCreateHelper roots direct function bytecode callback while creating helper" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     global.promoteToGlobalObjectClass(rt);
@@ -3333,7 +3333,7 @@ pub fn closeIteratorForFromEntriesAbrupt(
 }
 
 test "createIteratorResult roots direct function bytecode value while creating result" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-closure-iterator-result-bytecode-symbol");

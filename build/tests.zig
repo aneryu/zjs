@@ -79,8 +79,14 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     // `-Dtest-filter` run is a diagnosis and keeps DWARF. `-Dtest-strip=false`
     // forces DWARF on the full run. Both variants sit in the cache.
     const test_strip = b.option(bool, "test-strip", "Build the unified test binary without debug info (default: true for the full run, false under -Dtest-filter)") orelse (test_filter == null);
+    // One module: Zig collects tests from the root module only, so the test
+    // root `src/unified_tests.zig` imports the engine by path and mirrors
+    // `internal_root.zig` (the module imports itself as `zjs`). Keeping the
+    // stress and CLI families out of `internal_root.zig` is what lets the
+    // CLI executable, whose root is `src/cli/zjs.zig`, link the same engine
+    // sources without a module clash.
     const unified_root = b.createModule(.{
-        .root_source_file = b.path("src/internal_root.zig"),
+        .root_source_file = b.path("src/unified_tests.zig"),
         .target = ctx.target,
         .optimize = ctx.optimize,
         .link_libc = true,

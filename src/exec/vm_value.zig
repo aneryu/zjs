@@ -539,7 +539,7 @@ fn countLivePrivateAtomsNamed(rt: *core.JSRuntime, expected_name: []const u8) us
 }
 
 test "function object lookup recognizes every bytecode function class" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const class_ids = [_]core.ClassId{
@@ -558,9 +558,9 @@ test "function object lookup recognizes every bytecode function class" {
 }
 
 test "push private symbol creates a fresh runtime atom per execution" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const function_name = try rt.internAtom("pushPrivateSymbolNoRetain");
@@ -573,14 +573,10 @@ test "push private symbol creates a fresh runtime atom per execution" {
     template_roots.activate(rt);
     defer if (!template_atom_released) template_roots.deactivate(rt);
 
-    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, function_name);
-    defer function.deinit(rt);
     var code: [4]u8 = undefined;
     std.mem.writeInt(u32, &code, template_atom.raw(), .little);
-    try function.setCode(&code);
-
-    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
-    const execution_function = execution_adapter.init(&function);
+    const execution_function = try bytecode.FunctionBytecode.createFixture(rt, .{ .name = function_name, .byte_code = &code });
+    defer execution_function.destroyUnpublishedFixture(rt);
     var frame = frame_mod.Frame.init(execution_function);
     var stack = stack_mod.Stack.init(&rt.memory, 8);
     defer stack.deinit(rt);
@@ -616,9 +612,9 @@ test "push private symbol creates a fresh runtime atom per execution" {
 }
 
 test "stack rearrange opcodes validate depth before mutating stack" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     var stack = stack_mod.Stack.init(&rt.memory, 8);
     defer stack.deinit(rt);
@@ -637,9 +633,9 @@ test "stack rearrange opcodes validate depth before mutating stack" {
 }
 
 test "push private symbol stack failure does not retain transient private atom" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const function_name = try rt.internAtom("pushPrivateSymbolStackFailure");
@@ -652,14 +648,10 @@ test "push private symbol stack failure does not retain transient private atom" 
     template_roots.activate(rt);
     defer if (!template_atom_released) template_roots.deactivate(rt);
 
-    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, function_name);
-    defer function.deinit(rt);
     var code: [4]u8 = undefined;
     std.mem.writeInt(u32, &code, template_atom.raw(), .little);
-    try function.setCode(&code);
-
-    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
-    const execution_function = execution_adapter.init(&function);
+    const execution_function = try bytecode.FunctionBytecode.createFixture(rt, .{ .name = function_name, .byte_code = &code });
+    defer execution_function.destroyUnpublishedFixture(rt);
     var frame = frame_mod.Frame.init(execution_function);
     var stack = stack_mod.Stack.init(&rt.memory, 0);
     defer stack.deinit(rt);
@@ -681,9 +673,9 @@ test "push private symbol stack failure does not retain transient private atom" 
 }
 
 test "push private symbol releases fresh atom on allocation failure" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const function_name = try rt.internAtom("pushPrivateSymbolAllocationFailure");
@@ -694,14 +686,10 @@ test "push private symbol releases fresh atom on allocation failure" {
     template_roots.activate(rt);
     defer template_roots.deactivate(rt);
 
-    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, function_name);
-    defer function.deinit(rt);
     var code: [4]u8 = undefined;
     std.mem.writeInt(u32, &code, template_atom.raw(), .little);
-    try function.setCode(&code);
-
-    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
-    const execution_function = execution_adapter.init(&function);
+    const execution_function = try bytecode.FunctionBytecode.createFixture(rt, .{ .name = function_name, .byte_code = &code });
+    defer execution_function.destroyUnpublishedFixture(rt);
     var frame = frame_mod.Frame.init(execution_function);
     var stack = stack_mod.Stack.init(&rt.memory, 1);
     defer stack.deinit(rt);

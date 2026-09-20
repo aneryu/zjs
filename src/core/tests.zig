@@ -23,7 +23,7 @@ test "dense parameter arrays borrowed construction roots output during storage a
             };
         }
     };
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
     const child = try core.Object.createPlainObject(rt, null);
@@ -48,7 +48,7 @@ test "dense parameter arrays borrowed construction roots output during storage a
 }
 
 test "dense parameter arrays borrowed construction propagates OOM and recovers" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const values: [1024]core.JSValue = @splat(core.JSValue.int32(37));
     // Warm the empty array shape/header path, then deny the large backing store.
@@ -171,7 +171,7 @@ fn publishEmptyModule(
 }
 
 test "over-reserved property storage is freed by prop_size not prop_count" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("x");
@@ -198,7 +198,7 @@ test "over-reserved property storage is freed by prop_size not prop_count" {
 }
 
 test "M-cut slots2 payload-spill deletion mutant is rejected" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const object = try core.Object.createPlainObjectReserved2(rt, null);
 
@@ -229,7 +229,7 @@ test "M-cut slots2 payload-spill deletion mutant is rejected" {
 }
 
 test "plain object destroy slim frees two data slots and the value buffer" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const car = try rt.internAtom("car");
@@ -249,7 +249,7 @@ test "plain object destroy slim frees two data slots and the value buffer" {
 }
 
 test "proven object release preserves generic JSValue ownership semantics" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const baseline_objects = rt.gc.liveCount();
@@ -278,7 +278,7 @@ test "proven object release preserves generic JSValue ownership semantics" {
 }
 
 test "active bytecode release preserves generic ownership" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const baseline_objects = rt.gc.liveCount();
@@ -300,10 +300,10 @@ test "RealmContext is header-first and RealmRef owns independently of runtime li
     try std.testing.expectEqual(@as(usize, 0), @offsetOf(core.RealmContext, "header"));
     try std.testing.expectEqual(@sizeOf(?*core.RealmContext), @sizeOf(core.RealmRef));
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const first = try core.RealmContext.create(rt);
-    const second = try core.RealmContext.create(rt);
+    const first = try core.RealmContext.create(rt, .{});
+    const second = try core.RealmContext.create(rt, .{});
 
     try std.testing.expectEqual(core.gc.GcKind.realm_context, first.header.meta().flags.kind);
     try std.testing.expectEqual(first, rt.firstContext().?);
@@ -326,7 +326,7 @@ test "RealmContext is header-first and RealmRef owns independently of runtime li
 }
 
 test "RealmContext construction stays unpublished and untraced until the live commit" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.RealmContext.createConstructingWithOptions(rt, .{});
     defer ctx.destroy();
@@ -366,9 +366,9 @@ test "RealmContext construction stays unpublished and untraced until the live co
 }
 
 test "RealmContext owns the five QuickJS initial layouts as Shapes" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.RealmContext.create(rt);
+    const ctx = try core.RealmContext.create(rt, .{});
     defer ctx.destroy();
 
     const object_prototype = try core.Object.create(rt, core.class.ids.object, null);
@@ -402,7 +402,7 @@ test "RealmContext owns the five QuickJS initial layouts as Shapes" {
 }
 
 test "array target barrier: known append immediately shades the new target" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
     rt.setGCThreshold(std.math.maxInt(usize));
@@ -451,7 +451,7 @@ test "array target barrier: three append routes cover grey and black owners" {
     for ([_]bool{ false, true }) |drain_owner| {
         for (0..3) |route| {
             for ([_]bool{ false, true }) |reference_value| {
-                const rt = try core.JSRuntime.create(std.testing.allocator);
+                const rt = try core.JSRuntime.create(std.testing.allocator, .{});
                 defer rt.destroy();
                 rt.forcePreciseRootScanForTest();
                 rt.setGCThreshold(std.math.maxInt(usize));
@@ -505,7 +505,7 @@ test "array target barrier: three append routes cover grey and black owners" {
 }
 
 test "array target barrier: capacity growth shades only storage and preserves copied edges" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
     rt.setGCThreshold(std.math.maxInt(usize));
@@ -549,7 +549,7 @@ test "array target barrier: capacity growth shades only storage and preserves co
 }
 
 test "array target barrier: public uninitialized slot still queues its owner" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
     rt.setGCThreshold(std.math.maxInt(usize));
@@ -575,7 +575,7 @@ test "array target barrier: public uninitialized slot still queues its owner" {
 }
 
 test "array target barrier: old array remembers first storage and appended target" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
     rt.setGCThreshold(std.math.maxInt(usize));
@@ -603,7 +603,7 @@ test "array target barrier: old array remembers first storage and appended targe
 }
 
 test "array target barrier: failed capacity allocation leaves count and value unchanged" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
     rt.setGCThreshold(std.math.maxInt(usize));
@@ -628,7 +628,7 @@ test "array target barrier: failed capacity allocation leaves count and value un
 }
 
 test "array target barrier: frontier OOM fails closed after a committed store" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
     rt.setGCThreshold(std.math.maxInt(usize));
@@ -671,7 +671,7 @@ test "array target barrier: frontier OOM fails closed after a committed store" {
 
 test "array target barrier: literal fill marks new edges after owner scanning" {
     for ([_]bool{ false, true }) |trusted| {
-        const rt = try core.JSRuntime.create(std.testing.allocator);
+        const rt = try core.JSRuntime.create(std.testing.allocator, .{});
         defer rt.destroy();
         rt.forcePreciseRootScanForTest();
         rt.setGCThreshold(std.math.maxInt(usize));
@@ -707,9 +707,9 @@ test "array target barrier: literal fill marks new edges after owner scanning" {
 }
 
 test "Runtime queues retain their originating Realm until owned jobs are released" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.RealmContext.create(rt);
+    const ctx = try core.RealmContext.create(rt, .{});
 
     try rt.job_queue.enqueuePromise(ctx, core.JSValue.int32(11));
 
@@ -749,9 +749,9 @@ test "caller-owned ClassIdSlot is process-stable while definitions stay per Runt
     const class_id = try slot.getOrAllocate();
     try std.testing.expectEqual(class_id, try slot.getOrAllocate());
 
-    const first_rt = try core.JSRuntime.create(std.testing.allocator);
+    const first_rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer first_rt.destroy();
-    const second_rt = try core.JSRuntime.create(std.testing.allocator);
+    const second_rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer second_rt.destroy();
 
     try first_rt.classes.register(class_id, .{ .class_name = "ProcessStableClassFirstRuntime" });
@@ -773,10 +773,10 @@ test "caller-owned ClassIdSlot is process-stable while definitions stay per Runt
 }
 
 test "Runtime owner thread rejects foreign structural mutation before publication" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const live = try core.RealmContext.create(rt);
+    const live = try core.RealmContext.create(rt, .{});
     var live_guard = core.RealmRef.retain(live);
     const constructing = try core.RealmContext.createConstructingWithOptions(rt, .{});
     defer constructing.destroy();
@@ -806,7 +806,7 @@ test "Runtime owner thread rejects foreign structural mutation before publicatio
 
         fn run(self: *@This()) void {
             self.owner_check_rejected = if (self.rt.requireOwnerThread()) |_| false else |err| err == error.WrongRuntimeThread;
-            self.context_create_rejected = if (core.RealmContext.create(self.rt)) |created| blk: {
+            self.context_create_rejected = if (core.RealmContext.create(self.rt, .{})) |created| blk: {
                 self.unexpected_context = created;
                 break :blk false;
             } else |err| err == error.WrongRuntimeThread;
@@ -881,7 +881,7 @@ test "process-global ClassId allocation is atomic across owner-thread Runtimes" 
         failed: bool = false,
 
         fn run(self: *@This()) void {
-            const rt = core.JSRuntime.create(std.heap.page_allocator) catch {
+            const rt = core.JSRuntime.create(std.heap.page_allocator, .{}) catch {
                 self.failed = true;
                 return;
             };
@@ -927,9 +927,9 @@ test "process-global ClassId allocation is atomic across owner-thread Runtimes" 
 }
 
 test "RealmContext participates in cycle collection through typed RealmRef edges" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    var ctx = try core.RealmContext.create(rt);
+    var ctx = try core.RealmContext.create(rt, .{});
 
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
@@ -953,9 +953,9 @@ test "RealmContext participates in cycle collection through typed RealmRef edges
 }
 
 test "FunctionBytecode RealmRef edge participates in realm-global cycle collection" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.RealmContext.create(rt);
+    const ctx = try core.RealmContext.create(rt, .{});
     var ctx_alive = true;
     defer if (ctx_alive) ctx.destroy();
 
@@ -983,7 +983,6 @@ test "FunctionBytecode RealmRef edge participates in realm-global cycle collecti
         1,
         code.len,
         0,
-        0,
     );
     try std.testing.expect(std.meta.eql(expected_layout, fb.layout()));
     try std.testing.expect(fb.famBytes() > @sizeOf(engine.bytecode.function_bytecode.DebugInfo));
@@ -1008,9 +1007,9 @@ test "FunctionBytecode RealmRef edge participates in realm-global cycle collecti
 }
 
 test "FinalizationRegistry RealmRef edge participates in realm-global cycle collection" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.RealmContext.create(rt);
+    const ctx = try core.RealmContext.create(rt, .{});
     var ctx_alive = true;
     defer if (ctx_alive) ctx.destroy();
 
@@ -1045,11 +1044,11 @@ fn liveRealmCount(rt: *core.JSRuntime) usize {
 }
 
 test "auto_init slot to another realm retains it across JSContext.destroy and cycle GC" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx_a = try core.JSContext.create(rt);
+    const ctx_a = try core.JSContext.create(rt, .{});
     defer ctx_a.destroy();
-    var ctx_b = try core.JSContext.create(rt);
+    var ctx_b = try core.JSContext.create(rt, .{});
 
     {
         const obj = try core.Object.create(rt, core.class.ids.object, null);
@@ -1082,9 +1081,9 @@ test "auto_init slot to another realm retains it across JSContext.destroy and cy
 }
 
 test "FinalizationRegistry RealmRef retains and releases its construction realm exactly once" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.RealmContext.create(rt);
+    const ctx = try core.RealmContext.create(rt, .{});
     var ctx_alive = true;
     defer if (ctx_alive) ctx.destroy();
 
@@ -1101,11 +1100,11 @@ test "FinalizationRegistry RealmRef retains and releases its construction realm 
 }
 
 test "dynamic class registration reserves slots in live and future realms" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const first = try core.RealmContext.create(rt);
+    const first = try core.RealmContext.create(rt, .{});
     defer first.destroy();
-    const second = try core.RealmContext.create(rt);
+    const second = try core.RealmContext.create(rt, .{});
     defer second.destroy();
 
     const class_id = try rt.newClassId(core.class.invalid_class_id);
@@ -1114,14 +1113,14 @@ test "dynamic class registration reserves slots in live and future realms" {
     try std.testing.expect(first.classPrototypeObject(class_id) == null);
     try std.testing.expect(second.classPrototypeObject(class_id) == null);
 
-    const future = try core.RealmContext.create(rt);
+    const future = try core.RealmContext.create(rt, .{});
     defer future.destroy();
     try std.testing.expect(future.classPrototypeObject(class_id) == null);
     _ = try future.ensureClassPrototypeSlot(class_id);
 }
 
 test "dynamic class prototype capacity and clearing include constructing realms" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const constructing = try core.RealmContext.createConstructingWithOptions(rt, .{});
     defer constructing.destroy();
@@ -1188,7 +1187,7 @@ fn appendFinalizationRegistryCell(
 /// scratch runtime so the OOM-injection tests below follow the holder list's
 /// growth policy instead of restating it.
 fn borrowedHolderInitialAllocationBytes() usize {
-    const probe = core.JSRuntime.create(std.testing.allocator) catch unreachable;
+    const probe = core.JSRuntime.create(std.testing.allocator, .{}) catch unreachable;
     defer probe.destroy();
     const holder = core.Object.create(probe, core.class.ids.object, null) catch unreachable;
     const before = probe.memory.allocated_bytes;
@@ -1199,9 +1198,9 @@ fn borrowedHolderInitialAllocationBytes() usize {
 }
 
 test "context backtrace can borrow VM frame pc lazily" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     try ctx.pushBacktraceFrameWithResolver(
@@ -1229,7 +1228,7 @@ test "context backtrace can borrow VM frame pc lazily" {
 }
 
 test "private brand property owns exactly one stored symbol value across replacement" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const object = try core.Object.create(rt, core.class.ids.object, null);
     var object_alive = true;
@@ -1275,7 +1274,7 @@ test "ownership audit quarantines every atom slot the last sweep retired" {
     // born in epoch 0, so a sweep at any later epoch retires all of them. The
     // runtime is handed to `sweepDead` only because it asks it about cached
     // bodies; it owns none of these atoms.
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var account = core.memory.MemoryAccount.init(std.testing.allocator);
@@ -1313,7 +1312,7 @@ test "ownership audit quarantines every atom slot the last sweep retired" {
 }
 
 test "GC leaves atom-owned unique symbol atoms until release" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var symbol_atom = try rt.atoms.newValueSymbol("gc-unrooted-symbol");
@@ -1331,7 +1330,7 @@ test "GC leaves atom-owned unique symbol atoms until release" {
 }
 
 test "GC leaves manually owned unique symbol atoms alone" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var symbol_atom = try rt.atoms.newSymbol("gc-manual-symbol", .symbol);
@@ -1343,7 +1342,7 @@ test "GC leaves manually owned unique symbol atoms alone" {
 }
 
 test "GC keeps rooted unique symbol atoms until the root is gone" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-rooted-symbol");
@@ -1360,7 +1359,7 @@ test "GC keeps rooted unique symbol atoms until the root is gone" {
 }
 
 test "GC keeps atom-owned unique symbol atoms until the atom owner releases" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var symbol_atom = try rt.atoms.newValueSymbol("gc-atom-owned-symbol");
@@ -1379,10 +1378,10 @@ test "GC keeps atom-owned unique symbol atoms until the atom owner releases" {
 }
 
 test "GC keeps runtime exception and realm value slot unique symbol atoms" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const runtime_symbol = try rt.atoms.newValueSymbol("gc-runtime-slot-symbol");
@@ -1423,10 +1422,10 @@ test "GC keeps runtime exception and realm value slot unique symbol atoms" {
 }
 
 test "GC keeps context lexical object unique symbol atoms" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const env = try core.Object.create(rt, core.class.ids.object, null);
@@ -1446,10 +1445,10 @@ test "GC keeps context lexical object unique symbol atoms" {
 }
 
 test "GC keeps context pending promise job unique symbol atoms until release" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const pending_symbol = try rt.atoms.newValueSymbol("gc-context-pending-job-symbol");
@@ -1467,9 +1466,9 @@ test "GC keeps context pending promise job unique symbol atoms until release" {
 }
 
 test "GC keeps finalization job unique symbol atoms after dequeue until release" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const callback_symbol = try rt.atoms.newValueSymbol("gc-finalization-job-callback-symbol");
@@ -1513,9 +1512,9 @@ test "GC keeps finalization job unique symbol atoms after dequeue until release"
 }
 
 test "GC keeps dequeued finalization job function bytecode symbol constants until release" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-finalization-job-bytecode-symbol");
@@ -1548,9 +1547,9 @@ test "GC keeps dequeued finalization job function bytecode symbol constants unti
 }
 
 test "GC keeps module registry unique symbol atoms until release" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const module_name = try rt.internAtom("gc-module-symbols.mjs");
@@ -1581,7 +1580,7 @@ test "GC keeps module registry unique symbol atoms until release" {
 }
 
 test "GC sweeps unique symbol atoms after description string cache" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var symbol_atom = try rt.atoms.newValueSymbol("gc-cached-symbol-description");
@@ -1599,7 +1598,7 @@ test "GC sweeps unique symbol atoms after description string cache" {
 }
 
 test "GC keeps rooted function bytecode symbol constants" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-bytecode-symbol-constant");
@@ -1617,7 +1616,7 @@ test "GC keeps rooted function bytecode symbol constants" {
 }
 
 test "GC keeps object-held and registered symbol atoms" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var object = try core.Object.create(rt, core.class.ids.object, null);
@@ -1647,7 +1646,7 @@ test "GC keeps object-held and registered symbol atoms" {
 }
 
 test "runtime teardown keeps unique symbol property keys live through shape destruction" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
@@ -1693,7 +1692,7 @@ fn tailBufferText(rt: *core.JSRuntime, allocator: std.mem.Allocator, value: core
 }
 
 test "S2-i append chain survives a forced collection at every allocation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var accumulator = (try core.string.String.createLatin1(rt, "seed")).value();
@@ -1744,9 +1743,9 @@ test "S2-i append chain survives a forced collection at every allocation" {
 }
 
 test "S2-i the concat operator seeds a tail buffer and keeps forks independent" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     var seed = std.ArrayList(u8).empty;
@@ -1778,7 +1777,7 @@ test "S2-i the concat operator seeds a tail buffer and keeps forks independent" 
 }
 
 test "class table registers QuickJS standard classes and dynamic classes" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     try std.testing.expectEqual(@as(core.ClassId, 0), core.class.invalid_class_id);
@@ -1833,7 +1832,7 @@ test "class table registers QuickJS standard classes and dynamic classes" {
 test "class Record default fill matches Record{} without a template" {
     try std.testing.expectEqual(@as(usize, 96), @sizeOf(core.class.Record));
     try std.testing.expectEqual(@as(usize, 90), @offsetOf(core.class.Record, "inline_payload_align"));
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     try std.testing.expect(!rt.classes.isRegistered(core.class.invalid_class_id));
     try std.testing.expect(!rt.classes.isRegistered(core.class.ids.proxy));
@@ -1843,9 +1842,9 @@ test "class Record default fill matches Record{} without a template" {
 }
 
 test "class prototype inline slots start as JSValue.nullValue" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     try std.testing.expectEqual(@as(usize, 69 * @sizeOf(core.JSValue)), @sizeOf(@TypeOf(ctx.class_prototypes_inline)));
     try std.testing.expectEqual(ctx.class_prototypes_inline[0..].ptr, ctx.class_prototypes.ptr);
@@ -1855,7 +1854,7 @@ test "class prototype inline slots start as JSValue.nullValue" {
 }
 
 test "class standard_plans match standardPayloadKind before and after register" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     try std.testing.expectEqual(core.class.standardPayloadKind(core.class.ids.proxy), rt.classes.standard_plans[core.class.ids.proxy].payload_kind);
     try std.testing.expectEqual(@as(u16, 1), rt.classes.standard_plans[core.class.ids.proxy].inline_payload_align);
@@ -2388,7 +2387,7 @@ fn markTestExternalObjectPayload(
 }
 
 test "class registration growth OOM does not publish a partial definition and retry succeeds" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const class_id: core.ClassId = 4096;
@@ -2405,7 +2404,7 @@ test "class registration growth OOM does not publish a partial definition and re
 }
 
 test "object creation rejects an unregistered dynamic class generation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const class_id = try rt.newClassId(core.class.invalid_class_id);
@@ -2419,7 +2418,7 @@ test "object creation rejects an unregistered dynamic class generation" {
 }
 
 test "class construction pins its definition across reentrant unregister" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const class_id = try rt.newClassId(core.class.invalid_class_id);
@@ -2454,7 +2453,7 @@ test "class construction pins its definition across reentrant unregister" {
 }
 
 test "class construction scalar plan survives record table growth" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const target_id: core.ClassId = 1024;
@@ -2492,7 +2491,7 @@ test "class construction scalar plan survives record table growth" {
 }
 
 test "inline class finalizer reentry keeps definition pinned while growing the table" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     InlineClassFinalizerReentry.reset();
@@ -2530,7 +2529,7 @@ test "inline class finalizer reentry keeps definition pinned while growing the t
 }
 
 test "inline class finalizer observes the live object allocation until callback return" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     InlineObjectLifecycleProbe.reset();
@@ -2575,7 +2574,7 @@ test "inline class finalizer observes the live object allocation until callback 
 }
 
 test "standalone inline object publication is visible to collector enumeration" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const class_id = try registerStandaloneInlineObjectTestClass(
@@ -2595,7 +2594,7 @@ test "standalone inline object publication is visible to collector enumeration" 
 
 test "side authority swap-remove condemnation drains every non-block object exactly once" {
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
 
@@ -2655,7 +2654,7 @@ test "side authority swap-remove condemnation drains every non-block object exac
 }
 
 test "standalone inline object survives a rooted minor and retires young" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const class_id = try registerStandaloneInlineObjectTestClass(
@@ -2687,7 +2686,7 @@ test "standalone inline object survives a rooted minor and retires young" {
 }
 
 test "standalone inline object survives a rooted major mark" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const class_id = try registerStandaloneInlineObjectTestClass(
@@ -2718,7 +2717,7 @@ test "standalone inline object survives a rooted major mark" {
 }
 
 test "single-code-unit string table survives a declared-roots collection" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     // Fill every slot of the runtime's 256-entry Latin-1 table.
@@ -2765,7 +2764,7 @@ fn registryResolveOne(rt: *core.JSRuntime, addr: usize) ?*core.gc.Header {
 }
 
 test "standalone inline object resolves from a conservative interior candidate" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const class_id = try registerStandaloneInlineObjectTestClass(
@@ -2835,7 +2834,7 @@ test "standalone inline object resolves from a conservative interior candidate" 
 }
 
 test "standalone inline object teardown parks its struct free until the drain" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     payload_finalizer_calls = 0;
@@ -2862,7 +2861,7 @@ test "standalone inline object teardown parks its struct free until the drain" {
 }
 
 test "external class finalizers run synchronously with original object identity in zero-ref FIFO order" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     ExternalObjectLifecycleProbe.reset();
@@ -2897,7 +2896,7 @@ test "external class finalizers run synchronously with original object identity 
 }
 
 test "array teardown releases its unique prototype before its unique dense element" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     ExternalObjectLifecycleProbe.reset();
@@ -2927,7 +2926,7 @@ test "array teardown releases its unique prototype before its unique dense eleme
 }
 
 test "weak husk keeps its class definition after one synchronous finalizer" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const class_id = try rt.newClassId(core.class.invalid_class_id);
@@ -2969,7 +2968,7 @@ test "weak husk keeps its class definition after one synchronous finalizer" {
 }
 
 test "class finalizers and context prototype slots are wired" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const dynamic_id = try rt.newClassId(core.class.invalid_class_id);
@@ -2981,7 +2980,7 @@ test "class finalizers and context prototype slots are wired" {
         .payload_mark = countPayloadMark,
     });
 
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     try std.testing.expect(ctx.classPrototypeSlotCount() >= dynamic_id + 1);
 
@@ -3018,7 +3017,7 @@ test "class finalizers and context prototype slots are wired" {
 }
 
 test "object destruction runs class payload finalizers synchronously without allocation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const payloadless_id = try rt.newClassId(core.class.invalid_class_id);
@@ -3067,7 +3066,7 @@ test "object destruction runs class payload finalizers synchronously without all
 }
 
 test "strong collection clear publishes empty state before synchronous finalizer reentry" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
@@ -3106,7 +3105,7 @@ test "strong collection clear publishes empty state before synchronous finalizer
 }
 
 test "dense array delete publishes sparse state before synchronous finalizer reentry" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
@@ -3145,7 +3144,7 @@ test "dense array delete publishes sparse state before synchronous finalizer ree
 }
 
 test "ordinary property delete publishes absence before synchronous finalizer reentry" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
@@ -3189,7 +3188,7 @@ test "IC-R1: in-place delete mutates the shape Property word" {
     // Guard load-bearing: IC compares the 8-byte Property record. In-place
     // delete (unique shape, rc==1) must change that word without replacing
     // shape*. Shared shapes clone first (shape* changes) — also a miss.
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
@@ -3221,7 +3220,7 @@ test "IC-R1: in-place delete mutates the shape Property word" {
 }
 
 test "regexp lastIndex set publishes replacement before synchronous finalizer reentry" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
@@ -3260,7 +3259,7 @@ test "regexp lastIndex set publishes replacement before synchronous finalizer re
 }
 
 test "regexp lastIndex define publishes replacement before synchronous finalizer reentry" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
@@ -3303,7 +3302,7 @@ test "regexp lastIndex define publishes replacement before synchronous finalizer
 }
 
 test "mapped arguments binding update publishes value before synchronous finalizer reentry" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
@@ -3348,7 +3347,7 @@ test "mapped arguments binding update publishes value before synchronous finaliz
 }
 
 test "mapped arguments var-ref update publishes value before synchronous finalizer reentry" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
@@ -3392,7 +3391,7 @@ test "mapped arguments var-ref update publishes value before synchronous finaliz
 }
 
 test "mapped arguments binding delete publishes disconnection before synchronous finalizer reentry" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
@@ -3441,7 +3440,7 @@ test "mapped arguments binding delete publishes disconnection before synchronous
 }
 
 test "cached iterator next clear publishes null before synchronous finalizer reentry" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
@@ -3481,7 +3480,7 @@ test "cached iterator next clear publishes null before synchronous finalizer ree
 }
 
 test "exception slot clear publishes empty state before synchronous finalizer reentry" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
@@ -3513,7 +3512,7 @@ test "exception slot clear publishes empty state before synchronous finalizer re
 }
 
 test "array iterator target clear publishes null before synchronous finalizer reentry" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const reentrant_id = try rt.newClassId(core.class.invalid_class_id);
@@ -3558,7 +3557,7 @@ test "array iterator target clear publishes null before synchronous finalizer re
 }
 
 test "runtime cycle removal follows class payload mark hooks" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const payloadless_id = try rt.newClassId(core.class.invalid_class_id);
@@ -3611,7 +3610,7 @@ test "runtime cycle removal follows class payload mark hooks" {
 }
 
 test "synchronous class payload finalizer drains payload-owned zero-ref children before free returns" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const external_id = try rt.newClassId(core.class.invalid_class_id);
@@ -3645,7 +3644,7 @@ test "synchronous class payload finalizer drains payload-owned zero-ref children
 }
 
 test "synchronous external payload callback pins its generation through reentrant unregister" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     ExternalClassFinalizerReentry.reset();
@@ -3686,7 +3685,7 @@ test "synchronous external payload callback pins its generation through reentran
 }
 
 test "runtime cycle removal synchronously finalizes class payload object slots once" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const external_id = try rt.newClassId(core.class.invalid_class_id);
@@ -3728,7 +3727,7 @@ test "runtime cycle removal synchronously finalizes class payload object slots o
 }
 
 test "array buffer view list republishes cached typed array count and data" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const buffer = try core.Object.create(rt, core.class.ids.array_buffer, null);
@@ -3773,7 +3772,7 @@ test "array buffer view list republishes cached typed array count and data" {
 }
 
 test "shared array buffer grow refreshes length-tracking typed array state" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const buffer_value = try engine.exec.buffer_ops.sharedArrayBufferConstructLength(rt, 2, 8, null);
@@ -3788,9 +3787,9 @@ test "shared array buffer grow refreshes length-tracking typed array state" {
 }
 
 test "shared buffer store can back wrappers in separate runtimes" {
-    const left_rt = try core.JSRuntime.create(std.testing.allocator);
+    const left_rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer left_rt.destroy();
-    const right_rt = try core.JSRuntime.create(std.testing.allocator);
+    const right_rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer right_rt.destroy();
 
     const store = try core.object.SharedBufferStore.create(left_rt, 4);
@@ -3810,7 +3809,7 @@ test "shared buffer store can back wrappers in separate runtimes" {
 }
 
 test "array buffer backing stores report external memory" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const buffer_value = try engine.exec.buffer_ops.arrayBufferConstructLength(rt, 16, 32, null);
@@ -3830,7 +3829,7 @@ test "array buffer backing stores report external memory" {
 }
 
 test "ordinary array buffer backing overlaps account and external ledgers" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     // Above BufferPayload.inline_storage_capacity, ordinary backing is owned
@@ -3923,7 +3922,7 @@ test "runtime root tracer visits async roots" {
     try rt.init(std.testing.allocator, .{});
     defer rt.deinit();
 
-    const ctx = try core.JSContext.create(&rt);
+    const ctx = try core.JSContext.create(&rt, .{});
     defer ctx.destroy();
 
     try rt.job_queue.enqueuePromise(ctx, core.JSValue.int32(101));
@@ -4050,7 +4049,7 @@ test "value root buffer exposes mutable copied slice" {
 }
 
 test "generator completion eagerly releases the resident execution owners" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const current_function = try core.Object.create(rt, core.class.ids.object, null);
@@ -4103,7 +4102,7 @@ test "generator completion eagerly releases the resident execution owners" {
 }
 
 test "suspended execution preserves and closes open frame var refs" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const pointer_value_slots = try std.math.divCeil(usize, @sizeOf(?*core.VarRef), @sizeOf(core.JSValue));
@@ -4139,7 +4138,7 @@ test "suspended execution preserves and closes open frame var refs" {
 }
 
 test "suspended execution republishes running aliases without a second owner" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const values = try rt.memory.alloc(core.JSValue, 2);
@@ -4173,10 +4172,10 @@ test "suspended execution republishes running aliases without a second owner" {
 }
 
 test "native function state uses payload storage" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.RealmContext.create(rt);
+    const ctx = try core.RealmContext.create(rt, .{});
     defer ctx.destroy();
     const home = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try home.ensureGlobalPayload(rt);
@@ -4204,10 +4203,10 @@ test "native function state uses payload storage" {
 }
 
 test "true C functions own their construction realm while data functions do not" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.RealmContext.create(rt);
+    const ctx = try core.RealmContext.create(rt, .{});
     const function_proto = try core.Object.create(rt, core.class.ids.object, null);
     ctx.cached_function_proto = function_proto;
     var native = try engine.core.function.nativeFunction(ctx, "native", 0);
@@ -4253,7 +4252,7 @@ test "true C functions own their construction realm while data functions do not"
 }
 
 test "bytecode function state uses the inline qjs function arm" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const home = try core.Object.create(rt, core.class.ids.object, null);
@@ -4286,7 +4285,7 @@ test "bytecode function state uses the inline qjs function arm" {
 }
 
 test "module namespace uses shape-only live-binding storage" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const namespace = try core.Object.create(rt, core.class.ids.module_ns, null);
@@ -4319,7 +4318,7 @@ test "module namespace uses shape-only live-binding storage" {
 }
 
 test "trace object shape summary follows append kind delete and compaction" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const object = try core.Object.create(rt, core.class.ids.object, null);
 
@@ -4460,7 +4459,7 @@ test "trace object shape summary base-5 payload decodes all two-slot states" {
 }
 
 test "pure property value replacement preserves a shared shape until flags change" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const first = try core.Object.create(rt, core.class.ids.object, null);
@@ -4492,7 +4491,7 @@ test "pure property value replacement preserves a shared shape until flags chang
 }
 
 test "unique transition shape appends in place across FAM relocation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     // A fresh prototype identity guarantees that this object's empty root shape
@@ -4535,7 +4534,7 @@ test "unique transition shape appends in place across FAM relocation" {
 }
 
 test "first property append OOM restores the no-storage sentinel" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     // Two objects with the same fresh prototype share their empty shape. The
@@ -4570,7 +4569,7 @@ test "first property append OOM restores the no-storage sentinel" {
 }
 
 test "failed new property definition rolls back retained entry" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
@@ -4604,7 +4603,7 @@ test "failed new property definition rolls back retained entry" {
 }
 
 test "unique shape append OOM rolls back shape and value storage together" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     // A unique prototype keeps the named-property transition on the rc==1
@@ -4659,7 +4658,7 @@ test "unique shape append OOM rolls back shape and value storage together" {
 }
 
 test "property compaction removes tombstones without mutating shared sibling shapes" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const names = [_][]const u8{
@@ -4717,10 +4716,10 @@ test "property compaction removes tombstones without mutating shared sibling sha
 }
 
 test "context lexicals property alias releases context strong reference" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     const global = try core.Object.create(rt, core.class.ids.object, null);
     const env = try core.Object.create(rt, core.class.ids.object, null);
     ctx.global = global;
@@ -4735,10 +4734,10 @@ test "context lexicals property alias releases context strong reference" {
 }
 
 test "failed auto-init property definition rolls back retained entry" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.RealmContext.create(rt);
+    const ctx = try core.RealmContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
@@ -4774,10 +4773,10 @@ test "failed auto-init property definition rolls back retained entry" {
 }
 
 test "failed realm auto-init property definition rolls back borrowed holder registration" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
@@ -4813,7 +4812,7 @@ test "failed realm auto-init property definition rolls back borrowed holder regi
 }
 
 test "property replacement preserves references under memory cap" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
@@ -4843,7 +4842,7 @@ test "property replacement preserves references under memory cap" {
 // dups into the slot and retires the caller's ref) and must NOT consume it on
 // any failure (the VM's cold-shell re-execution still owns it on the stack).
 test "definePlainDataPropertyKnownFast refcounted append and duplicate-key replace balance refs" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const baseline_live = rt.gc.liveCountKind(.object);
@@ -4878,7 +4877,7 @@ test "definePlainDataPropertyKnownFast refcounted append and duplicate-key repla
 }
 
 test "definePlainDataPropertyKnownFast barriers follow committed slot and shape writes" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const holder = try core.Object.create(rt, core.class.ids.object, null);
@@ -4921,7 +4920,7 @@ const DefineFieldForceGcProbe = struct {
 };
 
 test "definePlainDataPropertyKnownFast refcounted define survives forced GC at every allocation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const baseline_live = rt.gc.liveCountKind(.object);
@@ -4984,7 +4983,7 @@ test "definePlainDataPropertyKnownFast refcounted define survives forced GC at e
 }
 
 test "definePlainDataPropertyKnownFast OOM sweep leaves refcounted value owned by caller" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const baseline_live = rt.gc.liveCountKind(.object);
@@ -5043,7 +5042,7 @@ test "definePlainDataPropertyKnownFast OOM sweep leaves refcounted value owned b
 }
 
 test "object data property self-assignment keeps stored object alive" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const holder = try core.Object.create(rt, core.class.ids.object, null);
@@ -5066,7 +5065,7 @@ test "object data property self-assignment keeps stored object alive" {
 }
 
 test "json parse data property self-assignment keeps stored object alive" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const holder = try core.Object.create(rt, core.class.ids.object, null);
@@ -5082,7 +5081,7 @@ test "json parse data property self-assignment keeps stored object alive" {
 }
 
 test "dense array element self-assignment keeps stored object alive" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const array = try core.Object.createArray(rt, null);
@@ -5098,7 +5097,7 @@ test "dense array element self-assignment keeps stored object alive" {
 }
 
 test "owned dense array writes consume values only on success" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const array = try core.Object.createArray(rt, null);
@@ -5119,7 +5118,7 @@ test "owned dense array writes consume values only on success" {
 }
 
 test "prototype replacement clones shared transition shape" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const proto = try core.Object.create(rt, core.class.ids.object, null);
@@ -5141,7 +5140,7 @@ test "prototype replacement clones shared transition shape" {
 }
 
 test "failed prototype replacement preserves prototype and refcounts" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const proto = try core.Object.create(rt, core.class.ids.object, null);
@@ -5169,7 +5168,7 @@ test "failed prototype replacement preserves prototype and refcounts" {
 }
 
 test "failed object registration destroys initialized object once" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var objects: [64]*core.Object = undefined;
@@ -5194,7 +5193,7 @@ test "failed object registration destroys initialized object once" {
 }
 
 test "shape transition cache releases chained shapes" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const a = try rt.internAtom("release_a");
@@ -5220,7 +5219,7 @@ test "shape transition cache releases chained shapes" {
 }
 
 test "large object property lookup uses shape hash across delete and re-add" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const obj = try core.Object.create(rt, core.class.ids.object, null);
@@ -5248,10 +5247,10 @@ test "large object property lookup uses shape hash across delete and re-add" {
 }
 
 test "exception slot transfers owned value and clears context slot" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const str = try core.string.String.createAscii(rt, "boom");
@@ -5265,7 +5264,7 @@ test "exception slot transfers owned value and clears context slot" {
 }
 
 test "reference dup and free retain until final release" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const str = try core.string.String.createAscii(rt, "abc");
@@ -5274,7 +5273,7 @@ test "reference dup and free retain until final release" {
 }
 
 test "gc registry tracks live objects and intrusive list state" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const obj = try core.Object.create(rt, core.class.ids.object, null);
@@ -5409,7 +5408,6 @@ test "function bytecode registration is old-space accounted" {
         4,
         1,
         0,
-        0,
     );
     // Keep this above the 512-byte small-object ceiling even in the alternate
     // 8-byte JSValue representation. The main FAM must therefore use one
@@ -5537,7 +5535,7 @@ test "runtime exposes stable gc stats snapshot" {
 }
 
 test "gc live heap stats drop when object is released" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
@@ -5699,7 +5697,7 @@ test "runtime force major gc runs an urgent major poll" {
 }
 
 test "object child edge tracing exposes mutable value slots" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const array_obj = try core.Object.createArray(rt, null);
@@ -5741,7 +5739,7 @@ test "object child edge tracing exposes mutable value slots" {
 }
 
 test "gc registry debug verifier accepts linked and unlinked list states" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     try rt.gc.verifyIntrusiveList();
@@ -5755,7 +5753,7 @@ test "gc registry debug verifier accepts linked and unlinked list states" {
 }
 
 test "gc heap accounting derives live bytes" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     try rt.gc.verifyHeapAccounting(rt);
@@ -5771,7 +5769,7 @@ test "gc heap accounting derives live bytes" {
 }
 
 test "gc heap accounting rejects an orphaned accounted standalone header" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const StandaloneProbe = extern struct {
@@ -5809,7 +5807,7 @@ test "gc heap accounting rejects an orphaned accounted standalone header" {
 }
 
 test "gc heap accounting verifier catches missing allocation entries" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const obj = try core.Object.create(rt, core.class.ids.object, null);
@@ -5825,7 +5823,7 @@ test "gc heap accounting verifier catches missing allocation entries" {
 }
 
 test "gc heap accounting verifier catches pinned header flag drift" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const obj = try core.Object.create(rt, core.class.ids.object, null);
@@ -5926,7 +5924,7 @@ test "gc invariant negative: block heap rejects geometry free-chain and doomed-l
 }
 
 test "gc invariant negative: block cell publication audit rejects hidden allocations" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const obj = try core.Object.createPlainObject(rt, null);
     const marker = core.gc.representation.block_cell_size_class;
@@ -6018,9 +6016,9 @@ test "gc invariant negative: metadata semantics reject kind carrier and field mi
 }
 
 test "compact trace retained-RC backlinks are authoritative and audited" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const shape = try rt.shapes.create(null);
 
@@ -6066,7 +6064,7 @@ test "compact trace retained-RC backlinks are authoritative and audited" {
 // tests pin the writers against the auditor so a regression fails at the
 // mechanism instead of somewhere downstream.
 test "trace shape summary: incremental writers track the Shape projection" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const key_a = try rt.internAtom("trace-summary-a");
@@ -6160,10 +6158,10 @@ test "trace shape summary: incremental writers track the Shape projection" {
 }
 
 test "trace shape summary: appends preserve the leased remembered bit" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const key_a = try rt.internAtom("trace-summary-bit7-a");
@@ -6215,7 +6213,7 @@ test "trace shape summary: appends preserve the leased remembered bit" {
 }
 
 test "gc invariant negative: representation audit rejects physical carrier and cell index drift" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const obj = try core.Object.createPlainObject(rt, null);
     try std.testing.expectEqual(
@@ -6274,10 +6272,10 @@ test "gc invariant negative: representation audit rejects physical carrier and c
 }
 
 test "representation audit cross-checks the remembered object cache and map" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const edge_key = try rt.internAtom("remembered-representation-audit");
@@ -6339,10 +6337,10 @@ test "representation audit cross-checks the remembered cache on a non-object car
     // transfers to the new carriers if the auditors actually see THEM, so
     // drive both directions with a VarRef -- which, unlike `.object`, really
     // is what pays the detach traffic on earley-boyer (§9.5/§9.7).
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const cell = try core.VarRef.createClosed(rt, core.JSValue.undefinedValue());
@@ -6416,10 +6414,10 @@ test "representation audit cross-checks the remembered cache on a non-object car
 }
 
 test "forget fuses the remembered map removal with its own cache bit" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const edge_key = try rt.internAtom("remembered-forget-fusion");
@@ -6481,7 +6479,7 @@ test "forget fuses the remembered map removal with its own cache bit" {
 }
 
 test "gc invariant negative: construction root audit rejects published shell state" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const shell = try core.Object.createGeneratorShell(rt, core.class.ids.generator);
     defer shell.destroyGeneratorShell(rt);
@@ -6530,7 +6528,7 @@ test "gc invariant negative: construction root audit rejects published shell sta
 }
 
 test "gc: a remembered detached generator shell is still a construction root" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const shell = try core.Object.createGeneratorShell(rt, core.class.ids.generator);
     defer shell.destroyGeneratorShell(rt);
@@ -6582,7 +6580,7 @@ test "gc: a remembered detached generator shell is still a construction root" {
 }
 
 test "gc invariant negative: arena audit rejects an accounted free slab block" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     // Block-served Objects and strings do not touch the small-object slab. A
     // VarRef does, and leaves free neighbours in the same arena for the
@@ -6619,7 +6617,7 @@ test "gc invariant negative: arena audit rejects an accounted free slab block" {
 }
 
 test "gc invariant negative: address index audit rejects canonical page drift" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const StandaloneProbe = extern struct {
         pub const gc_kind_tag: u8 = @intFromEnum(core.gc.GcKind.object);
@@ -6658,7 +6656,7 @@ test "gc invariant negative: address index audit rejects canonical page drift" {
 }
 
 test "gc invariant negative: generation audit rejects census and stale remembered drift" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     _ = try core.Object.createPlainObject(rt, null);
     try rt.gc.verifyGenerationInvariants();
@@ -6683,7 +6681,7 @@ test "gc invariant negative: generation audit rejects census and stale remembere
 }
 
 test "gc invariant negative: retirement audit rejects a marked young survivor" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const obj = try core.Object.createPlainObject(rt, null);
     var obj_slot: ?*core.Object = obj;
@@ -6704,7 +6702,7 @@ test "gc invariant negative: retirement audit rejects a marked young survivor" {
 }
 
 test "object traceChildEdgesFallible propagates visitor errors" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const obj = try core.Object.create(rt, core.class.ids.object, null);
@@ -6724,7 +6722,7 @@ test "object traceChildEdgesFallible propagates visitor errors" {
 }
 
 test "ordinary object trace visits data slots and TMASK accessor edges" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const obj = try core.Object.create(rt, core.class.ids.object, null);
@@ -6764,7 +6762,7 @@ test "ordinary object trace visits data slots and TMASK accessor edges" {
 }
 
 test "object traceChildEdgesFallible propagates class payload visitor errors" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const external_id = try rt.newClassId(core.class.invalid_class_id);
@@ -6794,7 +6792,7 @@ test "object traceChildEdgesFallible propagates class payload visitor errors" {
 }
 
 test "gc object release paths do not allocate" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const obj = try core.Object.create(rt, core.class.ids.object, null);
@@ -6834,7 +6832,7 @@ fn createDeepOwnedPropertyChain(rt: *core.JSRuntime, key: core.Atom, length: usi
 }
 
 test "zero-ref release drains a deep acyclic object chain iteratively" {
-    const rt = try core.JSRuntime.createWithOptions(std.testing.allocator, .{
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{
         .gc_threshold = 256 * 1024 * 1024,
     });
     defer rt.destroy();
@@ -6847,7 +6845,7 @@ test "zero-ref release drains a deep acyclic object chain iteratively" {
 }
 
 test "cycle scan preserves a deeply rooted object chain without recursion" {
-    const rt = try core.JSRuntime.createWithOptions(std.testing.allocator, .{
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{
         .gc_threshold = 256 * 1024 * 1024,
     });
     defer rt.destroy();
@@ -6928,7 +6926,7 @@ fn expectClosedPropertyCycleReclaimed(rt: *core.JSRuntime, freed: usize) !void {
 }
 
 test "closed object property cycle is released by runtime cycle removal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var left = try core.Object.create(rt, core.class.ids.object, null);
@@ -6945,7 +6943,7 @@ test "closed object property cycle is released by runtime cycle removal" {
 }
 
 test "fast array iterator-next cache cycle is released by runtime cycle removal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var it = try core.Object.createArray(rt, null);
@@ -7069,9 +7067,9 @@ const TraceEdges = struct {
 };
 
 test "function_bytecode trace edges visit realm and cpool" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const fb = try engine.bytecode.FunctionBytecode.createFixture(rt, .{
@@ -7092,7 +7090,7 @@ test "function_bytecode trace edges visit realm and cpool" {
 }
 
 test "var_ref trace edges visit the closed binding value" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const bound = try core.Object.create(rt, core.class.ids.object, null);
@@ -7104,9 +7102,9 @@ test "var_ref trace edges visit the closed binding value" {
 }
 
 test "realm_context trace edges visit the global object" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
@@ -7118,9 +7116,9 @@ test "realm_context trace edges visit the global object" {
 }
 
 test "module trace edges visit function, namespace, meta and thrown values" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const module_name = try rt.internAtom("cycle-mark-parity.mjs");
@@ -7143,7 +7141,7 @@ test "module trace edges visit function, namespace, meta and thrown values" {
 }
 
 test "strong Map and Set entry cycles are released by runtime cycle removal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const map = try core.Object.create(rt, core.class.ids.map, null);
@@ -7166,7 +7164,7 @@ test "strong Map and Set entry cycles are released by runtime cycle removal" {
 }
 
 test "ordinary error stack and callsite cycles are released by runtime cycle removal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const owner = try core.Object.create(rt, core.class.ids.object, null);
@@ -7186,7 +7184,7 @@ test "ordinary error stack and callsite cycles are released by runtime cycle rem
 }
 
 test "accessor getter and setter self-cycle is released by runtime cycle removal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
@@ -7201,7 +7199,7 @@ test "accessor getter and setter self-cycle is released by runtime cycle removal
 }
 
 test "bound function payload self-cycle is released by runtime cycle removal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const bound = try core.Object.create(rt, core.class.ids.bound_function, null);
@@ -7220,7 +7218,7 @@ test "bound function payload self-cycle is released by runtime cycle removal" {
 }
 
 test "arguments payload value-slice cycle is released by runtime cycle removal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const arguments_class = try rt.newClassId(core.class.invalid_class_id);
@@ -7243,7 +7241,7 @@ test "arguments payload value-slice cycle is released by runtime cycle removal" 
 }
 
 test "object data self-cycle is released by runtime cycle removal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const object = try core.Object.create(rt, core.class.ids.string, null);
@@ -7257,7 +7255,7 @@ test "object data self-cycle is released by runtime cycle removal" {
 }
 
 test "fallible GC API reports reclaimed objects and no failure" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const left = try core.Object.create(rt, core.class.ids.object, null);
@@ -7278,7 +7276,7 @@ test "fallible GC API reports reclaimed objects and no failure" {
 }
 
 test "trace_stw collects a closed property cycle" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const left = try core.Object.create(rt, core.class.ids.object, null);
@@ -7291,9 +7289,9 @@ test "trace_stw collects a closed property cycle" {
 }
 
 test "trace_stw ephemeron keeps value only when table and key are live" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
@@ -7321,9 +7319,9 @@ test "trace_stw ephemeron keeps value only when table and key are live" {
 }
 
 test "trace_stw ephemeron value does not keep its key alive" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
@@ -7346,9 +7344,9 @@ test "trace_stw ephemeron value does not keep its key alive" {
 }
 
 test "trace_stw WeakRef deref keep-alive lasts until job end" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
@@ -7380,7 +7378,7 @@ test "trace_stw WeakRef deref keep-alive lasts until job end" {
 // ---------------------------------------------------------------------------
 
 test "trace_stw WeakRef symbol target dies with its body" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var weak_ref: ?*core.Object = try core.Object.create(rt, core.class.ids.weak_ref, null);
@@ -7410,9 +7408,9 @@ test "trace_stw WeakRef symbol target dies with its body" {
 }
 
 test "trace_stw FinalizationRegistry symbol target enqueues its cleanup" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     var cleanup: ?*core.Object = try core.Object.create(rt, core.class.ids.object, null);
@@ -7448,7 +7446,7 @@ test "trace_stw FinalizationRegistry symbol target enqueues its cleanup" {
 }
 
 test "trace_stw WeakMap symbol key entry disappears with the symbol" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var weakmap: ?*core.Object = try core.Object.create(rt, core.class.ids.weakmap, null);
@@ -7475,7 +7473,7 @@ test "trace_stw WeakMap symbol key entry disappears with the symbol" {
 }
 
 test "trace_stw symbol liveness queries follow the mark inside the sweep phase" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     // A symbol that survives a collection: its body carries the current mark.
@@ -7530,7 +7528,7 @@ test "trace_stw symbol liveness queries follow the mark inside the sweep phase" 
 }
 
 test "trace_stw WeakRef symbol deref keep-alive survives the same job" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var weak_ref: ?*core.Object = try core.Object.create(rt, core.class.ids.weak_ref, null);
@@ -7563,7 +7561,7 @@ test "trace_stw WeakRef symbol deref keep-alive survives the same job" {
 }
 
 test "trace_stw survivor classes on a known graph" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     // Matching kept: a named root keeps the object under both RC and STW.
@@ -7609,9 +7607,9 @@ test "trace_stw survivor classes on a known graph" {
 }
 
 test "address registry tracks published objects and interior pointers" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     // `stats.live` counts occupant-table entries, and a slab-backed object no
@@ -7653,7 +7651,7 @@ test "address registry tracks published objects and interior pointers" {
 test "conservative scan shades a stack-held object header word" {
     try std.testing.expect(core.gc_conservative.target_supported);
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     var obj = try core.Object.create(rt, core.class.ids.object, null);
     var word: usize = @intFromPtr(obj.gcHeader());
@@ -7682,7 +7680,7 @@ test "conservative scan shades a stack-held object header word" {
 }
 
 test "carrier protocols keep adjacent one-past roots multi-hit and diagnostics explicit" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const first = try core.Object.create(rt, core.class.ids.object, null);
@@ -7714,7 +7712,7 @@ test "carrier protocols keep adjacent one-past roots multi-hit and diagnostics e
 }
 
 test "address registry page radix covers a multi-page allocation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const obj = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.object, null, 2048);
@@ -7733,7 +7731,7 @@ test "address registry page radix covers a multi-page allocation" {
 }
 
 test "address registry lookup cost stays with page occupants not live N" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const count: usize = 2048;
@@ -8044,7 +8042,7 @@ test "minor doomed snapshot preserves the active block lifecycle" {
 }
 
 test "trace carrier mark epoch keeps zero unmarked and scrubs before wrap" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const obj = try core.Object.create(rt, core.class.ids.object, null);
     const header = &obj.shape_ref.header;
@@ -8059,7 +8057,7 @@ test "trace carrier mark epoch keeps zero unmarked and scrubs before wrap" {
     try std.testing.expect(!rt.gc.headerMarked(header));
     try std.testing.expect(!rt.gc.headerMarkedKnownNonBlock(header));
 
-    const fresh_ctx = try core.JSContext.create(rt);
+    const fresh_ctx = try core.JSContext.create(rt, .{});
     defer fresh_ctx.destroy();
     var retained_realm = core.RealmRef.retain(fresh_ctx);
     defer retained_realm.deinit();
@@ -8324,7 +8322,7 @@ test "process heap trim fires only when a contraction crosses its threshold" {
 }
 
 test "pollGC runs pending collection and clears pending flag" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
 
@@ -8346,7 +8344,7 @@ test "pollGC runs pending collection and clears pending flag" {
 }
 
 test "object allocation drops a stale threshold request after a transient live-byte peak" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
 
@@ -8369,7 +8367,7 @@ test "object allocation drops a stale threshold request after a transient live-b
 }
 
 test "object allocation keeps a threshold request while prospective bytes remain over threshold" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
 
@@ -8391,7 +8389,7 @@ test "object allocation keeps a threshold request while prospective bytes remain
 }
 
 test "stale threshold request cannot mask explicit or pressure major requests" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
 
@@ -8429,7 +8427,7 @@ test "stale threshold request cannot mask explicit or pressure major requests" {
 // `collections == 0`; the pdfjs micro of the same shape (380k x 320B) left
 // 1.64 GB committed and `young_count` at 380k with zero collections.
 test "a pure string loop reaches the allocation-threshold boundary" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
 
@@ -8450,7 +8448,7 @@ test "a pure string loop reaches the allocation-threshold boundary" {
 
 // Same boundary for the other string carrier: rope nodes.
 test "a pure rope-concat loop reaches the allocation-threshold boundary" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
 
@@ -8477,7 +8475,7 @@ test "a pure rope-concat loop reaches the allocation-threshold boundary" {
 // through `MemoryAccount.*NoTrigger`, which is exactly the shape a production
 // allocation has.
 test "an unrequested threshold crossing is still serviced at the object boundary" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
 
@@ -8498,7 +8496,7 @@ test "an unrequested threshold crossing is still serviced at the object boundary
 }
 
 test "an unrequested threshold crossing is still serviced at a scheduler poll" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
 
@@ -8528,7 +8526,7 @@ test "an unrequested threshold crossing is still serviced at a scheduler poll" {
 }
 
 test "persistent value handle keeps object and nested symbols alive" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
@@ -8548,7 +8546,7 @@ test "persistent value handle keeps object and nested symbols alive" {
 }
 
 test "handle scope local keeps object alive until scope exits" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
@@ -8572,7 +8570,7 @@ test "handle scope local keeps object alive until scope exits" {
 }
 
 test "handle scope locals do not clear persistent handles created inside scope" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const local_object = try core.Object.create(rt, core.class.ids.object, null);
@@ -8601,7 +8599,7 @@ test "handle scope locals do not clear persistent handles created inside scope" 
 }
 
 test "native pin retains direct object and counts nested pins" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
@@ -8633,7 +8631,7 @@ fn weakPersistentCounterCallback(_: *core.JSRuntime, context: ?*anyopaque) void 
 }
 
 test "weak persistent value rejects non-weak targets" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     try std.testing.expectError(
@@ -8643,7 +8641,7 @@ test "weak persistent value rejects non-weak targets" {
 }
 
 test "weak persistent value does not retain direct object target" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -8675,7 +8673,7 @@ test "weak persistent value does not retain direct object target" {
 }
 
 test "weak persistent value clears object cycle target during gc" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const target = try core.Object.create(rt, core.class.ids.object, null);
@@ -8695,7 +8693,7 @@ test "weak persistent value clears object cycle target during gc" {
 }
 
 test "weak persistent value clears unrooted symbol target during gc" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("weak-persistent-symbol");
@@ -8721,7 +8719,7 @@ test "weak persistent value clears unrooted symbol target during gc" {
 }
 
 test "function home object cycle is released by runtime cycle removal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const home = try core.Object.create(rt, core.class.ids.object, null);
@@ -8735,7 +8733,7 @@ test "function home object cycle is released by runtime cycle removal" {
 }
 
 test "async continuation function cycle is released by runtime cycle removal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const continuation = try core.Object.create(rt, core.class.ids.c_function_data, null);
@@ -8753,7 +8751,7 @@ test "async continuation function cycle is released by runtime cycle removal" {
 }
 
 test "async generator promise cycle is released by runtime cycle removal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const generator = try core.Object.create(rt, core.class.ids.async_generator, null);
@@ -8771,10 +8769,10 @@ test "async generator promise cycle is released by runtime cycle removal" {
 }
 
 test "materialized native function cycle is released by runtime cycle removal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.RealmContext.create(rt);
+    const ctx = try core.RealmContext.create(rt, .{});
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
     ctx.global = global;
@@ -8809,7 +8807,7 @@ test "materialized native function cycle is released by runtime cycle removal" {
 }
 
 test "function bytecode constant object cycle is released by runtime cycle removal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("fn");
@@ -8831,7 +8829,7 @@ test "function bytecode constant object cycle is released by runtime cycle remov
 }
 
 test "runtime destroy releases callback bytecode before object registries" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
 
     const captured = try core.Object.create(rt, core.class.ids.object, null);
 
@@ -8843,7 +8841,7 @@ test "runtime destroy releases callback bytecode before object registries" {
 }
 
 test "runtime destroy releases nested callback bytecode in owner order" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
 
     const child = try engine.bytecode.FunctionBytecode.createFixture(rt, .{});
     var child_published = false;
@@ -8862,7 +8860,7 @@ test "runtime destroy releases nested callback bytecode in owner order" {
 }
 
 test "runtime destroy revisits callback bytecode after parent release" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
 
     const child = try engine.bytecode.FunctionBytecode.createFixture(rt, .{});
     var child_published = false;
@@ -8881,7 +8879,7 @@ test "runtime destroy revisits callback bytecode after parent release" {
 }
 
 test "runtime destroy releases cyclic callback bytecode constants" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
 
     const left = try engine.bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
     var left_published = false;
@@ -8901,7 +8899,7 @@ test "runtime destroy releases cyclic callback bytecode constants" {
 }
 
 test "runtime destroy releases callback bytecode constants with transferred ownership" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
 
     const left = try engine.bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
     var left_published = false;
@@ -8921,7 +8919,7 @@ test "runtime destroy releases callback bytecode constants with transferred owne
 }
 
 test "bytecode-only callback constant cycle is released by runtime cycle removal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const left = try engine.bytecode.FunctionBytecode.createFixture(rt, .{ .cpool_count = 1 });
@@ -8943,7 +8941,7 @@ test "bytecode-only callback constant cycle is released by runtime cycle removal
 }
 
 test "shared function bytecode constant object cycle is released by runtime cycle removal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("sharedFn");
@@ -8970,7 +8968,7 @@ test "shared function bytecode constant object cycle is released by runtime cycl
 }
 
 test "cycle teardown frees bytecode function captures before FB metadata" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
@@ -8995,7 +8993,7 @@ test "cycle teardown frees bytecode function captures before FB metadata" {
 }
 
 test "nested function bytecode constant object cycle is released by runtime cycle removal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const outer_name = try rt.internAtom("outerFn");
@@ -9031,7 +9029,7 @@ test "nested function bytecode constant object cycle is released by runtime cycl
 }
 
 test "cyclic internal function bytecode references are released by runtime cycle removal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const outer_name = try rt.internAtom("outerCycleFn");
@@ -9068,7 +9066,7 @@ test "cyclic internal function bytecode references are released by runtime cycle
 }
 
 test "class payload function bytecode constant object cycle is released by runtime cycle removal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const external_id = try rt.newClassId(core.class.invalid_class_id);
@@ -9109,10 +9107,10 @@ test "class payload function bytecode constant object cycle is released by runti
 }
 
 test "realm context owns cached prototype references" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
     ctx.global = global;
@@ -9135,10 +9133,10 @@ test "realm context owns cached prototype references" {
 }
 
 test "auto-init slot owns its Realm until the property is deleted" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.RealmContext.create(rt);
+    const ctx = try core.RealmContext.create(rt, .{});
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
     ctx.global = global;
@@ -9180,10 +9178,10 @@ test "auto-init slot owns its Realm until the property is deleted" {
 }
 
 test "typed MODULE_NS auto-init publishes a normal value or the same VarRef cell" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.RealmContext.create(rt);
+    const ctx = try core.RealmContext.create(rt, .{});
     defer ctx.destroy();
     const value_holder = try core.Object.create(rt, core.class.ids.object, null);
     const cell_holder = try core.Object.create(rt, core.class.ids.object, null);
@@ -9221,10 +9219,10 @@ test "typed MODULE_NS auto-init publishes a normal value or the same VarRef cell
 }
 
 test "MODULE_NS auto-init failure retains its slot Realm and retries once per read" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.RealmContext.create(rt);
+    const ctx = try core.RealmContext.create(rt, .{});
     defer ctx.destroy();
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("module_namespace_retry");
@@ -9246,10 +9244,10 @@ test "MODULE_NS auto-init failure retains its slot Realm and retries once per re
 }
 
 test "MODULE_NS auto-init reentry cannot overwrite the replacement property" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.RealmContext.create(rt);
+    const ctx = try core.RealmContext.create(rt, .{});
     defer ctx.destroy();
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("module_namespace_reentry");
@@ -9274,10 +9272,10 @@ test "MODULE_NS auto-init reentry cannot overwrite the replacement property" {
 }
 
 test "auto-init slot exposes the typed Realm and module owner edges" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.RealmContext.create(rt);
+    const ctx = try core.RealmContext.create(rt, .{});
     defer ctx.destroy();
     const holder = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("module_namespace_clone");
@@ -9294,10 +9292,10 @@ test "auto-init slot exposes the typed Realm and module owner edges" {
 }
 
 test "unmaterialized MODULE_NS slot participates in Realm cycle marking" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.RealmContext.create(rt);
+    const ctx = try core.RealmContext.create(rt, .{});
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
     ctx.global = global;
@@ -9320,7 +9318,7 @@ test "unmaterialized MODULE_NS slot participates in Realm cycle marking" {
 }
 
 test "ordinary and object-data payloads ignore generic realm assignment" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
@@ -9339,10 +9337,10 @@ test "ordinary and object-data payloads ignore generic realm assignment" {
 }
 
 test "native call carriers do not enter borrowed realm bookkeeping" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.RealmContext.create(rt);
+    const ctx = try core.RealmContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
@@ -9364,7 +9362,7 @@ test "native call carriers do not enter borrowed realm bookkeeping" {
 }
 
 test "generator noncarriers never enter borrowed realm bookkeeping" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
@@ -9386,7 +9384,7 @@ test "generator noncarriers never enter borrowed realm bookkeeping" {
 }
 
 test "leaf payload noncarriers ignore generic realm assignment" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
@@ -9425,7 +9423,7 @@ test "leaf payload noncarriers ignore generic realm assignment" {
 }
 
 test "promise weak-ref regexp and typed-array payloads ignore generic realm assignment" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
@@ -9454,7 +9452,7 @@ test "promise weak-ref regexp and typed-array payloads ignore generic realm assi
 }
 
 test "iterator collection and disposable payloads ignore generic realm assignment" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
@@ -9475,16 +9473,16 @@ test "iterator collection and disposable payloads ignore generic realm assignmen
 }
 
 test "collection iterator prototype follows explicit active realm, never receiver" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const first_realm = try core.RealmContext.create(rt);
+    const first_realm = try core.RealmContext.create(rt, .{});
     defer first_realm.destroy();
     const first_global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try first_global.ensureGlobalPayload(rt);
     first_realm.global = first_global;
 
-    const second_realm = try core.RealmContext.create(rt);
+    const second_realm = try core.RealmContext.create(rt, .{});
     defer second_realm.destroy();
     const second_global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try second_global.ensureGlobalPayload(rt);
@@ -9534,7 +9532,7 @@ test "collection iterator prototype follows explicit active realm, never receive
 }
 
 test "weak reference holders use a lifetime intrusive list" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const strong_map = try core.Object.create(rt, core.class.ids.map, null);
@@ -9580,7 +9578,7 @@ test "weak reference holders use a lifetime intrusive list" {
 }
 
 test "weak collection borrowed holder cache supports reverse teardown" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var holders: [8]?*core.Object = @splat(null);
@@ -9628,7 +9626,7 @@ test "weak collection borrowed holder cache supports reverse teardown" {
 }
 
 test "fresh object prototype rebinding reuses the shared empty root shape" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const prototype = try core.Object.create(rt, core.class.ids.object, null);
@@ -9672,9 +9670,9 @@ test "data to auto-init replacement stays traceable across allocation GC" {
         }
     };
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.RealmContext.create(rt);
+    const ctx = try core.RealmContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
@@ -9709,10 +9707,10 @@ test "data to auto-init replacement stays traceable across allocation GC" {
 }
 
 test "data to auto-init replacement rolls back descriptor OOM and retries in same runtime" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.RealmContext.create(rt);
+    const ctx = try core.RealmContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
@@ -9758,15 +9756,15 @@ test "data to auto-init replacement rolls back descriptor OOM and retries in sam
 }
 
 test "replacing auto-init transfers the owned Realm edge" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const first_ctx = try core.RealmContext.create(rt);
+    const first_ctx = try core.RealmContext.create(rt, .{});
     defer first_ctx.destroy();
     const first_global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try first_global.ensureGlobalPayload(rt);
     first_ctx.global = first_global;
-    const second_ctx = try core.RealmContext.create(rt);
+    const second_ctx = try core.RealmContext.create(rt, .{});
     defer second_ctx.destroy();
     const second_global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try second_global.ensureGlobalPayload(rt);
@@ -9799,15 +9797,15 @@ test "replacing auto-init transfers the owned Realm edge" {
 }
 
 test "replacing auto-init rolls back descriptor OOM and retries in same runtime" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const first_ctx = try core.RealmContext.create(rt);
+    const first_ctx = try core.RealmContext.create(rt, .{});
     defer first_ctx.destroy();
     const first_global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try first_global.ensureGlobalPayload(rt);
     first_ctx.global = first_global;
-    const second_ctx = try core.RealmContext.create(rt);
+    const second_ctx = try core.RealmContext.create(rt, .{});
     defer second_ctx.destroy();
     const second_global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try second_global.ensureGlobalPayload(rt);
@@ -9850,10 +9848,10 @@ test "replacing auto-init rolls back descriptor OOM and retries in same runtime"
 }
 
 test "deleting auto-init releases its owned Realm edge" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.RealmContext.create(rt);
+    const ctx = try core.RealmContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
@@ -9867,10 +9865,10 @@ test "deleting auto-init releases its owned Realm edge" {
 }
 
 test "ordinary auto-init replacement releases each owned Realm edge" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.RealmContext.create(rt);
+    const ctx = try core.RealmContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
@@ -9916,10 +9914,10 @@ test "ordinary auto-init replacement releases each owned Realm edge" {
 }
 
 test "specialized auto-init producers retain the same typed Realm owner" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.RealmContext.create(rt);
+    const ctx = try core.RealmContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
@@ -9960,7 +9958,7 @@ test "specialized auto-init producers retain the same typed Realm owner" {
 }
 
 test "auto-init descriptor interning reuses value-identical metadata" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const first_name = "repeat-method";
@@ -9985,10 +9983,10 @@ test "auto-init descriptor interning reuses value-identical metadata" {
 }
 
 test "materialized auto-init true C function owns its construction realm" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.RealmContext.create(rt);
+    const ctx = try core.RealmContext.create(rt, .{});
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
     ctx.global = global;
@@ -10023,7 +10021,7 @@ test "materialized auto-init true C function owns its construction realm" {
 }
 
 test "dead weak collection key entry is swept when target is destroyed" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const weakmap = try core.Object.create(rt, core.class.ids.weakmap, null);
@@ -10049,7 +10047,7 @@ test "dead weak collection key entry is swept when target is destroyed" {
 }
 
 test "dead weak collection key entry is swept without freeing live value" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const weakmap = try core.Object.create(rt, core.class.ids.weakmap, null);
@@ -10070,7 +10068,7 @@ test "dead weak collection key entry is swept without freeing live value" {
 }
 
 test "live weak collection key preserves stored value" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const weakmap = try core.Object.create(rt, core.class.ids.weakmap, null);
@@ -10094,7 +10092,7 @@ test "live weak collection key preserves stored value" {
 }
 
 test "weak ref target identity does not retain object target" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const weak_ref = try core.Object.create(rt, core.class.ids.weak_ref, null);
@@ -10120,7 +10118,7 @@ test "weak ref target identity does not retain object target" {
 }
 
 test "weak ref target registration roots direct symbol target" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const weak_ref = try core.Object.create(rt, core.class.ids.weak_ref, null);
@@ -10149,7 +10147,7 @@ test "weak ref target registration roots direct symbol target" {
 }
 
 test "weak ref target registration failure leaves target unset" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const weak_ref = try core.Object.create(rt, core.class.ids.weak_ref, null);
@@ -10163,7 +10161,7 @@ test "weak ref target registration failure leaves target unset" {
 }
 
 test "weak collection capacity failure leaves empty holder unregistered" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const weakmap = try core.Object.create(rt, core.class.ids.weakmap, null);
@@ -10178,7 +10176,7 @@ test "weak collection capacity failure leaves empty holder unregistered" {
 }
 
 test "weak collection append failure rolls back borrowed holder registration" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const weakmap = try core.Object.create(rt, core.class.ids.weakmap, null);
@@ -10195,7 +10193,7 @@ test "weak collection append failure rolls back borrowed holder registration" {
 }
 
 test "weak collection capacity reservation keeps empty holder unregistered" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const weakmap = try core.Object.create(rt, core.class.ids.weakmap, null);
@@ -10207,7 +10205,7 @@ test "weak collection capacity reservation keeps empty holder unregistered" {
 }
 
 test "finalization registry capacity failure leaves empty holder unregistered" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
@@ -10222,7 +10220,7 @@ test "finalization registry capacity failure leaves empty holder unregistered" {
 }
 
 test "finalization registry append failure rolls back borrowed holder registration" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
@@ -10241,7 +10239,7 @@ test "finalization registry append failure rolls back borrowed holder registrati
 }
 
 test "finalization registry job-queue reserve OOM rolls back the cell" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
@@ -10269,7 +10267,7 @@ test "finalization registry job-queue reserve OOM rolls back the cell" {
 }
 
 test "finalization registry capacity reservation keeps empty holder unregistered" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
@@ -10281,7 +10279,7 @@ test "finalization registry capacity reservation keeps empty holder unregistered
 }
 
 test "weak collection delete and clear unregister empty borrowed holder" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const weakmap = try core.Object.create(rt, core.class.ids.weakmap, null);
@@ -10308,7 +10306,7 @@ test "weak collection delete and clear unregister empty borrowed holder" {
 }
 
 test "finalization registry unregister unregisters empty borrowed holder" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
@@ -10325,7 +10323,7 @@ test "finalization registry unregister unregisters empty borrowed holder" {
 }
 
 test "finalization registry unregister handles token equal to target" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
@@ -10346,7 +10344,7 @@ test "finalization registry unregister handles token equal to target" {
 }
 
 test "finalization registry dead target cleanup tolerates held value reentry" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
@@ -10387,7 +10385,7 @@ test "finalization registry dead target cleanup tolerates held value reentry" {
 }
 
 test "weak collection delete tolerates value cleanup reentry" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const weakmap = try core.Object.create(rt, core.class.ids.weakmap, null);
@@ -10403,7 +10401,7 @@ test "weak collection delete tolerates value cleanup reentry" {
 }
 
 test "weak collection clear tolerates value cleanup reentry" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const weakmap = try core.Object.create(rt, core.class.ids.weakmap, null);
@@ -10422,7 +10420,7 @@ test "weak collection clear tolerates value cleanup reentry" {
 }
 
 test "weak map deep value chain releases without recursive destruction" {
-    const rt = try core.JSRuntime.createWithOptions(std.testing.allocator, .{
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{
         .gc_threshold = 256 * 1024 * 1024,
     });
     defer rt.destroy();
@@ -10449,7 +10447,7 @@ test "weak map deep value chain releases without recursive destruction" {
 }
 
 test "weak map cycle sweep clears index after removing dead keys" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const map = try core.Object.create(rt, core.class.ids.weakmap, null);
@@ -10506,7 +10504,7 @@ test "weak map cycle sweep clears index after removing dead keys" {
 }
 
 test "finalization registry dead target releases held value when target is destroyed" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
@@ -10532,7 +10530,7 @@ test "finalization registry dead target releases held value when target is destr
 }
 
 test "finalization registry live target preserves held value" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
@@ -10559,9 +10557,9 @@ test "finalization registry live target preserves held value" {
 }
 
 test "finalization registry unregister cannot remove queued cleanup cell" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const cleanup = try core.Object.create(rt, core.class.ids.object, null);
@@ -10611,9 +10609,9 @@ test "finalization registry unregister cannot remove queued cleanup cell" {
 }
 
 test "finalization registry cleanup enqueue does not allocate after registration" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const cleanup = try core.Object.create(rt, core.class.ids.object, null);
@@ -10678,7 +10676,7 @@ test "finalization registry cleanup enqueue does not allocate after registration
 }
 
 test "object allocation threshold triggers runtime cycle removal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
 
@@ -10707,7 +10705,7 @@ test "object allocation threshold triggers runtime cycle removal" {
 }
 
 test "object allocation collects reclaimable cycles before memory-limit rejection" {
-    const rt = try core.JSRuntime.createWithOptions(std.testing.allocator, .{
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{
         .gc_threshold = 256 * 1024 * 1024,
     });
     defer rt.destroy();
@@ -10744,7 +10742,7 @@ test "object allocation collects reclaimable cycles before memory-limit rejectio
 }
 
 test "cache-miss root shape is owned before the object allocation GC boundary" {
-    const rt = try core.JSRuntime.createWithOptions(std.testing.allocator, .{
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{
         .gc_threshold = 256 * 1024 * 1024,
     });
     defer rt.destroy();
@@ -10785,7 +10783,7 @@ test "cache-miss root shape is owned before the object allocation GC boundary" {
 }
 
 test "post-shape object OOM rolls back construction owners and retries in the same runtime" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const prototype = try core.Object.create(rt, core.class.ids.object, null);
@@ -10858,7 +10856,7 @@ test "post-shape object OOM rolls back construction owners and retries in the sa
 }
 
 test "shape reserve OOM does not publish or retain proto" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const prototype = try core.Object.create(rt, core.class.ids.object, null);
@@ -10884,7 +10882,7 @@ test "shape reserve OOM does not publish or retain proto" {
 }
 
 test "gc threshold API resets after scheduled collection and survives force-GC instrumentation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     try std.testing.expectEqual(core.runtime.default_gc_threshold, rt.gcThreshold());
@@ -10920,7 +10918,7 @@ test "gc threshold API resets after scheduled collection and survives force-GC i
 }
 
 test "proxy target handler cycle is released by runtime cycle removal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const proxy = try core.Object.create(rt, core.class.ids.proxy, null);
@@ -10935,7 +10933,7 @@ test "proxy target handler cycle is released by runtime cycle removal" {
 }
 
 test "runtime cycle removal preserves externally rooted outgoing objects" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var left = try core.Object.create(rt, core.class.ids.object, null);
@@ -10963,7 +10961,7 @@ test "runtime cycle removal preserves externally rooted outgoing objects" {
 }
 
 test "module namespace shape VarRef cycle is released by runtime cycle removal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const namespace = try core.Object.create(rt, core.class.ids.module_ns, null);
@@ -10980,7 +10978,7 @@ test "module namespace shape VarRef cycle is released by runtime cycle removal" 
 }
 
 test "mapped arguments var-ref cycle is released by runtime cycle removal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const arguments = try core.Object.create(rt, core.class.ids.mapped_arguments, null);
@@ -10996,7 +10994,7 @@ test "mapped arguments var-ref cycle is released by runtime cycle removal" {
 }
 
 test "array element self-cycle is released by runtime cycle removal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const array = try core.Object.createArray(rt, null);
@@ -11007,7 +11005,7 @@ test "array element self-cycle is released by runtime cycle removal" {
 }
 
 test "typed-array buffer self-cycle is released by runtime cycle removal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const view = try core.Object.create(rt, core.class.ids.object, null);
@@ -11018,7 +11016,7 @@ test "typed-array buffer self-cycle is released by runtime cycle removal" {
 }
 
 test "array buffer and linked typed array cycle survives arbitrary finalizer order" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const buffer = try core.Object.create(rt, core.class.ids.array_buffer, null);
@@ -11040,7 +11038,7 @@ test "array buffer and linked typed array cycle survives arbitrary finalizer ord
 }
 
 test "regexp lastIndex self-cycle is released by runtime cycle removal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const regexp = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.regexp, null, 1);
@@ -11054,9 +11052,9 @@ test "regexp lastIndex self-cycle is released by runtime cycle removal" {
 }
 
 test "realm module registry keeps published record addresses stable" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const first_name = try rt.internAtom("stable-first.mjs");
@@ -11074,11 +11072,11 @@ test "realm module registry keeps published record addresses stable" {
 }
 
 test "module registries isolate records between realms" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const first_ctx = try core.JSContext.create(rt);
+    const first_ctx = try core.JSContext.create(rt, .{});
     defer first_ctx.destroy();
-    const second_ctx = try core.JSContext.create(rt);
+    const second_ctx = try core.JSContext.create(rt, .{});
     defer second_ctx.destroy();
 
     const module_name = try rt.internAtom("shared-name.mjs");
@@ -11101,9 +11099,9 @@ test "module registries isolate records between realms" {
 }
 
 test "module registry trace keeps a linked record alive" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const module_name = try rt.internAtom("finalizer-self-unlink.mjs");
@@ -11119,9 +11117,9 @@ test "module registry trace keeps a linked record alive" {
 }
 
 test "explicitly rooted module outlives realm registry teardown" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     var ctx_alive = true;
     defer if (ctx_alive) ctx.destroy();
 
@@ -11149,9 +11147,9 @@ test "explicitly rooted module outlives realm registry teardown" {
 }
 
 test "module namespace strong edge participates in realm object cycle collection" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     var ctx_alive = true;
     defer if (ctx_alive) ctx.destroy();
 
@@ -11178,10 +11176,10 @@ test "module namespace strong edge participates in realm object cycle collection
 
 test "Nth module allocation OOM leaves registry and Atom ownership recoverable" {
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    const rt = try core.JSRuntime.create(failing_allocator.allocator());
+    const rt = try core.JSRuntime.create(failing_allocator.allocator(), .{});
     defer rt.destroy();
     defer failing_allocator.fail_index = std.math.maxInt(usize);
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     var names: [64]core.Atom = undefined;
@@ -11218,9 +11216,9 @@ test "Nth module allocation OOM leaves registry and Atom ownership recoverable" 
 }
 
 test "runtime memory usage counts linked and explicitly rooted unlinked modules" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     var ctx_alive = true;
     defer if (ctx_alive) ctx.destroy();
 
@@ -11262,9 +11260,9 @@ test "runtime memory usage counts linked and explicitly rooted unlinked modules"
 }
 
 test "module publication retains indexed metadata and all strong value edges" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const module_name = try rt.internAtom("main.mjs");
@@ -11329,9 +11327,9 @@ test "module publication retains indexed metadata and all strong value edges" {
 }
 
 test "pending module metadata and publication OOM are atomic" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     var module_name = try rt.internAtom("oom-main.mjs");
@@ -11371,9 +11369,9 @@ test "pending module metadata and publication OOM are atomic" {
 }
 
 test "module registry resolves local indirect star and ambiguous exports" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const main_name = try rt.internAtom("main.mjs");
@@ -11439,9 +11437,9 @@ test "module registry resolves local indirect star and ambiguous exports" {
 }
 
 test "existing published module generation is not overwritten by pending definition" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const module_name = try rt.internAtom("fresh.mjs");
@@ -11473,9 +11471,9 @@ test "existing published module generation is not overwritten by pending definit
 }
 
 test "indexed module resolution is pure across not-found ambiguous and cyclic graphs" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const dep_name = try rt.internAtom("resolve-dep.mjs");
@@ -11567,9 +11565,9 @@ test "indexed module resolution is pure across not-found ambiguous and cyclic gr
 }
 
 test "module resolution follows local exports of ordinary imports" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const source_name = try rt.internAtom("source");
@@ -11628,9 +11626,9 @@ test "module resolution follows local exports of ordinary imports" {
 }
 
 test "module resolution normalizes namespace re-export bindings" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const target_name = try rt.internAtom("target");
@@ -11744,7 +11742,7 @@ fn interruptOnce(_: *core.JSRuntime, userdata: ?*anyopaque) bool {
 }
 
 test "runtime stack and interrupt state are stored" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     rt.setStackSize(4096);
@@ -11769,12 +11767,12 @@ test "realm interrupt cadence advances without a handler and is realm-local" {
     // every poll (context.zig), so the exact poll arithmetic below does not
     // hold under the gc-stress gate.
     if (core.gc.stress_collect) return error.SkipZigTest;
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const realm_a = try core.JSContext.create(rt);
+    const realm_a = try core.JSContext.create(rt, .{});
     defer realm_a.destroy();
-    const realm_b = try core.JSContext.create(rt);
+    const realm_b = try core.JSContext.create(rt, .{});
     defer realm_b.destroy();
 
     const interval: usize = @intCast(core.JSContext.interrupt_counter_reset);
@@ -11807,7 +11805,7 @@ test "realm interrupt cadence advances without a handler and is realm-local" {
 }
 
 test "ordinary objects define own data properties and descriptors" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const obj = try core.Object.create(rt, core.class.ids.object, null);
@@ -11827,7 +11825,7 @@ test "ordinary objects define own data properties and descriptors" {
 }
 
 test "define property enforces non-configurable and non-writable invariants" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const obj = try core.Object.create(rt, core.class.ids.object, null);
@@ -11847,7 +11845,7 @@ test "define property enforces non-configurable and non-writable invariants" {
 }
 
 test "accessor descriptors store getter setter placeholders" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const obj = try core.Object.create(rt, core.class.ids.object, null);
@@ -11869,7 +11867,7 @@ test "accessor descriptors store getter setter placeholders" {
 }
 
 test "prototype traversal and cycle checks are enforced" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const proto = try core.Object.create(rt, core.class.ids.object, null);
@@ -11885,7 +11883,7 @@ test "prototype traversal and cycle checks are enforced" {
 }
 
 test "own keys follow index string symbol ordering" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const obj = try core.Object.create(rt, core.class.ids.object, null);
@@ -11911,7 +11909,7 @@ test "own keys follow index string symbol ordering" {
 }
 
 test "extensibility seal and freeze update descriptor flags" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const obj = try core.Object.create(rt, core.class.ids.object, null);
@@ -11930,7 +11928,7 @@ test "extensibility seal and freeze update descriptor flags" {
 }
 
 test "array length tracks sparse indices and truncation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const array_obj = try core.Object.createArray(rt, null);
@@ -11951,7 +11949,7 @@ test "array length tracks sparse indices and truncation" {
 }
 
 test "array indexed delete does not let dense holes mask ordinary properties" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const array_obj = try core.Object.createArray(rt, null);
@@ -11966,7 +11964,7 @@ test "array indexed delete does not let dense holes mask ordinary properties" {
 }
 
 test "array element storage mode moves between dense and sparse" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const array_obj = try core.Object.createArray(rt, null);
@@ -12006,7 +12004,7 @@ fn exoticOwnKeys(_: *core.Object, rt: *core.JSRuntime) ![]core.Atom {
 }
 
 test "exotic dispatch hooks are called without builtin shortcuts" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const exotic_id = try rt.newClassId(core.class.invalid_class_id);
@@ -12054,7 +12052,7 @@ test "exotic dispatch hooks are called without builtin shortcuts" {
 }
 
 test "explicit value root preserves and releases a symbol across GC" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-external-rooted-symbol");
@@ -12072,9 +12070,9 @@ test "explicit value root preserves and releases a symbol across GC" {
 }
 
 test "finalization registry pending jobs preserve callback and held symbols" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const cleanup_sym = try rt.atoms.newValueSymbol("finalization-cleanup-callback");
@@ -12129,9 +12127,9 @@ test "finalization registry pending jobs preserve callback and held symbols" {
 }
 
 test "minor collection reclaims young garbage and promotes survivors" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     _ = try core.Object.createPlainObject(rt, null);
@@ -12151,9 +12149,9 @@ test "minor collection reclaims young garbage and promotes survivors" {
 }
 
 test "minor block mark clearing preserves old sticky marks" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const old = try core.Object.createPlainObject(rt, null);
@@ -12173,9 +12171,9 @@ test "minor block mark clearing preserves old sticky marks" {
 }
 
 test "the minor reclaims young cycles and parks no deferred frees" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const left_key = try rt.internAtom("minor-drain-left");
@@ -12245,9 +12243,9 @@ test "minor pause distribution retains the complete diagnostic run" {
 }
 
 test "old-to-young edge survives a minor only because the barrier remembered it" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const edge_key = try rt.internAtom("stage5-old-to-young-edge");
@@ -12304,10 +12302,10 @@ test "object remembered bit is consumed and rebuilt across consecutive minors" {
     core.gc.minor_audit = true;
     defer core.gc.minor_audit = saved_audit;
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const edge_key = try rt.internAtom("remembered-bit-two-minors");
@@ -12351,10 +12349,10 @@ test "incremental retirement clears remembered cache before the next generation"
     core.gc.minor_audit = true;
     defer core.gc.minor_audit = saved_audit;
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const edge_key = try rt.internAtom("remembered-bit-cycle-retirement");
@@ -12422,7 +12420,7 @@ test "non-object remembered owners use the byte-6 cache and re-arm across consec
     core.gc.minor_audit = true;
     defer core.gc.minor_audit = saved_audit;
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
 
@@ -12478,9 +12476,9 @@ test "minor full-trace verifier owns its reachability set per runtime" {
     // makes each pass free it before its Runtime can disappear.
     var pass: usize = 0;
     while (pass < 2) : (pass += 1) {
-        const rt = try core.JSRuntime.create(std.testing.allocator);
+        const rt = try core.JSRuntime.create(std.testing.allocator, .{});
         defer rt.destroy();
-        const ctx = try core.JSContext.create(rt);
+        const ctx = try core.JSContext.create(rt, .{});
         defer ctx.destroy();
 
         const rooted = try core.Object.createPlainObject(rt, null);
@@ -12495,9 +12493,9 @@ test "minor full-trace verifier owns its reachability set per runtime" {
 }
 
 test "the generational barrier ignores edges a minor would find anyway" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const young_owner = try core.Object.createPlainObject(rt, null);
@@ -12514,10 +12512,10 @@ test "the folded barrier gate skips exactly the two owner facts" {
     core.gc.minor_audit = true;
     defer core.gc.minor_audit = saved_audit;
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const edge_key = try rt.internAtom("barrier-gate-fold");
@@ -12585,9 +12583,9 @@ test "the folded barrier gate skips exactly the two owner facts" {
 }
 
 test "the barrier gate closes on every phase that needs a richer arm" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const young_owner = try core.Object.createPlainObject(rt, null);
@@ -12637,9 +12635,9 @@ test "the barrier gate closes on every phase that needs a richer arm" {
 }
 
 test "the barrier shades exact targets while marking and remembers owners otherwise" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const owner = try core.Object.createPlainObject(rt, null);
@@ -12660,9 +12658,9 @@ test "the barrier shades exact targets while marking and remembers owners otherw
 }
 
 test "the barrier shades a target the marker had already passed" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     // Held by this frame, so it stays allocated; the point under test is the
@@ -12742,9 +12740,9 @@ test "mark frontier whitelist encodes the epoch exemption" {
 }
 
 test "checked frontier admission requires a published marked header" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const object = try core.Object.createPlainObject(rt, null);
@@ -12760,9 +12758,9 @@ test "checked frontier admission requires a published marked header" {
 }
 
 test "frontier requeue admission checks a prior claim without executing one" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const owner = try core.Object.createPlainObject(rt, null);
@@ -12795,9 +12793,9 @@ test "frontier requeue admission checks a prior claim without executing one" {
 }
 
 test "G-Shape indexed adoption shades the Shape once without requeueing the array" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const owner = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.array, null, 128);
     rt.gc.marking.queue.ensureCapacity(core.gc.Registry.markQueueAllocator());
@@ -12816,9 +12814,9 @@ test "G-Shape indexed adoption shades the Shape once without requeueing the arra
 }
 
 test "G-Shape adoption traces prototype children and symbol keys but skips white owners" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const prototype = try core.Object.createPlainObject(rt, null);
     const child = try core.Object.createPlainObject(rt, null);
@@ -12863,9 +12861,9 @@ test "G-Shape adoption traces prototype children and symbol keys but skips white
 }
 
 test "G-Shape prototype frontier OOM fails before tracing or sweeping" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const prototype = try core.Object.createPlainObject(rt, null);
     const owner = try core.Object.createPlainObject(rt, prototype);
@@ -12886,9 +12884,9 @@ test "G-Shape prototype frontier OOM fails before tracing or sweeping" {
 }
 
 test "G-Shape relocation leaves no raw Shape queued and survives declared major GC" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     rt.forcePreciseRootScanForTest();
     rt.setGCThreshold(std.math.maxInt(usize));
@@ -12923,9 +12921,9 @@ test "G-Shape relocation leaves no raw Shape queued and survives declared major 
 }
 
 test "G-Shape unpublished adoption does not publish a pending owner or target" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const owner = try core.Object.createPlainObject(rt, null);
     const header = &owner.shape_ref.header;
@@ -12952,9 +12950,9 @@ test "G-Shape unpublished adoption does not publish a pending owner or target" {
 }
 
 test "Shape barrier requeues only an owner with a prior mark claim" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const owner = try core.Object.createPlainObject(rt, null);
@@ -12987,9 +12985,9 @@ test "Shape barrier requeues only an owner with a prior mark claim" {
 }
 
 test "incremental abort disables marking before draining every frontier segment" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     rt.forcePreciseRootScanForTest();
 
@@ -13039,9 +13037,9 @@ test "the barrier queue hands whole segments to a private mark stack" {
 }
 
 test "an abandoned retirement transaction closes minors until a major repairs it" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     // Trace-coupled retirement promotes block cells as the trace reaches
@@ -13075,9 +13073,9 @@ test "an abandoned retirement transaction closes minors until a major repairs it
 }
 
 test "a major retires every block-cell survivor it traces" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     // The invariant the bulk walk used to establish by construction: after a
@@ -13123,9 +13121,9 @@ fn countExtentStringHeaders(rt: *core.JSRuntime, header: *const core.gc.Header) 
 }
 
 test "a conservative candidate on a shared extent boundary visits both extents" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const heap = &rt.gc.block_heap;
@@ -13182,9 +13180,9 @@ test "a conservative candidate on a shared extent boundary visits both extents" 
 }
 
 test "a published string extent takes no occupant entry and still resolves conservatively" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     var body = try core.string.String.createLatin1(rt, "e" ** extent_latin1_len);
@@ -13235,9 +13233,9 @@ test "a published string extent takes no occupant entry and still resolves conse
 }
 
 test "minor collection reclaims an unreachable young string extent" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     rt.forcePreciseRootScanForTest();
 
@@ -13267,9 +13265,9 @@ test "minor collection reclaims an unreachable young string extent" {
 }
 
 test "a rooted or remembered young string extent survives the minor" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     rt.forcePreciseRootScanForTest();
 
@@ -13312,9 +13310,9 @@ test "a rooted or remembered young string extent survives the minor" {
 }
 
 test "the whole-heap iterator enumerates string extents and a major removes the unreachable one" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     rt.forcePreciseRootScanForTest();
 
@@ -13378,9 +13376,9 @@ fn atomMarkEpochForTest(rt: *core.JSRuntime, id: anytype) ?u64 {
 
 test "the full-reachable verifier restores extent marks and atom epoch stamps" {
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     rt.forcePreciseRootScanForTest();
 
@@ -13440,9 +13438,9 @@ test "the full-reachable verifier restores extent marks and atom epoch stamps" {
 }
 
 test "incremental begin preserves list-young suffix until finish retirement" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
     rt.forcePreciseRootScanForTest();
@@ -13493,9 +13491,9 @@ test "incremental begin preserves list-young suffix until finish retirement" {
 }
 
 test "representation audit guards block-cell marker direct dispatch" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const obj = try core.Object.createPlainObject(rt, null);
@@ -13519,8 +13517,8 @@ test "independent runtimes collect without touching each other" {
     var runtimes: [8]*core.JSRuntime = undefined;
     var contexts: [8]*core.JSContext = undefined;
     for (&runtimes, &contexts) |*rt_slot, *ctx_slot| {
-        rt_slot.* = try core.JSRuntime.create(std.testing.allocator);
-        ctx_slot.* = try core.JSContext.create(rt_slot.*);
+        rt_slot.* = try core.JSRuntime.create(std.testing.allocator, .{});
+        ctx_slot.* = try core.JSContext.create(rt_slot.*, .{});
     }
     defer for (runtimes, contexts) |rt, ctx| {
         ctx.destroy();
@@ -13556,9 +13554,9 @@ test "independent runtimes collect without touching each other" {
 }
 
 test "a crossing a minor cannot answer is still answered by a major" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     // `minor_young_threshold` is 16k objects, which no unit test builds, so the
@@ -13617,7 +13615,7 @@ test "a crossing a minor cannot answer is still answered by a major" {
 test "a minor-only workload still returns free block pages to the OS" {
     if (comptime core.memory.force_gc_on_allocation_enabled) return error.SkipZigTest;
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const majors_before = rt.gcStats().major_gc_count;
@@ -13658,7 +13656,7 @@ test "a minor-only workload still returns free block pages to the OS" {
 test "ten thousand plain object deaths reach no destructor" {
     if (comptime core.memory.force_gc_on_allocation_enabled) return error.SkipZigTest;
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     // Precise roots: a conservative stack word left over from the loop below
     // would keep a corpse alive and make the counter read zero for the wrong
@@ -13705,7 +13703,7 @@ test "ten thousand plain object deaths reach no destructor" {
 test "young churn that crosses the threshold is paid by the minor, not by a major" {
     if (comptime core.memory.force_gc_on_allocation_enabled) return error.SkipZigTest;
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     // Deliberately NO explicit poll and NO stress knob: the crossing has to be
@@ -13743,9 +13741,9 @@ test "young churn that crosses the threshold is paid by the minor, not by a majo
 test "an old generation that keeps growing keeps triggering majors" {
     if (comptime core.memory.force_gc_on_allocation_enabled) return error.SkipZigTest;
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const stress_before = core.gc.stress_collect;
@@ -13794,9 +13792,9 @@ test "an old generation that keeps growing keeps triggering majors" {
 // young string cell is simply handed to the next allocation, so the array ends
 // up naming another string's bytes rather than freed memory.
 test "a dense buffer adopted by an aged array is remembered for the next minor" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const out = try core.Object.createArray(rt, null);
@@ -13896,9 +13894,9 @@ test "regexp capture strings survive a minor taken inside the match-array fill" 
 }
 
 test "a minor does not move the major's threshold" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const stress_before = core.gc.stress_collect;
@@ -13925,9 +13923,9 @@ test "a minor does not move the major's threshold" {
 }
 
 test "minor detailed stats decompose the outer STW envelope" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const stress_before = core.gc.stress_collect;
@@ -13966,7 +13964,7 @@ test "minor detailed stats decompose the outer STW envelope" {
 }
 
 test "cell resolution stops at the block header and at unallocated cells" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const obj = try core.Object.create(rt, core.class.ids.object, null);
@@ -13987,7 +13985,7 @@ test "cell resolution stops at the block header and at unallocated cells" {
 }
 
 test "carrier exact handles reject stale block-cell generations" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const old = try core.Object.create(rt, core.class.ids.object, null);
     const old_handle = rt.gc.allocationHandle(old.gcHeader()) orelse return error.TestUnexpectedResult;
@@ -14074,7 +14072,7 @@ test "carrier generation authorities reject wrap in both extent and block scheme
 }
 
 test "a minor that keeps reclaiming nothing stops being offered" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const State = @TypeOf(rt.gc.generation);
@@ -14109,9 +14107,9 @@ test "a minor that keeps reclaiming nothing stops being offered" {
 }
 
 test "marking barrier shades grey, not black: the stored object's children survive the remark" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     // B -> C, and the store target A. C's only strong path will run through
@@ -14167,9 +14165,9 @@ test "mark frontier allocation failure invalidates rather than rescans" {
 
 test "runtime recovers a frontier OOM through allocation-boundary full GC" {
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     rt.forcePreciseRootScanForTest();
     rt.setGCThreshold(std.math.maxInt(usize));
@@ -14229,9 +14227,9 @@ test "runtime recovers a frontier OOM through allocation-boundary full GC" {
 
 test "incremental marking preserves a frontier beyond both former 65K bounds" {
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     rt.forcePreciseRootScanForTest();
     rt.setGCThreshold(std.math.maxInt(usize));
@@ -14277,7 +14275,7 @@ test "incremental marking preserves a frontier beyond both former 65K bounds" {
 
 test "incremental settled account excludes storage bytes already debited at condemnation" {
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
     rt.setGCThreshold(std.math.maxInt(usize));
@@ -14310,7 +14308,7 @@ test "incremental settled account excludes storage bytes already debited at cond
 
 test "incremental settled account retains finalizer and list corpse charges" {
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
     rt.setGCThreshold(std.math.maxInt(usize));
@@ -14387,7 +14385,7 @@ test "incremental destruction credit reconciles each reclaimed byte once" {
 
 test "incremental destruction credit funds safe assists from actual native backing release" {
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
     rt.setGCThreshold(std.math.maxInt(usize));
@@ -14445,7 +14443,7 @@ test "incremental destruction credit funds safe assists from actual native backi
 test "incremental destruction credit rejects growth without sufficient deferred charges" {
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
     for ([_]bool{ false, true }) |with_list_charge| {
-        const rt = try core.JSRuntime.create(std.testing.allocator);
+        const rt = try core.JSRuntime.create(std.testing.allocator, .{});
         defer rt.destroy();
         rt.forcePreciseRootScanForTest();
         rt.setGCThreshold(std.math.maxInt(usize));
@@ -14492,7 +14490,7 @@ test "incremental destruction credit rejects growth without sufficient deferred 
 
 test "incremental marking retains requested-byte pacing across storage growth" {
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
     rt.setGCThreshold(rt.memory.allocated_bytes - 1);
@@ -14521,7 +14519,7 @@ test "incremental marking retains requested-byte pacing across storage growth" {
 
 test "incremental scheduler slices consume existing allocation assist debt" {
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
     rt.setGCThreshold(rt.memory.allocated_bytes - 1);
@@ -14539,11 +14537,11 @@ test "incremental scheduler slices consume existing allocation assist debt" {
 }
 
 test "an incremental cycle frees threshold garbage across bounded polls" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const untouched = try core.JSRuntime.create(std.testing.allocator);
+    const untouched = try core.JSRuntime.create(std.testing.allocator, .{});
     defer untouched.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
     // Precise scans: the dead batch below lingers in native registers, and a
@@ -14597,9 +14595,9 @@ test "an incremental cycle frees threshold garbage across bounded polls" {
 }
 
 test "object allocation boundaries pace incremental assists by allocation debt" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
 
@@ -14648,9 +14646,9 @@ fn driveOneIncrementalMajorForCensusTest(rt: *core.JSRuntime, garbage: usize) !u
 
 test "condemning many shapes leaves the transition table exactly consistent" {
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     rt.forcePreciseRootScanForTest();
 
@@ -14726,9 +14724,9 @@ test "the marked-set census is its own opt-in, not a rider on the stats panel" {
     core.gc_trace_stw.mark_footprint_census = false;
     defer core.gc_trace_stw.mark_footprint_census = census_before;
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     try std.testing.expectEqual(@as(u64, 1), try driveOneIncrementalMajorForCensusTest(rt, 256));
@@ -14758,9 +14756,9 @@ test "the incremental finish reports a remark segment net of its census walk" {
     core.gc_trace_stw.mark_footprint_census = true;
     defer core.gc_trace_stw.mark_footprint_census = census_before;
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const remark_before = rt.gc.incremental.stats.phase_finish_remark_ns;
@@ -14786,9 +14784,9 @@ test "incremental cycle envelope keeps one exact MemoryAccount S T P domain" {
     core.gc_trace_stw.detailed_reports = true;
     defer core.gc_trace_stw.detailed_reports = reports_before;
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     rt.forcePreciseRootScanForTest();
 
@@ -14831,7 +14829,7 @@ test "incremental cycle envelope keeps one exact MemoryAccount S T P domain" {
 }
 
 test "synchronous incremental destruction drains more than one parked-free budget" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
     rt.forcePreciseRootScanForTest();
@@ -14874,7 +14872,7 @@ test "synchronous incremental destruction drains more than one parked-free budge
 test "terminal pending stats count accounted block and standalone corpses" {
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
     rt.setGCThreshold(std.math.maxInt(usize));
@@ -14925,7 +14923,7 @@ test "terminal pending stats count accounted block and standalone corpses" {
 }
 
 test "pending class finalizer keeps the incremental morgue open" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
     rt.forcePreciseRootScanForTest();
@@ -14980,7 +14978,7 @@ test "pending class finalizer keeps the incremental morgue open" {
 }
 
 test "incremental block finalizer observes its object without sweep publication" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
     rt.forcePreciseRootScanForTest();
@@ -15016,9 +15014,9 @@ test "incremental block finalizer observes its object without sweep publication"
 }
 
 test "a store during an incremental cycle keeps the stored subgraph alive to the remark" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
 
@@ -15060,9 +15058,9 @@ test "a store during an incremental cycle keeps the stored subgraph alive to the
 }
 
 test "an explicit collection supersedes an open incremental cycle with full precision" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
 
@@ -15092,9 +15090,9 @@ test "an explicit collection supersedes an open incremental cycle with full prec
 }
 
 test "an urgent poll aborts the open cycle and collects fully" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     if (comptime core.memory.force_gc_on_allocation_enabled) return;
 
@@ -15116,7 +15114,7 @@ test "an urgent poll aborts the open cycle and collects fully" {
 }
 
 test "runtime teardown owns a detached generator shell" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     _ = try core.Object.createGeneratorShell(rt, core.class.ids.generator);
     rt.destroy();
 }
@@ -15144,9 +15142,9 @@ fn s3RunMajor(rt: *core.JSRuntime) !void {
 }
 
 test "TGC S3: a shape property key is an atom trace edge" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     rt.forcePreciseRootScanForTest();
 
@@ -15181,9 +15179,9 @@ test "TGC S3: an inline bytecode atom operand is an atom trace edge" {
 }
 
 test "TGC S3: a module record name is an atom trace edge" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     rt.forcePreciseRootScanForTest();
 
@@ -15201,9 +15199,9 @@ test "TGC S3: a module record name is an atom trace edge" {
 }
 
 test "TGC S3: an id-held value symbol keeps its body marked" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     rt.forcePreciseRootScanForTest();
 
@@ -15224,9 +15222,9 @@ test "TGC S3: an id-held value symbol keeps its body marked" {
 }
 
 test "TGC S3-c: an atom no edge and no root reaches is retired by the major" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     rt.forcePreciseRootScanForTest();
 
@@ -15246,9 +15244,9 @@ test "TGC S3-c: an atom no edge and no root reaches is retired by the major" {
 // ---------------------------------------------------------------------------
 
 test "TGC S3-b: a compile scope roots an atom no holder edge names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     rt.forcePreciseRootScanForTest();
 
@@ -15306,9 +15304,9 @@ fn s3OccupiedEntryCount(rt: *core.JSRuntime) usize {
 }
 
 test "TGC S3-c: the atom entry census falls back after a major" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     rt.forcePreciseRootScanForTest();
 
@@ -15337,9 +15335,9 @@ test "TGC S3-c: the atom entry census falls back after a major" {
 }
 
 test "TGC S3-c: a young symbol body a shape names by id survives a minor" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     rt.forcePreciseRootScanForTest();
 
@@ -15385,9 +15383,9 @@ test "TGC S3-c: a young symbol body a shape names by id survives a minor" {
 }
 
 test "TGC S3-c: a thousand fresh symbol keys survive the minors taken while they accumulate" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     rt.forcePreciseRootScanForTest();
 
@@ -15414,9 +15412,9 @@ test "TGC S3-c: a thousand fresh symbol keys survive the minors taken while they
 }
 
 test "TGC S3-c: a symbol interned inside a marking window keeps its body" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     rt.forcePreciseRootScanForTest();
 
@@ -15445,9 +15443,9 @@ test "TGC S3-c: a symbol interned inside a marking window keeps its body" {
 }
 
 test "TGC S3-c: a shape key keeps its atom, and the next major after the shape dies retires it" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     rt.forcePreciseRootScanForTest();
 
@@ -15472,9 +15470,9 @@ test "TGC S3-c: a shape key keeps its atom, and the next major after the shape d
 }
 
 test "TGC S3-c: a WeakRef'd symbol still leaves a weak shell instead of a recycled slot" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     rt.forcePreciseRootScanForTest();
 
@@ -15510,9 +15508,9 @@ test "TGC S3-c: a WeakRef'd symbol still leaves a weak shell instead of a recycl
 }
 
 test "TGC S3: the insertion barrier shades an atom stored during marking" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     rt.forcePreciseRootScanForTest();
 
@@ -15537,9 +15535,9 @@ test "TGC S3: the insertion barrier shades an atom stored during marking" {
 
 test "TGC S3-c: the atom verdict is applied in the pause that took it, not after the morgue drains" {
     if (comptime core.memory.force_gc_on_allocation_enabled) return error.SkipZigTest;
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     rt.forcePreciseRootScanForTest();
 
@@ -15582,9 +15580,9 @@ test "TGC S3-c: the atom verdict is applied in the pause that took it, not after
 }
 
 test "needs_finalizer is recorded in both the header and the block bitmap" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const object = try core.Object.createPlainObject(rt, null);
@@ -15663,7 +15661,7 @@ fn fillS4bDenseArray(rt: *core.JSRuntime, arr: *core.Object, count: u32) !void {
 }
 
 test "storage-cell mint writes runtime kind tags on block and extent paths" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const cases = [_]struct { u8, core.gc.GcKind }{
         .{ core.gc.representation.payload_kind_tag, .payload },
@@ -15701,7 +15699,7 @@ fn installMintedStringBufferBody(kind: core.gc.GcKind, body: [*]u8, total_bytes:
 }
 
 test "TGC S4-b: an external property buffer survives with its owner and dies one major later" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var owner_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.object, null);
@@ -15729,7 +15727,7 @@ test "TGC S4-b: an external property buffer survives with its owner and dies one
 }
 
 test "TGC S4-b: an aged owner remembers a property buffer minted after its promotion" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var owner_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.object, null);
@@ -15756,7 +15754,7 @@ test "TGC S4-b: an aged owner remembers a property buffer minted after its promo
 }
 
 test "Q22: a bitmap-reclaimed storage cell leaves the byte ledger exactly once" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var array_slot: ?*core.Object = null;
@@ -15803,7 +15801,7 @@ test "Q22: a bitmap-reclaimed storage cell leaves the byte ledger exactly once" 
 }
 
 test "TGC S4-b: a growing dense array leaves every superseded element cell to the sweep" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var array_slot: ?*core.Object = try core.Object.createArray(rt, null);
@@ -15830,7 +15828,7 @@ test "TGC S4-b: a growing dense array leaves every superseded element cell to th
 }
 
 test "Q21: the element cell is kept alive by the arm, not by flags.fast_array" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var array_slot: ?*core.Object = try core.Object.createArray(rt, null);
@@ -15866,7 +15864,7 @@ test "Q21: the element cell is kept alive by the arm, not by flags.fast_array" {
 }
 
 test "TGC S4-b: a mapped-arguments var-ref table is an array storage cell" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var arguments_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.mapped_arguments, null);
@@ -15896,7 +15894,7 @@ test "TGC S4-b: a mapped-arguments var-ref table is an array storage cell" {
 }
 
 test "TGC S4-b: storage over the block-cell ceiling takes the extent route and is swept" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var owner_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.object, null);
@@ -15945,7 +15943,7 @@ fn registerS4cPayloadClass(
 }
 
 test "promise coallocation: state and reactions survive through the sole owner" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
     var promise: ?*core.Object = try core.Object.create(rt, core.class.ids.promise, null);
@@ -15993,7 +15991,7 @@ test "promise coallocation: state and reactions survive through the sole owner" 
 }
 
 test "promise coallocation: accounting and allocation failure share the object cell" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.forcePreciseRootScanForTest();
     rt.setGCThreshold(std.math.maxInt(usize));
@@ -16021,7 +16019,7 @@ test "promise coallocation: accounting and allocation failure share the object c
 }
 
 test "TGC S4-c: every a-class payload is a cell that dies one major after its owner" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     try std.testing.expectEqual(@as(usize, 0), rt.gc.liveCountKind(.payload));
 
@@ -16102,7 +16100,7 @@ test "TGC S4-c: every a-class payload is a cell that dies one major after its ow
 }
 
 test "TGC S4-c: a bytecode function's rare/aux record is a payload cell" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var function_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.bytecode_function, null);
@@ -16131,7 +16129,7 @@ test "TGC S4-c: a bytecode function's rare/aux record is a payload cell" {
 }
 
 test "TGC S4-c: an aged promise remembers a reaction cell minted after its promotion" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var promise_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.promise, null);
@@ -16166,7 +16164,7 @@ test "TGC S4-c: an aged promise remembers a reaction cell minted after its promo
 }
 
 test "TGC S4-c: bound arguments, disposable resources and arguments var-refs cross a major" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const arguments_class = try registerS4cPayloadClass(rt, "S4cArgumentsSlice", .arguments);
@@ -16231,7 +16229,7 @@ test "TGC S4-c: bound arguments, disposable resources and arguments var-refs cro
 }
 
 test "TGC S4-c: a payload slice over the block-cell ceiling takes the extent route" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var bound_slot: ?*core.Object = try core.Object.create(rt, core.class.ids.bound_function, null);
@@ -16327,7 +16325,7 @@ test "gc stress deterministic object cycles are reclaimed" {
     var prng = Rng.init(0x7a6a_6763_0001);
     const random = prng.random();
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const count = 128;
@@ -16372,7 +16370,7 @@ test "gc stress weak map preserved key keeps value alive" {
     var prng = Rng.init(0x7a6a_6763_0002);
     const random = prng.random();
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const weakmap = try core.Object.create(rt, core.class.ids.weakmap, null);
@@ -16427,7 +16425,7 @@ test "gc stress weak map dead cyclic keys clear values" {
     var prng = Rng.init(0x7a6a_6763_0003);
     const random = prng.random();
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const weakmap = try core.Object.create(rt, core.class.ids.weakmap, null);
@@ -16484,9 +16482,9 @@ test "gc stress finalization registry dead target queues pending job" {
     var prng = Rng.init(0x7a6a_6763_0004);
     const random = prng.random();
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    var ctx = try core.JSContext.create(rt);
+    var ctx = try core.JSContext.create(rt, .{});
     var ctx_alive = true;
     defer if (ctx_alive) ctx.destroy();
 
@@ -16542,7 +16540,7 @@ test "gc stress function bytecode constant pool object cycles are reclaimed" {
     var prng = Rng.init(0x7a6a_6763_0006);
     const random = prng.random();
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const count = 17;
@@ -16606,11 +16604,11 @@ fn expectStringValue(value: core.JSValue, expected: []const u8) !void {
 }
 
 test "engine production: 8MB cap OOM reaches JS catch as InternalError and the context stays usable" {
-    const rt = try core.JSRuntime.createWithOptions(std.testing.allocator, .{
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{
         .memory_limit = cap_bytes,
     });
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     var wrapper = BindingContext.borrowCore(ctx);
 
@@ -16728,9 +16726,9 @@ const ExhaustState = struct {
 
 test "engine production: exhausted-heap OOM delivery to JS catch allocates nothing" {
     var counting = CountingAllocator{ .backing = std.testing.allocator };
-    const rt = try core.JSRuntime.createWithOptions(counting.allocator(), .{});
+    const rt = try core.JSRuntime.create(counting.allocator(), .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     var wrapper = BindingContext.borrowCore(ctx);
 
@@ -16858,13 +16856,13 @@ test "production embedding can own JSRuntime and JSContext directly" {
 }
 
 test "production embedding API applies limits and releases eval handles" {
-    const rt = try zjs.JSRuntime.createWithOptions(std.testing.allocator, .{
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{
         .stack_size = 128 * 1024,
         .gc_threshold = 32 * 1024,
     });
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     try std.testing.expectEqual(@as(usize, 128 * 1024), rt.stackSize());
@@ -16879,12 +16877,12 @@ test "production embedding API applies limits and releases eval handles" {
 }
 
 test "production embedding can configure context policy through public methods" {
-    const rt = try zjs.JSRuntime.createWithOptions(std.testing.allocator, .{
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{
         .stack_size = 96 * 1024,
     });
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.createWithOptions(rt, .{
+    const ctx = try zjs.JSContext.create(rt, .{
         .track_unhandled_rejections = false,
     });
     defer ctx.destroy();
@@ -16903,10 +16901,10 @@ test "production embedding can configure context policy through public methods" 
 }
 
 test "production default host surface stays minimal" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     var output_buffer: [160]u8 = undefined;
@@ -16927,10 +16925,10 @@ test "production default host surface stays minimal" {
 }
 
 test "production event loop does not add product runtime globals" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     var output_buffer: [160]u8 = undefined;
@@ -16953,10 +16951,10 @@ test "production event loop does not add product runtime globals" {
 }
 
 test "production embedding can install external host functions" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     var state = HostFunctionState{ .value = 42 };
@@ -16967,10 +16965,10 @@ test "production embedding can install external host functions" {
 }
 
 test "production embedding can create external host function values" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     var state = HostFunctionState{ .value = 7 };
@@ -17007,10 +17005,10 @@ test "production embedding can create external host function values" {
 }
 
 test "production embedding can create objects and define data properties" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const object = try ctx.createObject();
@@ -17021,10 +17019,10 @@ test "production embedding can create objects and define data properties" {
 }
 
 test "production embedding can inspect own property descriptors by JS key" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const envelope = try ctx.eval(
@@ -17072,10 +17070,10 @@ test "production embedding can inspect own property descriptors by JS key" {
 }
 
 test "production embedding can create strings and convert values to owned utf8" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const direct = try ctx.createString("caf\xc3\xa9");
@@ -17090,10 +17088,10 @@ test "production embedding can create strings and convert values to owned utf8" 
 }
 
 test "production embedding can convert values to numbers" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     try std.testing.expectEqual(@as(?f64, 42), zjs.JSValue.number(42.0).asNumber());
@@ -17108,10 +17106,10 @@ test "production embedding can convert values to numbers" {
 }
 
 test "production embedding can inspect callable and constructor values" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const function = try ctx.eval("(function NamedForEmbedding() {})", .{});
@@ -17131,10 +17129,10 @@ test "production embedding can inspect callable and constructor values" {
 }
 
 test "production embedding can call JavaScript functions" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const function = try ctx.eval("(function addToBase(a, b) { return this.base + a + b; })", .{});
@@ -17155,10 +17153,10 @@ test "production embedding can call JavaScript functions" {
 }
 
 test "production embedding can compare values with SameValue semantics" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     try std.testing.expect(zjs.JSValue.float64(std.math.nan(f64)).sameValue(zjs.JSValue.float64(std.math.nan(f64))));
@@ -17171,10 +17169,10 @@ test "production embedding can compare values with SameValue semantics" {
 }
 
 test "production embedding can inspect arrays and indexed values" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const array = try ctx.eval("[1, 2, 3]", .{});
@@ -17197,7 +17195,7 @@ test "production embedding can inspect arrays and indexed values" {
 }
 
 test "production embedding can inspect runtime memory usage without internal modules" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const usage: zjs.RuntimeMemoryUsage = rt.memoryUsage();
@@ -17207,10 +17205,10 @@ test "production embedding can inspect runtime memory usage without internal mod
 }
 
 test "production embedding roots host-held values with public handles" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const object = try ctx.eval("({ answer: 42 })", .{});
@@ -17237,10 +17235,10 @@ test "production embedding roots host-held values with public handles" {
 }
 
 test "production embedding can expose owned and shared byte stores" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     var owned_state = BytesStoreState{ .allocator = std.testing.allocator };
@@ -17306,10 +17304,10 @@ test "production embedding can expose owned and shared byte stores" {
 }
 
 test "production runtime can detach array buffers" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     var owned_state = BytesStoreState{ .allocator = std.testing.allocator };
@@ -17344,10 +17342,10 @@ test "production runtime can detach array buffers" {
 }
 
 test "production embedding can retain and rewrap shared array buffers" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     var shared_state = BytesStoreState{ .allocator = std.testing.allocator };
@@ -17363,9 +17361,9 @@ test "production embedding can retain and rewrap shared array buffers" {
     var shared_ref = try ctx.retainSharedArrayBuffer(original);
     defer shared_ref.release();
 
-    const other_rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const other_rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer other_rt.destroy();
-    const other_ctx = try zjs.JSContext.create(other_rt);
+    const other_ctx = try zjs.JSContext.create(other_rt, .{});
     defer other_ctx.destroy();
 
     const rewrapped = try other_ctx.sharedArrayBufferFromRef(shared_ref);
@@ -17384,10 +17382,10 @@ test "production embedding can retain and rewrap shared array buffers" {
 test "production embedding lifecycle deinitializes repeated script and module evals" {
     var index: usize = 0;
     while (index < 4) : (index += 1) {
-        const rt = try zjs.JSRuntime.create(std.testing.allocator);
+        const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
         defer rt.destroy();
 
-        const ctx = try zjs.JSContext.create(rt);
+        const ctx = try zjs.JSContext.create(rt, .{});
         defer ctx.destroy();
 
         const script_result = try ctx.eval(
@@ -17405,10 +17403,10 @@ test "production embedding lifecycle deinitializes repeated script and module ev
 }
 
 test "production module import.meta identity survives methods and nested closures" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     _ = try ctx.eval(
@@ -17430,10 +17428,10 @@ test "production module import.meta identity survives methods and nested closure
 }
 
 test "production embedding memory limit reports allocation failure without leaking" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     rt.setMemoryLimit(rt.memory.allocated_bytes);
@@ -17443,10 +17441,10 @@ test "production embedding memory limit reports allocation failure without leaki
 }
 
 test "production embedding public API allocation failures keep host ownership intact" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const object = try ctx.eval("({ answer: 42 })", .{});
@@ -17516,10 +17514,10 @@ test "production embedding public API allocation failures keep host ownership in
 }
 
 test "production embedding interrupt handler aborts unbounded execution" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     var state = InterruptState{};
@@ -17531,10 +17529,10 @@ test "production embedding interrupt handler aborts unbounded execution" {
 }
 
 test "production embedding interrupt handler aborts conditional-only backedge" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     var state = InterruptState{};
@@ -17548,10 +17546,10 @@ test "production embedding interrupt handler aborts conditional-only backedge" {
 }
 
 test "production embedding interrupt handler aborts a recursion-only call loop" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     var state = InterruptState{};
@@ -17568,10 +17566,10 @@ test "production embedding interrupt handler aborts a recursion-only call loop" 
 }
 
 test "production embedding takeException captures exception snapshot without leaking" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     _ = ctx.eval("throw new Error('test exception snapshot');", .{}) catch |err| {
@@ -17582,10 +17580,10 @@ test "production embedding takeException captures exception snapshot without lea
 }
 
 test "production embedding can create and throw named errors" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const created = try ctx.createError("TypeError", "host-created", .{});
@@ -17607,10 +17605,10 @@ test "production embedding can create and throw named errors" {
 }
 
 test "production embedding can match pending exceptions by error name" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     try std.testing.expect(!try ctx.pendingExceptionMatchesErrorName("TypeError"));
@@ -17631,10 +17629,10 @@ test "production embedding can match pending exceptions by error name" {
 }
 
 test "production embedding can create independent realms" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const retained = blk: {
@@ -17671,10 +17669,10 @@ test "production embedding can create independent realms" {
 }
 
 test "production embedding can eval script source in explicit function realms" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const realm = try ctx.createRealm();
@@ -17708,10 +17706,10 @@ test "production embedding can eval script source in explicit function realms" {
 }
 
 test "production embedding getProperty follows JavaScript accessors" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const object = try ctx.eval(
@@ -17737,10 +17735,10 @@ test "production embedding getProperty follows JavaScript accessors" {
 }
 
 test "production embedding getProperty reports accessor exceptions" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const object = try ctx.eval(
@@ -17787,9 +17785,9 @@ const S3HostDefineMajorProbe = struct {
 };
 
 test "TGC S3: a host-defined property name stays reachable across a major taken mid-define" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     // Install the standard globals before arming the probe: their own atom

@@ -70,7 +70,7 @@ zjs / zjs-profile                    run-test262 / test-runner
 
 ## test262 宿主 `$262.agent`
 
-`src/cli/run_test262_host.zig` 实现 test262 的多 agent 协调器，不是引擎公共 API。
+`src/test262_host.zig` 实现 test262 的多 agent 协调器，不是引擎公共 API。
 
 进程级 `Test262AgentCoordinator`（mutex + cond + agent 表 + report 表）跨 worker 线程共享。每个 `$262.agent.start(source)`：
 

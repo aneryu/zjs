@@ -169,7 +169,7 @@ fn emitCreateUsingDisposableStack(s: *State) Error!u16 {
 }
 
 fn emitUsingAwait(s: *State) Error!void {
-    if (s.lex.is_module and s.cur_func_stack.len == 0) s.function.ensureModule().has_top_level_await = true;
+    if (s.lex.is_module and s.cur_func_stack.len == 0) s.ensureModule().has_top_level_await = true;
     if (!s.ctx.in_async and !(s.lex.is_module and s.cur_func_stack.len == 0)) return Error.AwaitOutsideAsyncFunction;
     // zjs-only explicit-resource-management lowering reuses the
     // ordinary await opcode through the identity-native emitter.
@@ -299,7 +299,7 @@ const OpenUsingBlock = struct {
 fn openUsingBlock(s: *State) Error!OpenUsingBlock {
     const frame_len = s.using_block_frames.items.len;
     const catch_marker_depth = s.active_catch_marker_depth;
-    try array_list_erased.append(&s.using_block_frames, s.function.memory.allocator, .{});
+    try array_list_erased.append(&s.using_block_frames, s.memory.allocator, .{});
     return .{ .frame_len = frame_len, .catch_marker_depth = catch_marker_depth };
 }
 
@@ -582,8 +582,6 @@ fn parseReturnStatement(s: *State) Error!void {
     try s.advance();
     const has_expr = s.peekKind() != .semicolon and s.peekKind() != .rbrace and !s.gotLineTerminator();
     if (has_expr) try expressions.parseExpr(s);
-    const return_snapshot = s.takeEmissionSnapshot();
-    errdefer s.rollbackEmission(return_snapshot);
     const updated_source_loc = try emitter.reattributeReturnTailCallSource(s, has_expr, statement_source);
     errdefer if (updated_source_loc) |updated| emitter.restoreSourceLoc(s, updated);
     // qjs emits one return-keyword source event before the whole
@@ -598,8 +596,6 @@ fn parseThrowStatement(s: *State) Error!void {
     try s.advance();
     if (s.gotLineTerminator()) return s.failUnexpectedToken();
     try expressions.parseExpr(s);
-    const throw_snapshot = s.takeEmissionSnapshot();
-    errdefer s.rollbackEmission(throw_snapshot);
     // qjs TOK_THROW emits the keyword source immediately before
     // its source-less OP_throw.
     try emitter.emitGrammarSource(s, statement_source);

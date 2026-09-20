@@ -11,15 +11,13 @@ const core = @import("../core/root.zig");
 const sort_erased = @import("../core/sort_erased.zig");
 const bytecode = @import("../bytecode.zig");
 const builder = @import("builder.zig");
-const cfg = @import("cfg.zig");
+const temp_stream = @import("temp_stream.zig");
 const labels = @import("labels.zig");
 
 const opcode = bytecode.opcode;
 const op = opcode.op;
 const binding_rules = bytecode.binding_rules;
 const rules = binding_rules.surface;
-
-const audit_oracles = cfg.audit_oracles;
 
 /// The binding-rules error set; the two passes share it.
 pub const Error = binding_rules.Error;
@@ -105,12 +103,12 @@ pub const ResolvedProduct = struct {
 
 /// Geometric grow walk is the already-linked `builder.reserve` /
 /// `reserveSlowBytes` body. This pass still owns its output slices.
-const TempInstruction = cfg.TempInstruction;
+const TempInstruction = temp_stream.TempInstruction;
 // Sequential walks have the exact atom-ledger cursor for their current pc and
 // enforce the QuickJS phase-1 opcode view. Random-access pattern probes compare
 // their exact fixed-width opcodes directly, like QuickJS `code_match`.
-const phase1Instruction = cfg.phase1Instruction;
-const BindEntry = cfg.BindEntry;
+const phase1Instruction = temp_stream.phase1Instruction;
+const BindEntry = temp_stream.BindEntry;
 
 fn updateLabel(product: *ResolvedProduct, label_index: u32, delta: i32) Error!u32 {
     if (label_index >= product.label_len) return error.InvalidBytecode;
@@ -154,17 +152,12 @@ const Resolver = struct {
     input_sources: []const builder.SourceSlot,
     product: *ResolvedProduct,
     binds: []BindEntry,
-    graph: *const cfg.Graph,
 
     pending_tail_rewrites: []PendingTailRewrite = &.{},
     pending_tail_capacity: usize = 0,
     pending_tail_len: u32 = 0,
-    opt_boundaries: []cfg.OptimizationBoundary = &.{},
-    opt_boundary_capacity: usize = 0,
-    opt_boundary_len: u32 = 0,
 
     bind_cursor: usize = 0,
-    block_cursor: usize = 0,
     atom_index: u32 = 0,
     source_cursor: u32 = 0,
     source_attach_cursor: u32 = 0,
@@ -181,14 +174,6 @@ const Resolver = struct {
         self.pending_tail_rewrites = &.{};
         self.pending_tail_capacity = 0;
         self.pending_tail_len = 0;
-        if (comptime audit_oracles) {
-            if (self.opt_boundary_capacity != 0) {
-                self.product.memory.free(cfg.OptimizationBoundary, self.opt_boundaries);
-            }
-            self.opt_boundaries = &.{};
-            self.opt_boundary_capacity = 0;
-            self.opt_boundary_len = 0;
-        }
     }
 
     /// QuickJS discovers a binding and its preceding with/eval environments
@@ -230,62 +215,6 @@ const Resolver = struct {
         // keeps reporting error.NoFunctionDef exactly as before.
         const fd = self.ctx.function_def orelse return true;
         return fd.closure_var_may_have_dynamic_env;
-    }
-
-    /// `replacement_product` is the PRODUCT offset the replacement is written
-    /// at, captured by the caller at the instant of the replacing emission
-    /// (`labels.unbound` for a fold whose replacement is emitted later; the
-    /// deferred make_ref tail patches it in `emitPendingTailRewrite`). The F3
-    /// classifier compares it against the product offset of the label bound at
-    /// `replacement_start`.
-    fn recordOptimizationBoundary(
-        self: *Resolver,
-        kind: cfg.OptimizationBoundaryKind,
-        fold_start: u32,
-        consumed_end: u32,
-        replacement_start: u32,
-        replacement_product: u32,
-    ) Error!void {
-        if (comptime !audit_oracles) return;
-        if (self.opt_boundary_len == std.math.maxInt(u32))
-            return error.BytecodeOverflow;
-        try builder.reserve(
-            cfg.OptimizationBoundary,
-            self.product.memory,
-            &self.opt_boundaries,
-            &self.opt_boundary_capacity,
-            self.opt_boundary_len,
-            1,
-            4,
-        );
-        self.opt_boundaries[self.opt_boundary_len] = .{
-            .kind = kind,
-            .fold_start = fold_start,
-            .consumed_end = consumed_end,
-            .replacement_start = replacement_start,
-            .replacement_product = replacement_product,
-        };
-        self.opt_boundary_len += 1;
-    }
-
-    /// Fill in the product offset of a fold whose replacement is emitted after
-    /// the boundary was recorded (make_ref tail). Called from the emission
-    /// point with `product.code_len` taken before the replacing write.
-    fn resolveDeferredFoldProduct(
-        self: *Resolver,
-        kind: cfg.OptimizationBoundaryKind,
-        fold_start: u32,
-        replacement_product: u32,
-    ) void {
-        if (comptime !audit_oracles) return;
-        for (self.opt_boundaries[0..self.opt_boundary_len]) |*boundary| {
-            if (boundary.kind == kind and boundary.fold_start == fold_start and
-                boundary.replacement_product == labels.unbound)
-            {
-                boundary.replacement_product = replacement_product;
-                return;
-            }
-        }
     }
 
     inline fn streamHasCapacity(capacity: usize, used: u32, need: usize) bool {
@@ -555,14 +484,10 @@ const Resolver = struct {
         self: *Resolver,
         atom_id: core.atom.Atom,
         scope_level: i32,
-        oracle_plan: ?rules.ScopeVarProbePlanAlias,
     ) Error!bool {
         if (!rules.scopeVarDynamicProbeEligible(atom_id, scope_level) or
             !try self.hasDynamicEnvObjects())
         {
-            if (comptime audit_oracles) {
-                if (oracle_plan != null) return error.InvalidBytecode;
-            }
             return false;
         }
         return true;
@@ -579,11 +504,8 @@ const Resolver = struct {
         scope_level: i32,
         kind: opcode.dyn_env.ProbeKind,
         binding: rules.ScopeVarBindingAlias,
-        oracle_plan: ?rules.ScopeVarProbePlanAlias,
     ) Error!?u32 {
         var label_done: ?u32 = null;
-        const code_start = self.product.code_len;
-        const atom_start = self.product.atom_len;
 
         var with_iter = rules.localWithProbeIteratorInit(self.ctx, atom_id, scope_level);
         while (rules.localWithProbeIteratorNext(&with_iter)) |idx| {
@@ -631,19 +553,6 @@ const Resolver = struct {
             }
         }
 
-        if (comptime audit_oracles) {
-            const actual_size: usize = @intCast(self.product.code_len - code_start);
-            const actual_count: usize = @intCast(self.product.atom_len - atom_start);
-            if (oracle_plan) |expected| {
-                if (actual_size != expected.prefix_size or actual_count != expected.count or
-                    label_done == null)
-                {
-                    return error.InvalidBytecode;
-                }
-            } else if (actual_size != 0 or actual_count != 0 or label_done != null) {
-                return error.InvalidBytecode;
-            }
-        }
         return label_done;
     }
 
@@ -969,11 +878,6 @@ const Resolver = struct {
         {
             return error.InvalidBytecode;
         }
-        self.resolveDeferredFoldProduct(
-            .make_ref_tail,
-            rewrite.input_offset,
-            self.product.code_len,
-        );
         if (rewrite.emit_dup) try self.emitInstruction(&.{op.dup}, null);
         try self.writeScopeVarAction(core.atom.null_atom, rewrite.put_action);
         self.absorbSourcesThrough(rewrite.input_offset + 1);
@@ -1242,70 +1146,26 @@ const Resolver = struct {
         return false;
     }
 
-    fn blockAt(self: *Resolver, input_pos: u32) Error!usize {
-        if (input_pos > self.input.code_len or self.graph.block_starts.len == 0)
-            return error.InvalidBytecode;
-        while (self.block_cursor + 1 < self.graph.block_starts.len and
-            self.graph.block_starts[self.block_cursor + 1] <= input_pos)
-        {
-            self.block_cursor += 1;
-        }
-        if (self.block_cursor >= self.graph.blocks.len or
-            self.graph.block_starts[self.block_cursor] > input_pos)
-        {
-            return error.InvalidBytecode;
-        }
-        return self.block_cursor;
-    }
-
-    /// Exact-CFG dead boundary with qjs ref_count bookkeeping retained for
-    /// Stage 4 short-form selection. Dead blocks discard every bind at their
-    /// start; at a reachable boundary, only zero-reference label positions are
-    /// suppressed before the ordinary live bind pass.
+    /// Dead boundary test with qjs `update_label` bookkeeping (quickjs.c
+    /// skip_dead_code): a boundary whose labels all have zero references is
+    /// dead and its binds are retired; at a live boundary only the
+    /// zero-reference, non-barrier label positions are suppressed before the
+    /// ordinary live bind pass.
     fn deadBoundaryAt(self: *Resolver, input_pos: u32) Error!bool {
-        if (comptime !audit_oracles) {
-            if (self.next_bind_offset < input_pos) return error.InvalidBytecode;
-            if (self.next_bind_offset != input_pos) return false;
-            var end = self.bind_cursor;
-            while (end < self.binds.len and self.binds[end].input_offset == input_pos) : (end += 1) {}
-            std.debug.assert(end != self.bind_cursor);
-
-            var has_live = false;
-            for (self.binds[self.bind_cursor..end]) |entry| {
-                if (self.product.label_slots[entry.label_index].ref_count != 0) {
-                    has_live = true;
-                    break;
-                }
-            }
-            if (has_live) {
-                for (self.binds[self.bind_cursor..end]) |*entry| {
-                    const slot = self.product.label_slots[entry.label_index];
-                    if (slot.ref_count == 0 and !slot.flags.match_barrier)
-                        entry.dead_skipped = true;
-                }
-                return true;
-            }
-
-            for (self.binds[self.bind_cursor..end]) |*entry| {
-                std.debug.assert(self.product.label_slots[entry.label_index].first_reloc == labels.no_reloc);
-                entry.dead_skipped = true;
-            }
-            self.bind_cursor = end;
-            self.refreshBindFrontier();
-            return false;
-        }
-
-        const block_index = try self.blockAt(input_pos);
         if (self.next_bind_offset < input_pos) return error.InvalidBytecode;
         if (self.next_bind_offset != input_pos) return false;
         var end = self.bind_cursor;
         while (end < self.binds.len and self.binds[end].input_offset == input_pos) : (end += 1) {}
         std.debug.assert(end != self.bind_cursor);
 
-        if (self.graph.block_starts[block_index] != input_pos)
-            return error.InvalidBytecode;
-        std.debug.assert(self.graph.block_starts[block_index] == input_pos);
-        if (self.graph.isReachable(block_index)) {
+        var has_live = false;
+        for (self.binds[self.bind_cursor..end]) |entry| {
+            if (self.product.label_slots[entry.label_index].ref_count != 0) {
+                has_live = true;
+                break;
+            }
+        }
+        if (has_live) {
             for (self.binds[self.bind_cursor..end]) |*entry| {
                 const slot = self.product.label_slots[entry.label_index];
                 if (slot.ref_count == 0 and !slot.flags.match_barrier)
@@ -1523,7 +1383,7 @@ const Resolver = struct {
             return false;
         }
 
-        var previous: ?cfg.SourcePoint = if (low == 0) null else .{
+        var previous: ?temp_stream.SourcePoint = if (low == 0) null else .{
             .line = self.input_sources[low - 1].line,
             .col = self.input_sources[low - 1].col,
         };
@@ -1531,7 +1391,7 @@ const Resolver = struct {
         while (index < self.input_sources.len and
             self.input_sources[index].temp_offset == input_pos) : (index += 1)
         {
-            const current: cfg.SourcePoint = .{
+            const current: temp_stream.SourcePoint = .{
                 .line = self.input_sources[index].line,
                 .col = self.input_sources[index].col,
             };
@@ -1643,52 +1503,17 @@ const Resolver = struct {
             scope_operand.level,
             op_id,
         );
-        if (comptime audit_oracles) {
-            const action = rules.resolvedScopeVarPlanAction(plan);
-            const oracle = try rules.planScopeVarLowering(
-                self.ctx,
-                atom_id,
-                scope_operand,
-                op_id,
-                false,
-            );
-            if (!std.meta.eql(action, oracle.action)) return error.InvalidBytecode;
-        }
-
         var label_done: ?u32 = null;
         // Gate the whole qualification chain on the per-function predicate
-        // (qjs:32973 is only reached from walk events, never per op).  Audit
-        // builds still run the full chain so the oracle coverage inside
-        // `needsDynamicEnvProbes`/`emitDynamicEnvProbes` is unchanged.
-        const probes_possible = self.dynamicEnvProbesPossible();
-        if (audit_oracles or probes_possible) {
+        // (qjs:32973 is only reached from walk events, never per op).
+        if (self.dynamicEnvProbesPossible()) {
             if (rules.scopeVarProbeKind(op_id, scope_operand.no_dynamic_env)) |kind| {
-                const oracle_plan = if (comptime audit_oracles)
-                    rules.evalVarObjectProbePlan(
-                        self.ctx,
-                        atom_id,
-                        scope_operand.level,
-                        op_id,
-                        kind,
-                    )
-                else
-                    null;
-                if (try self.needsDynamicEnvProbes(
-                    atom_id,
-                    scope_operand.level,
-                    oracle_plan,
-                )) {
-                    if (comptime audit_oracles) {
-                        // Fail closed: the gate claimed no probe walk can be
-                        // required, but the precise chain disagrees.
-                        if (!probes_possible) return error.InvalidBytecode;
-                    }
+                if (try self.needsDynamicEnvProbes(atom_id, scope_operand.level)) {
                     label_done = try self.emitDynamicEnvProbes(
                         atom_id,
                         scope_operand.level,
                         rules.scopeVarProbeWireKind(kind),
                         rules.resolvedScopeVarPlanBinding(plan),
-                        oracle_plan,
                     );
                 }
             }
@@ -1718,35 +1543,15 @@ const Resolver = struct {
         else
             return error.InvalidBytecode;
         // Same per-function gate as `lowerScopeVar`: qjs:32973 is only reached
-        // from walk events.  Audit builds keep the full chain plus a fail-
-        // closed gate/oracle agreement check.
-        const probes_possible = self.dynamicEnvProbesPossible();
+        // from walk events.
         var label_done: ?u32 = null;
-        if (audit_oracles or probes_possible) {
-            const oracle_plan = if (comptime audit_oracles)
-                rules.evalVarObjectProbePlan(
-                    self.ctx,
-                    atom_id,
-                    scope_operand.level,
-                    op_id,
-                    probe_kind,
-                )
-            else
-                null;
-            if (try self.needsDynamicEnvProbes(
-                atom_id,
-                scope_operand.level,
-                oracle_plan,
-            )) {
-                if (comptime audit_oracles) {
-                    if (!probes_possible) return error.InvalidBytecode;
-                }
+        if (self.dynamicEnvProbesPossible()) {
+            if (try self.needsDynamicEnvProbes(atom_id, scope_operand.level)) {
                 label_done = try self.emitDynamicEnvProbes(
                     atom_id,
                     scope_operand.level,
                     rules.scopeVarProbeWireKind(probe_kind),
                     binding,
-                    oracle_plan,
                 );
             }
         }
@@ -1793,74 +1598,25 @@ const Resolver = struct {
             // Product offset the consumed head resolves to. Nothing has been
             // emitted since the caller's passBindsAt(position), so this is
             // exactly where a label bound at `position` was bound.
-            const head_product = self.product.code_len;
-            var value_product = head_product;
             var next = position_next;
             if (fold.reads_value) {
                 try self.passSideEventsThrough(position_next);
-                value_product = self.product.code_len;
                 try self.writeScopeVarAction(atom_id, fold.get_action);
                 next = std.math.add(u32, next, 1) catch return error.InvalidBytecode;
-            }
-            if (comptime audit_oracles) {
-                const tail_end = std.math.add(u32, fold.tail_offset, 2) catch
-                    return error.InvalidBytecode;
-                // The head is one span per consumed instruction: a bind may
-                // legitimately sit at position_next and is passed above.
-                try self.recordOptimizationBoundary(
-                    .make_ref_head,
-                    position,
-                    position_next,
-                    position,
-                    head_product,
-                );
-                if (fold.reads_value) {
-                    try self.recordOptimizationBoundary(
-                        .make_ref_head,
-                        position_next,
-                        next,
-                        position_next,
-                        value_product,
-                    );
-                }
-                // The tail replacement is emitted later, at the loop visit of
-                // fold.tail_offset; emitPendingTailRewrite fills the product.
-                try self.recordOptimizationBoundary(
-                    .make_ref_tail,
-                    fold.tail_offset,
-                    tail_end,
-                    fold.tail_offset,
-                    labels.unbound,
-                );
             }
             return next;
         }
 
-        const oracle_plan = if (comptime audit_oracles)
-            rules.evalVarObjectProbePlan(
-                self.ctx,
-                atom_id,
-                scope_operand.level,
-                op.scope_make_ref,
-                .make_ref,
-            )
-        else
-            null;
         // qjs:33024-33032, 33287-33299, 33332-33336. Only a surviving
         // reference captures a local/argument cell.
         try rules.markReferenceTakenBinding(self.ctx, atom_id, scope_operand.level);
 
-        const label_done = if (try self.needsDynamicEnvProbes(
-            atom_id,
-            scope_operand.level,
-            oracle_plan,
-        ))
+        const label_done = if (try self.needsDynamicEnvProbes(atom_id, scope_operand.level))
             try self.emitDynamicEnvProbes(
                 atom_id,
                 scope_operand.level,
                 .make_ref,
                 binding,
-                oracle_plan,
             )
         else
             null;
@@ -1941,18 +1697,6 @@ const Resolver = struct {
                         self.code[slot.bound_offset] == op.ret)
                     {
                         _ = try updateLabel(self.product, label_index, -1);
-                        if (comptime audit_oracles) {
-                            // The replacement is empty: the anchor is the
-                            // product offset the deleted gosub would have
-                            // occupied, i.e. the current output cursor.
-                            try self.recordOptimizationBoundary(
-                                .gosub_empty,
-                                position,
-                                position_next,
-                                position,
-                                self.product.code_len,
-                            );
-                        }
                     } else {
                         try self.copyInputInstruction(position, instruction, input_atom);
                     }
@@ -2012,17 +1756,7 @@ const Resolver = struct {
                             var rewritten: [5]u8 = undefined;
                             rewritten[0] = first.branch_op;
                             std.mem.writeInt(u32, rewritten[1..5], target.label_index, .little);
-                            const fold_product = self.product.code_len;
                             try self.emitInstruction(&rewritten, null);
-                            if (comptime audit_oracles) {
-                                try self.recordOptimizationBoundary(
-                                    .dup_branch_fold,
-                                    position,
-                                    first.after,
-                                    position,
-                                    fold_product,
-                                );
-                            }
                             self.absorbSourcesThrough(first.drop_pos);
                             position_next = first.after;
                         } else {
@@ -2036,17 +1770,7 @@ const Resolver = struct {
                 // qjs:34343-34358.
                 op.insert3 => {
                     if (try self.matchInsertTail(position_next)) |match| {
-                        const fold_product = self.product.code_len;
                         try self.emitInstruction(&.{match.middle_op}, null);
-                        if (comptime audit_oracles) {
-                            try self.recordOptimizationBoundary(
-                                .insert_tail_fold,
-                                position,
-                                match.after,
-                                position,
-                                fold_product,
-                            );
-                        }
                         self.absorbSourcesThrough(match.drop_pos);
                         position_next = match.after;
                     } else {
@@ -2377,76 +2101,8 @@ fn buildBindIndex(
         };
         bind_index += 1;
     }
-    sort_erased.heap(BindEntry, binds, {}, cfg.bindLessThan);
+    sort_erased.heap(BindEntry, binds, {}, temp_stream.bindLessThan);
     return binds;
-}
-
-/// Deliver reachable direct-eval capture events before the output walk can
-/// lower an earlier `leave_scope`. QuickJS marks the scope at OP_eval /
-/// OP_apply_eval (qjs:34247-34262); zjs's exact-CFG preflight makes that
-/// binding fact available to every real consumer regardless of byte order.
-fn markReachableEvalCaptures(
-    input: *const builder.Builder,
-    graph: *const cfg.Graph,
-    fd: *bytecode.function_def.FunctionDef,
-) Error!void {
-    const code = input.code[0..input.code_len];
-    const atom_ledger = input.atom_operands[0..input.atom_len];
-    var position: u32 = 0;
-    var atom_index: u32 = 0;
-    var block_index: usize = 0;
-
-    while (position < input.code_len) {
-        while (block_index + 1 < graph.block_starts.len and
-            graph.block_starts[block_index + 1] <= position)
-        {
-            block_index += 1;
-        }
-        if (block_index >= graph.blocks.len or
-            graph.block_starts[block_index] > position)
-        {
-            return error.InvalidBytecode;
-        }
-
-        const instruction = try phase1Instruction(
-            code,
-            atom_ledger,
-            position,
-            atom_index,
-        );
-        const pc: usize = @intCast(position);
-        if (instruction.has_atom) {
-            if (atom_index >= atom_ledger.len or instruction.size < 5)
-                return error.InvalidBytecode;
-            const encoded_atom = std.mem.readInt(u32, code[pc + 1 ..][0..4], .little);
-            if (encoded_atom != atom_ledger[atom_index].raw())
-                return error.InvalidBytecode;
-            atom_index += 1;
-        }
-
-        const block = graph.blocks[block_index];
-        const reachable = graph.isReachable(block_index) and
-            (!block.has_terminal or position <= block.cutoff_offset);
-        if (reachable) switch (code[pc]) {
-            op.eval => {
-                if (instruction.size != 5) return error.InvalidBytecode;
-                const scope = std.mem.readInt(u16, code[pc + 3 ..][0..2], .little);
-                try rules.markEvalCapturedVariables(fd, scope);
-            },
-            op.apply_eval => {
-                if (instruction.size != 3) return error.InvalidBytecode;
-                const scope = std.mem.readInt(u16, code[pc + 1 ..][0..2], .little);
-                try rules.markEvalCapturedVariables(fd, scope);
-            },
-            else => {},
-        };
-
-        // phase1Instruction proved this cursor advance is within the
-        // u32-sized input stream.
-        position += instruction.size;
-    }
-    if (position != input.code_len or atom_index != input.atom_len)
-        return error.InvalidBytecode;
 }
 
 /// Exact block-CFG resolve pass over fd.builder. The input Builder is
@@ -2468,22 +2124,6 @@ pub fn run(
 
     const binds = try buildBindIndex(fd.memory, input);
     defer if (binds.len != 0) fd.memory.free(BindEntry, binds);
-
-    var graph: cfg.Graph = .{ .memory = fd.memory };
-    defer if (comptime audit_oracles) graph.deinit();
-    if (comptime audit_oracles) {
-        graph = try cfg.build(fd.memory, input, binds);
-        try cfg.auditInstructionOwnership(fd.memory, input, &graph);
-    }
-    // QuickJS marks captured scopes only when its resolve_variables walk
-    // reaches OP_eval / OP_apply_eval. cfg.build has
-    // already decoded every instruction, so use its opcode census rather than
-    // rescanning streams that provably contain neither instruction. Do not use
-    // fd.has_eval_call here: synthetic/internal Builder callers are allowed to
-    // construct the opcode stream without parser metadata.
-    if (comptime audit_oracles) {
-        if (graph.has_eval_instruction) try markReachableEvalCaptures(input, &graph, fd);
-    }
 
     var product: ResolvedProduct = .{ .memory = fd.memory, .atoms = fd.atoms };
     errdefer product.deinitUncommitted();
@@ -2509,7 +2149,6 @@ pub fn run(
         .input_sources = input.source_slots[0..input.source_len],
         .product = &product,
         .binds = binds,
-        .graph = &graph,
         .next_bind_offset = initial_bind_offset,
         .next_source_offset = initial_source_offset,
         .next_side_offset = @min(initial_bind_offset, initial_source_offset),
@@ -2518,17 +2157,6 @@ pub fn run(
     };
     defer resolver.deinitScratch();
     try resolver.run();
-    if (comptime cfg.audit_oracles) {
-        try cfg.auditBoundaryUniqueness(
-            fd.memory,
-            input,
-            &graph,
-            binds,
-            product.label_slots[0..product.label_len],
-            product.source_slots[0..product.source_len],
-            resolver.opt_boundaries[0..resolver.opt_boundary_len],
-        );
-    }
     return product;
 }
 
@@ -2539,7 +2167,7 @@ const ResolveTestHarness = struct {
     fd: bytecode.function_def.FunctionDef,
 
     fn init(harness: *ResolveTestHarness, allocator: std.mem.Allocator) !void {
-        harness.rt = try core.JSRuntime.create(allocator);
+        harness.rt = try core.JSRuntime.create(allocator, .{});
         errdefer harness.rt.destroy();
 
         harness.name_atom = try harness.rt.atoms.internString("qcp1-s3-pass-a");
@@ -2549,7 +2177,7 @@ const ResolveTestHarness = struct {
             &harness.rt.atoms,
             harness.name_atom,
         );
-        errdefer harness.function.deinit(harness.rt);
+        errdefer harness.function.deinit();
 
         harness.fd = bytecode.function_def.FunctionDef.init(
             &harness.rt.memory,
@@ -2565,7 +2193,7 @@ const ResolveTestHarness = struct {
 
     fn deinit(harness: *ResolveTestHarness) void {
         harness.fd.deinit(harness.rt);
-        harness.function.deinit(harness.rt);
+        harness.function.deinit();
         harness.rt.destroy();
     }
 
@@ -2850,18 +2478,23 @@ test "compiler.resolve_variables: dead self-loop is skipped through to live merg
     try input.bindLabel(merge);
     try input.emitOp(op.return_undef);
 
+    // QuickJS `skip_dead_code` stops at the first label that still has a
+    // reference; the self-referencing loop keeps its own label alive, so the
+    // unreachable loop is retained exactly as QuickJS retains it.
     var expected = [_]u8{
         op.if_false,     0,               0, 0, 0,
-        op.return_undef, op.return_undef,
+        op.return_undef, op.goto,         0, 0, 0,
+        0,               op.return_undef,
     };
     std.mem.writeInt(u32, expected[1..5], merge.index(), .little);
+    std.mem.writeInt(u32, expected[7..11], dead_loop.index(), .little);
 
     var product = try harness.resolve();
     defer product.deinitUncommitted();
     try expectProductCode(&product, &expected);
-    try expectProductLabel(&product, dead_loop, 0, labels.unbound);
-    try expectProductLabel(&product, merge, 1, 6);
-    try std.testing.expectEqual(@as(u32, 1), product.jump_size);
+    try expectProductLabel(&product, dead_loop, 1, 6);
+    try expectProductLabel(&product, merge, 1, 11);
+    try std.testing.expectEqual(@as(u32, 2), product.jump_size);
 }
 
 test "compiler.resolve_variables: dead forward jump cannot retain another dead block" {
@@ -3109,7 +2742,7 @@ test "compiler.resolve_variables: source transitions bound insert3 fold" {
     );
 }
 
-test "compiler.resolve_variables: dup branch fold preserves precomputed live block" {
+test "compiler.resolve_variables: dup branch fold retires the block it unreferenced" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3127,24 +2760,22 @@ test "compiler.resolve_variables: dup branch fold preserves precomputed live blo
     try input.bindLabel(target);
     try input.emitOp(op.return_undef);
 
-    // The fold moves the first branch reference to target, but the exact CFG
-    // was intentionally computed before the walk. The originally reachable
-    // `first` block therefore remains live and is copied; only its zero-ref
-    // label position is suppressed for Stage 4 bookkeeping.
+    // The fold moves the first branch reference onto `target`, which leaves
+    // `first` with no reference. The block behind the terminator is then
+    // dead by QuickJS `update_label` bookkeeping and is skipped, releasing
+    // its own reference to `target` on the way.
     var expected = [_]u8{
-        op.if_false,     0,               0,               0, 0,
-        op.return_undef, op.if_false,     0,               0, 0,
-        0,               op.return_undef, op.return_undef,
+        op.if_false,     0,               0, 0, 0,
+        op.return_undef, op.return_undef,
     };
     std.mem.writeInt(u32, expected[1..5], target.index(), .little);
-    std.mem.writeInt(u32, expected[7..11], target.index(), .little);
 
     var product = try harness.resolve();
     defer product.deinitUncommitted();
     try expectProductCode(&product, &expected);
     try expectProductLabel(&product, first, 0, labels.unbound);
-    try expectProductLabel(&product, target, 2, 12);
-    try std.testing.expectEqual(@as(u32, 2), product.jump_size);
+    try expectProductLabel(&product, target, 1, 6);
+    try std.testing.expectEqual(@as(u32, 1), product.jump_size);
 }
 
 test "compiler.resolve_variables: scope_get_var global reuses legacy topology" {
@@ -3379,7 +3010,7 @@ test "compiler.resolve_variables: apply_eval scope head matches the pinned Quick
     try expectOwnedAtomRelease(&harness, &product, captured);
 }
 
-test "compiler.resolve_variables: later apply_eval capture closes an earlier scope exit" {
+test "compiler.resolve_variables: apply_eval marks captures when the walk reaches it" {
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3393,32 +3024,25 @@ test "compiler.resolve_variables: later apply_eval capture closes an earlier sco
     var snapshot = try TestInputSnapshot.init(harness.input());
     defer snapshot.deinit();
 
+    // QuickJS marks eval captures when `resolve_variables` reaches the
+    // OP_eval / OP_apply_eval instruction, so a scope exit emitted before it
+    // sees the variable uncaptured and closes nothing. The capture itself is
+    // recorded on the FunctionDef for every later consumer.
     var product = try harness.resolve();
     defer product.deinitUncommitted();
-    try std.testing.expectEqual(op.close_loc, product.code[0]);
-    try std.testing.expectEqual(
-        @as(u16, @intCast(local_index)),
-        std.mem.readInt(u16, product.code[1..3], .little),
-    );
     try expectProductCode(&product, &.{
-        op.close_loc,    0, 0,
         op.apply_eval,   2, 0,
         op.return_undef,
     });
+    try std.testing.expect(harness.fd.vars[@intCast(local_index)].is_captured);
     try snapshot.expectUnchanged(harness.input());
     try expectOwnedAtomRelease(&harness, &product, captured);
 }
 
 test "compiler.resolve_variables: local scope_make_ref fold matches the pinned QuickJS form" {
-
     // The corpus never reaches the make_ref fold (a `with` lvalue always needs
     // the var-object probe), so this is the only place the deferred
-    // make_ref_tail replacement anchor is exercised: the F3 classifier's
-    // `fold_product_unknown` must stay zero here or the class D counts for
-    // that kind would be unmeasured rather than measured-as-agreeing.
-    cfg.resetAnchorSplitCensus();
-    defer cfg.resetAnchorSplitCensus();
-
+    // make_ref_tail replacement is exercised.
     var harness: ResolveTestHarness = undefined;
     try harness.init(std.testing.allocator);
     defer harness.deinit();
@@ -3449,20 +3073,6 @@ test "compiler.resolve_variables: local scope_make_ref fold matches the pinned Q
     try std.testing.expect(!harness.fd.vars[0].is_captured);
     try snapshot.expectUnchanged(harness.input());
     try expectOwnedAtomRelease(&harness, &product, local);
-
-    if (comptime audit_oracles) {
-        const census = cfg.anchorSplitSnapshot();
-        try std.testing.expectEqual(
-            @as(u64, 2),
-            census.fold_by_kind[@intFromEnum(cfg.OptimizationBoundaryKind.make_ref_head)],
-        );
-        try std.testing.expectEqual(
-            @as(u64, 1),
-            census.fold_by_kind[@intFromEnum(cfg.OptimizationBoundaryKind.make_ref_tail)],
-        );
-        try std.testing.expectEqual(@as(u64, 0), census.fold_product_unknown);
-        try std.testing.expectEqual(@as(u64, 0), cfg.anchorClassTotal(census, .a));
-    }
 }
 
 test "compiler.resolve_variables: local scope_make_ref non-fold matches the pinned QuickJS form" {

@@ -695,7 +695,7 @@ pub const object = struct {
 };
 
 test "public object appendArrayValue maintains array length once" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const array = try object.createArray(rt, null);
@@ -712,9 +712,9 @@ test "public object appendArrayValue maintains array length once" {
 }
 
 test "public host defineScriptArgs materializes empty array on first read" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try JSContext.create(rt);
+    const ctx = try JSContext.create(rt, .{});
     defer ctx.destroy();
 
     try host.defineScriptArgs(ctx, &.{"stale"});
@@ -736,9 +736,9 @@ test "public host defineScriptArgs materializes empty array on first read" {
 }
 
 test "public Buffer helpers create and copy Uint8Array bytes" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try JSContext.create(rt);
+    const ctx = try JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const global = try context.globalObject(ctx);
@@ -758,7 +758,7 @@ test "public Buffer helpers create and copy Uint8Array bytes" {
 }
 
 test "public callable predicate recognizes every bytecode function class" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const class_ids = [_]zjs_core.ClassId{
@@ -777,9 +777,9 @@ test "public callable predicate recognizes every bytecode function class" {
 }
 
 test "public object isArray brands real arrays only" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try JSContext.create(rt);
+    const ctx = try JSContext.create(rt, .{});
     defer ctx.destroy();
 
     // A genuine Array is branded true.
@@ -803,9 +803,9 @@ test "public object isArray brands real arrays only" {
 }
 
 test "public Buffer borrowBytes views ArrayBuffer live store without copying" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try JSContext.create(rt);
+    const ctx = try JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const global = try context.globalObject(ctx);
@@ -832,7 +832,7 @@ test "public Buffer borrowBytes views ArrayBuffer live store without copying" {
 }
 
 test "public Buffer borrowBytes carries TypedArray byte offset and length" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const Object = zjs_core.Object;
@@ -855,9 +855,9 @@ test "public Buffer borrowBytes carries TypedArray byte offset and length" {
 }
 
 test "public Buffer borrowBytes detach is rejected up front" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try JSContext.create(rt);
+    const ctx = try JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const global = try context.globalObject(ctx);
@@ -878,7 +878,7 @@ test "public Buffer borrowBytes detach is rejected up front" {
 }
 
 test "public Buffer borrowBytes resize invalidates the old pointer" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const Object = zjs_core.Object;
@@ -904,7 +904,7 @@ test "public Buffer borrowBytes resize invalidates the old pointer" {
 }
 
 test "public Buffer borrowBytes immutable ArrayBuffer denies sliceMut" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const Object = zjs_core.Object;
@@ -923,9 +923,9 @@ test "public Buffer borrowBytes immutable ArrayBuffer denies sliceMut" {
 }
 
 test "public Buffer borrowBytesReadonly carries no mutable pointer" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try JSContext.create(rt);
+    const ctx = try JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const global = try context.globalObject(ctx);
@@ -951,9 +951,9 @@ test "public Buffer borrowBytesReadonly carries no mutable pointer" {
 }
 
 test "public Buffer pinForBorrow keeps source alive and releases cleanly" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try JSContext.create(rt);
+    const ctx = try JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const global = try context.globalObject(ctx);
@@ -1069,9 +1069,9 @@ pub const job = struct {
 };
 
 test "public job drain honors budget and reports the real remaining FIFO" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try JSContext.create(rt);
+    const ctx = try JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const observed = try zjs_core.Object.createArray(rt, null);
@@ -1110,9 +1110,9 @@ test "public job drain honors budget and reports the real remaining FIFO" {
 }
 
 test "public job drain stops at the first exception and leaves the tail queued" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try JSContext.create(rt);
+    const ctx = try JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const TestJob = struct {
@@ -1139,11 +1139,11 @@ test "public job drain stops at the first exception and leaves the tail queued" 
 }
 
 test "public job drain executes each entry in its retained Realm" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const host_ctx = try JSContext.create(rt);
+    const host_ctx = try JSContext.create(rt, .{});
     defer host_ctx.destroy();
-    const entry_ctx = try JSContext.create(rt);
+    const entry_ctx = try JSContext.create(rt, .{});
     const entry_core = entry_ctx.core;
     _ = try entry_ctx.globalObject();
 

@@ -1256,7 +1256,7 @@ fn parseSimpleJsonValue(rt: *core.JSRuntime, global: ?*core.Object, bytes: []con
 }
 
 test "simple JSON parser uses shared ASCII digit classification for integers" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const int_value = (try parseSimpleJsonValue(rt, null, "12345")).?;
@@ -1324,7 +1324,7 @@ fn isCallableJsonOmittedObject(object: *core.Object) bool {
 }
 
 test "JSON callable omission recognizes every bytecode function class" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const class_ids = [_]core.ClassId{
@@ -1634,10 +1634,10 @@ pub fn jsonParseCall(
 }
 
 test "JSON.parse roots direct function bytecode input while coercing to string" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
 
@@ -1896,10 +1896,10 @@ pub fn jsonStringifyCall(
 }
 
 test "JSON.stringify roots direct function bytecode value while creating holder" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
 
@@ -2563,7 +2563,7 @@ const S3DupKeyMajorProbe = struct {
 };
 
 test "TGC S3-d: a duplicate JSON key's shadowed record value survives majors taken mid-parse" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     // `findObjectEntry` returns the FIRST entry for a key (qjs

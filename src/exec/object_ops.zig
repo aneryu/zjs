@@ -662,7 +662,7 @@ pub fn constructPrimitiveWrapperWithPrototype(
 }
 
 test "constructPrimitiveWrapperWithPrototype roots direct symbol while creating wrapper" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-construct-primitive-wrapper-symbol");
@@ -741,9 +741,9 @@ pub fn aggregateErrorConstructWithPrototype(
 }
 
 test "aggregateErrorConstructWithPrototype preserves direct symbol errors and cause" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try zjs_vm.contextGlobal(ctx);
 
@@ -834,9 +834,9 @@ pub fn suppressedErrorConstructWithPrototype(
 }
 
 test "suppressedErrorConstructWithPrototype roots direct symbol args while creating error" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
 
@@ -943,9 +943,9 @@ pub fn errorConstructWithPrototype(
 }
 
 test "errorConstructWithPrototype preserves direct symbol cause" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try zjs_vm.contextGlobal(ctx);
 
@@ -1823,9 +1823,9 @@ pub fn destructuringObjectRest(
 }
 
 test "destructuringObjectRest roots direct symbol values while creating rest object" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try zjs_vm.contextGlobal(ctx);
 
@@ -2813,7 +2813,7 @@ pub fn primitiveObjectForAccess(rt: *core.JSRuntime, global: *core.Object, primi
 }
 
 test "primitiveObjectForAccess roots direct symbol while creating wrapper" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     const global = try core.Object.create(rt, core.class.ids.object, null);
     const symbol_constructor = try core.Object.create(rt, core.class.ids.object, null);
     const symbol_prototype = try core.Object.create(rt, core.class.ids.object, null);
@@ -3383,7 +3383,7 @@ pub fn descriptorObjectFromDescriptor(rt: *core.JSRuntime, global: *core.Object,
 }
 
 test "descriptorObjectFromDescriptor roots direct function bytecode value while creating descriptor object" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
@@ -4376,7 +4376,7 @@ fn readInt(comptime T: type, bytes: []const u8) T {
 }
 
 test "private brand atom is released with home object" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const home = try core.Object.create(rt, core.class.ids.object, null);
@@ -4392,7 +4392,7 @@ test "private brand atom is released with home object" {
 }
 
 test "private brand creation does not allocate atom for non-extensible home object" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const home = try core.Object.create(rt, core.class.ids.object, null);

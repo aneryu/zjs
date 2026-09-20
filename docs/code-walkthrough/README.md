@@ -28,7 +28,7 @@ zjs 是用 Zig 写的可嵌入 JavaScript 引擎，语义权威是 ECMA-262（te
 | 02 | [02-lexer.md](02-lexer.md) | `lexer.zig`、`simple_token.zig` |
 | 03 | [03-parser.md](03-parser.md) | `parser.zig`（词法之后的语法、作用域、发射） |
 | 04 | [04-compiler.md](04-compiler.md) | `src/compiler/`：builder、变量/标签解析、CFG |
-| 05 | [05-bytecode.md](05-bytecode.md) | `bytecode.zig`、`opcode_logical.zig`（子文档：opcodes / function / function-def / pipeline / binding） |
+| 05 | [05-bytecode.md](05-bytecode.md) | `bytecode.zig` hub、`bytecode/*.zig`、`compiler/{binding_rules,stack_size,finalize}.zig`、`opcode_logical.zig`（子文档：opcodes / function / function-def / pipeline / binding） |
 | 06 | [06-core-value.md](06-core-value.md) | `JSValue`、atom、string、number、bigint、json、uri、error |
 | 07 | [07-core-object.md](07-core-object.md) | `object.zig` 对象模型与 payload 访问 |
 | 08 | [08-core-shape-property.md](08-core-shape-property.md) | shape、property、array、class、function、typed array、collection |

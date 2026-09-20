@@ -24,7 +24,7 @@ const runner_metadata = @import("run_test262_metadata.zig");
 const runner_config = @import("run_test262_config.zig");
 const runner_known_errors = @import("run_test262_known_errors.zig");
 const runner_source = @import("run_test262_source.zig");
-const runner_host = @import("run_test262_host.zig");
+const runner_host = test262_root.test262_host;
 
 pub const Config = runner_options.Config;
 pub const FeatureOverrideKind = runner_options.FeatureOverrideKind;
@@ -649,9 +649,9 @@ fn runEmbeddedEngine(
     stderr_storage: *[stderr_storage_len]u8,
     stderr_out: *[]const u8,
 ) !bool {
-    const rt = try zjs.JSRuntime.createWithOptions(allocator, .{});
+    const rt = try zjs.JSRuntime.create(allocator, .{});
     errdefer rt.destroy();
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     errdefer ctx.destroy();
     var output_buffer: [64 * 1024]u8 = undefined;
     var output = std.Io.Writer.fixed(&output_buffer);
@@ -1668,10 +1668,10 @@ test "test262 typed array iterator staging source parses after installing global
     defer allocator.free(source);
 
     {
-        const rt = try zjs.JSRuntime.create(allocator);
+        const rt = try zjs.JSRuntime.create(allocator, .{});
         defer rt.destroy();
         rt.setNativeStackSize(core_runtime.default_native_stack_size * 4);
-        const ctx = try zjs.JSContext.create(rt);
+        const ctx = try zjs.JSContext.create(rt, .{});
         defer ctx.destroy();
         _ = try ctx.globalObject();
         var parsed = try parser.compile(.{ .realm = ctx.core }, source, .{
@@ -1684,10 +1684,10 @@ test "test262 typed array iterator staging source parses after installing global
     }
 
     {
-        const rt = try zjs.JSRuntime.create(allocator);
+        const rt = try zjs.JSRuntime.create(allocator, .{});
         defer rt.destroy();
         rt.setNativeStackSize(core_runtime.default_native_stack_size * 4);
-        const ctx = try zjs.JSContext.create(rt);
+        const ctx = try zjs.JSContext.create(rt, .{});
         defer ctx.destroy();
         const global = try ctx.globalObject();
         try installTest262Globals(rt, ctx, global);

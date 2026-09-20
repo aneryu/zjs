@@ -14,8 +14,6 @@ pub const Options = struct {
 };
 
 pub const Program = struct {
-    function: bytecode.Bytecode,
-
     name_atom: core.atom.Atom,
     lexer: parser.Lexer,
     state: Parser.ParseState,
@@ -27,20 +25,17 @@ pub const Program = struct {
     }
 
     pub fn deinit(p: *Program, rt: *core.JSRuntime) void {
-        // Program is returned by value, so repair the two pointers that named
-        // its construction-time result location before releasing the owners.
+        // Program is returned by value, so repair the lexer pointer that
+        // named its construction-time result location before releasing.
         p.state.lex = &p.lexer;
-        p.state.function = &p.function;
         p.state.deinit(rt);
         p.lexer.deinit();
-        p.function.deinit(rt);
     }
 };
 
 pub fn configureScriptRoot(state: *Parser.ParseState) void {
     state.function_def.is_eval = true;
     state.function_def.is_global_var = true;
-    state.root_mode = .canonical;
     state.top_level_lexical_as_global_ref = true;
 }
 
@@ -50,7 +45,6 @@ pub fn configureModuleRoot(state: *Parser.ParseState) void {
     state.function_def.is_global_var = true;
     state.function_def.is_strict_mode = true;
     state.is_strict = true;
-    state.root_mode = .canonical;
     state.top_level_lexical_as_module_ref = true;
 }
 
@@ -63,13 +57,10 @@ pub fn parseAndCompileV2TestProgram(
 ) !Program {
     const name_atom = try rt.atoms.internString(name);
 
-    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name_atom);
-    errdefer function.deinit(rt);
-
     var lexer = parser.Lexer.init(testing_allocator, &rt.atoms, source);
     errdefer lexer.deinit();
 
-    var state = try Parser.ParseState.init(&lexer, &function);
+    var state = try Parser.ParseState.init(&lexer, &rt.memory, &rt.atoms, name_atom);
     errdefer state.deinit(rt);
     state.runtime = rt;
     switch (options.root) {
@@ -84,7 +75,6 @@ pub fn parseAndCompileV2TestProgram(
     );
 
     return .{
-        .function = function,
         .name_atom = name_atom,
         .lexer = lexer,
         .state = state,

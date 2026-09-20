@@ -1473,7 +1473,7 @@ trait 收敛成**一处声明**，其余 comptime 派生。它不仅减少六处
 | fmt | 条数 | 实际形态 |
 |---|---:|---|
 | `loc8` / `const8` / `label8` / `label16` | 16 | **kind 与 width 不同轴**：`loc8` 是「local，1 字节」，`loc` 是「local，2 字节」 |
-| `npopx` | 4 | `call0..call3`，**参数个数烧进 opcode id**，0 操作数字节 |
+| `none_npop` | 4 | `call0..call3`，**参数个数烧进 opcode id**，0 操作数字节 |
 
 进一步普查「0 字节但语义上有操作数」的指令：
 
@@ -1483,7 +1483,7 @@ trait 收敛成**一处声明**，其余 comptime 派生。它不仅减少六处
 | `none_arg` | 12 | `get_arg0..3`、`put_arg0..3`、`set_arg0..3` |
 | `none_var_ref` | 12 | `get_var_ref0..3`… |
 | `none_int` | 9 | `push_0..7`、`push_minus1` |
-| `npopx` | 4 | `call0..3` |
+| `none_npop` | 4 | `call0..3` |
 | **合计** | **53** | **占在用指令的 22%** |
 
 ⇒ **`Operand` 必须支持零字节来源**：值烧死在声明里
@@ -2004,7 +2004,7 @@ ISA 哈希宣称已解决。
 > 的 import 方向为实测（49 个 `src/exec/*.zig` 导入 `bytecode.zig`，反向
 > 为 0，环成立）；P0-5 的同族冷热差为本仓普查（`push_const` 25,524 vs
 > `push_const8` 9,550,185）；P0-6 的封闭表达式充分性为实测（引擎中全部
-> 动态栈效应形态——`npop`/`npop_u16`/`npopx`/`using` sub/`dyn_env_probe`
+> 动态栈效应形态——`npop`/`npop_u16`/`none_npop`/`using` sub/`dyn_env_probe`
 > ——均可归约为 `fixed`/`operand_table`/`affine`）；不变量 5 由 F0a0 实测
 > 的「嵌套容器惰性分析导致断言只在 test 构建开火」直接支持。
 

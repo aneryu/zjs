@@ -56,42 +56,42 @@
 - **实现**：`parser.compile`（script 总是 `return_completion=true`，对齐 `js_parse_program` hidden `<ret>`）。语法错误走 `throwParseSyntaxError`（fileName/line/column + `at file:line:col`，quickjs.c:7553）。module：`installParsedModuleArtifact` + `linkModule`；已 evaluated 跳过；errored 重抛 `eval_exception`。script：`takeFunctionBytecodeValue` 进 `createRootBytecodeFunctionObject(.root_global)`，Realm 必须是 `ctx`。
 - **所有权 / 错误 / 调用**：`compiled.deinit` 在返回前。`eval` 立刻 root `root_function_value`。
 
-### `eval` (`src/exec/eval_entry.zig:197`)
+### `eval` (`src/exec/eval_entry.zig:196`)
 
 - **签名**：`pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context.ContextEvalOptions) !core.JSValue`。
 - **作用**：公开 script/module/direct/indirect eval 入口。
 - **实现**：`call_depth==0` 时 `updateNativeStackTop`（`JS_UpdateStackTop`）；嵌套直接 eval 不刷新。`prepareRootFunction` 在独立 native 帧。module：status `linked→evaluating→evaluated`，失败缓存 `eval_exception`。script：`runWithCallEnv`，strict `this` 为 undefined，sloppy 为 Realm 全局；`eval_global_var_bindings` 仅 `eval_indirect`；`direct_eval_vars_reach_global` 对 script 或 sloppy indirect。精确根用 `.slices`（生产 container-only 政策）。最后 `drainAndFinish`。
 - **所有权 / 错误 / 调用**：`JSContext.eval`。job drain 在 `drainAndFinish`。
 
-### `drainAndFinish` (`src/exec/eval_entry.zig:325`)
+### `drainAndFinish` (`src/exec/eval_entry.zig:323`)
 
 - **签名**：`noinline fn drainAndFinish( ctx: *core.JSContext, options: core.context.ContextEvalOptions, result: core.JSValue, ) !core.JSValue`。
 - **作用**：root 完成值、排微任务、应用 host 结果政策。
 - **实现**：完成值放 slice root（scalar ValueRoot 生产会被擦掉）。`drainPendingPromiseJobs`。script 且 `discard_script_result` 或 `!return_completion` 则丢完成值返回 undefined。
 - **所有权 / 错误 / 调用**：drain OOM 时 completion 由 root 保住再释放。
 
-### `runEvalModule` (`src/exec/eval_entry.zig:360`)
+### `runEvalModule` (`src/exec/eval_entry.zig:358`)
 
 - **签名**：`fn runEvalModule( ctx: *core.JSContext, record: *core.module.ModuleRecord, output: ?*std.Io.Writer, timing: ?*core.context.ContextEvalTiming, ) !core.JSValue`。
 - **作用**：模块体步进，处理顶层 await。
 - **实现**：generator class 的 `module_state`。循环 `runModuleEvaluationStep`；若 just yielded，`waitForModuleAwaitReaction` 后设 resume completion type（rejected=2）。
 - **所有权 / 错误 / 调用**：链接错误经 `moduleResolutionError`。
 
-### `waitForModuleAwaitReaction` (`src/exec/eval_entry.zig:413`)
+### `waitForModuleAwaitReaction` (`src/exec/eval_entry.zig:407`)
 
 - **签名**：`fn waitForModuleAwaitReaction( ctx: *core.JSContext, output: ?*std.Io.Writer, awaited: core.JSValue, timing: ?*core.context.ContextEvalTiming, ) !ModuleAwaitResume`。
 - **作用**：等该 await 的 reaction 排到 FIFO 头。
 - **实现**：`createModuleAwaitReactionPromise`；循环 `drainOnePendingJob`，空则 `runOneModuleAwaitHostEvent`。无进展抛 `throwModuleHostStall`。rejected 时 `markHandled`。
 - **所有权 / 错误 / 调用**：后续 job 留在队列直到模块下次挂起或完成。
 
-### `runOneModuleAwaitHostEvent` (`src/exec/eval_entry.zig:465`)
+### `runOneModuleAwaitHostEvent` (`src/exec/eval_entry.zig:459`)
 
 - **签名**：`fn runOneModuleAwaitHostEvent( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, ) !bool`。
 - **作用**：job 空时推进一个宿主事件。
 - **实现**：signal → rw → timer → atomics waiter。任一 true 即进展。
 - **所有权 / 错误 / 调用**：无事件返回 false，上层 stall。
 
-### `parserMode` (`src/exec/eval_entry.zig:476`)
+### `parserMode` (`src/exec/eval_entry.zig:470`)
 
 - **签名**：`fn parserMode(mode: core.context.EvalMode) parser.Mode`。
 - **作用**：把 context eval 模式映到 parser。
@@ -179,28 +179,28 @@
 - **实现**：无参 → undefined；非 string 原样返回。UTF-8 源。从 caller 取 strict、`EntryContract`（new.target/super/arguments）。`createDirectEvalClosureSeed`。`parser.compile(.eval_direct, filename="<eval>", eval_in_parameter_initializer=is_arg_scope)`。严格编译结果关掉 `eval_global_var_bindings`。`this`=`directEvalThisValue`；允许则 `directEvalNewTargetValue`。custom resolver 建根函数，`runWithCallEnv`（`is_eval_code=true`，`direct_eval_vars_reach_global` 跟 sloppy 全局 var 绑定走）。
 - **所有权 / 错误 / 调用**：种子与 nested_stack 本地释放。语法错误 `throwParseSyntaxError`。
 
-### `directEvalThisValue` (`src/exec/eval_ops.zig:496`)
+### `directEvalThisValue` (`src/exec/eval_ops.zig:495`)
 
 - **签名**：`pub fn directEvalThisValue( ctx: *core.JSContext, global: *core.Object, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !core.JSValue`。
 - **作用**：直接 eval 的 `this`。
 - **实现**：无帧 → undefined。捕获的 `this_` 闭包优先。派生类构造器读 local `this_`（可能仍 TDZ）。否则 `materializeFrameThisBinding`。
 - **所有权 / 错误 / 调用**：派生类缺 `this_` 槽 `InvalidBytecode`。
 
-### `capturedSpecialValue` (`src/exec/eval_ops.zig:516`)
+### `capturedSpecialValue` (`src/exec/eval_ops.zig:515`)
 
 - **签名**：`fn capturedSpecialValue( caller_function: ?*const bytecode.FunctionBytecode, caller_frame: *frame_mod.Frame, name: core.Atom, ) ?core.JSValue`。
 - **作用**：从闭包表取 `this_` / `new_target`。
 - **实现**：按 `var_name` 扫 `closureVar`，读 `var_refs[index].varRefValue()`。
 - **所有权 / 错误 / 调用**：借用细胞值。
 
-### `directEvalNewTargetValue` (`src/exec/eval_ops.zig:530`)
+### `directEvalNewTargetValue` (`src/exec/eval_ops.zig:529`)
 
 - **签名**：`fn directEvalNewTargetValue( caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) core.JSValue`。
 - **作用**：直接 eval 的 `new.target`。
 - **实现**：捕获优先，否则 `frame.newTargetValue()`；无帧 undefined。
 - **所有权 / 错误 / 调用**：返回的是借用值——要么是 caller 帧 var_ref 里的 `new.target`（`capturedSpecialValue`），要么是 `frame.newTargetValue()`；不 retain、不建根，由调用方 `directEval` 在同一帧存活期内立刻交给 `runWithCallEnv`（`src/exec/eval_ops.zig:448`，且只在 `eval_allows_new_target` 时调用）。无 error set。
 
-### `directEvalVisibleLocalNameCount` (`src/exec/eval_ops.zig:538`)
+### `directEvalVisibleLocalNameCount` (`src/exec/eval_ops.zig:537`)
 
 - **签名**：`pub fn directEvalVisibleLocalNameCount(rt: *core.JSRuntime, vardefs: []const bytecode.function_bytecode.BytecodeVarDef, atom_id: core.Atom) usize`。
 - **作用**：统计同名可见 local，避免把 shadowed 的 local 误绑到全局词法细胞。

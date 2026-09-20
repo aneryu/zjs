@@ -58,9 +58,9 @@ pub fn rejectedWithPrototype(realm: *core.RealmContext, reason: core.JSValue, pr
 }
 
 test "fulfilledWithPrototype roots direct function bytecode result while constructing promise" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const realm = try core.RealmContext.create(rt);
+    const realm = try core.RealmContext.create(rt, .{});
     defer realm.destroy();
     const function_proto = try core.Object.create(rt, core.class.ids.object, null);
     realm.cached_function_proto = function_proto;
@@ -174,9 +174,9 @@ fn createResolvingFunction(ctx: *core.JSContext, promise: core.JSValue, reject: 
 }
 
 test "createResolvingFunction roots promise and state while allocating slots" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const function_proto = try core.Object.create(rt, core.class.ids.object, null);
     ctx.cached_function_proto = function_proto;
@@ -202,9 +202,9 @@ test "createResolvingFunction roots promise and state while allocating slots" {
 }
 
 test "withResolvers roots promise and resolving functions while creating result" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const function_proto = try core.Object.create(rt, core.class.ids.object, null);
     ctx.cached_function_proto = function_proto;

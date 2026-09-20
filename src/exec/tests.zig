@@ -76,7 +76,7 @@ test "dense parameter arrays spread retains CreateDataProperty constraints" {
     }
 }
 
-const makeFunction = helpers.makeFunction;
+const makeFixture = helpers.makeFixture;
 
 test "dense parameter arrays spread reserves one backing cell for a known dense range" {
     const js = helpers.sharedTestEngine();
@@ -179,7 +179,7 @@ test "dense parameter arrays spread observes iterator methods getters and abrupt
         \\} finally {delete Array.prototype[0];}
     );
 }
-const runFunction = helpers.runFunction;
+const runFixture = helpers.runFixture;
 const countJob = helpers.countJob;
 const countJobArgs = helpers.countJobArgs;
 const createTailOpcodeFixture = helpers.createTailOpcodeFixture;
@@ -298,10 +298,10 @@ const NativeFenceProbe = struct {
 };
 
 test "eval lazily materializes a bare core context global before root closure construction" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     helpers.registerStandardGlobalsBare(rt);
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     try std.testing.expect(ctx.global == null);
 
@@ -3387,16 +3387,13 @@ test "js_function_set_properties publishes configurable length then name" {
 }
 
 test "get_var_ref reuses the open cell on a second capture of the same local" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("r11-reuse-open-cell");
-    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer function.deinit(rt);
-    function.var_count = 1;
-    function.open_var_ref_count = 1;
-    function.vardefs = try rt.memory.alloc(bytecode.function_bytecode.BytecodeVarDef, 1);
-    function.vardefs[0] = bytecode.function_bytecode.BytecodeVarDef.init(.{
+    const execution_function = try bytecode.FunctionBytecode.createFixture(rt, .{ .name = name, .var_count = 1, .var_ref_count = 1 });
+    defer execution_function.destroyUnpublishedFixture(rt);
+    execution_function.allVarDefs()[0] = bytecode.function_bytecode.BytecodeVarDef.init(.{
         .var_name = core.atom.null_atom,
         .is_captured = true,
         .var_ref_idx = 0,
@@ -3404,8 +3401,6 @@ test "get_var_ref reuses the open cell on a second capture of the same local" {
 
     var locals = [_]core.JSValue{core.JSValue.int32(7)};
     var open_refs = [_]?*core.VarRef{null};
-    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
-    const execution_function = execution_adapter.init(&function);
     var frame = frame_mod.Frame.init(execution_function);
     defer frame.deinit(&rt.memory, rt);
     frame.locals = &locals;
@@ -3449,19 +3444,17 @@ test "js_closure2 attach roots captures through the function object" {
 }
 
 test "var-ref growth promotes borrowed captures to owned cells" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const name = try rt.internAtom("frame-borrowed-var-ref-growth-test");
-    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer function.deinit(rt);
+    const execution_function = try bytecode.FunctionBytecode.createFixture(rt, .{ .name = name });
+    defer execution_function.destroyUnpublishedFixture(rt);
 
     const captured = try core.VarRef.createClosed(rt, core.JSValue.int32(41));
     var captures = [_]*core.VarRef{captured};
-    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
-    const execution_function = execution_adapter.init(&function);
     var exec_frame = frame_mod.Frame.init(execution_function);
     defer exec_frame.deinit(&rt.memory, rt);
     exec_frame.var_refs = &captures;
@@ -3471,63 +3464,6 @@ test "var-ref growth promotes borrowed captures to owned cells" {
     try std.testing.expectEqual(@as(usize, 2), exec_frame.var_refs.len);
     try std.testing.expectEqual(captured, exec_frame.var_refs[0]);
     try std.testing.expectEqual(frame_mod.Ownership.owned, exec_frame.ownership.var_refs);
-}
-
-test "global declaration construction rebinds duplicate carriers one slot at a time" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
-    defer ctx.destroy();
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-
-    const binding_name = try rt.internAtom("qjs-ordered-global-decl-slots");
-    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    defer function.deinit(rt);
-    function.closure_var = try rt.memory.alloc(bytecode.function_bytecode.BytecodeClosureVar, 2);
-    for (function.closure_var, 0..) |*cv, idx| {
-        cv.* = bytecode.function_bytecode.BytecodeClosureVar.init(.{
-            .closure_type = .global_decl,
-            .var_idx = @intCast(idx),
-            .var_name = binding_name,
-        });
-    }
-
-    var refs = [_]*core.VarRef{
-        try core.VarRef.createClosed(rt, core.JSValue.uninitialized()),
-        try core.VarRef.createClosed(rt, core.JSValue.uninitialized()),
-    };
-    const second_placeholder = refs[1];
-    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
-    const execution_function = execution_adapter.init(&function);
-    var frame = frame_mod.Frame.init(execution_function);
-    defer frame.deinit(&rt.memory, rt);
-    frame.var_refs = &refs;
-    frame.ownership.var_refs = .borrowed;
-
-    try std.testing.expect(try engine.exec.call_runtime.defineGlobalDeclVarCell(
-        ctx,
-        global,
-        execution_function,
-        &frame,
-        0,
-        binding_name,
-        false,
-        false,
-    ));
-    try std.testing.expect(refs[0] != refs[1]);
-    try std.testing.expectEqual(second_placeholder, refs[1]);
-
-    try std.testing.expect(try engine.exec.call_runtime.defineGlobalDeclVarCell(
-        ctx,
-        global,
-        execution_function,
-        &frame,
-        1,
-        binding_name,
-        false,
-        false,
-    ));
-    try std.testing.expectEqual(refs[0], refs[1]);
 }
 
 test "ordinary global closure selector preserves QuickJS cell waterfall and owner metadata" {
@@ -3864,20 +3800,18 @@ test "runtime-strict script still constructs its global function declaration" {
 }
 
 test "var-ref growth rejects an owned composite frame slab" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const name = try rt.internAtom("frame-composite-var-ref-growth-test");
-    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer function.deinit(rt);
+    const execution_function = try bytecode.FunctionBytecode.createFixture(rt, .{ .name = name });
+    defer execution_function.destroyUnpublishedFixture(rt);
 
     const slab = try frame_mod.FrameSlab.allocHeap(&rt.memory, .{ .stack = 1, .var_refs = 1 });
     slab.stack[0] = core.JSValue.undefinedValue();
     slab.var_refs[0] = try core.VarRef.createClosed(rt, core.JSValue.int32(7));
-    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
-    const execution_function = execution_adapter.init(&function);
     var exec_frame = frame_mod.Frame.init(execution_function);
     defer exec_frame.deinit(&rt.memory, rt);
     exec_frame.installOwnedStorage(slab.storage);
@@ -3891,18 +3825,16 @@ test "var-ref growth rejects an owned composite frame slab" {
 }
 
 test "local growth rejects an owned composite frame slab" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("frame-composite-local-growth-test");
-    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer function.deinit(rt);
+    const execution_function = try bytecode.FunctionBytecode.createFixture(rt, .{ .name = name });
+    defer execution_function.destroyUnpublishedFixture(rt);
 
     const slab = try frame_mod.FrameSlab.allocHeap(&rt.memory, .{ .locals = 1, .stack = 1 });
     slab.locals[0] = core.JSValue.int32(3);
     slab.stack[0] = core.JSValue.undefinedValue();
-    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
-    const execution_function = execution_adapter.init(&function);
     var exec_frame = frame_mod.Frame.init(execution_function);
     defer exec_frame.deinit(&rt.memory, rt);
     exec_frame.installOwnedStorage(slab.storage);
@@ -3920,19 +3852,18 @@ test "arg aliases reject missing open-ref storage without cellifying the slot" {
     defer js.deinit();
 
     const name = try js.runtime.internAtom("frame-arg-open-ref-capacity-test");
-    var function = bytecode.Bytecode.init(&js.runtime.memory, &js.runtime.atoms, name);
-    defer function.deinit(js.runtime);
-    function.flags.has_simple_parameter_list = true;
-    function.flags.has_mapped_arguments = true;
-    function.arg_count = 1;
-    function.open_var_ref_count = 1;
-    function.argdefs = try js.runtime.memory.alloc(bytecode.function_bytecode.BytecodeVarDef, 1);
-    function.argdefs[0] = bytecode.function_bytecode.BytecodeVarDef.init(.{ .var_name = core.atom.null_atom, .is_captured = true, .var_ref_idx = 0 });
+    const execution_function = try bytecode.FunctionBytecode.createFixture(js.runtime, .{
+        .name = name,
+        .flags = .{ .has_simple_parameter_list = true },
+        .arg_count = 1,
+        .var_ref_count = 1,
+    });
+    defer execution_function.destroyUnpublishedFixture(js.runtime);
+    execution_function.setExecutionFlags(.{ .has_mapped_arguments = true });
+    execution_function.allVarDefs()[0] = bytecode.function_bytecode.BytecodeVarDef.init(.{ .var_name = core.atom.null_atom, .is_captured = true, .var_ref_idx = 0 });
 
     var args = [_]core.JSValue{core.JSValue.int32(41)};
     var no_open_refs = [_]?*core.VarRef{};
-    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
-    const execution_function = execution_adapter.init(&function);
     var exec_frame = frame_mod.Frame.init(execution_function);
     defer exec_frame.deinit(&js.runtime.memory, js.runtime);
     exec_frame.args = &args;
@@ -3979,18 +3910,16 @@ test "arg aliases reject missing open-ref storage without cellifying the slot" {
 }
 
 test "local growth rejects moving storage after an open binding is published" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("frame-open-local-growth-test");
-    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer function.deinit(rt);
+    const execution_function = try bytecode.FunctionBytecode.createFixture(rt, .{ .name = name });
+    defer execution_function.destroyUnpublishedFixture(rt);
 
     var locals = [_]core.JSValue{core.JSValue.int32(7)};
     const open_ref = try core.VarRef.createOpen(rt, &locals[0]);
     var open_refs = [_]?*core.VarRef{open_ref};
-    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
-    const execution_function = execution_adapter.init(&function);
     var exec_frame = frame_mod.Frame.init(execution_function);
     defer exec_frame.deinit(&rt.memory, rt);
     exec_frame.locals = &locals;
@@ -4009,16 +3938,14 @@ test "local growth rejects moving storage after an open binding is published" {
 }
 
 test "call-binding OOM leaves input references with the caller" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("frame-call-binding-oom-test");
-    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer function.deinit(rt);
+    const execution_function = try bytecode.FunctionBytecode.createFixture(rt, .{ .name = name });
+    defer execution_function.destroyUnpublishedFixture(rt);
 
     const held = try core.Object.create(rt, core.class.ids.object, null);
-    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
-    const execution_function = execution_adapter.init(&function);
     var exec_frame = frame_mod.Frame.init(execution_function);
     defer exec_frame.deinit(&rt.memory, rt);
 
@@ -4038,18 +3965,16 @@ test "call-binding OOM leaves input references with the caller" {
 }
 
 test "original-args cold-state OOM does not retain copied references" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("frame-original-args-oom-test");
-    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer function.deinit(rt);
+    const execution_function = try bytecode.FunctionBytecode.createFixture(rt, .{ .name = name });
+    defer execution_function.destroyUnpublishedFixture(rt);
 
     const held = try core.Object.create(rt, core.class.ids.object, null);
     var source_args = [_]core.JSValue{held.value()};
     var original_args = [_]core.JSValue{core.JSValue.undefinedValue()};
-    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
-    const execution_function = execution_adapter.init(&function);
     var exec_frame = frame_mod.Frame.init(execution_function);
     defer exec_frame.deinit(&rt.memory, rt);
 
@@ -4127,20 +4052,20 @@ test "string leftover ToIntegerOrInfinity matches value_ops including bigint Typ
 }
 
 test "vm executes push constants arithmetic comparisons and return" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
-    var function = try makeFunction(rt, &.{
+    const function = try makeFixture(rt, ctx, .{ .code = &.{
         op.push_i32, 2,           0,            0, 0,
         op.push_i32, 3,           0,            0, 0,
         op.add,      op.push_i32, 6,            0, 0,
         0,           op.lt,       op.@"return",
-    });
-    defer function.deinit(rt);
+    } });
+    defer function.release(rt);
 
-    const result = try runFunction(rt, ctx, &function);
+    const result = try runFixture(rt, ctx, function.fb);
     try std.testing.expectEqual(true, result.as(.boolean).?);
 }
 
@@ -4243,29 +4168,27 @@ test "numeric discarded immediates preserve comma control and completion semanti
 }
 
 test "vm executes stack constants source locations and return_undef" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
-    var function = try makeFunction(rt, &.{
+    const function = try makeFixture(rt, ctx, .{ .code = &.{
         op.undefined, op.null, op.push_true, op.push_false, op.drop, op.return_undef,
-    });
-    defer function.deinit(rt);
+    } });
+    defer function.release(rt);
 
-    const result = try runFunction(rt, ctx, &function);
+    const result = try runFixture(rt, ctx, function.fb);
     try std.testing.expect(result.is(.undefined_value));
     try std.testing.expect(result.is(.undefined_value));
 }
 
 test "frame setLocal handles self-assignment without dropping object" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    defer function.deinit(rt);
-    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
-    const execution_function = execution_adapter.init(&function);
+    const execution_function = try bytecode.FunctionBytecode.createFixture(rt, .{});
+    defer execution_function.destroyUnpublishedFixture(rt);
     var frame = frame_mod.Frame.init(execution_function);
     defer frame.deinit(&rt.memory, rt);
 
@@ -4276,32 +4199,6 @@ test "frame setLocal handles self-assignment without dropping object" {
     try frame.setLocal(&rt.memory, 0, current);
 
     try std.testing.expectEqual(object.gcHeader(), frame.locals[0].refHeader().?);
-}
-
-test "lookupFrameVarRef tolerates synthetic var-ref name mirrors" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
-    defer ctx.destroy();
-
-    const global = try core.Object.create(rt, core.class.ids.object, null);
-
-    const binding_name = try rt.internAtom("synthetic-var-ref");
-    var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    defer function.deinit(rt);
-    function.var_ref_names = try rt.memory.alloc(core.Atom, 1);
-    function.var_ref_names[0] = binding_name;
-
-    const cell = try core.VarRef.createClosed(rt, core.JSValue.uninitialized());
-    var var_refs = [_]*core.VarRef{cell};
-    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
-    const execution_function = execution_adapter.init(&function);
-    var frame = frame_mod.Frame.init(execution_function);
-    frame.var_refs = &var_refs;
-    defer frame.deinit(&rt.memory, rt);
-
-    const result = engine.exec.call_runtime.lookupFrameVarRef(ctx, global, execution_function, &frame, binding_name);
-    try std.testing.expect(result == null);
 }
 
 test "derived constructor without nested this references has no owner cell" {
@@ -4882,9 +4779,9 @@ test "super call paths reject null live parents and do not authorize ordinary cl
 }
 
 test "bound function call skips zero-length combined args allocation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const target = try engine.exec.closure.create(rt, .returns_undefined);
@@ -4902,25 +4799,26 @@ test "bound function call skips zero-length combined args allocation" {
 }
 
 test "constant pool execution retains returned constants" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
-    const name = try rt.internAtom("const-return");
-    var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer function.deinit(rt);
     const str = try core.string.String.createAscii(rt, "hello");
     const value = str.value();
-    _ = try function.addConstant(value);
-    try helpers.setCodeAndStackSize(&function, &.{ op.push_const, 0, 0, 0, 0, op.@"return" });
+    const function = try makeFixture(rt, ctx, .{
+        .name = "const-return",
+        .code = &.{ op.push_const, 0, 0, 0, 0, op.@"return" },
+        .cpool = &.{value},
+    });
+    defer function.release(rt);
 
-    const result = try runFunction(rt, ctx, &function);
+    const result = try runFixture(rt, ctx, function.fb);
     try std.testing.expect(result.isString());
 }
 
 test "property ops use shared object semantics" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const obj = try core.Object.create(rt, core.class.ids.object, null);
     const key = try rt.internAtom("x");
@@ -4945,9 +4843,9 @@ test "property ops use shared object semantics" {
 }
 
 test "value ops own primitive VM semantics" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const sum = try engine.exec.value_ops.binary(rt, op.add, core.JSValue.int32(2), core.JSValue.int32(3));
@@ -4997,23 +4895,24 @@ test "value ops own primitive VM semantics" {
     const symbol_atom = try rt.atoms.newSymbol("boxed", .symbol);
     try std.testing.expectError(error.TypeError, engine.exec.string_builtin_ops.constructWithPrototype(rt, &.{try rt.symbolValue(symbol_atom)}, null));
 
-    const name = try rt.internAtom("loose-eq");
-    var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer function.deinit(rt);
-    _ = try function.addConstant(one_string);
-    try helpers.setCodeAndStackSize(&function, &.{
-        op.push_i32,   1,            0, 0, 0,
-        op.push_const, 0,            0, 0, 0,
-        op.eq,         op.@"return",
+    const function = try makeFixture(rt, ctx, .{
+        .name = "loose-eq",
+        .code = &.{
+            op.push_i32,   1,            0, 0, 0,
+            op.push_const, 0,            0, 0, 0,
+            op.eq,         op.@"return",
+        },
+        .cpool = &.{one_string},
     });
-    const eq_result = try runFunction(rt, ctx, &function);
+    defer function.release(rt);
+    const eq_result = try runFixture(rt, ctx, function.fb);
     try std.testing.expectEqual(true, eq_result.as(.boolean).?);
 
     try std.testing.expect(!engine.exec.value_ops.isTruthy(core.JSValue.int32(0)));
 }
 
 test "closure helper stores closure state outside the VM" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const closure_value = try engine.exec.closure.create(rt, .counter);
@@ -5313,9 +5212,9 @@ test "typed array int32 store fast arm preserves conversion and assignment seman
 }
 
 test "checked local replacement preserves int fast moves and refcounted fallbacks" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const result = try vm_helpers.parseAndRunWithTopLevelChildren(rt, ctx,
@@ -5332,9 +5231,9 @@ test "checked local replacement preserves int fast moves and refcounted fallback
 }
 
 test "an expression helper emits an explicit return after a bytecode call" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const result = try vm_helpers.parseAndRunWithTopLevelChildren(rt, ctx,
@@ -5344,9 +5243,9 @@ test "an expression helper emits an explicit return after a bytecode call" {
 }
 
 test "top-level function declarations use wide closure operands past 255 constants" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     var source = std.ArrayList(u8).empty;
@@ -5363,9 +5262,9 @@ test "top-level function declarations use wide closure operands past 255 constan
 }
 
 test "function expressions execute wide closure operands past 255 constants" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     var source: std.ArrayList(u8) = .empty;
@@ -5384,16 +5283,15 @@ test "function expressions execute wide closure operands past 255 constants" {
 }
 
 test "call subsystem installs and invokes host globals" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
     try helpers.installHostGlobalsBare(rt, global);
-    const run_test262 = @import("../cli/run_test262.zig");
     var wrapper = zjs.JSContext.borrowCore(ctx);
-    try run_test262.installTest262Globals(rt, &wrapper, global);
+    try zjs.test262_host.installTest262Globals(rt, &wrapper, global);
 
     const print_key = try rt.internAtom("print");
     const print = try global.getProperty(print_key);
@@ -5469,9 +5367,9 @@ test "call subsystem installs and invokes host globals" {
 }
 
 test "native builtin record dispatch is independent from dispatch-name strings" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
@@ -7037,9 +6935,9 @@ test "Iterator.from follows QuickJS wrapper selection" {
 }
 
 test "number native builtin records cover static and prototype dispatch" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     try helpers.installHostGlobalsBare(rt, global);
@@ -7101,9 +6999,9 @@ test "number native builtin records cover static and prototype dispatch" {
 }
 
 test "string static native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     try helpers.installHostGlobalsBare(rt, global);
@@ -7144,9 +7042,9 @@ test "string static native builtin records ignore dispatch names" {
 }
 
 test "string prototype native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     try helpers.installHostGlobalsBare(rt, global);
@@ -7226,9 +7124,9 @@ test "String case conversion records preserve coercion and Unicode semantics" {
 }
 
 test "date static native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     try helpers.installHostGlobalsBare(rt, global);
@@ -7268,9 +7166,9 @@ test "date static native builtin records ignore dispatch names" {
 }
 
 test "date constructor native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     try helpers.installHostGlobalsBare(rt, global);
@@ -7324,9 +7222,9 @@ test "date constructor native builtin records ignore dispatch names" {
 }
 
 test "constructValue AggregateError releases copied errors array owner" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
@@ -7363,9 +7261,9 @@ test "constructValue AggregateError releases copied errors array owner" {
 }
 
 test "date prototype native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     try helpers.installHostGlobalsBare(rt, global);
@@ -7408,9 +7306,9 @@ test "date prototype native builtin records ignore dispatch names" {
 }
 
 test "array static native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     try helpers.installHostGlobalsBare(rt, global);
@@ -7469,9 +7367,9 @@ test "array static native builtin records ignore dispatch names" {
 }
 
 test "array prototype native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     try helpers.installHostGlobalsBare(rt, global);
@@ -7549,9 +7447,9 @@ test "array prototype native builtin records ignore dispatch names" {
 }
 
 test "collection native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     try helpers.installHostGlobalsBare(rt, global);
@@ -7642,9 +7540,9 @@ test "collection native builtin records ignore dispatch names" {
 }
 
 test "buffer native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     try helpers.installHostGlobalsBare(rt, global);
@@ -7767,9 +7665,9 @@ test "buffer native builtin records ignore dispatch names" {
 }
 
 test "typed array accessor native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     try helpers.installHostGlobalsBare(rt, global);
@@ -7841,9 +7739,9 @@ test "typed array accessor native builtin records ignore dispatch names" {
 }
 
 test "regexp static native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     try helpers.installHostGlobalsBare(rt, global);
@@ -7886,9 +7784,9 @@ test "regexp static native builtin records ignore dispatch names" {
 }
 
 test "regexp prototype native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     try helpers.installHostGlobalsBare(rt, global);
@@ -7976,9 +7874,9 @@ test "regexp prototype native builtin records ignore dispatch names" {
 }
 
 test "regexp symbol native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     try helpers.installHostGlobalsBare(rt, global);
@@ -8088,9 +7986,9 @@ test "regexp symbol native builtin records ignore dispatch names" {
 }
 
 test "regexp accessor native builtin records ignore dispatch names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     try helpers.installHostGlobalsBare(rt, global);
@@ -8155,9 +8053,9 @@ test "regexp accessor native builtin records ignore dispatch names" {
 }
 
 test "vm host native builtin records dispatch by id before name fallback" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
@@ -8194,15 +8092,12 @@ test "vm host native builtin records dispatch by id before name fallback" {
 }
 
 test "vm collection constructors use registered prototype methods" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     helpers.registerStandardGlobalsBare(rt);
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
-    const name = try rt.internAtom("collection-prototype");
-    var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer function.deinit(rt);
     const map_atom = try rt.internAtom("Map");
     var bytes: [8]u8 = undefined;
     bytes[0] = op.get_var;
@@ -8211,13 +8106,16 @@ test "vm collection constructors use registered prototype methods" {
     bytes[4] = op.call_constructor;
     std.mem.writeInt(u16, bytes[5..7], 0, .little);
     bytes[7] = op.@"return";
-    function.var_ref_names = try rt.memory.alloc(core.Atom, 1);
-    function.var_ref_names[0] = map_atom;
-    try helpers.setCodeAndStackSize(&function, &bytes);
+    const function = try makeFixture(rt, ctx, .{
+        .name = "collection-prototype",
+        .code = &bytes,
+        .globals = &.{map_atom},
+    });
+    defer function.release(rt);
 
     var vm_instance = engine.exec.Vm.init(ctx);
     defer vm_instance.deinit();
-    const result = try helpers.runMutableVm(&vm_instance, &function);
+    const result = try vm_instance.run(function.fb);
 
     const object = core.Object.fromHeader(result.refHeader().?);
     const set_key = try rt.internAtom("set");
@@ -9620,9 +9518,9 @@ test "DisposableStack resource self-cycle is released by runtime cycle removal" 
 }
 
 test "module import-meta and eval-exception cycles are released by runtime cycle removal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     var ctx_alive = true;
     defer if (ctx_alive) ctx.destroy();
 
@@ -10627,15 +10525,12 @@ test "Engine eval TypeError with evaluated arguments does not double free consta
 }
 
 test "vm call handler accepts allocator-backed argument lists" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     helpers.registerStandardGlobalsBare(rt);
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
-    const name = try rt.internAtom("wide-call");
-    var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer function.deinit(rt);
     const print_key = try rt.internAtom("print");
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.memory.allocator);
@@ -10643,8 +10538,6 @@ test "vm call handler accepts allocator-backed argument lists" {
     var print_ref: [2]u8 = undefined;
     std.mem.writeInt(u16, &print_ref, 0, .little);
     try bytes.appendSlice(rt.memory.allocator, &print_ref);
-    function.var_ref_names = try rt.memory.alloc(core.Atom, 1);
-    function.var_ref_names[0] = print_key;
     var arg: i32 = 1;
     while (arg <= 40) : (arg += 1) {
         try bytes.append(rt.memory.allocator, op.push_i32);
@@ -10653,15 +10546,19 @@ test "vm call handler accepts allocator-backed argument lists" {
     try bytes.append(rt.memory.allocator, op.call);
     const argc: u16 = 40;
     try bytes.appendSlice(rt.memory.allocator, std.mem.asBytes(&argc));
-    try bytes.append(rt.memory.allocator, bytecode.CallSiteCache.no_cache_idx);
     try bytes.append(rt.memory.allocator, op.@"return");
-    try helpers.setCodeAndStackSize(&function, bytes.items);
+    const function = try makeFixture(rt, ctx, .{
+        .name = "wide-call",
+        .code = bytes.items,
+        .globals = &.{print_key},
+    });
+    defer function.release(rt);
 
     var output_buffer: [256]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
     var vm_instance = engine.exec.Vm.initWithOutput(ctx, &stream);
     defer vm_instance.deinit();
-    const result = try helpers.runMutableVm(&vm_instance, &function);
+    const result = try vm_instance.run(function.fb);
 
     var expected = std.ArrayList(u8).empty;
     defer expected.deinit(std.testing.allocator);
@@ -10792,7 +10689,7 @@ test "waitAsync completions enter one typed cross-realm FIFO after facade releas
     defer js.deinit();
     const global_a = try engine.exec.zjs_vm.contextGlobal(js.context);
 
-    const realm_b = try core.JSContext.create(js.runtime);
+    const realm_b = try core.JSContext.create(js.runtime, .{});
     var realm_b_owner = true;
     defer if (realm_b_owner) realm_b.destroy();
     _ = try engine.exec.zjs_vm.contextGlobal(realm_b);
@@ -10850,9 +10747,9 @@ test "waitAsync completions enter one typed cross-realm FIFO after facade releas
 }
 
 test "public property key coercion accepts a Symbol.toPrimitive key" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator);
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const target = try ctx.createObject();
@@ -10966,7 +10863,7 @@ test "dynamic import job keeps its enqueue Realm after creator facade release" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
     const host_global = try engine.exec.zjs_vm.contextGlobal(js.context);
-    const entry_realm = try core.JSContext.create(js.runtime);
+    const entry_realm = try core.JSContext.create(js.runtime, .{});
     var entry_realm_owner = true;
     defer if (entry_realm_owner) entry_realm.destroy();
     const entry_global = try engine.exec.zjs_vm.contextGlobal(entry_realm);
@@ -11009,7 +10906,7 @@ test "dynamic import loader mutates only the enqueue Realm registry after public
     defer js.deinit();
     const facade_global = try engine.exec.zjs_vm.contextGlobal(js.context);
 
-    const entry_realm = try core.JSContext.create(js.runtime);
+    const entry_realm = try core.JSContext.create(js.runtime, .{});
     var entry_realm_owner = true;
     defer if (entry_realm_owner) entry_realm.destroy();
     const entry_global = try engine.exec.zjs_vm.contextGlobal(entry_realm);
@@ -11205,10 +11102,10 @@ test "Promise reaction retains callable Proxy classification after revocation" {
 }
 
 test "job queue keeps symbol arguments rooted until release" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     var queue = engine.core.jobs.Queue.init(&rt.memory);
@@ -11231,10 +11128,10 @@ test "job queue keeps symbol arguments rooted until release" {
 }
 
 test "job queue symbol roots preserve weak map values" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     var queue = engine.core.jobs.Queue.init(&rt.memory);
@@ -11411,7 +11308,7 @@ test "RegExp Symbol.split appends sticky flag without narrowing wide species fla
 }
 
 test "flagless RegExp flags accessor reuses the runtime empty string" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const pattern = try core.string.String.createAscii(rt, "a");
@@ -13749,10 +13646,8 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
         return error.InvalidFunctionBytecode;
     try std.testing.expect(resolved.fb.simpleInlineEmptyLeaf());
 
-    var l0_function = try helpers.makeFunction(rt, &.{op.return_undef});
-    defer l0_function.deinit(rt);
-    var l0_execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
-    const l0_execution_function = l0_execution_adapter.init(&l0_function);
+    const l0_execution_function = try bytecode.FunctionBytecode.createFixture(rt, .{ .byte_code = &.{op.return_undef} });
+    defer l0_execution_function.destroyUnpublishedFixture(rt);
     var l0_frame = engine.exec.frame.Frame.init(l0_execution_function);
     defer l0_frame.deinit(&rt.memory, rt);
     var l0_stack = engine.exec.stack.Stack.init(&rt.memory, rt.stackSize());
@@ -14012,10 +13907,8 @@ test "method empty leaf warm constructor moves receiver ownership" {
         return error.InvalidFunctionBytecode;
     try std.testing.expect(resolved.fb.simpleInlineEmptyLeaf());
 
-    var l0_function = try helpers.makeFunction(rt, &.{op.return_undef});
-    defer l0_function.deinit(rt);
-    var l0_execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
-    const l0_execution_function = l0_execution_adapter.init(&l0_function);
+    const l0_execution_function = try bytecode.FunctionBytecode.createFixture(rt, .{ .byte_code = &.{op.return_undef} });
+    defer l0_execution_function.destroyUnpublishedFixture(rt);
     var l0_frame = engine.exec.frame.Frame.init(l0_execution_function);
     defer l0_frame.deinit(&rt.memory, rt);
     var l0_stack = engine.exec.stack.Stack.init(&rt.memory, rt.stackSize());
@@ -14192,10 +14085,8 @@ test "strict empty leaf frame preserves undefined this and borrowed ownership" {
     try std.testing.expect(resolved.fb.rawThisInlineEmptyLeaf());
     try std.testing.expect(resolved.fb.isStrictMode());
 
-    var l0_function = try helpers.makeFunction(rt, &.{op.return_undef});
-    defer l0_function.deinit(rt);
-    var l0_execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
-    const l0_execution_function = l0_execution_adapter.init(&l0_function);
+    const l0_execution_function = try bytecode.FunctionBytecode.createFixture(rt, .{ .byte_code = &.{op.return_undef} });
+    defer l0_execution_function.destroyUnpublishedFixture(rt);
     var l0_frame = engine.exec.frame.Frame.init(l0_execution_function);
     defer l0_frame.deinit(&rt.memory, rt);
     var l0_stack = engine.exec.stack.Stack.init(&rt.memory, rt.stackSize());
@@ -14241,17 +14132,15 @@ test "strict empty leaf frame preserves undefined this and borrowed ownership" {
 }
 
 test "inline call teardown releases every escaped storage shape" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     helpers.registerStandardGlobalsBare(rt);
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try engine.exec.zjs_vm.contextGlobal(ctx);
 
-    var l0_function = try helpers.makeFunction(rt, &.{op.return_undef});
-    defer l0_function.deinit(rt);
-    var l0_execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
-    const l0_execution_function = l0_execution_adapter.init(&l0_function);
+    const l0_execution_function = try bytecode.FunctionBytecode.createFixture(rt, .{ .byte_code = &.{op.return_undef} });
+    defer l0_execution_function.destroyUnpublishedFixture(rt);
     var l0_frame = engine.exec.frame.Frame.init(l0_execution_function);
     defer l0_frame.deinit(&rt.memory, rt);
     var l0_stack = engine.exec.stack.Stack.init(&rt.memory, rt.stackSize());
@@ -14265,11 +14154,9 @@ test "inline call teardown releases every escaped storage shape" {
     var machine = inline_calls.Machine.init(ctx, null, global, &l0);
     defer machine.deinit();
 
-    var function = try helpers.makeFunction(rt, &.{op.return_undef});
-    defer function.deinit(rt);
-    function.simple_inline_eligible = true;
-    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
-    const execution_function = execution_adapter.init(&function);
+    const execution_function = try bytecode.FunctionBytecode.createFixture(rt, .{ .byte_code = &.{op.return_undef} });
+    defer execution_function.destroyUnpublishedFixture(rt);
+    execution_function.setExecutionFlags(.{ .simple_inline_eligible = true });
     var unused_var_refs: [1]*core.VarRef = undefined;
     const target = inline_calls.InlineTarget{
         .var_refs = &unused_var_refs,
@@ -14313,7 +14200,7 @@ test "inline call teardown releases every escaped storage shape" {
     try std.testing.expectEqual(baseline_bytes, rt.memory.allocated_bytes);
 
     // A window larger than one arena chunk uses the setup-time heap fallback.
-    function.stack_size = core.VmStackArena.chunk_slots;
+    execution_function.stack_size = core.VmStackArena.chunk_slots;
     try l0_stack.pushOwned(core.JSValue.undefinedValue());
     l0_stack.setLen(0);
     _ = try machine.pushCall(global, &l0_stack, &target, l0_stack.topPtr(), 0, .plain);
@@ -14711,7 +14598,7 @@ test "computed integer write misses preserve generic set semantics" {
 }
 
 test "dense write leaf consumes reserved appends only inside the qjs capacity window" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const array = try core.Object.createArray(rt, null);
@@ -17005,10 +16892,10 @@ test "bytecode closures reuse the final function-prototype shape" {
 }
 
 test "escaped closure keeps its compile realm after facade destruction" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const compile_facade = try zjs.JSContext.create(rt);
+    const compile_facade = try zjs.JSContext.create(rt, .{});
     var compile_facade_alive = true;
     defer if (compile_facade_alive) compile_facade.destroy();
     const compile_realm = compile_facade.core;
@@ -17026,7 +16913,7 @@ test "escaped closure keeps its compile realm after facade destruction" {
     compile_facade.destroy();
     compile_facade_alive = false;
 
-    const caller = try zjs.JSContext.create(rt);
+    const caller = try zjs.JSContext.create(rt, .{});
     defer caller.destroy();
     const root_function = parsed.functionBytecode() orelse return error.TestExpectedEqual;
     var stack = engine.exec.stack.Stack.init(&rt.memory, caller.core.stackLimit());
@@ -17542,16 +17429,16 @@ test "generator async and wrapper noncarriers derive cross-realm state across GC
 }
 
 test "FinalizationRegistry cleanup job keeps registry realm before invoking callback realm" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const registry_facade = try zjs.JSContext.create(rt);
+    const registry_facade = try zjs.JSContext.create(rt, .{});
     var registry_facade_alive = true;
     defer if (registry_facade_alive) registry_facade.destroy();
     const registry_realm = registry_facade.core;
     const registry_global = try registry_facade.globalObject();
 
-    const callback_facade = try zjs.JSContext.create(rt);
+    const callback_facade = try zjs.JSContext.create(rt, .{});
     var callback_facade_alive = true;
     defer if (callback_facade_alive) callback_facade.destroy();
     const callback_realm = callback_facade.core;
@@ -18712,7 +18599,7 @@ test "same module specifier keeps record cells namespace import meta and error s
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
-    const realm_b = try core.JSContext.create(js.runtime);
+    const realm_b = try core.JSContext.create(js.runtime, .{});
     defer realm_b.destroy();
     var facade_a = zjs.JSContext.borrowCore(js.context);
     var facade_b = zjs.JSContext.borrowCore(realm_b);
@@ -19359,9 +19246,9 @@ fn loadFixtureModule(
 // exec-owned bootstrap seam before installation.
 
 test "host global bootstrap installs and tears down builtin plus host domains" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
@@ -19371,9 +19258,9 @@ test "host global bootstrap installs and tears down builtin plus host domains" {
 }
 
 test "engine eval host globals and throw intrinsic tear down cleanly" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
@@ -19422,9 +19309,9 @@ fn reflectTestSetArrayIndex(rt: *core.JSRuntime, array: *core.Object, index: u32
 }
 
 test "reflect construct roots argument list while resolving prototype" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     // `reflectConstruct` routes builtin construction (Array, like Date/RegExp/
@@ -21142,26 +21029,26 @@ test "C0: a throw inside key coercion attributes the frame to the carrier's sour
 }
 
 test "C0 closed: the carrier encoding executes and the quarantined direct id is rejected" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     // Non-object keys pass through the handler unconverted (the atom
     // conversion happens at the consuming define). The full coercion
     // matrix is the JS fixture suite's job.
-    var carrier = try makeFunction(rt, &.{
+    const carrier = try makeFixture(rt, ctx, .{ .code = &.{
         op.undefined, op.ext0, bytecode.opcode.ext0_sub.to_propkey, op.@"return",
-    });
-    defer carrier.deinit(rt);
-    const carrier_result = try runFunction(rt, ctx, &carrier);
+    } });
+    defer carrier.release(rt);
+    const carrier_result = try runFixture(rt, ctx, carrier.fb);
     try std.testing.expect(carrier_result.is(.undefined_value));
 
     // 11.0 end state: the reclaimed direct byte must not survive final
     // validation -- the stack pass rejects it at decode.
     try std.testing.expectError(
         error.InvalidOpcode,
-        makeFunction(rt, &.{ op.undefined, op.to_propkey, op.@"return" }),
+        makeFixture(rt, ctx, .{ .code = &.{ op.undefined, op.to_propkey, op.@"return" } }),
     );
 }
 
@@ -21177,13 +21064,13 @@ test "C0/D7: an unknown carrier tag is rejected by the artifact proof and by dis
     }));
 
     // And if a stream reaches dispatch anyway, the executor rejects it.
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
-    var function = try makeFunction(rt, &bad_code);
-    defer function.deinit(rt);
-    try std.testing.expectError(error.InvalidBytecode, runFunction(rt, ctx, &function));
+    const function = try makeFixture(rt, ctx, .{ .code = &bad_code });
+    defer function.release(rt);
+    try std.testing.expectError(error.InvalidBytecode, runFixture(rt, ctx, function.fb));
 }
 
 test "C1-1: computed-name function naming rides the carrier encoding" {
@@ -21261,9 +21148,9 @@ const S3MajorAtEveryAllocationProbe = struct {
 };
 
 test "TGC S3: JSON.parse object keys stay reachable across majors taken mid-parse" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     // Spellings that are not predefined atoms, so each key really becomes a
@@ -21321,9 +21208,9 @@ test "TGC S3: JSON.parse object keys stay reachable across majors taken mid-pars
 
 test "TGC S3-c: operand-stack strings stay rooted while a later push materializes its atom" {
     if (comptime core.memory.force_gc_on_allocation_enabled) return error.SkipZigTest;
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     rt.forcePreciseRootScanForTest();
 
@@ -21366,15 +21253,15 @@ test "TGC S3-c: operand-stack strings stay rooted while a later push materialize
     id_roots.activate(rt);
     defer id_roots.deactivate(rt);
 
-    var function = try helpers.makeFunction(rt, code[0..offset]);
-    defer function.deinit(rt);
+    const function = try makeFixture(rt, ctx, .{ .code = code[0..offset] });
+    defer function.release(rt);
 
     // Warm up UNARMED: the first run installs the host globals, and that
     // install is not collection-safe. It touches no atom under test.
     {
-        var warmup = try helpers.makeFunction(rt, &.{ op.push_i32, 1, 0, 0, 0, op.@"return" });
-        defer warmup.deinit(rt);
-        const warmed = try helpers.runFunction(rt, ctx, &warmup);
+        const warmup = try makeFixture(rt, ctx, .{ .code = &.{ op.push_i32, 1, 0, 0, 0, op.@"return" } });
+        defer warmup.release(rt);
+        const warmed = try runFixture(rt, ctx, warmup.fb);
         try std.testing.expectEqual(@as(i32, 1), warmed.as(.int).?);
     }
 
@@ -21407,7 +21294,7 @@ test "TGC S3-c: operand-stack strings stay rooted while a later push materialize
     rt.memory.trigger_gc_fn = Probe.trigger;
     rt.memory.trigger_gc_ctx = &probe;
     probe.armed = true;
-    const outcome = helpers.runFunction(rt, ctx, &function);
+    const outcome = runFixture(rt, ctx, function.fb);
     probe.armed = false;
     rt.memory.trigger_gc_fn = saved_fn;
     rt.memory.trigger_gc_ctx = saved_ctx;
@@ -21472,14 +21359,14 @@ const PublishRootProbe = struct {
 fn runUnderPublishProbe(
     rt: *core.JSRuntime,
     ctx: *core.JSContext,
-    function: *const bytecode.Bytecode,
+    function: *const bytecode.FunctionBytecode,
     probe: *PublishRootProbe,
 ) !core.JSValue {
     helpers.registerStandardGlobalsBare(rt);
     {
-        var warmup = try makeFunction(rt, &.{ op.push_i32, 1, 0, 0, 0, op.@"return" });
-        defer warmup.deinit(rt);
-        const warmed = try helpers.runFunction(rt, ctx, &warmup);
+        const warmup = try makeFixture(rt, ctx, .{ .code = &.{ op.push_i32, 1, 0, 0, 0, op.@"return" } });
+        defer warmup.release(rt);
+        const warmed = try runFixture(rt, ctx, warmup.fb);
         try std.testing.expectEqual(@as(i32, 1), warmed.as(.int).?);
     }
 
@@ -21491,7 +21378,7 @@ fn runUnderPublishProbe(
     probe.armed = true;
     var vm = engine.exec.Vm.init(ctx);
     defer vm.deinit();
-    const outcome = helpers.runMutableVm(&vm, function);
+    const outcome = vm.run(function);
     probe.armed = false;
     rt.memory.trigger_gc_fn = saved_fn;
     rt.memory.trigger_gc_ctx = saved_ctx;
@@ -21501,9 +21388,9 @@ fn runUnderPublishProbe(
 
 test "TGC S3-d: an inline call's argument region stays rooted while the callee frame is pushed" {
     if (comptime core.memory.force_gc_on_allocation_enabled) return error.SkipZigTest;
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     // `op_call1` retreats the operand top to the call region and hands the
@@ -21537,19 +21424,15 @@ test "TGC S3-d: an inline call's argument region stays rooted while the callee f
         .root_global,
     );
 
-    const name = try rt.internAtom("exec");
-    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer function.deinit(rt);
-    _ = try function.addConstant(callee);
-    var code: [13]u8 = undefined;
+    var code: [12]u8 = undefined;
     code[0] = op.push_const;
     std.mem.writeInt(u32, code[1..5], 0, .little);
     code[5] = op.push_atom_value;
     std.mem.writeInt(u32, code[6..10], victim_atom.raw(), .little);
     code[10] = op.call1;
-    code[11] = bytecode.CallSiteCache.no_cache_idx;
-    code[12] = op.@"return";
-    try helpers.setCodeAndStackSize(&function, code[0..]);
+    code[11] = op.@"return";
+    const function = try makeFixture(rt, ctx, .{ .code = code[0..], .cpool = &.{callee} });
+    defer function.release(rt);
 
     // A legacy `Bytecode` fixture carries no tracer edge for its inline atom
     // operands (see the S3-c test), so the forced majors would retire the atom
@@ -21561,7 +21444,7 @@ test "TGC S3-d: an inline call's argument region stays rooted while the callee f
     defer id_roots.deactivate(rt);
 
     var probe = PublishRootProbe{ .rt = rt, .id = victim_atom };
-    const result = try runUnderPublishProbe(rt, ctx, &function, &probe);
+    const result = try runUnderPublishProbe(rt, ctx, function.fb, &probe);
 
     // Non-vacuity: the body has to have been minted and observed inside the
     // window (`seen`), and the window has to have been collected in
@@ -21577,9 +21460,9 @@ test "TGC S3-d: an inline call's argument region stays rooted while the callee f
 
 test "TGC S3-d: op_put_array_el's cold arm publishes before the dense grow allocates" {
     if (comptime core.memory.force_gc_on_allocation_enabled) return error.SkipZigTest;
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     // `op_put_array_el_cold` reaches `setFastArrayElementOwnedDuringActiveBytecode`
@@ -21596,10 +21479,6 @@ test "TGC S3-d: op_put_array_el's cold arm publishes before the dense grow alloc
     // no-grow append arm, so the store falls to the cold twin and grows.
     const array = try array_ops.createArrayFromArgs(rt, global, &.{});
 
-    const name = try rt.internAtom("exec");
-    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer function.deinit(rt);
-    _ = try function.addConstant(array);
     var code: [18]u8 = undefined;
     code[0] = op.push_atom_value;
     std.mem.writeInt(u32, code[1..5], victim_atom.raw(), .little);
@@ -21609,7 +21488,8 @@ test "TGC S3-d: op_put_array_el's cold arm publishes before the dense grow alloc
     code[11] = op.push_1;
     code[12] = op.put_array_el;
     code[13] = op.@"return";
-    try helpers.setCodeAndStackSize(&function, code[0..14]);
+    const function = try makeFixture(rt, ctx, .{ .code = code[0..14], .cpool = &.{array} });
+    defer function.release(rt);
 
     var rooted_ids = [_]core.Atom{victim_atom};
     var rooted_slice: []core.Atom = rooted_ids[0..];
@@ -21618,7 +21498,7 @@ test "TGC S3-d: op_put_array_el's cold arm publishes before the dense grow alloc
     defer id_roots.deactivate(rt);
 
     var probe = PublishRootProbe{ .rt = rt, .id = victim_atom };
-    const result = try runUnderPublishProbe(rt, ctx, &function, &probe);
+    const result = try runUnderPublishProbe(rt, ctx, function.fb, &probe);
 
     try std.testing.expect(probe.majors > 0);
     try std.testing.expect(probe.seen);
@@ -21631,9 +21511,9 @@ test "TGC S3-d: op_put_array_el's cold arm publishes before the dense grow alloc
 
 test "TGC S3-d: the string-primitive get_field2 arm publishes before the auto-init resolver allocates" {
     if (comptime core.memory.force_gc_on_allocation_enabled) return error.SkipZigTest;
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     // `op_get_field2_primitive`'s second arm calls the MATERIALIZING
@@ -21644,9 +21524,6 @@ test "TGC S3-d: the string-primitive get_field2 arm publishes before the auto-in
     const method_atom = try rt.internAtom("charCodeAt");
     try std.testing.expect(rt.atoms.cachedString(victim_atom) == null);
 
-    const name = try rt.internAtom("exec");
-    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer function.deinit(rt);
     var code: [16]u8 = undefined;
     code[0] = op.push_atom_value;
     std.mem.writeInt(u32, code[1..5], victim_atom.raw(), .little);
@@ -21657,7 +21534,8 @@ test "TGC S3-d: the string-primitive get_field2 arm publishes before the auto-in
     code[10] = bytecode.PropSiteCache.no_cache_idx;
     code[11] = op.drop;
     code[12] = op.@"return";
-    try helpers.setCodeAndStackSize(&function, code[0..13]);
+    const function = try makeFixture(rt, ctx, .{ .code = code[0..13] });
+    defer function.release(rt);
 
     var rooted_ids = [_]core.Atom{ victim_atom, method_atom };
     var rooted_slice: []core.Atom = rooted_ids[0..];
@@ -21666,7 +21544,7 @@ test "TGC S3-d: the string-primitive get_field2 arm publishes before the auto-in
     defer id_roots.deactivate(rt);
 
     var probe = PublishRootProbe{ .rt = rt, .id = victim_atom };
-    const result = try runUnderPublishProbe(rt, ctx, &function, &probe);
+    const result = try runUnderPublishProbe(rt, ctx, function.fb, &probe);
 
     try std.testing.expect(probe.majors > 0);
     try std.testing.expect(probe.seen);
@@ -24033,13 +23911,13 @@ test "native builtin records use callee realm for errors and created objects" {
 }
 
 test "collection callback adapter materializes errors in its explicit realm" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const caller = try core.JSContext.create(rt);
+    const caller = try core.JSContext.create(rt, .{});
     defer caller.destroy();
     const caller_global = try engine.exec.zjs_vm.contextGlobal(caller);
-    const callback_realm = try core.JSContext.create(rt);
+    const callback_realm = try core.JSContext.create(rt, .{});
     defer callback_realm.destroy();
     const callback_global = try engine.exec.zjs_vm.contextGlobal(callback_realm);
 
@@ -24963,7 +24841,7 @@ test "WeakMap and WeakSet accept non-registered symbols as weak keys" {
 }
 
 test "host WeakMap mutation closure rejects registered symbol keys" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const map_value = try engine.exec.collection_ops.constructBare(rt, 3);
@@ -24990,7 +24868,7 @@ test "host WeakMap mutation closure rejects registered symbol keys" {
 }
 
 test "host WeakMap mutation closure links entries into existing weak index" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const map_value = try engine.exec.collection_ops.constructBare(rt, 3);
@@ -25366,10 +25244,10 @@ test "TypedArray Reflect.construct fallback uses the realm intrinsic after globa
 }
 
 test "Set.prototype.symmetricDifference tracks receiver mutations from a set-like keys call" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const callback_ctx = try core.JSContext.create(rt);
+    const callback_ctx = try core.JSContext.create(rt, .{});
     defer callback_ctx.destroy();
     _ = try engine.exec.zjs_vm.contextGlobal(callback_ctx);
 
@@ -25413,7 +25291,7 @@ test "Set.prototype.symmetricDifference tracks receiver mutations from a set-lik
 }
 
 test "host map closure releases appended value when entry allocation fails" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const map_value = try engine.exec.collection_ops.constructBare(rt, 1);
@@ -25449,7 +25327,7 @@ test "host map closure releases appended value when entry allocation fails" {
 }
 
 test "host map closure rolls back appended entry when size update fails" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const map_value = try engine.exec.collection_ops.constructBare(rt, 1);
@@ -26218,15 +26096,15 @@ test "eval source conversion combines valid UTF-16 surrogate pairs" {
 }
 
 test "invalid opcode reports invalid bytecode without context exception" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     helpers.registerStandardGlobalsBare(rt);
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
-    var function = try helpers.makeUncheckedFunction(rt, &.{255});
-    defer function.deinit(rt);
-    try std.testing.expectError(error.InvalidBytecode, runFunction(rt, ctx, &function));
+    const function = try makeFixture(rt, ctx, .{ .code = &.{255}, .stack_size = 0 });
+    defer function.release(rt);
+    try std.testing.expectError(error.InvalidBytecode, runFixture(rt, ctx, function.fb));
     try std.testing.expect(!ctx.hasException());
 }
 

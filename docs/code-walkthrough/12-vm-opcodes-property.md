@@ -87,28 +87,28 @@
 - **实现**：`min(var_refs.len, varRefNamesLen())` 线性扫。
 - **所有权 / 错误 / 调用**：多个全局快路径门。
 
-### `fastDenseArrayElementValue` (`src/exec/vm_property.zig:158`)
+### `fastDenseArrayElementValue` (`src/exec/vm_property.zig:157`)
 
 - **签名**：`pub fn fastDenseArrayElementValue(value: core.JSValue, key: core.JSValue) ?core.JSValue`。
 - **作用**：服务 `op.get_array_el` 族：密数组 / 未映射 arguments 的 int 下标快读（quickjs.c:9047 旁路）。
 - **实现**：key 非负 int32；trusted object；`fastArrayElementDup(index)`。映射 arguments 的 var-ref 单元**不**走这里。
 - **所有权 / 错误 / 调用**：返回 owned dup。miss → null。`vm_property_field` re-export。无抛错。
 
-### `fastMappedArgumentsElementValue` (`src/exec/vm_property.zig:178`)
+### `fastMappedArgumentsElementValue` (`src/exec/vm_property.zig:177`)
 
 - **签名**：`pub noinline fn fastMappedArgumentsElementValue(value: core.JSValue, key: core.JSValue) ?core.JSValue`。
 - **作用**：服务 `op.get_array_el`：映射 arguments 的 cell 解引用读（qjs `JS_CLASS_MAPPED_ARGUMENTS` 臂）。
 - **实现**：非负 int32；`mappedArgumentsElementDup`。故意不并进密数组读者（六个调用方，并进去会拖累从不读元素的纯调用基准）。
 - **所有权 / 错误 / 调用**：owned dup。仅 get_array_el 冷/热 handler。
 
-### `fastArrayOwnIntElementValue` (`src/exec/vm_property.zig:198`)
+### `fastArrayOwnIntElementValue` (`src/exec/vm_property.zig:197`)
 
 - **签名**：`pub fn fastArrayOwnIntElementValue(value: core.JSValue, key: core.JSValue) ?core.JSValue`。
 - **作用**：稀疏/慢数组的自有整数元素读（密路径 miss 之后）。qjs 把 `idx >= count` 转到 int-atom `JS_GetPropertyInternal`。
 - **实现**：非负 int32；`isArray()`；`getOwnDataPropertyValue(atomFromUInt32)`。洞/访问器/仅原型 → null。
 - **所有权 / 错误 / 调用**：data 值的约定与 getOwn 相同。`isArray` 门避免映射 arguments。
 
-### `fastArrayOwnIntElementSet` (`src/exec/vm_property.zig:218`)
+### `fastArrayOwnIntElementSet` (`src/exec/vm_property.zig:217`)
 
 - **签名**：`pub fn fastArrayOwnIntElementSet(rt: *core.JSRuntime, value: core.JSValue, key: core.JSValue, new_value: core.JSValue) !bool`。
 - **作用**：稀疏数组自有可写数据元素覆盖，服务 `op.put_array_el`。

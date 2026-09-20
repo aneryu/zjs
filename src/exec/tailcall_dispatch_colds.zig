@@ -11,6 +11,7 @@
 //! in the hot .text.zjs.op_handlers island implicitly via dispatch.coldStd's
 //! linksection wrapper — a grep for linksection will not find this file.
 
+const std = @import("std");
 const bytecode = @import("../bytecode.zig");
 const dispatch = @import("tailcall_dispatch.zig");
 const HostError = @import("exceptions.zig").HostError;
@@ -991,6 +992,20 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
         .{ .o = op.set_var_ref3, .h = dispatch.opSetVarRef },
         .{ .o = op.set_var_ref, .h = dispatch.opSetVarRef },
     }) |e| t[e.o] = e.h;
+
+    // The table is the sixth hand-written per-opcode list in the tree and the
+    // only one nothing cross-checked: a claimed id left at `op_invalid` used
+    // to fail at run time, on the first program that reached it. Prove the
+    // cover against the physical ledger instead.
+    for (0..256) |raw| {
+        const id: u8 = @intCast(raw);
+        const claimed = bytecode.opcode.physical.stateOf(id) == .claimed;
+        // `invalid` (id 0) is a claimed row whose handler is the trap itself.
+        if (claimed and id != op.invalid and t[id] == s.op_invalid)
+            @compileError(std.fmt.comptimePrint("claimed opcode {d} has no dispatch handler", .{id}));
+        if (!claimed and t[id] != s.op_invalid)
+            @compileError(std.fmt.comptimePrint("unclaimed opcode {d} has a dispatch handler", .{id}));
+    }
     return .{ .table = t, .keep = keep };
 }
 

@@ -971,7 +971,7 @@ fn parseAwaitExpression(s: *State, flags: ParseFlags) Error!void {
         }
         return Error.AwaitOutsideAsyncFunction;
     }
-    if (top_level_module_await) s.function.ensureModule().has_top_level_await = true;
+    if (top_level_module_await) s.ensureModule().has_top_level_await = true;
     try s.advance();
     // `await`'s operand is a UnaryExpression (spec AwaitExpression:
     // `await UnaryExpression`; qjs js_parse_unary TOK_AWAIT parses a
@@ -1068,31 +1068,18 @@ fn emitYieldStarDelegation(s: *State, is_async: bool) Error!void {
     try Emitter.op(s, opcode.op.nip);
 }
 
-/// Emit `this` for a super-property receiver. Synthetic field initializer
-/// methods own a normal receiver binding; nested arrows/static blocks
-/// resolve it through the ordinary closure chain.
+/// Emit `this` for a super-property receiver. QuickJS emits the same scope
+/// lookup in methods and nested arrows; resolve_pseudo_var decides whether
+/// this is an owner local or a closure over the nearest ThisBinding.
 fn emitSuperThis(s: *State) Error!void {
-    if (s.emit_to_function_def) {
-        // QuickJS emits the same scope lookup in methods and nested
-        // arrows; resolve_pseudo_var decides whether this is an owner
-        // local or a closure over the nearest ThisBinding.
-        try s.emitScopeGetVar(atom_this);
-        return;
-    }
-    try Emitter.op(s, opcode.op.push_this);
+    try s.emitScopeGetVar(atom_this);
 }
 
 /// Emit the `[this, home_object]` pair consumed by a super property
-/// reference. FunctionDef-backed methods use ordinary pseudo-variable
-/// resolution; low-level mutable root fixtures use the frame
-/// special-object opcode.
+/// reference through ordinary pseudo-variable resolution.
 fn emitSuperThisAndHomeObject(s: *State) Error!void {
     try emitSuperThis(s);
-    if (s.emit_to_function_def) {
-        try s.emitScopeGetVar(atom_home_object);
-    } else {
-        try Emitter.opU8(s, opcode.op.special_object, opcode.special_object_subtype.home_object);
-    }
+    try s.emitScopeGetVar(atom_home_object);
 }
 
 fn discardTrailingGetSuper(s: *State) Error!void {
@@ -1718,12 +1705,7 @@ fn parseNewExpr(s: *State, flags: ParseFlags) Error!void {
         }
         if (!s.ctx.new_target_allowed) return s.failUnexpectedToken();
         try s.advance();
-        if (s.emit_to_function_def) {
-            try s.emitScopeGetVar(atom_new_target);
-        } else {
-            // Test-only: ParseState.init leaves emit_to_function_def false; initCanonicalRootWithRuntime sets it true.
-            try Emitter.opU8(s, opcode.op.special_object, 3);
-        }
+        try s.emitScopeGetVar(atom_new_target);
         return;
     }
     if (s.peekKind() == .kw_new) {
@@ -2168,7 +2150,7 @@ fn parseRegExpLiteral(s: *State) Error!void {
     };
     try Emitter.pushConst(s, pattern_string.value());
 
-    var compiled = regexp_lib.compilePatternAndFlagsWithOptions(s.function.memory.allocator, pattern, flags, .{
+    var compiled = regexp_lib.compilePatternAndFlagsWithOptions(s.memory.allocator, pattern, flags, .{
         .host = core.regexp.libraryHost(s.runtime.?),
     }) catch |err| switch (err) {
         error.OutOfMemory => return Error.OutOfMemory,
@@ -2176,7 +2158,7 @@ fn parseRegExpLiteral(s: *State) Error!void {
         error.StackOverflow => return Error.StackOverflow,
         else => return Error.InvalidRegExp,
     };
-    defer compiled.deinit(s.function.memory.allocator);
+    defer compiled.deinit(s.memory.allocator);
     // qjs compiles a literal once while parsing, stores the lre bytecode as
     // an 8-bit JSString constant, and lets OP_regexp share that immutable
     // string with each fresh RegExp instance (quickjs.c,
@@ -2416,7 +2398,7 @@ fn parseTemplate(s: *State, flags: ParseFlags) Error!void {
                     try s.advance();
                     return;
                 }
-                const concat_atom = try s.function.atoms.internString("concat");
+                const concat_atom = try s.atoms.internString("concat");
                 try Emitter.opAtom(s, opcode.op.get_field2, concat_atom);
             }
             depth += 1;
@@ -2443,15 +2425,15 @@ fn parseTemplate(s: *State, flags: ParseFlags) Error!void {
 }
 
 fn emitTaggedTemplateSingletonObject(s: *State, bytes: []const u8, raw_bytes: []const u8) Error!void {
-    const cooked_atom = try s.function.atoms.internString(bytes);
+    const cooked_atom = try s.atoms.internString(bytes);
     try Emitter.opAtom(s, opcode.op.push_atom_value, cooked_atom);
     try Emitter.opU16(s, opcode.op.array_from, 1);
 
-    const raw_atom = try s.function.atoms.internString(raw_bytes);
+    const raw_atom = try s.atoms.internString(raw_bytes);
     try Emitter.opAtom(s, opcode.op.push_atom_value, raw_atom);
     try Emitter.opU16(s, opcode.op.array_from, 1);
 
-    const raw_name = try s.function.atoms.internString("raw");
+    const raw_name = try s.atoms.internString("raw");
     try Emitter.opAtom(s, opcode.op.define_field, raw_name);
 }
 
@@ -2599,7 +2581,7 @@ fn parseArrayLiteral(s: *State, flags: ParseFlags) Error!void {
             } else if (sparse_active) {
                 var index_buf: [16]u8 = undefined;
                 const index_name = std.fmt.bufPrint(&index_buf, "{d}", .{sparse_index}) catch return Error.ParserInvariant;
-                const index_atom = try s.function.atoms.internString(index_name);
+                const index_atom = try s.atoms.internString(index_name);
                 try Emitter.opAtom(s, opcode.op.define_field, index_atom);
                 sparse_index += 1;
             } else {
@@ -2880,7 +2862,7 @@ pub fn parseObjectPropertyName(s: *State) Error!?ObjectPropertyName {
             (k == .kw_let and !(s.is_strict or s.curFunc().is_strict_mode));
         try s.advance();
     } else if (k == .string) {
-        atom_id = try s.function.atoms.internString(s.token.payload.str.bytes);
+        atom_id = try s.atoms.internString(s.token.payload.str.bytes);
         try s.advance();
     } else if (k == .number) {
         const is_bigint = s.token.payload.num.is_bigint;
@@ -2889,8 +2871,8 @@ pub fn parseObjectPropertyName(s: *State) Error!?ObjectPropertyName {
             try identifiers.formatBigIntPropertyName(s, s.token.payload.num.bigint_text)
         else
             core.value_format.formatFiniteNumberAssumeCapacity(&number_buf, s.token.payload.num.value);
-        defer if (is_bigint) s.function.memory.allocator.free(text);
-        atom_id = try s.function.atoms.internString(text);
+        defer if (is_bigint) s.memory.allocator.free(text);
+        atom_id = try s.atoms.internString(text);
         try s.advance();
     } else {
         return null;

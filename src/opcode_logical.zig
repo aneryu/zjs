@@ -36,7 +36,7 @@ pub const Format = enum(u8) {
     i16,
     label16,
     npop,
-    npopx,
+    none_npop,
     npop_u16,
     loc,
     arg,
@@ -51,11 +51,6 @@ pub const Format = enum(u8) {
     atom_label_u8,
     atom_label_u16,
     label_u16,
-    /// Call-site quickening (native-boundary design 5.5): `argc:u16` followed
-    /// by a `cache_idx:u8` into `FunctionBytecode.call_sites` (255 = no
-    /// cache). Carried by the variable-arity call family; `call_constructor`,
-    /// `array_from` and `apply` keep the bare `npop` / `u16` rows.
-    npop_u8,
     /// W1 property-site cache (native-boundary design 8.2 / plan r3 WP2):
     /// `atom:u32` followed by a `cache_idx:u8` into
     /// `FunctionBytecode.prop_sites` (255 = no cache). Carried by
@@ -940,7 +935,7 @@ pub const Operand = struct {
 /// cannot be compared at comptime, cannot enter a canonical fingerprint,
 /// hides the effect back in arbitrary code and emits an indirect call.
 /// Verified sufficient: every dynamic stack effect in the engine -- npop,
-/// npop_u16, npopx, the `using` sub table and `dyn_env_probe`'s flags --
+/// npop_u16, none_npop, the `using` sub table and `dyn_env_probe`'s flags --
 /// reduces to one of these three.
 pub const StackEffectExpr = union(enum) {
     fixed: struct { pop: u32, push: u32 },
@@ -1020,10 +1015,7 @@ pub fn operandTemplate(fmt: Format) ?[]const Operand {
         .none_loc => &.{.{ .kind = .local_slot, .flow = .read_write, .source = .{ .fixed = 0 } }},
         .none_arg => &.{.{ .kind = .arg_slot, .flow = .read_write, .source = .{ .fixed = 0 } }},
         .none_var_ref => &.{.{ .kind = .var_ref_slot, .flow = .read_write, .source = .{ .fixed = 0 } }},
-        .npopx => &.{
-            .{ .kind = .count, .source = .{ .fixed = 0 } },
-            .{ .kind = .imm, .source = .{ .payload = .{ .index = 0, .width = .u8 } } },
-        },
+        .none_npop => &.{.{ .kind = .count, .source = .{ .fixed = 0 } }},
 
         // Payload operands. Width and kind are orthogonal: `loc8` is a local
         // in one byte, `loc` is a local in two.
@@ -1044,10 +1036,6 @@ pub fn operandTemplate(fmt: Format) ?[]const Operand {
         .npop_u16 => &.{
             .{ .kind = .count, .source = .{ .payload = .{ .index = 0, .width = .u16 } } },
             .{ .kind = .imm, .source = .{ .payload = .{ .index = 1, .width = .u16 } } },
-        },
-        .npop_u8 => &.{
-            .{ .kind = .count, .source = .{ .payload = .{ .index = 0, .width = .u16 } } },
-            .{ .kind = .imm, .source = .{ .payload = .{ .index = 1, .width = .u8 } } },
         },
         .atom_u8 => &.{
             .{ .kind = .atom, .source = .{ .payload = .{ .index = 0, .width = .u32 } } },
@@ -1159,7 +1147,7 @@ pub const dynamic_stack: []const DynamicStack = &.{
 
     // Variable-arity calls: pop grows one per argument. `pop_base` is the
     // fixed part already in the physical row; `pop_scale` 1 is the argument
-    // count. `npopx` (call0..3) uses the same expression over a burned-in
+    // count. `none_npop` (call0..3) uses the same expression over a burned-in
     // operand, which is why OperandSource.fixed had to exist first.
     .{ .form = .call, .shape = .{ .affine = .{ .affine = .{ .operand_index = 0, .pop_base = 1, .pop_scale = 1, .push_base = 1, .push_scale = 0 } } } },
     .{ .form = .call_constructor, .shape = .{ .affine = .{ .affine = .{ .operand_index = 0, .pop_base = 2, .pop_scale = 1, .push_base = 1, .push_scale = 0 } } } },
@@ -1398,10 +1386,10 @@ pub const form_decls: []const FormDecl = &.{
     .{ .form = .get_var_ref0_get_loc8, .fmt = .none, .pop = 0, .push = 1 },
     .{ .form = .get_loc8_push_2, .fmt = .loc8, .pop = 0, .push = 1 },
     .{ .form = .call_constructor, .fmt = .npop, .pop = 2, .push = 1 },
-    .{ .form = .call, .fmt = .npop_u8, .pop = 1, .push = 1 },
-    .{ .form = .tail_call, .fmt = .npop_u8, .pop = 1, .push = 0 },
-    .{ .form = .call_method, .fmt = .npop_u8, .pop = 2, .push = 1 },
-    .{ .form = .tail_call_method, .fmt = .npop_u8, .pop = 2, .push = 0 },
+    .{ .form = .call, .fmt = .npop, .pop = 1, .push = 1 },
+    .{ .form = .tail_call, .fmt = .npop, .pop = 1, .push = 0 },
+    .{ .form = .call_method, .fmt = .npop, .pop = 2, .push = 1 },
+    .{ .form = .tail_call_method, .fmt = .npop, .pop = 2, .push = 0 },
     .{ .form = .array_from, .fmt = .npop, .pop = 0, .push = 1 },
     .{ .form = .apply, .fmt = .u16, .pop = 3, .push = 1 },
     .{ .form = .@"return", .fmt = .none, .pop = 1, .push = 0 },
@@ -1591,10 +1579,10 @@ pub const form_decls: []const FormDecl = &.{
     .{ .form = .if_true8, .fmt = .label8, .pop = 1, .push = 0 },
     .{ .form = .goto8, .fmt = .label8, .pop = 0, .push = 0 },
     .{ .form = .goto16, .fmt = .label16, .pop = 0, .push = 0 },
-    .{ .form = .call0, .fmt = .npopx, .pop = 1, .push = 1 },
-    .{ .form = .call1, .fmt = .npopx, .pop = 1, .push = 1 },
-    .{ .form = .call2, .fmt = .npopx, .pop = 1, .push = 1 },
-    .{ .form = .call3, .fmt = .npopx, .pop = 1, .push = 1 },
+    .{ .form = .call0, .fmt = .none_npop, .pop = 1, .push = 1 },
+    .{ .form = .call1, .fmt = .none_npop, .pop = 1, .push = 1 },
+    .{ .form = .call2, .fmt = .none_npop, .pop = 1, .push = 1 },
+    .{ .form = .call3, .fmt = .none_npop, .pop = 1, .push = 1 },
     .{ .form = .get_field_field2, .fmt = .atom_cache_u8, .pop = 1, .push = 1 },
     .{ .form = .is_null, .fmt = .none, .pop = 1, .push = 1 },
     .{ .form = .get_var_field, .fmt = .var_ref, .pop = 0, .push = 1 },
@@ -1603,7 +1591,7 @@ pub const form_decls: []const FormDecl = &.{
     .{ .form = .get_field2_call_method, .fmt = .atom_cache_u8, .pop = 1, .push = 2 },
     .{ .form = .get_loc2_field, .fmt = .none_loc, .pop = 0, .push = 1 },
     .{ .form = .eq_if_false8, .fmt = .none, .pop = 2, .push = 1 },
-    .{ .form = .call_method_apply_fwd, .fmt = .npop_u8, .pop = 2, .push = 1 },
+    .{ .form = .call_method_apply_fwd, .fmt = .npop, .pop = 2, .push = 1 },
     .{ .form = .get_loc0_field, .fmt = .none_loc, .pop = 0, .push = 1 },
     .{ .form = .cmp_if_false8, .fmt = .none, .pop = 2, .push = 1 },
     .{ .form = .put_loc8_get_loc8, .fmt = .loc8, .pop = 1, .push = 0 },

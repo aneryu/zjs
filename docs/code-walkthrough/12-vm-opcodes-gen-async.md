@@ -97,7 +97,7 @@
 ### `stopBeforePc` (`src/exec/vm_gen_async.zig:417`)
 
 - **签名**：`pub fn stopBeforePc( ctx: *core.JSContext, stack: *stack_mod.Stack, frame: *frame_mod.Frame, generator: ?*core.Object, catch_target: ?usize, stop_before_pc: ?usize, ) !?core.JSValue`。
-- **作用**：入口停车边界（`stop_before_pc`）：普通 async 函数、legacy 可变字节码与空字节码 fixture 没有 `OP_initial_yield`，就把已初始化好的帧停在 pc 0 等 promise 驱动启动（`call_runtime` 按 `functionKind() == .async` / legacy adapter / 空码流置位）。pc 命中边界则停车并返回 undefined。
+- **作用**：入口停车边界（`stop_before_pc`）：普通 async 函数与空字节码 fixture 没有 `OP_initial_yield`，就把已初始化好的帧停在 pc 0 等 promise 驱动启动（`call_runtime` 按 `functionKind() == .async` / 空码流置位）。pc 命中边界则停车并返回 undefined。
 - **实现**：无目标或 pc 不匹配 → null。有 generator → `parkGeneratorStartBoundary`。返回 `undefined`。
 - **所有权 / 错误 / 调用**：`zjs_vm` 入口一次，之后由 `coldNext` 的 `maybeStop` 在 `depth == 0` 时复查。
 

@@ -8,13 +8,13 @@ const core = @import("../core/root.zig");
 const sort_erased = @import("../core/sort_erased.zig");
 const bytecode = @import("../bytecode.zig");
 const builder = @import("builder.zig");
-const cfg = @import("cfg.zig");
+const temp_stream = @import("temp_stream.zig");
 const labels = @import("labels.zig");
 const resolve_variables = @import("resolve_variables.zig");
 
 const opcode = bytecode.opcode;
 const op = opcode.op;
-const SourceLocSlot = bytecode.pipeline_pc2line.SourceLocSlot;
+const SourceLocSlot = bytecode.pipeline.pc2line.SourceLocSlot;
 
 pub const Error = error{ OutOfMemory, InvalidBytecode, BytecodeOverflow };
 
@@ -42,17 +42,11 @@ const FinalReloc = struct {
     size: u8,
 };
 
-const AuditCanonicalIdentity = if (cfg.audit_oracles) u32 else void;
-const no_audit_canonical_identity: AuditCanonicalIdentity = if (cfg.audit_oracles)
-    labels.unbound
-else {};
-
 const JumpSlot = struct {
     op: u8,
     size: u8,
     pos: u32,
     label: u32,
-    canonical_identity: AuditCanonicalIdentity = no_audit_canonical_identity,
 };
 
 const BindEntry = struct {
@@ -67,161 +61,6 @@ fn bindLessThan(_: void, lhs: BindEntry, rhs: BindEntry) bool {
     if (lhs.bound_offset != rhs.bound_offset)
         return lhs.bound_offset < rhs.bound_offset;
     return lhs.label_index < rhs.label_index;
-}
-
-fn lowerBoundBindOffset(binds: []const BindEntry, bound_offset: u32) usize {
-    var low: usize = 0;
-    var high = binds.len;
-    while (low < high) {
-        const middle = low + (high - low) / 2;
-        if (binds[middle].bound_offset < bound_offset)
-            low = middle + 1
-        else
-            high = middle;
-    }
-    return low;
-}
-
-/// Product-coordinate form of cfg.canonicalIdentityAtOffset. Callers already
-/// hold the target LabelSlot and pass slot.bound_offset, keeping every jump
-/// lookup O(log binds) rather than scanning this offset-primary index by id.
-fn canonicalIdentityAtProductOffset(
-    binds: []const BindEntry,
-    bound_offset: u32,
-) ?u32 {
-    const first = lowerBoundBindOffset(binds, bound_offset);
-    if (first >= binds.len or binds[first].bound_offset != bound_offset) return null;
-    return binds[first].label_index;
-}
-
-const FinalAliasSplit = struct {
-    first_label: u32,
-    first_address: u32,
-    second_label: u32,
-    second_address: u32,
-};
-
-fn finalAliasSplit(group: []const BindEntry, addr: []const u32) ?FinalAliasSplit {
-    var first_live_label: ?u32 = null;
-    for (group) |entry| {
-        if (entry.label_index >= addr.len) return null;
-        const final_address = addr[entry.label_index];
-        if (final_address == labels.unbound) continue;
-        if (first_live_label) |first_label| {
-            const first_address = addr[first_label];
-            if (first_address != final_address) {
-                return .{
-                    .first_label = first_label,
-                    .first_address = first_address,
-                    .second_label = entry.label_index,
-                    .second_address = final_address,
-                };
-            }
-        } else {
-            first_live_label = entry.label_index;
-        }
-    }
-    return null;
-}
-
-const AliasLivenessSplit = struct {
-    live_label: u32,
-    retired_label: u32,
-};
-
-fn aliasLivenessSplit(group: []const BindEntry, addr: []const u32) ?AliasLivenessSplit {
-    var live_label: ?u32 = null;
-    var retired_label: ?u32 = null;
-    for (group) |entry| {
-        if (entry.label_index >= addr.len) return null;
-        if (addr[entry.label_index] == labels.unbound)
-            retired_label = retired_label orelse entry.label_index
-        else
-            live_label = live_label orelse entry.label_index;
-        if (live_label != null and retired_label != null) {
-            return .{ .live_label = live_label.?, .retired_label = retired_label.? };
-        }
-    }
-    return null;
-}
-
-/// A boundary whose whole alias run was retired must have been retired
-/// deliberately and must own nothing: it was dead-skipped, holds no relocation
-/// and carries no surviving reference.
-///
-/// `match_barrier` is deliberately NOT a disqualifier. The barrier flag means
-/// "Stage 4 must not FOLD across this bind even at ref_count zero"
-/// (labels.zig LabelFlags), and `hasBindInRange` — the routine that enforces
-/// it — reads `initially_referenced`/`match_barrier` without consulting
-/// `dead_skipped`, so retiring the bind keeps the barrier intact. Only
-/// `skipDeadCode` can retire a barrier bind (`processBindsAt`'s pass-over loop
-/// fails closed on one), and it scans unreachable code only; that is exactly
-/// the S4 analogue of resolve_variables' `deadBoundaryAt` unreachable arm,
-/// which likewise retires barrier binds. cfg.auditBoundaryUniqueness encodes
-/// the same asymmetry in input coordinates.
-fn retiredIdentityStillReferenced(entry: BindEntry, slot: labels.LabelSlot) bool {
-    return !entry.dead_skipped or
-        slot.first_reloc != labels.no_reloc or
-        slot.ref_count != 0;
-}
-
-fn panicFinalBoundaryUniquenessViolation(
-    bucket: cfg.DiffBucket,
-    category: []const u8,
-    role: []const u8,
-    canonical_identities: [2]u32,
-    raw_labels: [2]u32,
-    product_offsets: [2]u32,
-    final_addresses: [2]u32,
-) noreturn {
-    cfg.recordDiffBucket(bucket);
-    std.debug.panic(
-        "compiler oracle violation: bucket={s} category={s} role={s} construct=resolve_labels key=canonical_identities={d},{d}:raw_labels={d},{d} identities=[canonical_label#{d}@{d}, canonical_label#{d}@{d}] block=none label=none source=none addresses=[{d},{d}]",
-        .{
-            bucket.name(),
-            category,
-            role,
-            canonical_identities[0],
-            canonical_identities[1],
-            raw_labels[0],
-            raw_labels[1],
-            canonical_identities[0],
-            product_offsets[0],
-            canonical_identities[1],
-            product_offsets[1],
-            final_addresses[0],
-            final_addresses[1],
-        },
-    );
-}
-
-fn resolvedJumpAddress(
-    output: []const u8,
-    output_len: u32,
-    jump: JumpSlot,
-) Error!u32 {
-    // Writer-side self-check on the OUTPUT stream; `jump.op` is a physical
-    // id until F0c migrates the writers. The deltas are the reader's derived
-    // offsets, shared so they cannot drift apart.
-    const opcode_delta: u32 = if (jump.op == op.dyn_env_probe)
-        operand_off.probe_label
-    else
-        operand_off.jump_label;
-    if (jump.pos < opcode_delta or jump.pos > output_len or
-        @as(usize, jump.pos) + jump.size > output_len or
-        output[jump.pos - opcode_delta] != jump.op)
-    {
-        return error.InvalidBytecode;
-    }
-    const operand: i64 = switch (jump.size) {
-        1 => @as(i8, @bitCast(output[jump.pos])),
-        2 => std.mem.readInt(i16, output[jump.pos..][0..2], .little),
-        4 => std.mem.readInt(i32, output[jump.pos..][0..4], .little),
-        else => return error.InvalidBytecode,
-    };
-    const target = @as(i64, jump.pos) + operand;
-    if (target < 0 or target > output_len) return error.InvalidBytecode;
-    return @intCast(target);
 }
 
 const Form = opcode.logical.LogicalOpcode;
@@ -336,55 +175,6 @@ fn validateProductMetadata(product: *const resolve_variables.ResolvedProduct) Er
     }
 }
 
-/// Full S3 byte-stream proof for standalone callers.  The production packed
-/// path receives this stream directly from resolve_variables, whose output
-/// walk already emits opcode-sized instructions and parallel atom/label
-/// ledgers.  resolve_labels then decodes those same bytes while consuming
-/// them, and the packed finalizer validates the resulting S4 stream in its
-/// fused owner/var-ref walk.  QuickJS likewise trusts the internal bytecode
-/// handed from resolve_variables to resolve_labels instead
-/// of running an extra validation traversal between the two passes.
-fn validateProductCode(product: *const resolve_variables.ResolvedProduct) Error!void {
-    const code = product.code[0..product.code_len];
-    var atom_index: u32 = 0;
-    var position: u32 = 0;
-    while (position < product.code_len) {
-        const instruction = try decodeInstruction(code, position);
-        if (instruction.form == .invalid) return error.InvalidBytecode;
-
-        switch (instruction.form) {
-            .goto, .if_true, .if_false, .gosub, .@"catch" => {
-                if (instruction.size != 5) return error.InvalidBytecode;
-                const label_index = try readU32At(code, position, operand_off.jump_label);
-                if (label_index >= product.label_len) return error.InvalidBytecode;
-            },
-            .dyn_env_probe => {
-                if (instruction.size != 10) return error.InvalidBytecode;
-                const label_index = try readU32At(code, position, operand_off.probe_label);
-                if (label_index >= product.label_len) return error.InvalidBytecode;
-            },
-            // S3 emits only wide logical LabelIds. Any OTHER label-bearing
-            // form -- final shorts today, whatever is added tomorrow -- would
-            // reinterpret a relative operand as an identity and silently
-            // corrupt the side table. The label bit rejects the class, so
-            // this arm does not need extending when a form is.
-            else => if (instruction.hasLabel()) return error.InvalidBytecode,
-        }
-
-        if (instruction.hasAtom()) {
-            if (instruction.size < 5 or atom_index >= product.atom_len)
-                return error.InvalidBytecode;
-            const encoded = try readU32At(code, position, operand_off.atom);
-            if (encoded != product.atom_operands[atom_index].raw())
-                return error.InvalidBytecode;
-            atom_index += 1;
-        }
-        position += instruction.size;
-    }
-    if (position != product.code_len or atom_index != product.atom_len)
-        return error.InvalidBytecode;
-}
-
 fn updateLabel(
     product: *resolve_variables.ResolvedProduct,
     label_index: u32,
@@ -474,7 +264,7 @@ const Resolver = struct {
     atom_cursor: u32 = 0,
     source_cursor: u32 = 0,
     source_attach_cursor: u32 = 0,
-    last_attached_source: ?cfg.SourcePoint = null,
+    last_attached_source: ?temp_stream.SourcePoint = null,
     last_pc: u32 = 0,
     last_sz: u32 = 0,
     /// The B opcodes that may fuse with the last emitted A, in match order,
@@ -483,10 +273,6 @@ const Resolver = struct {
     fusions: [max_fusions]Fusion = @splat(.{ .b = 0, .fused = 0 }),
     fusion_count: u8 = 0,
     last_bound_output: u32 = std.math.maxInt(u32),
-    /// Call sites written so far (native-boundary design 5.5): each final
-    /// call/call0..3/tail_call/call_method/tail_call_method takes the next
-    /// `cache_idx` in emission order; sites past 255 get the no-cache index.
-    call_sites_emitted: u32 = 0,
     /// W1 property sites written so far: each final `get_field` /
     /// `get_field2` / `put_field` (and the fused forms that own the atom)
     /// takes the next `cache_idx` in emission order; sites past 255 get the
@@ -1002,7 +788,7 @@ const Resolver = struct {
         // loop below.
         if (self.source_attach_cursor == self.source_cursor - 1) {
             const source = self.input_sources[self.source_attach_cursor];
-            const pending = cfg.SourcePoint{ .line = source.line, .col = source.col };
+            const pending = temp_stream.SourcePoint{ .line = source.line, .col = source.col };
             if (self.last_attached_source) |last| {
                 if (last.eql(pending)) {
                     self.source_attach_cursor += 1;
@@ -1030,7 +816,7 @@ const Resolver = struct {
         while (self.source_attach_cursor < self.source_cursor) {
             const source = self.input_sources[self.source_attach_cursor];
             self.source_attach_cursor += 1;
-            const pending = cfg.SourcePoint{ .line = source.line, .col = source.col };
+            const pending = temp_stream.SourcePoint{ .line = source.line, .col = source.col };
             if (self.last_attached_source) |last| {
                 if (last.eql(pending)) continue;
             }
@@ -1067,7 +853,7 @@ const Resolver = struct {
         var index = start;
         while (index < end) : (index += 1) {
             const source = self.input_sources[index];
-            const pending = cfg.SourcePoint{ .line = source.line, .col = source.col };
+            const pending = temp_stream.SourcePoint{ .line = source.line, .col = source.col };
             if (self.last_attached_source) |last| {
                 if (last.eql(pending)) continue;
             }
@@ -1380,16 +1166,6 @@ const Resolver = struct {
             .pos = operand_pos,
             .label = label_index,
         };
-        if (comptime cfg.audit_oracles) {
-            if (label_index >= self.product.label_len)
-                return error.InvalidBytecode;
-            const slot = self.product.label_slots[label_index];
-            if (!slot.flags.bound or slot.bound_offset == labels.unbound)
-                return error.InvalidBytecode;
-            self.jump_slots[index].canonical_identity =
-                canonicalIdentityAtProductOffset(self.binds, slot.bound_offset) orelse
-                return error.InvalidBytecode;
-        }
         self.jump_count += 1;
         return index;
     }
@@ -1687,61 +1463,6 @@ const Resolver = struct {
     // every family and across every branch boundary of the idx domain
     // before the writer switches to the derived one. The probe values
     // cover both sides of each threshold the ladder tests.
-    comptime {
-        @setEvalBranchQuota(100000);
-        const wides = [_]Form{
-            .get_loc,     .put_loc,       .set_loc,
-            .get_arg,     .put_arg,       .set_arg,
-            .get_var_ref, .put_var_ref,   .set_var_ref,
-            .call,        .put_loc_check, .get_loc_check,
-            .get_field,   .push_i32,
-        };
-        const probes = [_]u16{ 0, 1, 2, 3, 4, 5, 255, 256, 257, 65535 };
-        for (wides) |wide| {
-            for (probes) |idx| {
-                const hand = shortSlotOp(opId(wide), idx);
-                const derived = opcode.decode.selectSlotShortForm(wide, idx);
-                const derived_id: ?u8 = if (derived) |form| opId(form) else null;
-                if (!std.meta.eql(hand, derived_id))
-                    @compileError("short selection diverges for " ++ @tagName(wide) ++
-                        " at idx " ++ std.fmt.comptimePrint("{d}", .{idx}));
-            }
-        }
-    }
-
-    /// Comptime-only baseline for the block above. It has no run-time caller:
-    /// the writer selects short forms through
-    /// `opcode.decode.selectSlotShortForm`, and this hand-written ladder exists
-    /// solely so that choice is cross-checked at compile time. Keep both in
-    /// sync, or delete them together.
-    fn shortSlotOp(op_id: u8, idx: u16) ?u8 {
-        if (idx < 4) {
-            const base: ?u8 = switch (op_id) {
-                op.get_loc => op.get_loc0,
-                op.put_loc => op.put_loc0,
-                op.set_loc => op.set_loc0,
-                op.get_arg => op.get_arg0,
-                op.put_arg => op.put_arg0,
-                op.set_arg => op.set_arg0,
-                op.get_var_ref => op.get_var_ref0,
-                op.put_var_ref => op.put_var_ref0,
-                op.set_var_ref => op.set_var_ref0,
-                op.call => op.call0,
-                else => null,
-            };
-            if (base) |short_base| return short_base + @as(u8, @intCast(idx));
-        }
-        if (idx < 256) {
-            return switch (op_id) {
-                op.get_loc => op.get_loc8,
-                op.put_loc => op.put_loc8,
-                op.set_loc => op.set_loc8,
-                else => null,
-            };
-        }
-        return null;
-    }
-
     fn putShortCodeSize(comptime layout: LayoutMode, op_id: u8, idx: u16) u32 {
         // Contract 3: capacity and emission consume the same selector, and
         // the selected form's size comes from its row -- there is no second
@@ -1830,22 +1551,6 @@ const Resolver = struct {
         try self.appendU16(idx);
     }
 
-    /// Next `cache_idx` operand (0.. in emission order, 255 once the slot
-    /// budget is spent). The FunctionBytecode gets `min(sites, 255)` slots.
-    fn nextCallSiteIndex(self: *Resolver) u8 {
-        const no_cache = bytecode.CallSiteCache.no_cache_idx;
-        const idx: u8 = if (self.call_sites_emitted < no_cache)
-            @intCast(self.call_sites_emitted)
-        else
-            no_cache;
-        self.call_sites_emitted += 1;
-        return idx;
-    }
-
-    fn callSiteCount(self: *const Resolver) u16 {
-        return @intCast(@min(self.call_sites_emitted, bytecode.CallSiteCache.no_cache_idx));
-    }
-
     /// Next W1 property-site `cache_idx` operand (0.. in emission order, 255
     /// once the slot budget is spent). The FunctionBytecode gets
     /// `min(sites, 255)` slots.
@@ -1864,9 +1569,8 @@ const Resolver = struct {
     }
 
     /// Final writer for the plain-call family (`call` / `tail_call`): the
-    /// burned-arity `call0..3` short forms carry only the cache index; the
-    /// wide forms carry `argc:u16 idx:u8`. `putShortCode` cannot serve these
-    /// rows because its one payload byte is the slot index, not a cache id.
+    /// burned-arity `call0..3` short forms carry no operand; the wide forms
+    /// carry `argc:u16`.
     fn putCallCode(
         self: *Resolver,
         comptime layout: LayoutMode,
@@ -1874,17 +1578,14 @@ const Resolver = struct {
         argc: u16,
     ) Error!void {
         std.debug.assert(op_id == op.call or op_id == op.tail_call);
-        const idx = self.nextCallSiteIndex();
         if (layout == .short) {
             if (opcode.decode.selectSlotShortForm(formOf(op_id), argc)) |short_form| {
                 try self.appendByte(opId(short_form));
-                try self.appendByte(idx);
                 return;
             }
         }
         try self.appendByte(op_id);
         try self.appendU16(argc);
-        try self.appendByte(idx);
     }
 
     /// qjs:34715 push_short_int, using zjs's explicit push_minus1 row.
@@ -2169,13 +1870,6 @@ const Resolver = struct {
             }
             const pc = self.output_len;
             try self.appendRaw(self.code[position..position_next]);
-            // The method-call family copies through with its placeholder
-            // `cache_idx` byte; assign the real index in the output.
-            if (instruction.form == .call_method or instruction.form == .tail_call_method or
-                instruction.form == .call_method_apply_fwd)
-            {
-                self.output[pc + 3] = self.nextCallSiteIndex();
-            }
             // W1: the `atom_cache_u8` family copies through with its
             // placeholder `cache_idx` byte; assign the real index here. The
             // emit-time fusions (`get_loc0_field`, `get_field_field2`,
@@ -2377,7 +2071,6 @@ const Resolver = struct {
                         } else {
                             try self.appendByte(op.tail_call_method);
                             try self.appendU16(argc);
-                            try self.appendByte(self.nextCallSiteIndex());
                         }
                         try self.consumeInstructionAtom(position, instruction, true);
                         // Keep the following `return` (do not skipDeadCode it).
@@ -3251,29 +2944,6 @@ const Resolver = struct {
             jump.size = compact_size;
             patch_offsets += 1;
 
-            // F3 anchor-split instrumentation: label addresses and source pcs
-            // are shifted below as two independent arrays. Both use the SAME
-            // predicate and delta, so the only way they can end up disagreeing
-            // is an event sitting STRICTLY INSIDE the removed bytes
-            // `(jump.pos, source_start)` - that event would be pulled behind
-            // its own instruction by one array while the other kept it. These
-            // counters make that population falsifiable instead of argued.
-            if (comptime cfg.audit_oracles) {
-                var window_labels: u64 = 0;
-                var window_sources: u64 = 0;
-                for (self.addr) |label_addr| {
-                    if (label_addr != labels.unbound and
-                        label_addr > jump.pos and label_addr < source_start)
-                    {
-                        window_labels += 1;
-                    }
-                }
-                for (self.output_sources[0..self.output_source_len]) |source| {
-                    if (source.pc > jump.pos and source.pc < source_start) window_sources += 1;
-                }
-                cfg.recordRelaxCompaction(window_sources, window_labels);
-            }
-
             for (self.addr) |*label_addr| {
                 if (label_addr.* != labels.unbound and label_addr.* > jump.pos)
                     label_addr.* -= delta;
@@ -3301,268 +2971,6 @@ const Resolver = struct {
         }
     }
 
-    /// F3 audit scratch: one bit per emitted source event, set when that event
-    /// sat exactly on a bound identity's final address before relaxJumps.
-    const AnchorCoincidence = struct {
-        bits: []u8 = &.{},
-        count: u64 = 0,
-
-        fn deinit(self: *AnchorCoincidence, memory: *core.memory.MemoryAccount) void {
-            if (self.bits.len != 0) memory.free(u8, self.bits);
-            self.bits = &.{};
-        }
-    };
-
-    /// True when `pc` equals the final address of some bound alias group.
-    /// `group_cursor` walks `self.binds` monotonically, so a caller iterating
-    /// source events in ascending pc order pays one merge, not a search each.
-    fn anchorAtAddress(self: *const Resolver, pc: u32, group_cursor: *usize) bool {
-        while (group_cursor.* < self.binds.len) {
-            var group_end = group_cursor.* + 1;
-            while (group_end < self.binds.len and
-                self.binds[group_end].bound_offset ==
-                    self.binds[group_cursor.*].bound_offset) : (group_end += 1)
-            {}
-            const group_identity = self.binds[group_cursor.*].label_index;
-            if (group_identity >= self.addr.len) return false;
-            const group_address = self.addr[group_identity];
-            if (group_address == labels.unbound or group_address < pc) {
-                group_cursor.* = group_end;
-                continue;
-            }
-            return group_address == pc;
-        }
-        return false;
-    }
-
-    fn captureAnchorCoincidence(self: *const Resolver) Error!AnchorCoincidence {
-        if (comptime !cfg.audit_oracles) return .{};
-        if (self.output_source_len == 0) return .{};
-        const byte_count = (@as(usize, self.output_source_len) + 7) / 8;
-        const bits = self.memory.alloc(u8, byte_count) catch return error.OutOfMemory;
-        @memset(bits, 0);
-        var result: AnchorCoincidence = .{ .bits = bits };
-        var group_cursor: usize = 0;
-        for (self.output_sources[0..self.output_source_len], 0..) |source, index| {
-            if (!self.anchorAtAddress(source.pc, &group_cursor)) continue;
-            bits[index / 8] |= @as(u8, 1) << @intCast(index % 8);
-            result.count += 1;
-        }
-        return result;
-    }
-
-    fn reportAnchorCoincidence(self: *const Resolver, before: *const AnchorCoincidence) void {
-        if (comptime !cfg.audit_oracles) return;
-        var after_count: u64 = 0;
-        var lost: u64 = 0;
-        var gained: u64 = 0;
-        var group_cursor: usize = 0;
-        for (self.output_sources[0..self.output_source_len], 0..) |source, index| {
-            const after = self.anchorAtAddress(source.pc, &group_cursor);
-            if (after) after_count += 1;
-            const was = before.bits.len > index / 8 and
-                (before.bits[index / 8] & (@as(u8, 1) << @intCast(index % 8))) != 0;
-            if (was and !after) lost += 1;
-            if (after and !was) gained += 1;
-        }
-        cfg.recordRelaxCoincidence(before.count, after_count, lost, gained);
-    }
-
-    /// Debug/ReleaseSafe product-to-final proof obligation. Canonical
-    /// identities are compared before final addresses; address equality only
-    /// corroborates the already-matched identity chain.
-    fn auditFinalBoundaryIdentity(self: *const Resolver) Error!void {
-        if (self.product.label_len > self.product.label_slots.len or
-            self.addr.len < self.product.label_len or
-            self.jump_count > self.jump_slots.len or
-            self.output_len > self.output.len or
-            self.output_source_len > self.output_sources.len)
-        {
-            return error.InvalidBytecode;
-        }
-
-        var bound_count: usize = 0;
-        for (self.product.label_slots[0..self.product.label_len]) |slot| {
-            if (slot.flags.bound) bound_count += 1;
-        }
-        if (bound_count != self.binds.len) return error.InvalidBytecode;
-
-        var previous_bind: ?BindEntry = null;
-        for (self.binds) |entry| {
-            if (entry.label_index >= self.product.label_len)
-                return error.InvalidBytecode;
-            const slot = self.product.label_slots[entry.label_index];
-            if (!slot.flags.bound or slot.bound_offset != entry.bound_offset)
-                return error.InvalidBytecode;
-            if (previous_bind) |previous| {
-                if (entry.bound_offset < previous.bound_offset or
-                    (entry.bound_offset == previous.bound_offset and
-                        entry.label_index <= previous.label_index))
-                {
-                    return error.InvalidBytecode;
-                }
-            }
-            previous_bind = entry;
-        }
-
-        var previous_live_address: ?u32 = null;
-        var live_group_count: u64 = 0;
-        var group_start: usize = 0;
-        while (group_start < self.binds.len) {
-            var group_end = group_start + 1;
-            while (group_end < self.binds.len and
-                self.binds[group_end].bound_offset == self.binds[group_start].bound_offset) : (group_end += 1)
-            {}
-            const group = self.binds[group_start..group_end];
-            const product_offset = group[0].bound_offset;
-            const canonical_identity = group[0].label_index;
-            if (canonicalIdentityAtProductOffset(self.binds, product_offset) != canonical_identity)
-                return error.InvalidBytecode;
-
-            if (finalAliasSplit(group, self.addr)) |split| {
-                panicFinalBoundaryUniquenessViolation(
-                    .boundary_mismatch,
-                    "alias_final_address_split",
-                    "position",
-                    .{ canonical_identity, canonical_identity },
-                    .{ split.first_label, split.second_label },
-                    .{ product_offset, product_offset },
-                    .{ split.first_address, split.second_address },
-                );
-            }
-            if (aliasLivenessSplit(group, self.addr)) |split| {
-                panicFinalBoundaryUniquenessViolation(
-                    .boundary_mismatch,
-                    "alias_liveness_split",
-                    "position",
-                    .{ canonical_identity, canonical_identity },
-                    .{ split.live_label, split.retired_label },
-                    .{ product_offset, product_offset },
-                    .{ self.addr[split.live_label], self.addr[split.retired_label] },
-                );
-            }
-
-            const group_address = self.addr[canonical_identity];
-            if (group_address == labels.unbound) {
-                for (group) |entry| {
-                    const slot = self.product.label_slots[entry.label_index];
-                    if (retiredIdentityStillReferenced(entry, slot)) {
-                        panicFinalBoundaryUniquenessViolation(
-                            .binding_mismatch,
-                            "retired_identity_still_referenced",
-                            "position",
-                            .{ canonical_identity, canonical_identity },
-                            .{ entry.label_index, canonical_identity },
-                            .{ product_offset, product_offset },
-                            .{ self.addr[entry.label_index], group_address },
-                        );
-                    }
-                }
-            } else {
-                if (group_address > self.output_len) return error.InvalidBytecode;
-                if (previous_live_address) |previous| {
-                    if (group_address < previous) return error.InvalidBytecode;
-                }
-                previous_live_address = group_address;
-                live_group_count += 1;
-            }
-            group_start = group_end;
-        }
-
-        for (self.jump_slots[0..self.jump_count]) |jump| {
-            if (jump.label >= self.product.label_len)
-                return error.InvalidBytecode;
-            const target_slot = self.product.label_slots[jump.label];
-            if (!target_slot.flags.bound or target_slot.bound_offset == labels.unbound)
-                return error.InvalidBytecode;
-
-            // JumpSlot retains the jump subsystem's canonical identity when
-            // emitted. Recompute the position subsystem's identity from the
-            // held LabelSlot offset, then compare identities before reading an
-            // address or decoding the relative operand.
-            const jump_identity = jump.canonical_identity;
-            const boundary_identity = canonicalIdentityAtProductOffset(
-                self.binds,
-                target_slot.bound_offset,
-            ) orelse return error.InvalidBytecode;
-            if (jump_identity >= self.product.label_len)
-                return error.InvalidBytecode;
-            const jump_identity_slot = self.product.label_slots[jump_identity];
-            if (!jump_identity_slot.flags.bound or
-                jump_identity_slot.bound_offset == labels.unbound)
-            {
-                return error.InvalidBytecode;
-            }
-            if (jump_identity != boundary_identity) {
-                panicFinalBoundaryUniquenessViolation(
-                    .binding_mismatch,
-                    "cross_subsystem_identity_split",
-                    "jump_target",
-                    .{ jump_identity, boundary_identity },
-                    .{ jump.label, boundary_identity },
-                    .{ jump_identity_slot.bound_offset, target_slot.bound_offset },
-                    .{ self.addr[jump.label], self.addr[boundary_identity] },
-                );
-            }
-
-            const encoded_address = try resolvedJumpAddress(
-                self.output[0..self.output_len],
-                self.output_len,
-                jump,
-            );
-            const target_address = self.addr[jump.label];
-            if (target_address == labels.unbound or encoded_address != target_address) {
-                panicFinalBoundaryUniquenessViolation(
-                    .binding_mismatch,
-                    "cross_subsystem_identity_split",
-                    "jump_target",
-                    .{ jump_identity, boundary_identity },
-                    .{ jump.label, boundary_identity },
-                    .{ jump_identity_slot.bound_offset, target_slot.bound_offset },
-                    .{ target_address, encoded_address },
-                );
-            }
-        }
-
-        var source_group_start: usize = 0;
-        var previous_source_pc: ?u32 = null;
-        var source_events_on_identity: u64 = 0;
-        var source_events_between_identities: u64 = 0;
-        for (self.output_sources[0..self.output_source_len]) |source| {
-            if (source.pc >= self.output_len) return error.InvalidBytecode;
-            if (previous_source_pc) |previous| {
-                if (source.pc < previous) return error.InvalidBytecode;
-            }
-            previous_source_pc = source.pc;
-
-            var on_identity = false;
-            while (source_group_start < self.binds.len) {
-                var source_group_end = source_group_start + 1;
-                while (source_group_end < self.binds.len and
-                    self.binds[source_group_end].bound_offset == self.binds[source_group_start].bound_offset) : (source_group_end += 1)
-                {}
-                const group_identity = self.binds[source_group_start].label_index;
-                const group_address = self.addr[group_identity];
-                if (group_address == labels.unbound or group_address < source.pc) {
-                    source_group_start = source_group_end;
-                    continue;
-                }
-                on_identity = group_address == source.pc;
-                break;
-            }
-            if (on_identity)
-                source_events_on_identity += 1
-            else
-                source_events_between_identities += 1;
-        }
-        cfg.recordFinalSourceCensus(
-            self.output_source_len,
-            source_events_on_identity,
-            source_events_between_identities,
-        );
-        cfg.recordFinalBoundaryHops(live_group_count);
-    }
-
     fn isLabelAddress(self: *const Resolver, pc: u32) bool {
         for (self.addr) |addr| {
             if (addr == pc) return true;
@@ -3580,27 +2988,6 @@ const Resolver = struct {
             }
             previous_pc = source.pc;
         }
-    }
-
-    fn validateFinalOutput(self: *const Resolver) Error!void {
-        const code = self.output[0..self.output_len];
-        var position: u32 = 0;
-        var atom_index: u32 = 0;
-        while (position < self.output_len) {
-            const instruction = try decodeInstruction(code, position);
-            if (instruction.form == .invalid) return error.InvalidBytecode;
-            if (instruction.hasAtom()) {
-                if (atom_index >= self.output_atom_len)
-                    return error.InvalidBytecode;
-                if (try readU32At(code, position, operand_off.atom) != self.output_atoms[atom_index].raw())
-                    return error.InvalidBytecode;
-                atom_index += 1;
-            }
-            position += instruction.size;
-        }
-        if (position != self.output_len or atom_index != self.output_atom_len)
-            return error.InvalidBytecode;
-        try self.validateFinalSources();
     }
 
     fn installSourceLocsNoFail(
@@ -3623,7 +3010,6 @@ const Resolver = struct {
     /// operation is allocation-free and infallible, so no observable
     /// half-install can escape by construction.
     fn commit(self: *Resolver) void {
-        self.function.call_site_count = self.callSiteCount();
         self.function.prop_site_count = self.propSiteCount();
         const owned_code = self.output[0..self.output_len];
         const owned_code_capacity = self.output_capacity;
@@ -3653,8 +3039,7 @@ const Resolver = struct {
 /// first_reloc heads are mutated in place qjs-style. All fallible output work
 /// finishes before the Bytecode's single allocation-free ownership-transfer
 /// commit point.
-fn runImpl(
-    comptime packed_finalize_validates_code: bool,
+pub fn run(
     comptime layout: LayoutMode,
     function: *bytecode.Bytecode,
     fd: ?*const bytecode.function_def.FunctionDef,
@@ -3667,8 +3052,6 @@ fn runImpl(
             return error.InvalidBytecode;
     }
     try validateProductMetadata(product);
-    if (comptime !packed_finalize_validates_code)
-        try validateProductCode(product);
 
     var resolver: Resolver = .{
         .function = function,
@@ -3684,52 +3067,20 @@ fn runImpl(
     try resolver.initScratch(layout);
     try resolver.walk(layout);
     try resolver.releaseConsumedProduct();
-    if (layout == .short) {
-        // F3: relaxJumps is the one pass that moves source events and label
-        // addresses after they are both fixed. Snapshot which events sit on an
-        // identity BEFORE it runs and re-derive after, so "positional
-        // attribution survives compaction" is measured, not assumed.
-        var stability = try resolver.captureAnchorCoincidence();
-        defer stability.deinit(resolver.memory);
-        try resolver.relaxJumps();
-        resolver.reportAnchorCoincidence(&stability);
-    }
-    if (comptime cfg.audit_oracles) try resolver.auditFinalBoundaryIdentity();
-    if (comptime packed_finalize_validates_code) {
-        // The packed FunctionBytecode choke point immediately validates final
-        // code, atom-owner sequence, and var-ref bounds in one fused walk.
-        // Source slots are consumed before that point, so retain their proof
-        // here while avoiding a duplicate code traversal.
-        try resolver.validateFinalSources();
-    } else {
-        try resolver.validateFinalOutput();
-    }
+    if (layout == .short) try resolver.relaxJumps();
+    // The packed FunctionBytecode choke point immediately validates final
+    // code, atom-owner sequence, and var-ref bounds in one fused walk.
+    // Source slots are consumed before that point, so retain their proof
+    // here while avoiding a duplicate code traversal.
+    try resolver.validateFinalSources();
     resolver.commit();
     std.debug.assert(resolver.output_capacity == 0 and
         resolver.output_atom_capacity == 0 and resolver.output_source_capacity == 0);
 }
 
-pub fn run(
-    comptime layout: LayoutMode,
-    function: *bytecode.Bytecode,
-    fd: ?*const bytecode.function_def.FunctionDef,
-    product: *resolve_variables.ResolvedProduct,
-) Error!void {
-    return runImpl(false, layout, function, fd, product);
-}
-
 /// Packed-finalize variant.  Its caller must perform the fused final-code,
 /// atom-owner, and var-ref validation before publishing the FunctionBytecode.
 /// All other callers use `run`, which keeps the self-contained full proof.
-pub fn runForPackedFinalize(
-    comptime layout: LayoutMode,
-    function: *bytecode.Bytecode,
-    fd: ?*const bytecode.function_def.FunctionDef,
-    product: *resolve_variables.ResolvedProduct,
-) Error!void {
-    return runImpl(true, layout, function, fd, product);
-}
-
 const ResolveLabelsTestHarness = struct {
     rt: *core.JSRuntime,
     name_atom: core.atom.Atom,
@@ -3737,7 +3088,7 @@ const ResolveLabelsTestHarness = struct {
     fd: bytecode.function_def.FunctionDef,
 
     fn init(harness: *ResolveLabelsTestHarness, allocator: std.mem.Allocator) !void {
-        harness.rt = try core.JSRuntime.create(allocator);
+        harness.rt = try core.JSRuntime.create(allocator, .{});
         errdefer harness.rt.destroy();
         harness.name_atom = try harness.rt.atoms.internString("qcp1-s4-pass-a");
         harness.function = bytecode.Bytecode.init(
@@ -3745,7 +3096,7 @@ const ResolveLabelsTestHarness = struct {
             &harness.rt.atoms,
             harness.name_atom,
         );
-        errdefer harness.function.deinit(harness.rt);
+        errdefer harness.function.deinit();
         harness.fd = bytecode.function_def.FunctionDef.init(
             &harness.rt.memory,
             &harness.rt.atoms,
@@ -3759,7 +3110,7 @@ const ResolveLabelsTestHarness = struct {
 
     fn deinit(harness: *ResolveLabelsTestHarness) void {
         harness.fd.deinit(harness.rt);
-        harness.function.deinit(harness.rt);
+        harness.function.deinit();
         harness.rt.destroy();
     }
 
@@ -4999,95 +4350,4 @@ test "compiler.resolve_labels: allocation failure sweep is transactional" {
         resolveLabelsOomScript,
         .{},
     );
-}
-
-test "compiler.resolve_labels: alias group resolves to one final address" {
-    const group = [_]BindEntry{
-        .{
-            .bound_offset = 4,
-            .label_index = 0,
-            .initially_referenced = true,
-            .match_barrier = false,
-        },
-        .{
-            .bound_offset = 4,
-            .label_index = 1,
-            .initially_referenced = true,
-            .match_barrier = false,
-        },
-    };
-    const addr = [_]u32{ 9, 9 };
-    try std.testing.expect(finalAliasSplit(&group, &addr) == null);
-    try std.testing.expect(aliasLivenessSplit(&group, &addr) == null);
-}
-
-test "compiler.resolve_labels: split final addresses are rejected" {
-    const group = [_]BindEntry{
-        .{
-            .bound_offset = 4,
-            .label_index = 0,
-            .initially_referenced = true,
-            .match_barrier = false,
-        },
-        .{
-            .bound_offset = 4,
-            .label_index = 1,
-            .initially_referenced = true,
-            .match_barrier = false,
-        },
-    };
-    const addr = [_]u32{ 9, 10 };
-    const split = finalAliasSplit(&group, &addr) orelse
-        return error.TestExpectedEqual;
-    try std.testing.expectEqual(@as(u32, 0), split.first_label);
-    try std.testing.expectEqual(@as(u32, 1), split.second_label);
-}
-
-test "compiler.resolve_labels: a half-retired alias group is rejected" {
-    const group = [_]BindEntry{
-        .{
-            .bound_offset = 4,
-            .label_index = 0,
-            .initially_referenced = true,
-            .match_barrier = false,
-        },
-        .{
-            .bound_offset = 4,
-            .label_index = 1,
-            .initially_referenced = false,
-            .match_barrier = false,
-            .dead_skipped = true,
-        },
-    };
-    const addr = [_]u32{ 9, labels.unbound };
-    const split = aliasLivenessSplit(&group, &addr) orelse
-        return error.TestExpectedEqual;
-    try std.testing.expectEqual(@as(u32, 0), split.live_label);
-    try std.testing.expectEqual(@as(u32, 1), split.retired_label);
-}
-
-test "compiler.resolve_labels: identical final address is not a defence" {
-    const binds = [_]BindEntry{
-        .{
-            .bound_offset = 4,
-            .label_index = 0,
-            .initially_referenced = true,
-            .match_barrier = false,
-        },
-        .{
-            .bound_offset = 8,
-            .label_index = 1,
-            .initially_referenced = true,
-            .match_barrier = false,
-        },
-    };
-    const addr = [_]u32{ 12, 12 };
-    const first_identity = canonicalIdentityAtProductOffset(&binds, 4).?;
-    const second_identity = canonicalIdentityAtProductOffset(&binds, 8).?;
-    try std.testing.expect(first_identity != second_identity);
-    try std.testing.expectEqual(addr[first_identity], addr[second_identity]);
-}
-
-test {
-    _ = builtin;
 }

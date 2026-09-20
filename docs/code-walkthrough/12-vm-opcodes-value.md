@@ -92,280 +92,280 @@
 - **实现**：读模板 atom，取名，`reserveAdditional(1)` **先于** `newSymbol`+`takeSymbolValue`，避免栈失败留下幽灵 atom。pushOwnedAssumeCapacity。
 - **所有权 / 错误 / 调用**：新 symbol owned。测试覆盖栈失败/分配失败不保留瞬时 atom。
 
-### `pushEmptyString` (`src/exec/vm_value.zig:111`)
+### `pushEmptyString` (`src/exec/vm_value.zig:114`)
 
 - **签名**：`pub noinline fn pushEmptyString(ctx: *core.JSContext, stack: *stack_mod.Stack) !void`。
 - **作用**：服务 `op.push_empty_string`。
 - **实现**：`rt.emptyString().value()`。
 - **所有权 / 错误 / 调用**：intern dup。
 
-### `pushThis` (`src/exec/vm_value.zig:116`)
+### `pushThis` (`src/exec/vm_value.zig:119`)
 
 - **签名**：`pub fn pushThis(stack: *stack_mod.Stack, this_value: core.JSValue) !void`。
 - **作用**：服务 `op.push_this` 的纯压栈（已物化的 this）。
 - **实现**：`adapterValueBorrow`；uninitialized → ReferenceError；`pushAssumeCapacity`。
 - **所有权 / 错误 / 调用**：dup this。`pushThisVm`。
 
-### `pushThisVm` (`src/exec/vm_value.zig:122`)
+### `pushThisVm` (`src/exec/vm_value.zig:125`)
 
 - **签名**：`pub noinline fn pushThisVm( ctx: *core.JSContext, output: ?*std.Io.Writer, stack: *stack_mod.Stack, frame: *frame_mod.Frame, catch_target: *?usize, global: *core.Object, ) !Step`。
 - **作用**：`op.push_this` 冷路径：先 `materializeFrameThisBinding`（可能 TypeError），再 pushThis。
 - **实现**：两处 catch 走 handleCatchable。
 - **所有权 / 错误 / 调用**：分发 miss（严格/派生 this）。
 
-### `toObject` (`src/exec/vm_value.zig:146`)
+### `toObject` (`src/exec/vm_value.zig:149`)
 
 - **签名**：`pub fn toObject(ctx: *core.JSContext, global: *core.Object, stack: *stack_mod.Stack) !void`。
 - **作用**：服务 `op.ext0` + `ext0_sub.to_object` 的 ToObject。
 - **实现**：pop；已是对象则原样；否则 `primitiveObjectForAccess`。assumeCapacity push。
 - **所有权 / 错误 / 调用**：null/undefined TypeError。`toObjectVm`。
 
-### `toObjectVm` (`src/exec/vm_value.zig:155`)
+### `toObjectVm` (`src/exec/vm_value.zig:158`)
 
 - **签名**：`pub noinline fn toObjectVm( ctx: *core.JSContext, output: ?*std.Io.Writer, stack: *stack_mod.Stack, frame: *frame_mod.Frame, catch_target: *?usize, global: *core.Object, ) !Step`。
 - **作用**：catch 包装，TypeError 单独走 handleCatchable。
 - **实现**：switch TypeError / else。
 - **所有权 / 错误 / 调用**：分发。
 
-### `typeOf` (`src/exec/vm_value.zig:173`)
+### `typeOf` (`src/exec/vm_value.zig:176`)
 
 - **签名**：`pub noinline fn typeOf(ctx: *core.JSContext, stack: *stack_mod.Stack) !void`。
 - **作用**：服务 `op.typeof`。qjs 返回预定义 atom 再 `JS_AtomToString`（intern dup，非新分配）。
 - **实现**：HTMLDDA 与 undefined → `"undefined"`；null → `"object"`；bool/bigint/number/string/symbol 各原子；bytecode 函数、c_function、async resume、c_closure、bound、可调用 proxy → `"function"`；否则 `"object"`。
 - **所有权 / 错误 / 调用**：intern 字符串 owned。
 
-### `typeOfIsUndefined` (`src/exec/vm_value.zig:201`)
+### `typeOfIsUndefined` (`src/exec/vm_value.zig:204`)
 
 - **签名**：`pub noinline fn typeOfIsUndefined(_: *core.JSRuntime, stack: *stack_mod.Stack) !void`。
 - **作用**：服务融合/比较：`typeof x === "undefined"`（含 HTMLDDA）。
 - **实现**：pop，push bool。
 - **所有权 / 错误 / 调用**：立即数。
 
-### `typeOfIsFunction` (`src/exec/vm_value.zig:206`)
+### `typeOfIsFunction` (`src/exec/vm_value.zig:209`)
 
 - **签名**：`pub noinline fn typeOfIsFunction(_: *core.JSRuntime, stack: *stack_mod.Stack) !void`。
 - **作用**：`typeof x === "function"`，与 `typeOf` 同一可调用集合。
 - **实现**：排除 HTMLDDA。
 - **所有权 / 错误 / 调用**：分发仍可能走此外壳。
 
-### `logicalNot` (`src/exec/vm_value.zig:219`)
+### `logicalNot` (`src/exec/vm_value.zig:222`)
 
 - **签名**：`pub noinline fn logicalNot(_: *core.JSRuntime, stack: *stack_mod.Stack) !void`。
 - **作用**：服务 `op.lnot`（`!`）。
 - **实现**：pop，`!isTruthy`，push bool。
 - **所有权 / 错误 / 调用**：无 ToBoolean 再入（对象恒真）。
 
-### `drop` (`src/exec/vm_value.zig:224`)
+### `drop` (`src/exec/vm_value.zig:227`)
 
 - **签名**：`pub noinline fn drop(_: *core.JSRuntime, stack: *stack_mod.Stack) !DropResult`。
 - **作用**：服务 `op.drop`。普通值丢掉；catch offset 要更新 handler；iterator catch marker 当普通值。
 - **实现**：pop。iterator marker → `.value`。catchOffset==0 → `.value`；否则 `.catch_target`。
 - **所有权 / 错误 / 调用**：分发按结果写 `vm.catch_target`。pop 先于 free（热路径注释）。
 
-### `nipCatch` (`src/exec/vm_value.zig:239`)
+### `nipCatch` (`src/exec/vm_value.zig:242`)
 
 - **签名**：`pub noinline fn nipCatch(_: *core.JSRuntime, stack: *stack_mod.Stack) !DropResult`。
 - **作用**：服务 `op.nip_catch`：保留栈顶返回值，往下丢直到 catch offset。
 - **实现**：pop ret。循环 pop 直到 catchOffset；marker 或 0 → `.value`，否则更新 target。把 ret 压回。无 marker → `InvalidBytecode`。
 - **所有权 / 错误 / 调用**：finally 完成后。
 
-### `dup` (`src/exec/vm_value.zig:260`)
+### `dup` (`src/exec/vm_value.zig:263`)
 
 - **签名**：`pub fn dup(ctx: *core.JSContext, stack: *stack_mod.Stack, opc: u8) !void`。
 - **作用**：服务 `op.dup`。
 - **实现**：peekBorrowed，`pushAssumeCapacity`（dup）。ctx/opc 未用。
 - **所有权 / 错误 / 调用**：`StackUnderflow`。
 
-### `swap` (`src/exec/vm_value.zig:267`)
+### `swap` (`src/exec/vm_value.zig:270`)
 
 - **签名**：`pub fn swap(ctx: *core.JSContext, stack: *stack_mod.Stack) !void`。
 - **作用**：服务 `op.swap`：`[a,b] → [b,a]`。
 - **实现**：require 2，pop 两次再反序 pushOwnedAssumeCapacity。
 - **所有权 / 错误 / 调用**：所有权移动。
 
-### `nip` (`src/exec/vm_value.zig:276`)
+### `nip` (`src/exec/vm_value.zig:279`)
 
 - **签名**：`pub fn nip(_: *core.JSContext, stack: *stack_mod.Stack) !void`。
 - **作用**：服务 `op.nip`：丢次顶，留顶。
 - **实现**：pop top，pop 丢弃，push top。
 - **所有权 / 错误 / 调用**：次顶释放。
 
-### `dup2` (`src/exec/vm_value.zig:283`)
+### `dup2` (`src/exec/vm_value.zig:286`)
 
 - **签名**：`pub fn dup2(ctx: *core.JSContext, stack: *stack_mod.Stack) !void`。
 - **作用**：`[a,b] → [a,b,a,b]`。
 - **实现**：pop b,a，push a,b（assume dup），再 owned a,b。
 - **所有权 / 错误 / 调用**：净 +2。
 
-### `dup1` (`src/exec/vm_value.zig:294`)
+### `dup1` (`src/exec/vm_value.zig:297`)
 
 - **签名**：`pub fn dup1(ctx: *core.JSContext, stack: *stack_mod.Stack) !void`。
 - **作用**：`[a,b] → [a,a,b]`。
 - **实现**：pop b,a，push a（dup）、owned a、owned b。
 - **所有权 / 错误 / 调用**：旧一字节 id 18 已被融合 opcode `get_loc8_push_i8` 收走，`dup1` 现以 `op.ext0` + `ext0_sub.dup1` 发射与分发（parser 仍在用）。
 
-### `dup3` (`src/exec/vm_value.zig:304`)
+### `dup3` (`src/exec/vm_value.zig:307`)
 
 - **签名**：`pub fn dup3(ctx: *core.JSContext, stack: *stack_mod.Stack) !void`。
 - **作用**：复制顶三槽。
 - **实现**：require 3，pop cba，push 三份 assume + 三份 owned。
 - **所有权 / 错误 / 调用**：测试验证 underflow 不改栈。
 
-### `insert2` (`src/exec/vm_value.zig:318`)
+### `insert2` (`src/exec/vm_value.zig:321`)
 
 - **签名**：`pub fn insert2(ctx: *core.JSContext, stack: *stack_mod.Stack) !void`。
 - **作用**：`[a,b] → [b,a,b]`。
 - **实现**：pop b,a，push b（dup）、owned a、owned b。
 - **所有权 / 错误 / 调用**：栈洗牌族。
 
-### `insert3` (`src/exec/vm_value.zig:328`)
+### `insert3` (`src/exec/vm_value.zig:331`)
 
 - **签名**：`pub fn insert3(ctx: *core.JSContext, stack: *stack_mod.Stack) !void`。
 - **作用**：把顶插入到深度 3。
 - **实现**：`[a,b,c] → [c,a,b,c]`。
 - **所有权 / 错误 / 调用**：只搬运栈槽，不分配、不 retain：`pushOwnedAssumeCapacity` 与 `pushAssumeCapacity` 在去 rc 之后是同一段代码（`src/exec/stack.zig:226` / `:232`），`Owned` 后缀现在只是文档性的。error set 只有 `requireStackLen`（`src/exec/vm_value.zig:489`）的 `error.StackUnderflow`，且**先检查后动栈**，这正是 `src/exec/vm_value.zig:624` 那条测试断言的不变量。pop 与 push 之间值只活在 Zig 局部里，但中间不分配，且保守栈扫描覆盖这些局部。`ctx` 被 `_` 丢弃。唯一调用方冷表 `op.insert3` 臂（`src/exec/tailcall_dispatch_colds.zig:612`）。
 
-### `insert4` (`src/exec/vm_value.zig:340`)
+### `insert4` (`src/exec/vm_value.zig:343`)
 
 - **签名**：`pub fn insert4(ctx: *core.JSContext, stack: *stack_mod.Stack) !void`。
 - **作用**：顶插入深度 4。
 - **实现**：`[a,b,c,d] → [d,a,b,c,d]`。
 - **所有权 / 错误 / 调用**：underflow 测试。
 
-### `rot3l` (`src/exec/vm_value.zig:354`)
+### `rot3l` (`src/exec/vm_value.zig:357`)
 
 - **签名**：`pub fn rot3l(ctx: *core.JSContext, stack: *stack_mod.Stack) !void`。
 - **作用**：服务 `op.rot3l`：`[a,b,c] → [b,c,a]`。
 - **实现**：pop cba，push b,c,a。
 - **所有权 / 错误 / 调用**：所有权移动。
 
-### `rot3r` (`src/exec/vm_value.zig:365`)
+### `rot3r` (`src/exec/vm_value.zig:368`)
 
 - **签名**：`pub fn rot3r(ctx: *core.JSContext, stack: *stack_mod.Stack) !void`。
 - **作用**：`[a,b,c] → [c,a,b]`。
 - **实现**：push c,a,b。
 - **所有权 / 错误 / 调用**：旧一字节 id 30 归 `get_loc8_push_1`，现以 `op.ext0` + `ext0_sub.rot3r` 发射与分发。
 
-### `rot4l` (`src/exec/vm_value.zig:376`)
+### `rot4l` (`src/exec/vm_value.zig:379`)
 
 - **签名**：`pub fn rot4l(ctx: *core.JSContext, stack: *stack_mod.Stack) !void`。
 - **作用**：四槽左旋。
 - **实现**：`[a,b,c,d] → [b,c,d,a]`。
 - **所有权 / 错误 / 调用**：同族：纯搬运、不分配、不 retain，唯一错误是先检查的 `error.StackUnderflow`。`rot4l` 已无一字节 id（旧 id 31 归 `get_var_ref0_get_loc8`），唯一可达分发是 `op.ext0` + `ext0_sub.rot4l`，在 `using_ops.execVm` 的二级 switch 里（`src/exec/using_ops.zig:163`）；`src/exec/tailcall_dispatch_colds.zig:632` 那处写的是 `keep[9]`，是为保持冷表代码布局而保活的实例，不是可达的 opcode 臂。
 
-### `rot5l` (`src/exec/vm_value.zig:389`)
+### `rot5l` (`src/exec/vm_value.zig:392`)
 
 - **签名**：`pub fn rot5l(ctx: *core.JSContext, stack: *stack_mod.Stack) !void`。
 - **作用**：五槽左旋。
 - **实现**：`[a,b,c,d,e] → [b,c,d,e,a]`。
 - **所有权 / 错误 / 调用**：同族：纯搬运、不分配、先检查深度。同样只以 `op.ext0` + `ext0_sub.rot5l` 分发（`src/exec/using_ops.zig:143`）；`src/exec/tailcall_dispatch_colds.zig:637` 是 `keep[4]` 的布局保活实例，不可达。
 
-### `perm3` (`src/exec/vm_value.zig:404`)
+### `perm3` (`src/exec/vm_value.zig:407`)
 
 - **签名**：`pub fn perm3(ctx: *core.JSContext, stack: *stack_mod.Stack) !void`。
 - **作用**：服务 `op.perm3`：`[a,b,c] → [b,a,c]`。
 - **实现**：push b,a,c。
 - **所有权 / 错误 / 调用**：同族：纯搬运、不分配、先检查深度（`error.StackUnderflow`），`ctx` 丢弃。唯一调用方冷表 `op.perm3` 臂（`src/exec/tailcall_dispatch_colds.zig:642`）。
 
-### `perm4` (`src/exec/vm_value.zig:415`)
+### `perm4` (`src/exec/vm_value.zig:418`)
 
 - **签名**：`pub fn perm4(ctx: *core.JSContext, stack: *stack_mod.Stack) !void`。
 - **作用**：服务 `op.perm4`。
 - **实现**：`[a,b,c,d] → [c,a,b,d]`。
 - **所有权 / 错误 / 调用**：同族：纯搬运、不分配、先检查深度。唯一调用方冷表 `op.perm4` 臂（`src/exec/tailcall_dispatch_colds.zig:647`）。
 
-### `perm5` (`src/exec/vm_value.zig:428`)
+### `perm5` (`src/exec/vm_value.zig:431`)
 
 - **签名**：`pub fn perm5(ctx: *core.JSContext, stack: *stack_mod.Stack) !void`。
 - **作用**：五槽置换。
 - **实现**：`[a,b,c,d,e] → [d,a,b,c,e]`。
 - **所有权 / 错误 / 调用**：同族：纯搬运、不分配、先检查深度。只以 `op.ext0` + `ext0_sub.perm5` 分发（`src/exec/using_ops.zig:147`）；`src/exec/tailcall_dispatch_colds.zig:652` 是 `keep[5]` 的布局保活实例，不可达。
 
-### `swap2` (`src/exec/vm_value.zig:443`)
+### `swap2` (`src/exec/vm_value.zig:446`)
 
 - **签名**：`pub fn swap2(ctx: *core.JSContext, stack: *stack_mod.Stack) !void`。
 - **作用**：交换两对：`[a,b,c,d] → [c,d,a,b]`。
 - **实现**：require 4。
 - **所有权 / 错误 / 调用**：旧一字节 id 28 归 `push_0_shr`，现以 `op.ext0` + `ext0_sub.swap2` 发射与分发。
 
-### `isUndefinedOrNull` (`src/exec/vm_value.zig:456`)
+### `isUndefinedOrNull` (`src/exec/vm_value.zig:459`)
 
 - **签名**：`pub noinline fn isUndefinedOrNull(_: *core.JSRuntime, stack: *stack_mod.Stack) !void`。
 - **作用**：服务 `op.is_undefined_or_null`。
 - **实现**：pop，push bool。
 - **所有权 / 错误 / 调用**：热路径常内联。
 
-### `isUndefined` (`src/exec/vm_value.zig:461`)
+### `isUndefined` (`src/exec/vm_value.zig:464`)
 
 - **签名**：`pub noinline fn isUndefined(_: *core.JSRuntime, stack: *stack_mod.Stack) !void`。
 - **作用**：`=== undefined`（不含 null/HTMLDDA）。
 - **实现**：`value.is(.undefined_value)`。
 - **所有权 / 错误 / 调用**：原一字节 id 240 已回收，现以 `op.ext0` + `ext0_sub.is_undefined` 发射与分发。
 
-### `isNull` (`src/exec/vm_value.zig:466`)
+### `isNull` (`src/exec/vm_value.zig:469`)
 
 - **签名**：`pub noinline fn isNull(_: *core.JSRuntime, stack: *stack_mod.Stack) !void`。
 - **作用**：服务 `op.is_null`。
 - **实现**：`is(.null_value)`。
 - **所有权 / 错误 / 调用**：`op.is_null` 仍是一字节 id 241，由冷表直接分发。
 
-### `adapterValueBorrow` (`src/exec/vm_value.zig:471`)
+### `adapterValueBorrow` (`src/exec/vm_value.zig:474`)
 
 - **签名**：`fn adapterValueBorrow(slot: core.JSValue) core.JSValue`。
 - **作用**：解 VarRef cell 读 this。
 - **实现**：Debug 断言不套 cell。
 - **所有权 / 错误 / 调用**：`pushThis`。
 
-### `requireStackLen` (`src/exec/vm_value.zig:480`)
+### `requireStackLen` (`src/exec/vm_value.zig:483`)
 
 - **签名**：`fn requireStackLen(stack: *const stack_mod.Stack, required: usize) !void`。
 - **作用**：洗牌前深度检查，失败不改栈。
 - **实现**：`< required` → `StackUnderflow`。
 - **所有权 / 错误 / 调用**：所有 rearrange。
 
-### `expectStackInt32s` (`src/exec/vm_value.zig:484`)
+### `expectStackInt32s` (`src/exec/vm_value.zig:487`)
 
 - **签名**：`fn expectStackInt32s(stack: *const stack_mod.Stack, expected: []const i32) !void`。
 - **作用**：测试辅助：栈恰好是这些 int32。
 - **实现**：`std.testing.expectEqual`。
 - **所有权 / 错误 / 调用**：测试辅助，只读：不改栈、不分配，error set 来自 `std.testing`。它按 `stack.values[index]` 从缓冲**底部**索引（不是相对栈顶），所以只对从空栈起搭起来的夹具成立。唯一调用方是 `src/exec/vm_value.zig:624` 那条深度校验测试（3 次）。
 
-### `varRefCellFromValue` (`src/exec/vm_value.zig:491`)
+### `varRefCellFromValue` (`src/exec/vm_value.zig:494`)
 
 - **签名**：`fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef`。
 - **作用**：`VarRef.fromValue` 薄包装。
 - **实现**：一行。
 - **所有权 / 错误 / 调用**：adapterValueBorrow。
 
-### `functionObjectFromValue` (`src/exec/vm_value.zig:495`)
+### `functionObjectFromValue` (`src/exec/vm_value.zig:498`)
 
 - **签名**：`fn functionObjectFromValue(value: core.JSValue) ?*core.Object`。
 - **作用**：是否字节码函数类（含 generator/async 函数对象）。
 - **实现**：对象 + `isBytecodeFunctionClass`。
 - **所有权 / 错误 / 调用**：typeof。测试覆盖四个 class id。
 
-### `callableObjectFromValue` (`src/exec/vm_value.zig:505`)
+### `callableObjectFromValue` (`src/exec/vm_value.zig:508`)
 
 - **签名**：`fn callableObjectFromValue(value: core.JSValue) ?*core.Object`。
 - **作用**：native/host/bound/closure/async-resume 可调用对象。
 - **实现**：c_function、c_function_data、async resume 类、c_closure、bound_function。
 - **所有权 / 错误 / 调用**：typeof。
 
-### `proxyTargetIsCallable` (`src/exec/vm_value.zig:517`)
+### `proxyTargetIsCallable` (`src/exec/vm_value.zig:520`)
 
 - **签名**：`fn proxyTargetIsCallable(value: core.JSValue) bool`。
 - **作用**：代理链是否指向可调用目标（递归）。
 - **实现**：`proxyTarget` 再 bytecode/function/callable/再 proxy。
 - **所有权 / 错误 / 调用**：typeof；环由引擎 proxy 不变量约束。
 
-### `readInt` (`src/exec/vm_value.zig:523`)
+### `readInt` (`src/exec/vm_value.zig:526`)
 
 - **签名**：`fn readInt(comptime T: type, bytes: []const u8) T`。
 - **作用**：读立即数/atom/常量索引。
 - **实现**：小端。
 - **所有权 / 错误 / 调用**：纯读借用的字节码切片，不分配、无 error set，定长由调用点 `[0..N]` 切片保证。文件私有，调用方：`src/exec/vm_value.zig:30`/`:36`/`:42`（立即数）、`:87`（常量索引）、`:102`（atom）、`:109`（private symbol 模板 atom）。
 
-### `countLivePrivateAtomsNamed` (`src/exec/vm_value.zig:527`)
+### `countLivePrivateAtomsNamed` (`src/exec/vm_value.zig:530`)
 
 - **签名**：`fn countLivePrivateAtomsNamed(rt: *core.JSRuntime, expected_name: []const u8) usize`。
 - **作用**：测试：数仍活着的同名 private atom。

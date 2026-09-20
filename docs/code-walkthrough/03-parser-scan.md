@@ -3,7 +3,7 @@
 `ParseState.advance`、ASI、`expect*`、失败诊断、箭头 cover 与 for 头的平衡扫描、lexer 快照。表达式/语句的真正下降在其它分册。
 
 
-### `ParseState.advance` (`src/parser.zig:2018`)
+### `ParseState.advance` (`src/parser.zig:41`)
 
 - **签名**：`fn advance(self: *State) Error!void`。
 - **作用**：消费当前 token，就地换成下一个 token（被消费 token 的 payload 由 `nextIntoReplacing` 释放）。

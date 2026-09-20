@@ -95,14 +95,7 @@
 - **实现**：对每个 `global_decl` 调上一函数。
 - **所有权 / 错误 / 调用**：`zjs_vm` 进入脚本/eval 帧前；`object_ops` 闭包定义。
 
-### `instantiateGlobalVarDeclarationCells` (`src/exec/vm_property_globals.zig:458`)
-
-- **签名**：`pub fn instantiateGlobalVarDeclarationCells( ctx: *core.JSContext, global: *core.Object, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, is_eval_code: bool, ) !void`。
-- **作用**：PASS2：按闭包顺序绑定 GLOBAL_DECL cell。函数值不在此安装（fclosure/put_var_ref 序言在整趟 PASS 之后）。
-- **实现**：词法 → `defineGlobalDeclLexicalCell` 或 fallback `defineGlobalLexicalValue(uninit, isConst)`。var/function → `defineGlobalDeclVarCell`。
-- **所有权 / 错误 / 调用**：`zjs_vm` 帧建立后。idx 须 fit u16。
-
-### `globalDefinition` (`src/exec/vm_property_globals.zig:478`)
+### `globalDefinition` (`src/exec/vm_property_globals.zig:451`)
 
 - **签名**：`pub noinline fn globalDefinition( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, catch_target: *?usize, eval_global_var_bindings: bool, opc: u8, ) !Step`。
 - **作用**：服务 `op.put_var_init`（词法/eval 初始化）。

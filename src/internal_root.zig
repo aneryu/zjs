@@ -47,6 +47,13 @@ pub const exec = @import("exec/root.zig");
 pub const libs = @import("libs/root.zig");
 pub const runtime = @import("event_loop.zig");
 pub const compiler = @import("compiler/root.zig");
+/// Test262 `$262` host and agent coordinator. Shared by the `run-test262`
+/// CLI and the in-tree test helpers; it depends only on the engine.
+pub const test262_host = @import("test262_host.zig");
+/// In-tree test helpers (`TestEngine`, fixtures). Test-only; the stress and
+/// CLI test families reach it through this export because they live in the
+/// unified test root module, not in the engine module.
+pub const testing = @import("testing.zig");
 
 /// Internal CLI probe. The public embedder root does not export this.
 /// Named for what it does (print to stderr); the exec helper is unchanged.
@@ -68,15 +75,6 @@ test {
     _ = exec;
     _ = libs;
     _ = runtime;
-}
-
-// Stress + CLI tests are not on the core/exec/parser package graph.
-comptime {
-    if (@import("builtin").is_test and @import("build_options").zjs_unified_test_suite) {
-        _ = @import("stress.zig");
-        _ = @import("cli/zjs.zig");
-        _ = @import("cli/run_test262.zig");
-    }
 }
 
 test "zjs.pull_test_modules" {

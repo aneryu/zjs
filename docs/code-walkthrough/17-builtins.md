@@ -9,7 +9,7 @@
 ```
 JSRuntime.create
   → 复制默认 installer 回调到 Runtime（尚未创建 realm/global）
-JSContext.create / createWithOptions
+JSContext.create / create
   → ensureStandardGlobalsRegistered + core context 构造
   → globalObject → exec 的 contextGlobal 物化回调
   → rt.installStandardGlobals(global) → installStandardGlobals(rt, global)

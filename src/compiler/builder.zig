@@ -40,22 +40,6 @@ pub const SourceSlot = struct {
     col: i32,
 };
 
-/// Sparse events needed by exact-CFG construction that are not already
-/// represented by LabelSlot/RelocEntry.  Real parser offsets are below 2 GiB
-/// (the same invariant as `opcode.op.parser_label_tag`), leaving one bit for
-/// the event kind and keeping each row to four bytes.
-pub const ControlKind = enum(u1) {
-    terminal,
-    direct_eval,
-};
-
-pub const ControlSlot = packed struct(u32) {
-    temp_offset: u31,
-    kind: ControlKind,
-};
-
-const inline_control_capacity: u32 = 4;
-
 /// A detached tail segment. Owns its backings and the atom refs moved out of
 /// the builder ledger until spliceSegment (which consumes it) or
 /// discardSegment (which releases it). Offsets are segment-relative.
@@ -64,7 +48,6 @@ pub const DetachedSegment = struct {
     atoms: []core.atom.Atom = &.{},
     /// operand_offset is segment-relative; kind is preserved (jump32/aux32).
     relocs: []labels.RelocEntry = &.{},
-    controls: []ControlSlot = &.{},
     /// Labels whose bind sits inside the segment, as (label, rel offset).
     binds: []Bind = &.{},
     sources: []SourceSlot = &.{},
@@ -152,7 +135,6 @@ pub const Snapshot = struct {
     atom_len: u32,
     label_len: u32,
     reloc_len: u32,
-    control_len: u32,
     source_len: u32,
     last_opcode_pos: ?u32,
 };
@@ -179,17 +161,6 @@ pub const Builder = struct {
     reloc_capacity: usize = 0,
     reloc_len: u32 = 0,
 
-    /// Consumer-proportional CFG side table. Relocation-bearing control flow
-    /// already lives in `relocs`; this contains only non-reloc terminals and
-    /// direct eval. Parser-owned builders enable it before their first emit.
-    /// Four inline rows cover the common one-return function without another
-    /// allocation; uncommon additional rows spill into a growable backing.
-    control_index_enabled: bool = false,
-    inline_controls: [inline_control_capacity]ControlSlot = undefined,
-    control_spill: []ControlSlot = &.{},
-    control_spill_capacity: usize = 0,
-    control_len: u32 = 0,
-
     source_slots: []SourceSlot = &.{},
     source_capacity: usize = 0,
     source_len: u32 = 0,
@@ -202,85 +173,6 @@ pub const Builder = struct {
         return .{ .memory = memory, .atoms = atoms };
     }
 
-    /// Enable the sparse control index before the first emitted byte. Test
-    /// harnesses that construct arbitrary byte streams can leave it disabled;
-    /// cfg.build then uses its self-validating decode fallback.
-    pub fn enableControlIndex(self: *Builder) Error!void {
-        if (self.code_len != 0 or self.control_len != 0)
-            return error.InvalidBytecode;
-        self.control_index_enabled = true;
-    }
-
-    pub fn hasControlIndex(self: *const Builder) bool {
-        return self.control_index_enabled;
-    }
-
-    pub fn controlCount(self: *const Builder) u32 {
-        return self.control_len;
-    }
-
-    pub fn controlAt(self: *const Builder, index: u32) ControlSlot {
-        std.debug.assert(index < self.control_len);
-        if (index < inline_control_capacity)
-            return self.inline_controls[index];
-        return self.control_spill[index - inline_control_capacity];
-    }
-
-    fn ensureControlCapacity(self: *Builder, additional: usize) Error!void {
-        const required = std.math.add(usize, @intCast(self.control_len), additional) catch
-            return error.OutOfMemory;
-        if (required > std.math.maxInt(u32)) return error.BytecodeOverflow;
-        if (required <= inline_control_capacity) return;
-
-        const spill_required = required - inline_control_capacity;
-        const spill_used: u32 = if (self.control_len > inline_control_capacity)
-            self.control_len - inline_control_capacity
-        else
-            0;
-        const need = spill_required - @as(usize, spill_used);
-        try reserve(
-            ControlSlot,
-            self.memory,
-            &self.control_spill,
-            &self.control_spill_capacity,
-            spill_used,
-            need,
-            4,
-        );
-    }
-
-    fn appendControlAssumeCapacity(self: *Builder, slot: ControlSlot) void {
-        std.debug.assert(self.control_len < std.math.maxInt(u32));
-        if (self.control_len < inline_control_capacity) {
-            self.inline_controls[self.control_len] = slot;
-        } else {
-            const spill_index = self.control_len - inline_control_capacity;
-            std.debug.assert(spill_index < self.control_spill_capacity);
-            self.control_spill[spill_index] = slot;
-        }
-        self.control_len += 1;
-    }
-
-    /// Record a terminal/direct-eval instruction just emitted through the
-    /// parser facade. The opcode bytes remain the semantic authority; this is
-    /// only the sparse index that lets cfg.build avoid decoding unrelated ops.
-    pub fn recordControl(self: *Builder, kind: ControlKind) Error!void {
-        if (!self.control_index_enabled) return;
-        const offset = self.last_opcode_pos orelse return error.InvalidBytecode;
-        if (offset >= self.code_len or offset > std.math.maxInt(u31))
-            return error.BytecodeOverflow;
-        if (self.control_len != 0 and
-            self.controlAt(self.control_len - 1).temp_offset >= offset)
-        {
-            return error.InvalidBytecode;
-        }
-        try self.ensureControlCapacity(1);
-        self.appendControlAssumeCapacity(.{
-            .temp_offset = @intCast(offset),
-            .kind = kind,
-        });
-    }
-
     /// Item-wise release of the owned atom prefix, then every backing freed
     /// by full capacity. Idempotent.
     pub fn deinit(self: *Builder) void {
@@ -288,8 +180,6 @@ pub const Builder = struct {
         if (self.atom_capacity != 0) self.memory.free(core.atom.Atom, self.atom_operands);
         if (self.label_capacity != 0) self.memory.free(labels.LabelSlot, self.label_slots);
         if (self.reloc_capacity != 0) self.memory.free(labels.RelocEntry, self.relocs);
-        if (self.control_spill_capacity != 0)
-            self.memory.free(ControlSlot, self.control_spill);
         if (self.source_capacity != 0) self.memory.free(SourceSlot, self.source_slots);
 
         self.code = &.{};
@@ -304,10 +194,6 @@ pub const Builder = struct {
         self.relocs = &.{};
         self.reloc_capacity = 0;
         self.reloc_len = 0;
-        self.control_index_enabled = false;
-        self.control_spill = &.{};
-        self.control_spill_capacity = 0;
-        self.control_len = 0;
         self.source_slots = &.{};
         self.source_capacity = 0;
         self.source_len = 0;
@@ -529,21 +415,6 @@ pub const Builder = struct {
         self.code_len += 3;
     }
 
-    /// Emit a variable-arity call (`argc:u16` + `cache_idx:u8`). The index
-    /// byte is a placeholder in the phase-1 stream; `resolve_labels` assigns
-    /// the real one when it writes the final form.
-    pub fn emitCallOp(self: *Builder, op_id: u8, argc: u16) Error!void {
-        try self.reserveCode(4);
-
-        const opcode_offset = self.code_len;
-        const opcode_index: usize = @intCast(opcode_offset);
-        self.code[opcode_index] = op_id;
-        std.mem.writeInt(u16, self.code[opcode_index + 1 ..][0..2], argc, .little);
-        self.code[opcode_index + 3] = 0;
-        self.last_opcode_pos = opcode_offset;
-        self.code_len += 4;
-    }
-
     /// Emit an opcode with a u32 immediate operand (compact temp encoding).
     pub fn emitOpU32(self: *Builder, op_id: u8, val: u32) Error!void {
         try self.reserveCode(5);
@@ -761,11 +632,6 @@ pub const Builder = struct {
         {
             self.source_len -= 1;
         }
-        while (self.control_len > 0 and
-            self.controlAt(self.control_len - 1).temp_offset >= opcode_offset)
-        {
-            self.control_len -= 1;
-        }
         self.code_len = opcode_offset;
         self.last_opcode_pos = null;
         return expected_atom;
@@ -864,7 +730,6 @@ pub const Builder = struct {
             .atom_len = self.atom_len,
             .label_len = self.label_len,
             .reloc_len = self.reloc_len,
-            .control_len = self.control_len,
             .source_len = self.source_len,
             .last_opcode_pos = self.last_opcode_pos,
         };
@@ -919,7 +784,6 @@ pub const Builder = struct {
         self.code_len = snap.code_len;
         self.label_len = snap.label_len;
         self.reloc_len = snap.reloc_len;
-        self.control_len = snap.control_len;
         self.source_len = snap.source_len;
         self.last_opcode_pos = snap.last_opcode_pos;
     }
@@ -947,11 +811,6 @@ pub const Builder = struct {
         {
             self.source_len -= 1;
         }
-        while (self.control_len > 0 and
-            self.controlAt(self.control_len - 1).temp_offset >= new_code_len)
-        {
-            self.control_len -= 1;
-        }
         self.code_len = new_code_len;
         self.last_opcode_pos = null;
     }
@@ -974,7 +833,6 @@ pub const Builder = struct {
             mark.atom_len <= self.atom_len and
             mark.label_len <= self.label_len and
             mark.reloc_len <= self.reloc_len and
-            mark.control_len <= self.control_len and
             mark.source_len <= self.source_len;
         std.debug.assert(lengths_valid);
         if (!lengths_valid) return error.InvalidBytecode;
@@ -996,14 +854,6 @@ pub const Builder = struct {
             std.debug.assert(slot_valid);
             if (!slot_valid) return error.InvalidBytecode;
         }
-        var control_index = mark.control_len;
-        while (control_index < self.control_len) : (control_index += 1) {
-            const slot = self.controlAt(control_index);
-            const slot_valid = slot.temp_offset >= mark.code_len and
-                slot.temp_offset < self.code_len;
-            std.debug.assert(slot_valid);
-            if (!slot_valid) return error.InvalidBytecode;
-        }
 
         var bind_count: usize = 0;
         for (self.label_slots[0..self.label_len]) |slot| {
@@ -1017,7 +867,6 @@ pub const Builder = struct {
         const code_count: usize = @intCast(self.code_len - mark.code_len);
         const atom_count: usize = @intCast(self.atom_len - mark.atom_len);
         const reloc_count: usize = @intCast(self.reloc_len - mark.reloc_len);
-        const control_count: usize = @intCast(self.control_len - mark.control_len);
         const source_count: usize = @intCast(self.source_len - mark.source_len);
         var seg: DetachedSegment = .{};
 
@@ -1036,11 +885,6 @@ pub const Builder = struct {
         }
         errdefer if (seg.relocs.len != 0) self.memory.free(labels.RelocEntry, seg.relocs);
 
-        if (control_count != 0) {
-            seg.controls = self.memory.alloc(ControlSlot, control_count) catch return error.OutOfMemory;
-        }
-        errdefer if (seg.controls.len != 0) self.memory.free(ControlSlot, seg.controls);
-
         if (bind_count != 0) {
             seg.binds = self.memory.alloc(DetachedSegment.Bind, bind_count) catch return error.OutOfMemory;
         }
@@ -1056,14 +900,6 @@ pub const Builder = struct {
         for (self.relocs[mark.reloc_len..self.reloc_len], seg.relocs) |entry, *detached| {
             detached.* = entry;
             detached.operand_offset -= mark.code_len;
-        }
-        control_index = mark.control_len;
-        var detached_control_index: usize = 0;
-        while (control_index < self.control_len) : (control_index += 1) {
-            var detached = self.controlAt(control_index);
-            detached.temp_offset = @intCast(@as(u32, detached.temp_offset) - mark.code_len);
-            seg.controls[detached_control_index] = detached;
-            detached_control_index += 1;
         }
         for (self.source_slots[mark.source_len..self.source_len], seg.sources) |slot, *detached| {
             detached.* = slot;
@@ -1096,7 +932,6 @@ pub const Builder = struct {
         self.code_len = mark.code_len;
         self.atom_len = mark.atom_len;
         self.reloc_len = mark.reloc_len;
-        self.control_len = mark.control_len;
         self.source_len = mark.source_len;
         self.last_opcode_pos = null;
         return seg;
@@ -1129,16 +964,6 @@ pub const Builder = struct {
             if (self.label_slots[bind.label_index].flags.bound) return error.InvalidBytecode;
             if (@as(u64, bind.rel_offset) > seg.code.len) return error.InvalidBytecode;
         }
-        var previous_control_offset: ?u31 = null;
-        for (seg.controls) |slot| {
-            if (@as(u64, slot.temp_offset) >= seg.code.len) return error.InvalidBytecode;
-            if (@as(u64, self.code_len) + slot.temp_offset > std.math.maxInt(u31))
-                return error.BytecodeOverflow;
-            if (previous_control_offset) |previous| {
-                if (slot.temp_offset <= previous) return error.InvalidBytecode;
-            }
-            previous_control_offset = slot.temp_offset;
-        }
         var previous_source_offset: ?u32 = null;
         for (seg.sources) |slot| {
             if (@as(u64, slot.temp_offset) > seg.code.len) return error.InvalidBytecode;
@@ -1149,7 +974,6 @@ pub const Builder = struct {
         }
 
         if (seg.relocs.len > @as(usize, std.math.maxInt(u32) - self.reloc_len) or
-            seg.controls.len > @as(usize, std.math.maxInt(u32) - self.control_len) or
             seg.sources.len > @as(usize, std.math.maxInt(u32) - self.source_len) or
             seg.atoms.len > @as(usize, std.math.maxInt(u32) - self.atom_len))
         {
@@ -1166,7 +990,6 @@ pub const Builder = struct {
             seg.relocs.len,
             8,
         );
-        try self.ensureControlCapacity(seg.controls.len);
         try reserve(
             SourceSlot,
             self.memory,
@@ -1211,14 +1034,6 @@ pub const Builder = struct {
             self.source_len += 1;
         }
 
-        for (seg.controls) |control| {
-            const shifted_offset = @as(u64, new_base) + control.temp_offset;
-            self.appendControlAssumeCapacity(.{
-                .temp_offset = @intCast(shifted_offset),
-                .kind = control.kind,
-            });
-        }
-
         for (seg.relocs) |entry| {
             const relative_operand: usize = @intCast(entry.operand_offset);
             const label_index = std.mem.readInt(u32, seg.code[relative_operand..][0..4], .little);
@@ -1259,7 +1074,6 @@ pub const Builder = struct {
         if (seg.code.len != 0) self.memory.free(u8, seg.code);
         if (seg.atoms.len != 0) self.memory.free(core.atom.Atom, seg.atoms);
         if (seg.relocs.len != 0) self.memory.free(labels.RelocEntry, seg.relocs);
-        if (seg.controls.len != 0) self.memory.free(ControlSlot, seg.controls);
         if (seg.binds.len != 0) self.memory.free(DetachedSegment.Bind, seg.binds);
         if (seg.sources.len != 0) self.memory.free(SourceSlot, seg.sources);
         seg.* = .{};

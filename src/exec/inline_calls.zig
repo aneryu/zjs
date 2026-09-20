@@ -3147,8 +3147,7 @@ pub const Machine = struct {
         // Captures.len == closure_var.len ≥ every bytecode var_ref idx, so
         // `ensureVarRefsCapacity` never fires either. Teardown skips the per-element
         // free (the still-live function object owns the cells).
-        const borrow_var_refs = !function.isGlobalVar() and
-            frame_var_refs.len > 0;
+        const borrow_var_refs = frame_var_refs.len > 0;
         const var_ref_storage_count: usize = if (borrow_var_refs) 0 else frame_mod.frameVarRefStorageCount(function, frame_var_refs);
         const open_var_ref_count = frame_mod.frameOpenVarRefStorageCount(function);
         const slab_layout: frame_mod.SlabLayout = .{
@@ -3207,7 +3206,7 @@ pub const Machine = struct {
             entry.frame.var_refs = target.captureSlice();
             entry.frame.ownership.var_refs = .borrowed;
         } else if (frame_var_refs.len != 0 or function.varRefNamesLen() != 0) {
-            try vm_call.initFrameVarRefs(ctx, global, function, &entry.frame, frame_var_refs, true, frame_windows);
+            try vm_call.initFrameVarRefs(ctx, function, &entry.frame, frame_var_refs, true, frame_windows);
         }
     }
 

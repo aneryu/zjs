@@ -416,9 +416,9 @@ pub fn validateGlobalVarDeclarations(
 }
 
 test "QuickJS global declaration validation does not materialize auto-init properties" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     ctx.global = global;
@@ -436,43 +436,16 @@ test "QuickJS global declaration validation does not materialize auto-init prope
     const property_index = global.findProperty(binding_name) orelse return error.TestExpectedEqual;
     try std.testing.expectEqual(core.property.Kind.auto_init, global.propKindAt(property_index));
 
-    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    defer function.deinit(rt);
-    function.flags.is_global_var = true;
-    function.closure_var = try rt.memory.alloc(core.function_bytecode.BytecodeClosureVar, 1);
-    function.closure_var[0] = core.function_bytecode.BytecodeClosureVar.init(.{
+    const function = try bytecode.FunctionBytecode.createFixture(rt, .{ .closure_var_count = 1 });
+    defer function.destroyUnpublishedFixture(rt);
+    function.closureVar()[0] = core.function_bytecode.BytecodeClosureVar.init(.{
         .closure_type = .global_decl,
         .var_idx = 0,
         .var_name = binding_name,
     });
 
-    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
-    const execution_function = execution_adapter.init(&function);
-    try validateGlobalVarDeclarations(ctx, global, execution_function, true);
+    try validateGlobalVarDeclarations(ctx, global, function, true);
     try std.testing.expectEqual(core.property.Kind.auto_init, global.propKindAt(property_index));
-}
-
-/// qjs js_closure2 PASS2: bind every GLOBAL_DECL cell in closure order. Function
-/// values are intentionally absent here; the fclosure/put_var_ref bytecode
-/// prologue runs only after this whole pass finishes.
-pub fn instantiateGlobalVarDeclarationCells(
-    ctx: *core.JSContext,
-    global: *core.Object,
-    function: *const bytecode.FunctionBytecode,
-    frame: *frame_mod.Frame,
-    is_eval_code: bool,
-) !void {
-    for (function.closureVar(), 0..) |cv, idx| {
-        if (cv.closureType() != .global_decl) continue;
-        const ref_idx = std.math.cast(u16, idx) orelse return error.InvalidBytecode;
-        if (cv.isLexical()) {
-            if (!try call_runtime.defineGlobalDeclLexicalCell(ctx, global, function, frame, ref_idx, cv.var_name, cv.isConst())) {
-                try call_runtime.defineGlobalLexicalValue(ctx, cv.var_name, core.JSValue.uninitialized(), cv.isConst());
-            }
-        } else {
-            _ = try call_runtime.defineGlobalDeclVarCell(ctx, global, function, frame, ref_idx, cv.var_name, is_eval_code, globalDeclIsFunction(cv));
-        }
-    }
 }
 
 pub noinline fn globalDefinition(

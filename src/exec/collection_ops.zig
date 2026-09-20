@@ -752,7 +752,7 @@ fn iteratorResult(rt: *core.JSRuntime, global: ?*core.Object, value: core.JSValu
 }
 
 test "collection iteratorResult roots direct function bytecode value while creating result" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-collection-iterator-result-bytecode-symbol");
@@ -779,7 +779,7 @@ test "collection iteratorResult roots direct function bytecode value while creat
 }
 
 test "Map groupBy roots direct symbol key while creating group array" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const map_value = try constructBare(rt, 1);
@@ -794,7 +794,7 @@ test "Map groupBy roots direct symbol key while creating group array" {
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     try addGroupedItem(rt, map, callback, testCallbackHost(ctx), item, 0);
@@ -1244,7 +1244,7 @@ fn freeValueList(rt: *core.JSRuntime, values: []core.JSValue) void {
 }
 
 test "appendValue roots existing values and incoming value during growth" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const first_value = try rt.newSymbolValue("gc-collection-value-list-first");
@@ -1889,7 +1889,7 @@ fn setSnapshotKeys(rt: *core.JSRuntime, receiver: *core.Object) ![]core.JSValue 
 }
 
 test "set difference snapshot key root exposes dynamic key slice" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var keys = try rt.memory.alloc(core.JSValue, 1);

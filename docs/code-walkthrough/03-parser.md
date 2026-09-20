@@ -146,7 +146,7 @@ break/continue/finally/using 的解析期栈。`LabelFrame` 带 `LabelId`（不�
 - **所有权 / 错误 / 调用**：返回的是**预定义 atom id**（`ids.null_ + (val - TOK_NULL)`，对应 quickjs-atom.h 的 1..47 号），不是新建的 atom：既不分配也不 retain，调用方不得 release，它们在 AtomTable 的整个生命周期内恒存，与 `CompileAtomScope` 无关。无 error set（非关键字只有 Debug `assert`）。调用方：`lexer.zig:617`，parser 内 11 处（`tokenKindLabel`（`src/parser.zig:2107`）、`parseNewCalleeMemberAccess`（`:5821`）、`parseMemberChain`（`:5877`/`:5940`）、`parsePrimary` 的松散 `let`（`:6387`）、`parseObjectPropertyName`（`:6924`/`:6930`）、`identifierLikeAtom`（`:7102`）、`parseVar`（`:10548`）、类元素名（`:14074`）、导出名（`:15419`））。
 
 
-### `DeclarationConflictIndex.deinit` (`src/parser.zig:363`)
+### `DeclarationConflictIndex.deinit` (`src/parser.zig:163`)
 
 - **签名**：`fn deinit(self: *DeclarationConflictIndex, allocator: std.mem.Allocator) void`。
 - **作用**：释放冲突索引的 `scope_names` 哈希表，并把索引复位成可以重新 `build` 的空状态。
@@ -221,7 +221,7 @@ break/continue/finally/using 的解析期栈。`LabelFrame` 带 `LabelId`（不�
 三行：按值拷贝一份 `flags`，把 `result_needed` 置真后返回；其余位（`in_accepted` / `pow_allowed` / `yield_forbidden`）原样透传。
 - **所有权 / 错误 / 调用**：无：`ParseFlags` 按值进按值出，只置一位，不碰 `State`、不分配、无 error set。5 处调用方，都是「子表达式的值必须留在栈上」的语法点：`parseCondExpr` 的 then/else 两臂（`src/parser.zig:4667`/`:4669`）、`parseCoalesceExpr` 的 `??` 右操作数（`:4693`）、`parseLogicalAndOr` 的 `||` 与 `&&` 右操作数（`:4721`/`:4741`）。
 
-### `LabelFrame.deinit` (`src/parser.zig:556`)
+### `LabelFrame.deinit` (`src/parser.zig:163`)
 
 - **签名**：`fn deinit(self: *LabelFrame, allocator: std.mem.Allocator) void`。
 - **作用**：回收一层标签帧上登记的 break/continue 待回填列表。
@@ -229,41 +229,25 @@ break/continue/finally/using 的解析期栈。`LabelFrame` 带 `LabelId`（不�
 释放 `LabelFrame` 的 `break_fixups` / `continue_fixups` 两个 ArrayList。标签 atom 不在这里 free。
 - **所有权 / 错误 / 调用**：释放这一帧自己的两个 `std.ArrayList(usize)` fixup 缓冲（`break_fixups` / `continue_fixups`，allocator 总是 `State.function.memory.allocator`）；帧里的 `atom` 与两个 `LabelId` 都是裸值，无释放义务。无 error set。调用方：`State.deinit` 遍历 `label_frames`（`src/parser.zig:1055`）与 `popLabelFrame`（`:2310`）。
 
-### `ParseState.initRootEmitter` (`src/parser.zig:922`)
+### `ParseState.init` (`src/parser/parse_state.zig`)
 
-- **签名**：`fn initRootEmitter( lex: *lexer_mod.Lexer, function: *bytecode_function.Bytecode, emit_root_to_function_def: bool, ) Error!State`。
-- **作用**：构造根 ParseState：scope 0、Builder、第一个 token、函数体 identity。
-- **实现**：
-填 `function_def`（`js_new_function_def`：scope 0 parent=-1）、`CompileAtomScope`、`ensureBuilderForFd`。`lex.nextInto` 读第一个 token。`beginFunctionBodyIdentityOnly` 建立程序体作用域 identity，但不发 `enter_scope`（等 `beginProgramEmission` 作为流的第一条）。独立 ParseState 默认 `has_this_binding`/`arguments_allowed`；生产 `compile_entry` 会覆盖。
-- **所有权 / 错误 / 调用**：**构造者**：在返回值里就地建 `FunctionDef`（`FunctionDef.init`，缓冲挂 `function.memory`）与 `CompileAtomScope`，再 `appendScope(-1)`、`ensureBuilderForFd` 分配 root 的 `compiler.Builder`，最后 `lex.nextInto(&state.token)` 读进第一个 token（token 的 payload 归 `State`，由 `advance`/`State.deinit` 释放）。失败路径用 `errdefer state.function_def.deinitInitFailure()`；`appendScope`/`ensureBuilderForFd` 的错误被统一折成 `error.OutOfMemory`。注意**返回的是按值的 `State`**：`atom_scope` 与两个 root provider 都存 `&self`，所以调用方必须先让它落到最终地址，再调 `activateCompileRoots`。调用方：`ParseState.init`（`src/parser.zig:967`）与 `initCanonicalRootWithRuntime`（`:994`）。
-
-### `ParseState.init` (`src/parser.zig:963`)
-
-- **签名**：`pub fn init(lex: *lexer_mod.Lexer, function: *bytecode_function.Bytecode) Error!State`。
-- **作用**：构造对象并填好默认字段。
+- **签名**：`pub fn init( lex: *lexer_mod.Lexer, account: *core.memory.MemoryAccount, atoms: *atom_module.AtomTable, name: Atom, ) Error!State`。
+- **作用**：构造一次解析的根：`name` 是根 FunctionDef 的名字（生产=文件名 atom），也是无名声明的默认名；不再需要 `Bytecode` 载体。
 - **实现**：
 `initRootEmitter(lex, function, false)`：根字节码仍写到 `Bytecode` 壳，给低层单测用。
 - **所有权 / 错误 / 调用**：薄包装：`initRootEmitter(..., false)`，即 root 发射到 `Bytecode` 而不是 `FunctionDef`；所有权/错误同上条，`runtime` 留空（表示「无 runtime 的解析器专用入口」，`TaggedTemplateObjectBuilder`、`discardFunctionDef` 等处按这个字段分叉）。调用方：`initWithRuntime`（`src/parser.zig:980`）与 `src/tests/parser.zig` / `compiler/tests.zig` 的低层解析测试。
 
 ### `ParseState.initWithRuntime` (`src/parser.zig:972`)
 
-- **签名**：`pub fn initWithRuntime( rt: *core.JSRuntime, lex: *lexer_mod.Lexer, function: *bytecode_function.Bytecode, ) Error!State`。
+- **签名**：`pub fn initWithRuntime(rt: *core.JSRuntime, lex: *lexer_mod.Lexer, name: Atom) Error!State`。
 - **作用**：在 `init` 之上挂上 JSRuntime，以便发射运行时常量。
 - **实现**：
 `init` 之后把 `runtime` 设上。有 runtime 才能把 RegExp / 标签模板 / tagged-int 字符串收成真正的 JSValue 常量。
 - **所有权 / 错误 / 调用**：在 `init` 之上只补一个 `state.runtime = rt`（借用指针，不 retain、不接管 runtime 生命周期）。error set 同 `initRootEmitter`。本入口仍是 `emit_root_to_function_def = false` 的旧形，生产 `compile` 走的是 `initCanonicalRootWithRuntime`；它的消费者是需要 runtime 常量（RegExp / tagged template）的可执行字节码辅助与测试。
 
-### `ParseState.initCanonicalRootWithRuntime` (`src/parser.zig:986`)
+### `ParseState.deinit` (`src/parser.zig:163`)
 
-- **签名**：`pub fn initCanonicalRootWithRuntime( rt: *core.JSRuntime, lex: *lexer_mod.Lexer, function: *bytecode_function.Bytecode, ) Error!State`。
-- **作用**：生产根：从第一条指令就 emit 进 FunctionDef。
-- **实现**：
-`initRootEmitter(..., emit_root_to_function_def=true)` 再挂 runtime。生产 `compileQjsProgram` 走这条：根函数与子函数同一套 finalize。
-- **所有权 / 错误 / 调用**：生产入口：`initRootEmitter(..., true)` 让 root 从第一个 body-scope 事件起就发射进自己的 `FunctionDef`，再挂上借来的 `rt`。错误同 `initRootEmitter`（都折成 `OutOfMemory` 或 lexer 的首 token 错误）。唯一调用方 `compileQjsProgram`（`src/parser.zig:16199`），紧接着就是 `defer state.deinit(rt)` 与 `try state.activateCompileRoots()`。
-
-### `ParseState.deinit` (`src/parser.zig:1000`)
-
-- **签名**：`pub fn deinit(self: *State, rt: anytype) void`。
+- **签名**：`pub fn deinit(self: *State, rt: *core.JSRuntime) void`。
 - **作用**：按固定顺序拆掉一次解析持有的全部 Zig 堆资源：GC 根、冲突索引、函数定义栈、控制流列表，最后才是 atom 区间。
 - **实现**：
 顺序：先 `deactivateCompileValueRoots`（否则拆 FunctionDef 时 tracer 仍走它们），再冲突索引、namespace/last-declared atom、`source_line_starts`、当前 token。销毁 `cur_func_stack` 上每个 FunctionDef，再沿 `discarded_func_head` 清投机回滚留下的 def。然后 break/continue/label/using/private 列表。最后 `function_def.deinit`，**最后** `atom_scope.deinit`（拆的过程还要把 atom 还表）。
@@ -420,7 +404,7 @@ break/continue/finally/using 的解析期栈。`LabelFrame` 带 `LabelId`（不�
 - **实现**：先 `discardDeclarationConflictIndex(fd)` 摘掉它的冲突索引。有 runtime 时立刻 `fd.deinit(rt)` + `memory.destroy` 并返回；没有 runtime（低层单测）时把 `fd` 串到 `discarded_func_head` 链头，留给 `State.deinit` 统一销毁——这条链同时也是 `traceCompileValueRoots` 的第三处根存储。
 - **所有权 / 错误 / 调用**：释放路径分两条：**先**无条件 `discardDeclarationConflictIndex(fd)` 清掉以它为 key 的索引（否则表里留悬空 key）；然后有 `runtime` 时立刻 `fd.deinit(rt)` + `memory.destroy`，没有 runtime（解析器专用入口）时把它挂进 `discarded_func_head` 单链，延迟到 `State.deinit` 统一销毁——这条链同时也是 `traceCompileValueRoots` 的第三类根，保证被丢弃的 def 的 cpool 在编译结束前仍被 GC 看见。无 error set。调用方 `discardCurrentFunction`（`src/parser.zig:1409`）与各处投机回滚点。
 
-### `ModuleArtifact.deinit` (`src/parser.zig:15292`)
+### `ModuleArtifact.deinit` (`src/parser.zig:163`)
 
 - **签名**：`pub fn deinit(self: *ModuleArtifactImpl) void`。
 - **作用**：释放模块产物里属于自己的那一半——链接元数据 `module.Record`。
@@ -428,7 +412,7 @@ break/continue/finally/using 的解析期栈。`LabelFrame` 带 `LabelId`（不�
 `ModuleArtifact.deinit` 只 `record.deinit()`。FunctionBytecode 不在这里释放——它是独立的 canonical root，由拿走它的调用方或 Result 的 function_bytecode 臂管理。
 - **所有权 / 错误 / 调用**：**只释放两半里的一半**：`record.deinit()` 收掉模块链接元数据，`function_bytecode` 那个 `*FunctionBytecode` **不在这里释放**——它是 GC 堆上的对象，所有权在 `installParsedModuleArtifact`（`src/exec/module.zig`）里转给模块记录，未被消费时由 GC 回收。无 error set。唯一调用方 `Result.deinit`（`src/parser.zig:15827`）的 `.module` 臂；`takeModuleArtifact` 把整个结构体移走之后，`Result.artifact` 已置 `.none`，这条路径就不会重复跑。
 
-### `Result.deinit` (`src/parser.zig:15314`)
+### `Result.deinit` (`src/parser.zig:163`)
 
 - **签名**：`pub fn deinit(self: *ResultImpl) void`。
 - **作用**：清掉一次编译结果里仍由 Result 拥有的两样东西：语法错误诊断与模块记录。
@@ -436,7 +420,7 @@ break/continue/finally/using 的解析期栈。`LabelFrame` 带 `LabelId`（不�
 `Result.deinit`：释放 `syntax_error`；若 artifact 是 module 则 `ModuleArtifact.deinit`（记录侧）。function_bytecode 臂不在这里 free（所有权在调用方 / GC）。最后把 artifact 置 `.none`。
 - **所有权 / 错误 / 调用**：释放 `Result` 自己拥有的两样东西：`syntax_error`（`diagnostics.SyntaxError.deinit` 释放那段堆上的消息字节，`SyntaxError.create` 在 `rt.memory` 上分配）与 `.module` 臂的 `ModuleArtifact`（即 `record`）；`.function_bytecode` 臂**什么都不做**——FB 归 GC。收尾把 `artifact` 置 `.none`，所以与 `takeFunctionBytecodeValue`/`takeModuleArtifact` 的移走语义天然不冲突（谁先谁后都只释放一次）。无 error set。生产调用方全是 `defer`，共 8 处：`exec/eval_entry.zig:117`、`exec/eval_ops.zig:435`、`exec/function_ops.zig:494`、`exec/module.zig:117`/`:1020`、`exec/module_graph.zig:2203`、`exec/call.zig:2490`、`exec/call_runtime.zig:3365`。
 
-### `Result.functionBytecode` (`src/parser.zig:15326`)
+### `Result.functionBytecode` (`src/parser.zig:175`)
 
 - **签名**：`pub fn functionBytecode(self: *const ResultImpl) ?*const bytecode.FunctionBytecode`。
 - **作用**：借用式读取根 `FunctionBytecode`（不转移所有权）。
@@ -444,77 +428,77 @@ break/continue/finally/using 的解析期栈。`LabelFrame` 带 `LabelId`（不�
 对 `artifact` 三臂取值：`function_bytecode` 直接返回；`module` 返回 `artifact.function_bytecode`（模块与普通根共用同一个 canonical FB）；`none` 返回 `null`。下面一串 `byteCode` / `constants` / `closureVars` / `varDefs` / `openVarRefCount` / `filenameAtom` / `scriptOrModuleAtom` / `entryContract` / `isStrict` / `isDirectOrIndirectEval` 都建立在它之上。
 - **所有权 / 错误 / 调用**：返回**借用**的 `*const FunctionBytecode`（两种 artifact 臂都指向同一个规范根），`Result` 仍然持有它：调用方不得释放，也不得在 `deinit`/`take*` 之后继续用。不分配、无 error set。生产调用方五处，都是先借看再 `take` 走：`exec/eval_entry.zig:168`、`exec/eval_ops.zig:443`、`exec/function_ops.zig:502`、`exec/call.zig:2499`、`exec/call_runtime.zig:3374`。
 
-### `Result.takeFunctionBytecodeValue` (`src/parser.zig:15340`)
+### `Result.takeFunctionBytecodeValue` (`src/parser.zig:189`)
 
 - **签名**：`pub fn takeFunctionBytecodeValue(self: *ResultImpl) ?JSValue`。
 - **作用**：把普通根的 FunctionBytecode 以 `JSValue` 形式移交给调用方，Result 随即清空。
 - **实现**：artifact 不是 `function_bytecode` 臂就返回 `null`（module 走 `takeModuleArtifact`）。取出 FB 指针后**先**把 `artifact` 置 `.none` 再包成 `JSValue.functionBytecode(&fb.header)` 返回，于是随后的 `Result.deinit` 不可能再释放第二次；借用式查看仍走 `functionBytecode`。
 - **所有权 / 错误 / 调用**：**所有权转移**：只在 `.function_bytecode` 臂上成立，把 artifact 置 `.none` 后返回一个 `JSValue.functionBytecode(&fb.header)`，从此这个引用归调用方（交给 root `js_closure2` 或自行管理），`Result.deinit` 不会再碰它。不分配、无 error set；`.module`/`.none` 臂返回 `null`。生产调用方 5 处：`exec/eval_entry.zig:181`、`exec/eval_ops.zig:456`、`exec/function_ops.zig:503`、`exec/call.zig:2500`、`exec/call_runtime.zig:3375`。
 
-### `Result.byteCode` (`src/parser.zig:15349`)
+### `Result.byteCode` (`src/parser.zig:198`)
 
 - **签名**：`pub fn byteCode(self: *const ResultImpl) []const u8`。
 - **作用**：借用根 FB 的 code 字节（无产物时返回空切片）。
 - **实现**：`functionBytecode()` 取不到根 FB 就返回空切片，否则转调 `fb.byteCode()`，指向 FB 尾块里的 code 区，生命周期跟着 FB。
 - **所有权 / 错误 / 调用**：返回**借用**的只读字节切片，背后是 `FunctionBytecode` 的内联存储，随该 FB 存活；没有 artifact 时返回空 slice 而不是报错。不分配、无 error set。**生产零调用方**：`Result` 上这一族只读访问器只在 `src/tests/parser.zig` 里被用来对账（同名方法 `FunctionBytecode.byteCode` 则到处都是，别混）。
 
-### `Result.constants` (`src/parser.zig:15354`)
+### `Result.constants` (`src/parser.zig:203`)
 
 - **签名**：`pub fn constants(self: *const ResultImpl) []const JSValue`。
 - **作用**：借用根 FB 的常量池切片（无产物时返回空切片）。
 - **实现**：同样先 `functionBytecode()`，无产物返回空切片，否则 `fb.cpoolSlice()`——FB 尾块中的常量池，元素是已发布的 `JSValue`，调用方只读不 retain。
 - **所有权 / 错误 / 调用**：返回**借用**的 `[]const JSValue`（FB 的 cpool 切片）：里面的值归 FB 所有，调用方既不 retain 也不 release，只能在 FB 存活期间读。不分配、无 error set，无 artifact 时返回空 slice。**生产零调用方**，只在 `src/tests/parser.zig` 里用于常量对账。
 
-### `Result.closureVars` (`src/parser.zig:15359`)
+### `Result.closureVars` (`src/parser.zig:208`)
 
 - **签名**：`pub fn closureVars(self: *const ResultImpl) []const bytecode.function_bytecode.BytecodeClosureVar`。
 - **作用**：借用根 FB 的闭包变量表（无产物时返回空切片）。
 - **实现**：无产物返回空切片，否则 `fb.closureVar()`，即 finalize 后钉进 FB 尾块的闭包变量表（`resolve_variables` 的产物）。
 - **所有权 / 错误 / 调用**：返回**借用**的 `[]const BytecodeClosureVar`（FB 内联存储），行里的 `var_name` 只是 atom id、无所有权义务。不分配、无 error set。**生产零调用方**，只被 `src/tests/parser.zig` 用于闭包穿线对账。
 
-### `Result.varDefs` (`src/parser.zig:15364`)
+### `Result.varDefs` (`src/parser.zig:213`)
 
 - **签名**：`pub fn varDefs(self: *const ResultImpl) []const bytecode.function_bytecode.BytecodeVarDef`。
 - **作用**：借用根 FB 的变量定义表（无产物时返回空切片）。
 - **实现**：无产物返回空切片，否则 `fb.varDefs()`，即 FB 尾块里的局部变量表；解析期的 `FunctionDef.vars` 此时已经被 finalize 降成这张表。
 - **所有权 / 错误 / 调用**：返回**借用**的 `[]const BytecodeVarDef`（FB 内联存储），同样只读、无所有权转移。不分配、无 error set。**生产零调用方**，只被 `src/tests/parser.zig` 使用。
 
-### `Result.openVarRefCount` (`src/parser.zig:15369`)
+### `Result.openVarRefCount` (`src/parser.zig:218`)
 
 - **签名**：`pub fn openVarRefCount(self: *const ResultImpl) u16`。
 - **作用**：根 FB 的开放 VarRef 数（无产物时 0）。
 - **实现**：无产物返回 0，否则转调 `fb.openVarRefCount()`，读 FB 头上记的闭包 open var_ref 数——`js_closure2` 据此决定要建几个 var_ref。
 - **所有权 / 错误 / 调用**：无：转发 `FunctionBytecode.openVarRefCount()`，无 artifact 时返回 0；不分配、无 error set。**`Result` 这一层生产零调用方**（被广泛使用的是 FB 上的同名方法）。
 
-### `Result.filenameAtom` (`src/parser.zig:15374`)
+### `Result.filenameAtom` (`src/parser.zig:223`)
 
 - **签名**：`pub fn filenameAtom(self: *const ResultImpl) atom.Atom`。
 - **作用**：根 FB 的文件名 atom（无产物时 `null_atom`）。
 - **实现**：无产物返回 `null_atom`，否则 `fb.filenameAtom()`。返回的是 FB 持有的 atom，借用读取，不 retain。
 - **所有权 / 错误 / 调用**：返回的是 FB 里存着的 atom id（**借用**：归 FB 所有，随 FB 的 tracer 边保活），调用方不得 release；没有 artifact 时返回 `null_atom`。不分配、无 error set。**`Result` 这一层生产零调用方**，只在 `src/tests/parser.zig:10261` 做名字对账。
 
-### `Result.scriptOrModuleAtom` (`src/parser.zig:15379`)
+### `Result.scriptOrModuleAtom` (`src/parser.zig:228`)
 
 - **签名**：`pub fn scriptOrModuleAtom(self: *const ResultImpl) atom.Atom`。
 - **作用**：根 FB 的 ScriptOrModule 身份 atom（无产物时 `null_atom`）。
 - **实现**：无产物返回 `null_atom`，否则 `fb.scriptOrModule()`——这是稳定的脚本/模块身份 atom，与只作显示用的 `filenameAtom` 分开（direct eval 的 filename 是 `"<eval>"`，身份则沿用调用方的）。
 - **所有权 / 错误 / 调用**：同上：返回 FB 持有的 atom id，借用、不 release，无 artifact 时是 `null_atom`。不分配、无 error set。唯一调用点是 `src/tests/parser.zig:10262`，生产零调用方。
 
-### `Result.entryContract` (`src/parser.zig:15384`)
+### `Result.entryContract` (`src/parser.zig:233`)
 
 - **签名**：`pub fn entryContract(self: *const ResultImpl) bytecode.EntryContract`。
 - **作用**：把根 FB 的 `new.target` / `super()` / `super.x` / `arguments` 四个准入位打包成 `EntryContract`。
 - **实现**：无产物时返回全默认（四位皆 false）的 `EntryContract`；否则从 FB 头读 `newTargetAllowed` / `superCallAllowed` / `superAllowed` / `argumentsAllowed` 四个位打包返回，供嵌入方在调用这段根字节码前核对准入条件。
 - **所有权 / 错误 / 调用**：无：把 FB 的四个入口标志装成一个按值返回的 `EntryContract`，不分配、无 error set，无 artifact 时返回全默认。**生产零调用方**（只有 `src/tests/parser.zig` 两处）。
 
-### `Result.isStrict` (`src/parser.zig:15394`)
+### `Result.isStrict` (`src/parser.zig:243`)
 
 - **签名**：`pub fn isStrict(self: *const ResultImpl) bool`。
 - **作用**：根 FB 是否按严格模式编译（无产物时 false）。
 - **实现**：转调 `fb.isStrictMode()`，读的是 finalize 时钉在 FB 头上的旗；它已经是指令 prologue（`"use strict"`）重算之后的权威严格性，不是 host 选项里的初值。
 - **所有权 / 错误 / 调用**：无：转发 `FunctionBytecode.isStrictMode()`，无 artifact 时 `false`；不分配、无 error set。注意它读的是**最终产物**上的标志，也就是指令序言解析之后由 `compileQjsProgram`（`src/parser.zig:16279`，`function.flags.is_strict = parsed_strict`）回写的那个值，而不是 `options.strict`。生产零调用方（`src/tests/parser.zig` 两处）。
 
-### `Result.isGlobalVar` (`src/parser.zig:15399`)
+### `Result.isGlobalVar` (`src/parser.zig:248`)
 
 - **签名**：`pub fn isGlobalVar(self: *const ResultImpl) bool`。
 - **作用**：谓词：这次编译的声明该落到全局对象还是局部槽。
@@ -522,42 +506,42 @@ break/continue/finally/using 的解析期栈。`LabelFrame` 带 `LabelId`（不�
 没有 artifact 时为假；script / module 恒真；两种 eval 取 `!isStrict()`（严格 eval 的 var 是自己的局部）。这与 `compileQjsProgram` 在 directive prologue 之后回写 `function_def.is_global_var` 的规则是同一条。
 - **所有权 / 错误 / 调用**：无：唯一一个**不看 FB 而看 `self.mode`** 的判定（script/module 恒真，eval 看 `isStrict()`），`.none` artifact 恒假；不分配、无 error set。生产零调用方，只有 `src/tests/parser.zig:6166` 对账。
 
-### `Result.isDirectOrIndirectEval` (`src/parser.zig:15409`)
+### `Result.isDirectOrIndirectEval` (`src/parser.zig:258`)
 
 - **签名**：`pub fn isDirectOrIndirectEval(self: *const ResultImpl) bool`。
 - **作用**：根 FB 是不是 eval（direct 或 indirect）编译出来的。
 - **实现**：无产物返回 false，否则 `fb.isDirectOrIndirectEval()`。该旗由 `initCompileCarrier` 按 `Mode` 落在可变载体上，再由 finalize 带进 FB；VM 用它区分 eval 根与普通函数的作用域规则。
 - **所有权 / 错误 / 调用**：无：转发 FB 的同名标志，无 artifact 时 `false`；不分配、无 error set。`Result` 这一层生产零调用方（FB 上的同名方法另有用户）。
 
-### `Result.isModule` (`src/parser.zig:15414`)
+### `Result.isModule` (`src/parser.zig:263`)
 
 - **签名**：`pub fn isModule(self: *const ResultImpl) bool`。
 - **作用**：本次编译是不是 module 模式。
 - **实现**：只比 `self.mode == .module`，不看 artifact——因此语法错误导致没有产物时，一个 module 编译的 Result 仍然返回 true。
 - **所有权 / 错误 / 调用**：无：只比较 `self.mode == .module`，连 artifact 都不看（所以语法错误的模块编译结果仍报 `true`），不分配、无 error set。`Result` 这一层生产零调用方。
 
-### `Result.moduleArtifact` (`src/parser.zig:15418`)
+### `Result.moduleArtifact` (`src/parser.zig:267`)
 
 - **签名**：`pub fn moduleArtifact(self: *const ResultImpl) ?*const ModuleArtifactImpl`。
 - **作用**：借用式读取 module 臂的产物（非 module 返回 null）。
 - **实现**：`artifact` 是 `.module` 臂时返回 `&self.artifact.module`，其它臂返回 `null`。返回的是指进 Result 内部的借用指针，随 `takeModuleArtifact` / `deinit` 失效。
 - **所有权 / 错误 / 调用**：返回**借用**的 `*const ModuleArtifact`（指向 `Result` 内联的 union 载荷），`Result` 仍持有它：调用方只读、不得释放，且不能跨过 `takeModuleArtifact`/`deinit` 使用。不分配、无 error set。生产调用方一处：`exec/module_graph.zig:2215`（先借看再 `:2257` 取走）。
 
-### `Result.moduleRecord` (`src/parser.zig:15425`)
+### `Result.moduleRecord` (`src/parser.zig:274`)
 
 - **签名**：`pub fn moduleRecord(self: *const ResultImpl) ?*const bytecode.module.Record`。
 - **作用**：借用式读取模块链接用的 `module.Record`（非 module 返回 null）。
 - **实现**：先 `moduleArtifact()`，没有就 `null`；有就返回 `&artifact.record`。同样是借用，模块链接器读完 import/export 表即弃，不得跨过 `Result.deinit`。
 - **所有权 / 错误 / 调用**：在 `moduleArtifact` 之上再取一层 `&artifact.record`，同样是**借用**的只读指针，所有权仍在 `Result`。不分配、无 error set。**生产零调用方**，只被 `src/tests/parser.zig` 用于导入/导出表对账。
 
-### `Result.takeModuleArtifact` (`src/parser.zig:15433`)
+### `Result.takeModuleArtifact` (`src/parser.zig:282`)
 
 - **签名**：`pub fn takeModuleArtifact(self: *ResultImpl) ?ModuleArtifactImpl`。
 - **作用**：把 FB 与模块记录两半一起移交给调用方，Result 随即清空。
 - **实现**：非 `.module` 臂返回 `null`。把整个 `ModuleArtifactImpl`（canonical FB 指针 + `module.Record`）按值取出，**先**把 `artifact` 置 `.none` 再返回，于是 FB 与 record 这两个独立所有者各自只会被释放一次。
 - **所有权 / 错误 / 调用**：**所有权转移**：把整个 `ModuleArtifact`（FB 指针 + `module.Record`）按值移出并将 `artifact` 置 `.none`，此后 `Result.deinit` 不会再释放 record，责任归调用方（生产上交给 `installParsedModuleArtifact` 装进模块记录）。不分配、无 error set；非 `.module` 臂返回 `null`。生产调用方三处：`exec/eval_entry.zig:135`、`exec/module.zig:1039`、`exec/module_graph.zig:2257`。
 
-### `Result.hasFeature` (`src/parser.zig:15442`)
+### `Result.hasFeature` (`src/parser.zig:291`)
 
 - **签名**：`pub fn hasFeature(self: ResultImpl, feature: FeatureImpl) bool`。
 - **作用**：谓词：本次编译是否用到了某个 `Feature`。
@@ -565,28 +549,28 @@ break/continue/finally/using 的解析期栈。`LabelFrame` 带 `LabelId`（不�
 一行 `return self.features.contains(feature);`；`features` 是 `compileQjsProgram` 结束时从 `state.features` 整体拷过来的 `EnumSet`。
 - **所有权 / 错误 / 调用**：无：`self` 按值传入（`EnumSet` 只是位集），查一位，不分配、无 error set。特征集在 `compileQjsProgram` 末尾从 `state.features` 整体拷贝过来（`src/parser.zig:16331`）。**生产零调用方**——21 处调用全在 `src/tests/parser.zig`。
 
-### `compile_entry.isPrivateEvalClosureKind` (`src/parser.zig:15475`)
+### `compile_entry.isPrivateEvalClosureKind` (`src/parser.zig:323`)
 
 - **签名**：`fn isPrivateEvalClosureKind(kind: bytecode.function_def.VarKind) bool`。
 - **作用**：判断一条 eval 闭包种子是不是类体里的 `#` 私有名（字段/方法/getter/setter/getter-setter 对）。
 - **实现**：对 `VarKind` 做 switch：`private_field`、`private_method`、`private_getter`、`private_setter`、`private_getter_setter` 五种返回 true，其余 false。`restoreDirectEvalPrivateBoundNames` 用它从调用方传来的闭包种子里筛出需要在 direct eval 根上重建的私有名绑定。
 - **所有权 / 错误 / 调用**：无：五条臂的纯查表 switch，不碰 `State`、不分配、无 error set。唯一调用方 `restoreDirectEvalPrivateBoundNames`（`src/parser.zig:16012`）。
 
-### `compile_entry.isPrivateSetterCompanion` (`src/parser.zig:15487`)
+### `compile_entry.isPrivateSetterCompanion` (`src/parser.zig:335`)
 
 - **签名**：`fn isPrivateSetterCompanion(atoms: *const atom.AtomTable, seed: EvalClosureSeedImpl) bool`。
 - **作用**：谓词：这个闭包种子是不是 `#x` 存取器对里那个合成的 setter 伴生项（不该再当成一个独立私有名恢复）。
 - **实现**：只认 `var_kind == .private_setter`，再查它的 atom 名字是否以 `"<set>"` 结尾；atom 查不到名字时返回 false。
 - **所有权 / 错误 / 调用**：只读：`atoms.name(seed.var_name)` 返回的是 AtomTable 里的**借用**字节切片，只在本次比较中使用、不复制也不释放；atom 表指针是 `*const`，不分配、无 error set，名字查不到时返回 `false`。唯一调用方 `restoreDirectEvalPrivateBoundNames`（`src/parser.zig:16012`），用来跳过 `<set>` 伴生行以免同一个私有名被登记两次。
 
-### `compile_entry.restoreDirectEvalPrivateBoundNames` (`src/parser.zig:15493`)
+### `compile_entry.restoreDirectEvalPrivateBoundNames` (`src/parser.zig:341`)
 
 - **签名**：`fn restoreDirectEvalPrivateBoundNames( rt: *JSRuntime, state: *parser_impl.ParseState, seeds: []const EvalClosureSeedImpl, ) !void`。
 - **作用**：direct eval 的根上恢复调用方类体里的 `#` 私有名绑定，让 eval 里的 `#x` 能解析。
 - **实现**：**从尾向头**遍历 `seeds`：运行时闭包表是就近优先的，而 parser 查私有名时从 `class_private_bound_names` 的尾部往回找，反向一次就能复原同样的遮蔽顺序。重复名与 `<set>` 伴生项跳过；只要恢复了任何一个名字就把 `state.in_class` 置真。
 - **所有权 / 错误 / 调用**：唯一的分配是 `state.class_private_bound_names.append(rt.memory.allocator, ...)`，缓冲归 `State`、由 `State.deinit` 释放；追加的 `seed.var_name` **只是 id 拷贝**（局部变量名叫 `retained` 是 TGC S3-c 之前的遗迹，现在没有 retain），私有名 atom 的存活由 `CompileAtomScope` 负责。副作用还有一条：恢复了任何名字就置 `state.in_class = true`。error set 是 `append` 的 `OutOfMemory`（签名写成 `!void` 推导得来）。倒序遍历是为了让 parser 的「从尾部找」与运行时闭包的「就近优先」得到同一个遮蔽顺序。唯一调用方 `compileQjsProgram`（`src/parser.zig:16247`）的 `mode == .eval_direct` 分支。
 
-### `compile_entry.elapsedNanosSince` (`src/parser.zig:15526`)
+### `compile_entry.elapsedNanosSince` (`src/parser.zig:374`)
 
 - **签名**：`fn elapsedNanosSince(start: u64) u64`。
 - **作用**：算一段编译阶段的耗时纳秒数。
@@ -594,14 +578,14 @@ break/continue/finally/using 的解析期栈。`LabelFrame` 带 `LabelId`（不�
 读 `platform_clock.monotonicNanos()`，只有 `end > start` 才返回差值，否则返回 0（时钟不前进时不产生负值/回绕）。`compileQjsProgram` 用它填 `compile_context.timing` 的 `frontend_ns` / `finalize_ns`。
 - **所有权 / 错误 / 调用**：无：读一次单调时钟做减法，时间回退时返回 0（不报错）；不分配、无 error set。两个调用方都在 `compileQjsProgram`：前端耗时（`src/parser.zig:16305`）与 finalize 耗时（`:16329`），且只在 `compile_context.timing != null` 时才有意义。
 
-### `compile_entry.initCompileCarrier` (`src/parser.zig:15531`)
+### `compile_entry.initCompileCarrier` (`src/parser.zig:379`)
 
 - **签名**：`fn initCompileCarrier( rt: *JSRuntime, filename_atom: atom.Atom, options: OptionsImpl, effective_strict: bool, ) bytecode.Bytecode`。
 - **作用**：按编译模式建那个可变的 `Bytecode` 壳（解析期的载体，不是最终产物）。
 - **实现**：`Bytecode.init` 之后把 `script_or_module`（若选项给了）、`line_num`/`col_num = 1` 填上，再按 mode 落四个旗：`is_strict = module or effective_strict`、`is_global_var`（script/module 为真，两种 eval 取 `!effective_strict`）、`is_module`、`is_direct_or_indirect_eval`。注意这里的严格性只来自 host 选项，指令 prologue 之后 `compileQjsProgram` 还会重算并回写这两个旗。
 - **所有权 / 错误 / 调用**：**返回一个按值的 `Bytecode` 载体**，其内部缓冲随后由 `Bytecode.init(&rt.memory, &rt.atoms, filename_atom)` 挂在 runtime 的 MemoryAccount 上——所有权归调用方，`compile` 用 `function_owned` + `errdefer function.deinit(rt)` 管，成功路径在取走 `module_record` 后也会 `function.deinit(rt)`。`filename_atom` 只是 id 拷贝（`compile` 那次 `rt.internAtom` 的结果由 `CompileAtomScope` 作根）。本函数自身**无 error set**（`Bytecode.init` 不分配，只填字段）。唯一调用方 `compile`（`src/parser.zig:16086`）。
 
-### `compile_entry.compile` (`src/parser.zig:15553`)
+### `compile_entry.compile` (`src/parser.zig:401`)
 
 - **签名**：`pub fn compile(compile_context: bytecode.CompileContext, source: []const u8, options: OptionsImpl) !ResultImpl`。
 - **作用**：把源文编译成 FunctionBytecode / 模块产物。
@@ -615,7 +599,7 @@ break/continue/finally/using 的解析期栈。`LabelFrame` 带 `LabelId`（不�
 6. module 把 `module_record` 挪进 `ModuleArtifact`；script/eval 只持有 FB。然后 `function.deinit` + `arena.deinit`（FB 已在 artifact allocator 上）。
 - **所有权 / 错误 / 调用**：两个布尔守着两件必须恰好释放一次的东西：`arena_owned`（`errdefer arena.deinit()`）与 `function_owned`（`errdefer function.deinit(rt)`）——**每一条 `return` 之前都手工 `deinit` 并清标志**，所以正常返回与错误返回都不会重复释放。`rt.memory.allocator` 被临时改指 arena，用 `defer` 还原；`CompileAtomScope` 在第一次 intern 之前 `activate`、`defer deinit`，覆盖从文件名 atom 到发布 FB 的整条链。产物 FB 建在 `compile_context.artifactAllocator()` 上（由 `compileQjsProgram` 切换），所以 arena 释放不影响它；module 还会把 `function.module_record` **移**进 `ModuleArtifact`（移走后把源字段置 `null`）。错误分三类：`OutOfMemory` 原样上抛（唯一会让调用方看到 Zig error 的一类）、`StackOverflow` 与一般解析错误折成 `Result.syntax_error`、`isInternalCompilerError` 命中的走 ICE 文案；三条都仍然返回一个**成功的** `ResultImpl`。`pub` 出口，生产调用方在 `exec/eval_entry.zig`、`exec/eval_ops.zig`、`exec/function_ops.zig`、`exec/module*.zig`、`exec/call*.zig` 共 8 处。
 
-### `compile_entry.compileQjsProgram` (`src/parser.zig:15674`)
+### `compile_entry.compileQjsProgram` (`src/parser.zig:518`)
 
 - **签名**：`fn compileQjsProgram( rt: *JSRuntime, source: []const u8, options: OptionsImpl, compile_context: bytecode.CompileContext, function: *bytecode.Bytecode, features: *std.EnumSet(FeatureImpl), pending_diagnostic: *?parser_impl.PendingDiagnostic, ) !*bytecode.FunctionBytecode`。
 - **作用**：词法+语法+发射+finalize，产出 canonical FunctionBytecode。
@@ -631,7 +615,7 @@ break/continue/finally/using 的解析期栈。`LabelFrame` 带 `LabelId`（不�
 8. 把 allocator 切到 `artifactAllocator()`，`createFunctionBytecode` / `createModuleFunctionBytecode`（`resolve_variables` + `resolve_labels` + 打包 FB）。计时写入 `compile_context.timing`。
 - **所有权 / 错误 / 调用**：三层 `defer` 决定了拆解顺序：`lex.deinit()`、`state.deinit(rt)`、以及**finalize 期间那次 allocator 切换的还原**——注释点明必须在 `State.deinit` 之前还原成解析用的 allocator，否则 parser 的临时缓冲会用错误的 allocator 回收。`errdefer pending_diagnostic.* = state.pending_diagnostic;` 是唯一的错误出参：`State` 马上要被 `defer` 拆掉，所以诊断要在那之前按值抄给 `compile`。返回的 `*FunctionBytecode` 指向 `createFunctionBytecode` 在 `compile_context.artifactAllocator()` 上发布的切片首元素，所有权交给调用方（`compile` 装进 `Result.artifact`）；module 形态的 `record` 仍留在 `function.module_record` 上，由 `compile` 移走。文件名不在参数里：它由 `initCompileCarrier` 提前写进 `function`（原先那个从未被读的 `filename_atom` 形参已删）。错误：`OutOfMemory` 与全部解析错误原样上抛给 `compile` 分类。唯一调用方 `compile`（`src/parser.zig:16119`）。
 
-### `compile_entry.setPendingSyntaxError` (`src/parser.zig:15828`)
+### `compile_entry.setPendingSyntaxError` (`src/parser.zig:668`)
 
 - **签名**：`fn setPendingSyntaxError( result: *ResultImpl, rt: *JSRuntime, filename_atom: atom.Atom, pending: *const parser_impl.PendingDiagnostic, ) !void`。
 - **作用**：把解析期钉住的 `PendingDiagnostic`（位置 + 短消息）落成 `Result.syntax_error`。
@@ -639,7 +623,7 @@ break/continue/finally/using 的解析期栈。`LabelFrame` 带 `LabelId`（不�
 用 `pending.position` 与 `pending.message()` 调 `SyntaxError.create`（消息在这里才拷进 `MemoryAccount`），并把 `result.parse_path` 置 `.syntax_error_guard`。
 - **所有权 / 错误 / 调用**：把 `PendingDiagnostic` 里那份**栈上/借用**的 96 字节消息复制进堆：`SyntaxError.create` 在 `rt.memory` 上 `alloc`，产物归 `result.syntax_error`，由 `Result.deinit` 释放；同时把 `parse_path` 标成 `.syntax_error_guard`。error set 只有 `create` 的 `OutOfMemory`（签名 `!void` 推导），而它**本身不是**错误上报路径——它是把解析错误落成 `Result` 的那一步，真正变 JS 异常发生在 `exec/eval_entry.zig:127` 的 `throwParseSyntaxError`。两个调用方都在 `compile` 的 catch 里：`src/parser.zig:16128`（StackOverflow 臂）与 `:16146`（通用臂）。
 
-### `compile_entry.isInternalCompilerError` (`src/parser.zig:15844`)
+### `compile_entry.isInternalCompilerError` (`src/parser.zig:684`)
 
 - **签名**：`fn isInternalCompilerError(err: anyerror) bool`。
 - **作用**：谓词：这个 error 是引擎自身的不变量破了（ICE），而不是源程序的语法错误。
@@ -647,7 +631,7 @@ break/continue/finally/using 的解析期栈。`LabelFrame` 带 `LabelId`（不�
 一个 switch 白名单：`InvalidBytecode`、`BytecodeOverflow`、`InvalidTopology`、`InvalidOpcode`、`StackUnderflow`、`StackMismatch`、`ClosureVarNotFound`、`Pc2LineTruncated`、`Pc2LineOverflow`、`ParserInvariant` 为真，其余为假。紧跟其后的 `comptime` 块用 `if (!isInternalCompilerError(error.ParserInvariant)) @compileError(...)` 钉死 `ParserInvariant` 永远走 ICE 臂。
 - **所有权 / 错误 / 调用**：纯谓词（十条臂的 `anyerror` 查表），不分配、无 error set、无副作用。紧跟其后有一段 `comptime` 断言钉死 `error.ParserInvariant` 必须命中这条臂（`src/parser.zig:16369-16372`），防止有人把它挪回用户级 SyntaxError 通道。唯一调用方是 `compile` 的错误分类臂（`:16144` 之前的判定），为真则走 `setInternalCompilerError`。
 
-### `compile_entry.setInternalCompilerError` (`src/parser.zig:15866`)
+### `compile_entry.setInternalCompilerError` (`src/parser.zig:706`)
 
 - **签名**：`fn setInternalCompilerError( result: *ResultImpl, rt: *JSRuntime, filename_atom: atom.Atom, err: anyerror, ) !void`。
 - **作用**：把一个 ICE 折成用户可见的 `Result.syntax_error`。
@@ -655,21 +639,21 @@ break/continue/finally/using 的解析期栈。`LabelFrame` 带 `LabelId`（不�
 在 96 字节栈缓冲里 `bufPrint("internal compiler error: {s}", .{@errorName(err)})`（放不下就退回裸字符串 `"internal compiler error"`），位置填 `{0,0,0}`（ICE 没有可信源位置），再 `SyntaxError.create` 并把 `parse_path` 置 `.syntax_error_guard`。
 - **所有权 / 错误 / 调用**：消息先在**栈上 96 字节缓冲**里用 `bufPrint` 拼成 `"internal compiler error: <errName>"`（放不下就退回常量串），再由 `SyntaxError.create` 复制到 `rt.memory` 上，归 `result.syntax_error`、由 `Result.deinit` 释放；位置固定为 `(0, 0, 0)`，因为 ICE 没有有意义的源位置。只可能失败于 `OutOfMemory`。唯一调用方 `compile`（`src/parser.zig:16144`），且只在 `isInternalCompilerError(err)` 为真时。
 
-### `compile_entry.setFallbackSyntaxError` (`src/parser.zig:15888`)
+### `compile_entry.setFallbackSyntaxError` (`src/parser.zig:728`)
 
 - **签名**：`fn setFallbackSyntaxError( result: *ResultImpl, rt: *JSRuntime, filename_atom: atom.Atom, source: []const u8, message: []const u8, ) !void`。
 - **作用**：解析失败却没有 pending 诊断时，重扫一遍源文给错误定个位置。
 - **实现**：新开一个 `Lexer` 从头扫到 `TOK_EOF`，每取一个 token 就把 `pos` 更新成词法器当前的 `{line, col, pos}`，每个 token 用完立刻 `freeToken`。扫描途中词法器自己报错（非 `OutOfMemory`）时，改用 `lex.mark_*` 的位置 + `@errorName(err)` 作消息立即返回。正常走完则用最后记下的 `pos` 和调用方给的 `message`（例如 `"stack overflow"` 或 `@errorName`）建 `SyntaxError`。两条路径都把 `parse_path` 置 `.syntax_error_guard`。
 - **所有权 / 错误 / 调用**：没有 pending 诊断时的兜底：**自己再开一个 `Lexer`** 把源码从头扫到 EOF，只为得到「最后一个成功 token 之后」的位置；扫描期间每个 token 都 `lex.freeToken` 释放 payload，`lex` 本身是栈上值（注意这里没有 `defer lex.deinit()`，Lexer 的状态不持堆资源）。产出同样是 `rt.memory` 上的 `SyntaxError`，归 `result.syntax_error`。error set：扫描中途的 `OutOfMemory` 直接上抛，其它词法错误**就地变成另一条 `SyntaxError`**（位置取 `lex.mark_*`，消息用 `@errorName`）并提前返回。两个调用方同样在 `compile` 的 catch 里（`src/parser.zig:16130`/`:16148`）。
 
-### `compile_entry.nextFallbackSyntaxTokenInto` (`src/parser.zig:15926`)
+### `compile_entry.nextFallbackSyntaxTokenInto` (`src/parser.zig:766`)
 
 - **签名**：`fn nextFallbackSyntaxTokenInto(lex: *lexer_mod.Lexer, out: *token_mod.Token, previous_token_kind: ?token_mod.TokenKind) lexer_mod.Error!void`。
 - **作用**：fallback 重扫用的取词一步，负责把 `/` 决议成除法还是正则字面量。
 - **实现**：`lex.nextInto(out)` 取一个 token（`errdefer` 负责失败时 `freeToken`）；若它是 `'/'` 或 `TOK_DIV_ASSIGN` 且 `fallbackSlashStartsRegexp(previous_token_kind)` 为真，就记下 `lex.mark_pos`、释放刚才那个 token，改用 `rescanRegexpInto` 从斜杠处重扫成正则。
 - **所有权 / 错误 / 调用**：写进调用方给的 `out: *Token`；token 的 payload 所有权**归调用方**（`setFallbackSyntaxError` 每轮 `freeToken`），本函数只在自己的失败路径上用 `errdefer lex.freeToken(out)` 兜底，以及在改判正则时先 `freeToken` 旧 token 再 `rescanRegexpInto`。不分配长期对象。error set 是 **`lexer_mod.Error`**（不是 `parser_core.Error`），由调用方分流成 OOM 上抛或 `SyntaxError` 记录。唯一调用方 `setFallbackSyntaxError`（`src/parser.zig:16408`）。
 
-### `compile_entry.fallbackSlashStartsRegexp` (`src/parser.zig:15939`)
+### `compile_entry.fallbackSlashStartsRegexp` (`src/parser.zig:779`)
 
 - **签名**：`fn fallbackSlashStartsRegexp(previous_token_kind: ?token_mod.TokenKind) bool`。
 - **作用**：按上一个 token 判断此处的 `/` 应当开启正则字面量还是当除号。

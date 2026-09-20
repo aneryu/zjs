@@ -32,8 +32,7 @@ const FinallyControlTarget = parse_state.FinallyControlTarget;
 const State = parse_state.State;
 
 // ---------------------------------------------------------------------------
-// The raw sink under `Emitter`: Builder calls plus the control records
-// (terminal / direct-eval) that resolve_labels reads. Grammar code never
+// The raw sink under `Emitter`: the Builder calls. Grammar code never
 // calls these; it goes through `Emitter`.
 // ---------------------------------------------------------------------------
 
@@ -51,40 +50,10 @@ fn builderAddSourceMarker(s: *State, line_num: u32, col_num: u32) Error!void {
     try v2b.addSourceMarker(@intCast(line_num), @intCast(col_num));
 }
 
-fn builderRecordPlainControl(s: *State, op_id: u8) Error!void {
-    switch (op_id) {
-        opcode.op.@"return",
-        opcode.op.return_undef,
-        opcode.op.throw,
-        opcode.op.ret,
-        => try s.activeBuilder().recordControl(.terminal),
-        else => {},
-    }
-}
-
-fn builderRecordU16Control(s: *State, op_id: u8) Error!void {
-    switch (op_id) {
-        opcode.op.tail_call, opcode.op.tail_call_method => try s.activeBuilder().recordControl(.terminal),
-        opcode.op.apply_eval => try s.activeBuilder().recordControl(.direct_eval),
-        else => {},
-    }
-}
-
-fn builderRecordU32Control(s: *State, op_id: u8) Error!void {
-    if (op_id == opcode.op.eval)
-        try s.activeBuilder().recordControl(.direct_eval);
-}
-
-fn builderRecordAtomU8Control(s: *State, op_id: u8) Error!void {
-    if (op_id == opcode.op.throw_error)
-        try s.activeBuilder().recordControl(.terminal);
-}
-
 /// QuickJS-style plain opcode emission: grammar productions add source
 /// markers explicitly; `emit_op()` itself is source-less.
 fn builderEmitOp(s: *State, op_id: u8) Error!void {
     try s.activeBuilder().emitOp(op_id);
-    try builderRecordPlainControl(s, op_id);
 }
 
 /// Source-less immediate emitters, matching QuickJS emit_op + emit_u*.
@@ -94,12 +63,10 @@ fn builderEmitOpU8(s: *State, op_id: u8, val: u8) Error!void {
 
 fn builderEmitOpU16(s: *State, op_id: u8, val: u16) Error!void {
     try s.activeBuilder().emitOpU16(op_id, val);
-    try builderRecordU16Control(s, op_id);
 }
 
 fn builderEmitOpU32(s: *State, op_id: u8, val: u32) Error!void {
     try s.activeBuilder().emitOpU32(op_id, val);
-    try builderRecordU32Control(s, op_id);
 }
 
 fn builderEmitOpI32(s: *State, op_id: u8, val: i32) Error!void {
@@ -114,7 +81,6 @@ fn builderEmitAtomOpOwned(s: *State, op_id: u8, atom_id: Atom) Error!void {
 
 fn builderEmitAtomOpU8Owned(s: *State, op_id: u8, atom_id: Atom, val: u8) Error!void {
     try s.activeBuilder().emitAtomOpU8Owned(op_id, atom_id, val);
-    try builderRecordAtomU8Control(s, op_id);
 }
 
 fn builderEmitAtomOpU16Owned(s: *State, op_id: u8, atom_id: Atom, val: u16) Error!void {
@@ -161,10 +127,9 @@ fn builderBindParserLabel(s: *State, label: compiler.LabelId) Error!void {
 /// A namespace of functions over `*State`, deliberately NOT a value type:
 /// a `struct { s: *State }` receiver costs one materialised temporary per
 /// call site in Debug, which is enough to overflow a 64 KiB native stack.
-/// The Builder error set is a subset of `Error`, so calls are plain `try`; the terminal control
-/// records are kept by the `State.builder*` wrappers, and the hottest
-/// walks stay outlined (`noinline`) because every inline copy costs
-/// machine code. Grammar sites own source markers: the `NoSource`
+/// The Builder error set is a subset of `Error`, so calls are plain `try`;
+/// the hottest walks stay outlined (`noinline`) because every inline copy
+/// costs machine code. Grammar sites own source markers: the `NoSource`
 /// spellings are the same walk and only document that QuickJS emits that
 /// opcode without a source event.
 ///
@@ -219,7 +184,6 @@ pub const Emitter = struct {
     /// no source marker of its own.
     pub fn opU8NoSource(s: *State, op_id: u8, val: u8) Error!void {
         try s.activeBuilder().emitOpU8(op_id, val);
-        try builderRecordPlainControl(s, op_id);
     }
     pub noinline fn opU16(s: *State, op_id: u8, val: u16) Error!void {
         try builderEmitOpU16(s, op_id, val);
@@ -235,20 +199,17 @@ pub const Emitter = struct {
         errdefer v2b.rollback(snapshot);
         try addSourceMarker(s, line_num, col_num);
         try v2b.emitOpU16(op_id, val);
-        try builderRecordU16Control(s, op_id);
     }
-    /// `call` / `call_method` family: `argc:u16` plus the cache-index byte.
-    /// Source-less: qjs pins the call's one source event on the callee.
+    /// `call` / `call_method` family: `argc:u16`. Source-less: qjs pins the
+    /// call's one source event on the callee.
     pub fn callOp(s: *State, op_id: u8, argc: u16) Error!void {
-        try s.activeBuilder().emitCallOp(op_id, argc);
-        try builderRecordU16Control(s, op_id);
+        try s.activeBuilder().emitOpU16(op_id, argc);
     }
     pub fn opU32(s: *State, op_id: u8, val: u32) Error!void {
         try builderEmitOpU32(s, op_id, val);
     }
     pub fn opU32NoSource(s: *State, op_id: u8, val: u32) Error!void {
         try s.activeBuilder().emitOpU32(op_id, val);
-        try builderRecordU32Control(s, op_id);
     }
     /// QuickJS emits the signed literal payload directly after OP_push_i32
     pub fn opI32(s: *State, op_id: u8, val: i32) Error!void {
@@ -284,10 +245,7 @@ pub const Emitter = struct {
         errdefer v2b.rollback(snapshot);
         try opU32(s, opcode.op.push_const, 0);
         const opcode_pos: usize = v2b.last_opcode_pos.?;
-        const idx = if (s.emit_to_function_def or s.root_mode == .canonical)
-            try s.curFunc().appendCpool(value)
-        else
-            try s.function.addConstant(value);
+        const idx = try s.curFunc().appendCpool(value);
         std.mem.writeInt(u32, v2b.code[opcode_pos + 1 ..][0..4], idx, .little);
     }
     /// An explicit source event that one or more NoSource instructions
@@ -304,7 +262,7 @@ pub const Emitter = struct {
     pub fn discardDetachedSources(s: *State, seg: *compiler.builder.DetachedSegment) void {
         const sources = seg.sources;
         seg.sources = &.{};
-        if (sources.len != 0) s.function.memory.free(compiler.builder.SourceSlot, sources);
+        if (sources.len != 0) s.memory.free(compiler.builder.SourceSlot, sources);
     }
     pub fn spliceSegment(s: *State, seg: *compiler.builder.DetachedSegment) Error!void {
         try s.activeBuilder().spliceSegment(seg);
@@ -318,25 +276,25 @@ pub fn emitGrammarSource(s: *State, source: SourcePosition) Error!void {
 }
 
 pub fn pushBreakFrame(s: *State) Error!void {
-    try s.break_frame_lens.append(s.function.memory.allocator, s.break_fixups.items.len);
-    try s.continue_frame_lens.append(s.function.memory.allocator, s.continue_fixups.items.len);
-    try s.continue_frame_break_frame_indices.append(s.function.memory.allocator, s.break_frame_lens.items.len - 1);
-    try s.break_frame_catch_marker_depths.append(s.function.memory.allocator, s.active_catch_marker_depth);
-    try s.break_frame_cleanup_drops.append(s.function.memory.allocator, 0);
-    try s.break_frame_cross_cleanup_drops.append(s.function.memory.allocator, 0);
-    try s.continue_frame_catch_marker_depths.append(s.function.memory.allocator, s.active_catch_marker_depth);
-    try s.continue_frame_cleanup_drops.append(s.function.memory.allocator, 0);
+    try s.break_frame_lens.append(s.memory.allocator, s.break_fixups.items.len);
+    try s.continue_frame_lens.append(s.memory.allocator, s.continue_fixups.items.len);
+    try s.continue_frame_break_frame_indices.append(s.memory.allocator, s.break_frame_lens.items.len - 1);
+    try s.break_frame_catch_marker_depths.append(s.memory.allocator, s.active_catch_marker_depth);
+    try s.break_frame_cleanup_drops.append(s.memory.allocator, 0);
+    try s.break_frame_cross_cleanup_drops.append(s.memory.allocator, 0);
+    try s.continue_frame_catch_marker_depths.append(s.memory.allocator, s.active_catch_marker_depth);
+    try s.continue_frame_cleanup_drops.append(s.memory.allocator, 0);
     // qjs push_break_entry order: label_cont first, then label_break.
-    try array_list_erased.append(&s.continue_frame_labels, s.function.memory.allocator, try Emitter.newLabel(s));
-    try array_list_erased.append(&s.break_frame_labels, s.function.memory.allocator, try Emitter.newLabel(s));
+    try array_list_erased.append(&s.continue_frame_labels, s.memory.allocator, try Emitter.newLabel(s));
+    try array_list_erased.append(&s.break_frame_labels, s.memory.allocator, try Emitter.newLabel(s));
 }
 
 pub fn pushBreakOnlyFrame(s: *State) Error!void {
-    try s.break_frame_lens.append(s.function.memory.allocator, s.break_fixups.items.len);
-    try s.break_frame_catch_marker_depths.append(s.function.memory.allocator, s.active_catch_marker_depth);
-    try s.break_frame_cleanup_drops.append(s.function.memory.allocator, 0);
-    try s.break_frame_cross_cleanup_drops.append(s.function.memory.allocator, 0);
-    try array_list_erased.append(&s.break_frame_labels, s.function.memory.allocator, try Emitter.newLabel(s));
+    try s.break_frame_lens.append(s.memory.allocator, s.break_fixups.items.len);
+    try s.break_frame_catch_marker_depths.append(s.memory.allocator, s.active_catch_marker_depth);
+    try s.break_frame_cleanup_drops.append(s.memory.allocator, 0);
+    try s.break_frame_cross_cleanup_drops.append(s.memory.allocator, 0);
+    try array_list_erased.append(&s.break_frame_labels, s.memory.allocator, try Emitter.newLabel(s));
 }
 
 /// Put a real break/continue target in the same ordered environment chain
@@ -526,7 +484,7 @@ pub fn popBreakOnlyFrameAndPatch(s: *State) Error!void {
 }
 
 pub fn emitStringLiteralValue(s: *State, bytes: []const u8) Error!void {
-    const atom_id = try s.function.atoms.internString(bytes);
+    const atom_id = try s.atoms.internString(bytes);
 
     // QuickJS's emit_push_const(..., as_atom = true) keeps ordinary
     // string atoms as push_atom_value, but a canonical numeric name is a
@@ -554,7 +512,7 @@ pub fn pushReturnFinallyFrame(
     catch_marker_depth: u32,
 ) Error!usize {
     if (catch_marker_depth > s.active_catch_marker_depth) return error.ParserInvariant;
-    try s.return_finally_frames.append(s.function.memory.allocator, .{
+    try s.return_finally_frames.append(s.memory.allocator, .{
         .finally_label = finally_label,
         .scope_level = s.scope_level,
         .catch_marker_depth = catch_marker_depth,
@@ -614,9 +572,9 @@ pub fn enterReturnFinallyFunctionBoundary(s: *State) ReturnFinallyBoundary {
 }
 
 pub fn leaveReturnFinallyFunctionBoundary(s: *State, saved: *const ReturnFinallyBoundary) void {
-    s.return_finally_frames.deinit(s.function.memory.allocator);
+    s.return_finally_frames.deinit(s.memory.allocator);
     s.return_finally_frames = saved.frames;
-    s.finally_body_control_frames.deinit(s.function.memory.allocator);
+    s.finally_body_control_frames.deinit(s.memory.allocator);
     s.finally_body_control_frames = saved.finally_body_control_frames;
 }
 
@@ -656,7 +614,7 @@ pub fn parseSharedFinallyBlock(s: *State) Error!void {
         s.top_break = block.prev;
     }
 
-    try s.finally_body_control_frames.append(s.function.memory.allocator, .{
+    try s.finally_body_control_frames.append(s.memory.allocator, .{
         .block = &block,
         .catch_marker_depth = s.active_catch_marker_depth,
         .break_depth = s.break_frame_lens.items.len,

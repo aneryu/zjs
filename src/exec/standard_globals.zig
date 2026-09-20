@@ -3241,7 +3241,7 @@ pub const Intrinsics = struct {
 
     pub fn init(rt: *core.JSRuntime) !Intrinsics {
         configureRuntime(rt);
-        const context = try core.JSContext.create(rt);
+        const context = try core.JSContext.create(rt, .{});
         errdefer context.destroy();
         const global = try core.Object.createWithOwnPropertyCapacity(
             rt,
@@ -3473,7 +3473,7 @@ fn expectAutoInitOwnPropertyForTest(object: *core.Object, atom_id: core.Atom) !v
 }
 
 test "intrinsic bootstrap registers global builtin domains through object properties" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var intrinsics = try Intrinsics.init(rt);
@@ -3514,7 +3514,7 @@ test "intrinsic bootstrap registers global builtin domains through object proper
 }
 
 test "lazy standard functions attach typed records for every formerly exceptional domain" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var intrinsics = try Intrinsics.init(rt);
@@ -3559,7 +3559,7 @@ test "lazy standard functions attach typed records for every formerly exceptiona
 }
 
 test "bootstrap aliases retain exact native identity and records" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var intrinsics = try Intrinsics.init(rt);
@@ -3644,7 +3644,7 @@ test "bootstrap aliases retain exact native identity and records" {
 }
 
 test "Realm bootstrap publishes eager and alias function metadata without repair scans" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var intrinsics = try Intrinsics.init(rt);
@@ -3795,7 +3795,7 @@ test "Realm bootstrap publishes eager and alias function metadata without repair
 }
 
 test "lazy builtin namespaces remain AUTOINIT after Realm bootstrap" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var intrinsics = try Intrinsics.init(rt);

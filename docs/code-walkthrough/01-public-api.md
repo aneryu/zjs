@@ -32,9 +32,9 @@ src/exec/  eval_entry / call_site / object_ops / builtin_dispatch / zjs_vm
 一次最短嵌入：
 
 ```zig
-const rt = try zjs.JSRuntime.create(allocator);
+const rt = try zjs.JSRuntime.create(allocator, .{});
 defer rt.destroy();
-const ctx = try zjs.JSContext.create(rt);
+const ctx = try zjs.JSContext.create(rt, .{});
 defer ctx.destroy();
 const result = try ctx.eval("1 + 2", .{});
 _ = result;

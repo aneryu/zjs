@@ -736,7 +736,7 @@
 - **签名**：`fn finishClassInitFunction(s: *State, child_index: usize) Error!void`。
 - **作用**：给初始化子函数收尾：最后一条不是终结指令时补 `return_undef`。
 - **实现**：`child_index` 越过 `parent_fd.child_list.len`、或子函数没有 `builder`，都报 `Error.ParserInvariant`。终结判定照 qjs `js_is_live_code` 的形状做在子函数的临时指令流上：`v2b.last_opcode_pos < 0`（`get_prev_opcode` 无效，例如刚绑过 merge 标签）按「活」处理、需要补终结；否则看最后一条指令，是 `return` / `return_undef` / `return_async` / `throw` 才算已终结。需要补时发 `return_undef` 并 `recordControl(.terminal)`。
-- **所有权 / 错误 / 调用**：不分配；注意它写的**不是当前函数**的 Builder——`v2b` 直接取自 `parent_fd.child_list[child_index].builder`，绕过 `activeBuilder()` 往子函数的指令流上补码。自有错误两条 `Error.ParserInvariant`（下标越界、子函数没有 Builder），`emitOp` 与 `recordControl` 的失败经 `mapBuilderError` 变成 `OutOfMemory` / `BytecodeOverflow` / `ParserInvariant`。调用方 2 处：`finishClassFieldsInitFunction`（`src/parser.zig:14327`）与 `finishClassStaticInitFunction`（`src/parser.zig:14332`）。
+- **所有权 / 错误 / 调用**：不分配；注意它写的**不是当前函数**的 Builder——`v2b` 直接取自 `parent_fd.child_list[child_index].builder`，绕过 `activeBuilder()` 往子函数的指令流上补码。自有错误两条 `Error.ParserInvariant`（下标越界、子函数没有 Builder），`emitOp` 的失败经 `mapBuilderError` 变成 `OutOfMemory` / `BytecodeOverflow` / `ParserInvariant`。调用方 2 处：`finishClassFieldsInitFunction`（`src/parser.zig:14327`）与 `finishClassStaticInitFunction`（`src/parser.zig:14332`）。
 
 ### `registerClassPrivateBoundName` (`src/parser.zig:13887`)
 

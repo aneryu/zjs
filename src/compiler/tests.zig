@@ -31,14 +31,14 @@ const ParseHarness = struct {
 
     /// `h` must be a stack local (`var h: ParseHarness = undefined;`).
     fn init(h: *ParseHarness, src: []const u8) !void {
-        h.rt = try core.JSRuntime.create(std.testing.allocator);
+        h.rt = try core.JSRuntime.create(std.testing.allocator, .{});
         errdefer h.rt.destroy();
         h.name_atom = try h.rt.atoms.internString("s2g1");
         h.function = bytecode_mod.Bytecode.init(&h.rt.memory, &h.rt.atoms, h.name_atom);
-        errdefer h.function.deinit(h.rt);
+        errdefer h.function.deinit();
         h.lex = parser_mod.Lexer.init(std.testing.allocator, &h.rt.atoms, src);
         errdefer h.lex.deinit();
-        h.state = try P.ParseState.init(&h.lex, &h.function);
+        h.state = try P.ParseState.init(&h.lex, &h.rt.memory, &h.rt.atoms, h.name_atom);
         try h.state.beginBuilderEmissionForTest();
     }
 
@@ -57,7 +57,7 @@ const ParseHarness = struct {
     fn deinit(h: *ParseHarness) void {
         h.state.deinit(h.rt);
         h.lex.deinit();
-        h.function.deinit(h.rt);
+        h.function.deinit();
         h.rt.destroy();
     }
 };
@@ -73,22 +73,21 @@ const ExecHarness = struct {
 
     /// `h` must be a stack local (`var h: ExecHarness = undefined;`).
     fn init(h: *ExecHarness, src: []const u8) !void {
-        h.rt = try core.JSRuntime.create(std.testing.allocator);
+        h.rt = try core.JSRuntime.create(std.testing.allocator, .{});
         errdefer h.rt.destroy();
         standard_globals.configureRuntime(h.rt);
-        h.ctx = try core.JSContext.create(h.rt);
+        h.ctx = try core.JSContext.create(h.rt, .{});
         errdefer h.ctx.destroy();
         h.name_atom = try h.rt.atoms.internString("compiler-s4-exec");
         h.function = bytecode_mod.Bytecode.init(&h.rt.memory, &h.rt.atoms, h.name_atom);
-        errdefer h.function.deinit(h.rt);
+        errdefer h.function.deinit();
         h.lex = parser_mod.Lexer.init(std.testing.allocator, &h.rt.atoms, src);
         errdefer h.lex.deinit();
-        h.state = try P.ParseState.initCanonicalRootWithRuntime(h.rt, &h.lex, &h.function);
+        h.state = try P.ParseState.initWithRuntime(h.rt, &h.lex, h.name_atom);
         // TGC S3-b: `h` is a stack local and `h.state` never moves after this
         // assignment, so the providers may register here.
         try h.state.activateCompileRoots();
         h.state.function_def.is_global_var = true;
-        h.state.root_mode = .canonical;
         try h.state.beginProgramEmission();
         h.installed_short_opcode = false;
     }
@@ -96,7 +95,7 @@ const ExecHarness = struct {
     fn deinit(h: *ExecHarness) void {
         h.state.deinit(h.rt);
         h.lex.deinit();
-        h.function.deinit(h.rt);
+        h.function.deinit();
         h.ctx.destroy();
         h.rt.destroy();
     }
@@ -208,7 +207,7 @@ fn compileAndRunWithHook(h: *ExecHarness, before_finalize: ?*const fn (*ExecHarn
     try h.state.finalizeEvalReturn();
     if (before_finalize) |hook| try hook(h);
 
-    const fb_slice = try bytecode_mod.pipeline_finalize.createFunctionBytecode(
+    const fb_slice = try bytecode_mod.pipeline.finalize.createFunctionBytecode(
         &h.state.function_def,
         .{ .realm = h.ctx },
     );
@@ -244,7 +243,6 @@ fn compileAndRunWithHook(h: *ExecHarness, before_finalize: ?*const fn (*ExecHarn
         .strict_unresolved_get_var = fb.isStrictMode(),
         .current_function_value = root_fn,
         .direct_eval_vars_reach_global = true,
-        .global_declarations_prevalidated = true,
     });
 }
 
@@ -380,7 +378,7 @@ fn expectSourceOffsets(b: *const builder_mod.Builder, expected: []const u32) !vo
 }
 
 test "compiler.tests: forward jump binds and relocates" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var b = builder_mod.Builder.init(&rt.memory, &rt.atoms);
@@ -409,7 +407,7 @@ test "compiler.tests: forward jump binds and relocates" {
 }
 
 test "compiler.tests: backward jump marks target and relocates" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var b = builder_mod.Builder.init(&rt.memory, &rt.atoms);
@@ -437,7 +435,7 @@ test "compiler.tests: backward jump marks target and relocates" {
 }
 
 test "compiler.tests: many jumps share a head-first reloc chain" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var b = builder_mod.Builder.init(&rt.memory, &rt.atoms);
@@ -475,7 +473,7 @@ test "compiler.tests: many jumps share a head-first reloc chain" {
 }
 
 test "compiler.tests: first unbound label and binds fail closed" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var b = builder_mod.Builder.init(&rt.memory, &rt.atoms);
@@ -493,7 +491,7 @@ test "compiler.tests: first unbound label and binds fail closed" {
 }
 
 fn oomScript(allocator: std.mem.Allocator) !void {
-    const rt = try core.JSRuntime.create(allocator);
+    const rt = try core.JSRuntime.create(allocator, .{});
     defer rt.destroy();
 
     var b = builder_mod.Builder.init(&rt.memory, &rt.atoms);
@@ -550,7 +548,7 @@ test "compiler.tests: allocation failure sweep preserves cleanup" {
 }
 
 test "compiler.tests: source slots roll back to snapshot" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var b = builder_mod.Builder.init(&rt.memory, &rt.atoms);
@@ -584,7 +582,7 @@ test "compiler.tests: source slots roll back to snapshot" {
 }
 
 test "compiler.tests: atom ownership balances across rollback and deinit" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const atom = try rt.atoms.internString("compiler_atom_ownership");
@@ -606,7 +604,7 @@ test "compiler.tests: atom ownership balances across rollback and deinit" {
 }
 
 test "compiler.tests: rollback restores a shared label reloc chain" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var b = builder_mod.Builder.init(&rt.memory, &rt.atoms);
@@ -2182,17 +2180,17 @@ test "compiler.s2g4: minimal class expression and default constructor" {
         .{ .op = qop.if_false, .size = 5, .label = 0 },
         .{ .op = qop.get_loc, .size = 3 },
         .{ .op = qop.swap, .size = 1 },
-        .{ .op = qop.call_method, .size = 4 },
+        .{ .op = qop.call_method, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.return_undef, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 27), ctor.code_len);
+    try std.testing.expectEqual(@as(u32, 26), ctor.code_len);
     try std.testing.expectEqual(@as(u32, 1), ctor.label_len);
-    try expectLabel(ctor, 0, 1, 25);
+    try expectLabel(ctor, 0, 1, 24);
     try std.testing.expectEqual(@as(u32, 1), ctor.atom_len);
     try std.testing.expectEqual(fields_atom, ctor.atom_operands[0]);
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, ctor.code[22..24], .little));
-    try std.testing.expectEqual(@as(?u32, 26), ctor.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 25), ctor.last_opcode_pos);
     try expectRelocIntegrity(ctor);
     try expectSourceOrder(ctor);
 }
@@ -2252,16 +2250,16 @@ test "compiler.s2g4: class declaration stores local binding" {
         .{ .op = qop.if_false, .size = 5, .label = 0 },
         .{ .op = qop.get_loc, .size = 3 },
         .{ .op = qop.swap, .size = 1 },
-        .{ .op = qop.call_method, .size = 4 },
+        .{ .op = qop.call_method, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.return_undef, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 27), ctor.code_len);
+    try std.testing.expectEqual(@as(u32, 26), ctor.code_len);
     try std.testing.expectEqual(@as(u32, 1), ctor.label_len);
-    try expectLabel(ctor, 0, 1, 25);
+    try expectLabel(ctor, 0, 1, 24);
     try std.testing.expectEqual(@as(u32, 1), ctor.atom_len);
     try std.testing.expectEqual(fields_atom, ctor.atom_operands[0]);
-    try std.testing.expectEqual(@as(?u32, 26), ctor.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 25), ctor.last_opcode_pos);
     try expectRelocIntegrity(ctor);
     try expectSourceOrder(ctor);
 }
@@ -2339,16 +2337,16 @@ test "compiler.s2g4: named class method splices runtime definition" {
         .{ .op = qop.if_false, .size = 5, .label = 0 },
         .{ .op = qop.get_loc, .size = 3 },
         .{ .op = qop.swap, .size = 1 },
-        .{ .op = qop.call_method, .size = 4 },
+        .{ .op = qop.call_method, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.return_undef, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 27), ctor.code_len);
+    try std.testing.expectEqual(@as(u32, 26), ctor.code_len);
     try std.testing.expectEqual(@as(u32, 1), ctor.label_len);
-    try expectLabel(ctor, 0, 1, 25);
+    try expectLabel(ctor, 0, 1, 24);
     try std.testing.expectEqual(@as(u32, 1), ctor.atom_len);
     try std.testing.expectEqual(fields_atom, ctor.atom_operands[0]);
-    try std.testing.expectEqual(@as(?u32, 26), ctor.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 25), ctor.last_opcode_pos);
     try expectRelocIntegrity(ctor);
     try expectSourceOrder(ctor);
 }
@@ -2399,19 +2397,19 @@ test "compiler.s2g4: explicit constructor rolls back parent closure" {
         .{ .op = qop.if_false, .size = 5, .label = 0 },
         .{ .op = qop.scope_get_var, .size = 7 },
         .{ .op = qop.swap, .size = 1 },
-        .{ .op = qop.call_method, .size = 4 },
+        .{ .op = qop.call_method, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.enter_scope, .size = 3 },
         .{ .op = qop.null, .size = 1 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.return_undef, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 33), ctor.code_len);
+    try std.testing.expectEqual(@as(u32, 32), ctor.code_len);
     try std.testing.expectEqual(@as(u32, 1), ctor.label_len);
-    try expectLabel(ctor, 0, 1, 26);
+    try expectLabel(ctor, 0, 1, 25);
     try std.testing.expectEqual(@as(u32, 2), ctor.atom_len);
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, ctor.code[23..25], .little));
-    try std.testing.expectEqual(@as(?u32, 32), ctor.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 31), ctor.last_opcode_pos);
     try expectRelocIntegrity(ctor);
     try expectSourceOrder(ctor);
 }
@@ -2465,18 +2463,18 @@ test "compiler.s2g4: derived default constructor returns checked this" {
         .{ .op = qop.if_false, .size = 5, .label = 0 },
         .{ .op = qop.get_loc_check, .size = 3 },
         .{ .op = qop.swap, .size = 1 },
-        .{ .op = qop.call_method, .size = 4 },
+        .{ .op = qop.call_method, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.get_loc_checkthis, .size = 3 },
         .{ .op = qop.@"return", .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 33), ctor.code_len);
+    try std.testing.expectEqual(@as(u32, 32), ctor.code_len);
     try std.testing.expectEqual(@as(u32, 1), ctor.label_len);
-    try expectLabel(ctor, 0, 1, 28);
+    try expectLabel(ctor, 0, 1, 27);
     try std.testing.expectEqual(@as(u32, 1), ctor.atom_len);
     try std.testing.expectEqual(fields_atom, ctor.atom_operands[0]);
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, ctor.code[25..27], .little));
-    try std.testing.expectEqual(@as(?u32, 32), ctor.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 31), ctor.last_opcode_pos);
     try expectRelocIntegrity(ctor);
     try expectSourceOrder(ctor);
 }
@@ -2671,21 +2669,21 @@ test "compiler.s2g4: static block nests closure in static initializer" {
         .{ .op = qop.dup, .size = 1 },
         .{ .op = qop.fclosure, .size = 5 },
         .{ .op = qop.set_home_object, .size = 1 },
-        .{ .op = qop.call_method, .size = 4 },
+        .{ .op = qop.call_method, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 50), b.code_len);
+    try std.testing.expectEqual(@as(u32, 49), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[11..15], .little));
     try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[28..32], .little));
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, b.code[34..36], .little));
-    try std.testing.expectEqual(@as(?u32, 49), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 48), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -2700,17 +2698,17 @@ test "compiler.s2g4: static block nests closure in static initializer" {
         .{ .op = qop.set_name, .size = 5 },
         .{ .op = qop.scope_get_var, .size = 7 },
         .{ .op = qop.swap, .size = 1 },
-        .{ .op = qop.call_method, .size = 4 },
+        .{ .op = qop.call_method, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.return_undef, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 24), static_init.code_len);
+    try std.testing.expectEqual(@as(u32, 23), static_init.code_len);
     try std.testing.expectEqual(@as(u32, 0), static_init.label_len);
     try std.testing.expectEqual(@as(u32, 2), static_init.atom_len);
     try std.testing.expectEqual(core.atom.null_atom, static_init.atom_operands[0]);
     try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, static_init.code[1..5], .little));
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, static_init.code[19..21], .little));
-    try std.testing.expectEqual(@as(?u32, 23), static_init.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 22), static_init.last_opcode_pos);
     try expectRelocIntegrity(static_init);
     try expectSourceOrder(static_init);
 
@@ -2757,21 +2755,21 @@ test "compiler.s2g4: static field emits through static initializer" {
         .{ .op = qop.dup, .size = 1 },
         .{ .op = qop.fclosure, .size = 5 },
         .{ .op = qop.set_home_object, .size = 1 },
-        .{ .op = qop.call_method, .size = 4 },
+        .{ .op = qop.call_method, .size = 3 },
         .{ .op = qop.drop, .size = 1 },
         .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.leave_scope, .size = 3 },
         .{ .op = qop.set_class_name, .size = 5 },
         .{ .op = qop.drop, .size = 1 },
     });
-    try std.testing.expectEqual(@as(u32, 50), b.code_len);
+    try std.testing.expectEqual(@as(u32, 49), b.code_len);
     try std.testing.expectEqual(@as(u32, 0), b.label_len);
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
     try std.testing.expectEqual(empty_atom, b.atom_operands[0]);
     try std.testing.expectEqual(@as(u32, 1), std.mem.readInt(u32, b.code[11..15], .little));
     try std.testing.expectEqual(@as(u32, 0), std.mem.readInt(u32, b.code[28..32], .little));
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, b.code[34..36], .little));
-    try std.testing.expectEqual(@as(?u32, 49), b.last_opcode_pos);
+    try std.testing.expectEqual(@as(?u32, 48), b.last_opcode_pos);
     try expectSourceOffsets(b, &.{0});
     try expectRelocIntegrity(b);
     try expectSourceOrder(b);
@@ -3120,7 +3118,7 @@ test "compiler.fuse: legacy opcode sizes stay put" {
     try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.goto8));
     try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.put_loc8));
     try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.get_loc8));
-    try std.testing.expectEqual(@as(u8, 4), opcode.sizeOf(qop.call_method_apply_fwd));
+    try std.testing.expectEqual(@as(u8, 3), opcode.sizeOf(qop.call_method_apply_fwd));
     try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.get_loc0_field));
     try std.testing.expectEqual(@as(u8, 1), opcode.sizeOf(qop.cmp_if_false8));
     try std.testing.expectEqual(@as(u8, 2), opcode.sizeOf(qop.put_loc8_get_loc8));
@@ -3163,7 +3161,7 @@ fn compileRunAndCount(src: []const u8, expected: i32, want: []const u8) !void {
     try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
     try h.state.finalizeEvalReturn();
 
-    const fb_slice = try bytecode_mod.pipeline_finalize.createFunctionBytecode(
+    const fb_slice = try bytecode_mod.pipeline.finalize.createFunctionBytecode(
         &h.state.function_def,
         .{ .realm = h.ctx },
     );
@@ -3199,7 +3197,6 @@ fn compileRunAndCount(src: []const u8, expected: i32, want: []const u8) !void {
         .strict_unresolved_get_var = fb.isStrictMode(),
         .current_function_value = root_fn,
         .direct_eval_vars_reach_global = true,
-        .global_declarations_prevalidated = true,
     });
     try std.testing.expectEqual(expected, result.as(.int).?);
 }
@@ -3262,7 +3259,7 @@ test "no compiled program emits a reclaimed opcode id (R0 + F0a0)" {
             P.DeclMask{ .func = true, .func_with_label = true, .other = true },
         );
         try h.state.finalizeEvalReturn();
-        const fb_slice = try bytecode_mod.pipeline_finalize.createFunctionBytecode(
+        const fb_slice = try bytecode_mod.pipeline.finalize.createFunctionBytecode(
             &h.state.function_def,
             .{ .realm = h.ctx },
         );
@@ -3508,7 +3505,7 @@ test "compiler.p5: FunctionDef owners are inert after the FunctionBytecode escap
     try h.state.finalizeEvalReturn();
     try std.testing.expect(h.state.function_def.child_list.len >= 1);
 
-    const fb_slice = try bytecode_mod.pipeline_finalize.createFunctionBytecode(
+    const fb_slice = try bytecode_mod.pipeline.finalize.createFunctionBytecode(
         &h.state.function_def,
         .{ .realm = h.ctx },
     );
@@ -3718,23 +3715,20 @@ test "TGC S3-b: a major inside a parse keeps the front end's atoms marked" {
         "zjsS3ParseScopeDelta",
     };
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     standard_globals.configureRuntime(rt);
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const name_atom = try rt.atoms.internString("s3b-parse-scope");
-    var function = bytecode_mod.Bytecode.init(&rt.memory, &rt.atoms, name_atom);
-    defer function.deinit(rt);
     var lex = parser_mod.Lexer.init(std.testing.allocator, &rt.atoms, source);
     defer lex.deinit();
 
-    var state = try P.ParseState.initCanonicalRootWithRuntime(rt, &lex, &function);
+    var state = try P.ParseState.initWithRuntime(rt, &lex, name_atom);
     defer state.deinit(rt);
     try state.activateCompileRoots();
     state.function_def.is_global_var = true;
-    state.root_mode = .canonical;
     try state.beginProgramEmission();
     try P.parseProgramStatements(
         &state,
@@ -3774,15 +3768,13 @@ test "compiler.p5: escaped atoms outlive compiler teardown" {
         \\o.escapeAuditProbeName;
     ;
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     standard_globals.configureRuntime(rt);
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     const name_atom = try rt.atoms.internString("compiler-p5-atom-escape");
-    var function = bytecode_mod.Bytecode.init(&rt.memory, &rt.atoms, name_atom);
     var lex = parser_mod.Lexer.init(std.testing.allocator, &rt.atoms, source);
-    var state = try P.ParseState.initCanonicalRootWithRuntime(rt, &lex, &function);
+    var state = try P.ParseState.initWithRuntime(rt, &lex, name_atom);
     state.function_def.is_global_var = true;
-    state.root_mode = .canonical;
     try state.beginProgramEmission();
 
     {
@@ -3803,7 +3795,7 @@ test "compiler.p5: escaped atoms outlive compiler teardown" {
         }
         try std.testing.expectEqual(@as(usize, 2), phase1_probe_refs);
 
-        const fb_slice = try bytecode_mod.pipeline_finalize.createFunctionBytecode(
+        const fb_slice = try bytecode_mod.pipeline.finalize.createFunctionBytecode(
             &state.function_def,
             .{ .realm = ctx },
         );
@@ -3811,7 +3803,6 @@ test "compiler.p5: escaped atoms outlive compiler teardown" {
 
         state.deinit(rt);
         lex.deinit();
-        function.deinit(rt);
 
         // TGC S3-c: the count ledger is gone, so the surviving claim is the
         // one that matters -- compiler teardown does not retire an atom the

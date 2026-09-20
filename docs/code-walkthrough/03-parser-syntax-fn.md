@@ -54,7 +54,7 @@
 一行 `list.deinit(s.function.memory.allocator)`：只还列表存储，列表里的 atom id 不逐个 release（归 `atom_scope` 记账）。
 - **所有权 / 错误 / 调用**：不分配、无 error set，只把 `appendOwnedParserAtom` 攒起来的缓冲还给 `s.function.memory.allocator`；里面的 atom id 是借用的，编译期由 `CompileAtomScope` 统一作根，所以不逐个 release。四个调用点都在 `defer` / 作用域收尾里：`parseFunctionDecl` 的参数属性 `defer`（`src/parser.zig:11090`）、`FunctionParameters.deinit`（`:11263`）、`parseArrowFunction` 的 `param_names` `defer`（`:12277`）、`parseClassElementFunction` 的参数属性 `defer`（`:14444`）。
 
-### `FunctionParameters.deinit` (`src/parser.zig:10795`)
+### `FunctionParameters.deinit` (`src/parser.zig:163`)
 
 - **签名**：`fn deinit(self: *FunctionParameters, s: *State) void`。
 - **作用**：归还形参收集器里那份简单形参名列表所持有的 atom。
@@ -109,7 +109,7 @@ cover grammar 已确认是箭头后进入。创建 `func_type = .arrow` 的子 F
 `.direct_binding` 返回绑定 atom。`.lvalue` 仅 `scope_var`/`ref_value` 返回 `name`，成员/私有/下标不能给匿名函数提供推断名。
 - **所有权 / 错误 / 调用**：绑定模式返回名字；lvalue 仅 `scope_var`/`ref_value` 有可命名 atom。
 
-### `PatternTarget.deinit` (`src/parser.zig:12114`)
+### `PatternTarget.deinit` (`src/parser.zig:163`)
 
 - **签名**：`fn deinit(self: *PatternTarget, s: *State) void`。
 - **作用**：按 tag 释放一个解构目标可能挂着的 lvalue 资源。

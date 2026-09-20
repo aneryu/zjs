@@ -353,9 +353,9 @@ fn testStandardGlobal(ctx: *core.JSContext) !*core.Object {
 }
 
 test "createPromiseResolvingFunction roots promise and state while allocating function" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try testStandardGlobal(ctx);
 
@@ -477,7 +477,7 @@ pub fn promiseReactionRecord(
 }
 
 test "promiseReactionRecord roots direct symbol fields while allocating slots" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const on_fulfilled_symbol = try rt.atoms.newValueSymbol("gc-reaction-on-fulfilled-symbol");
@@ -521,9 +521,9 @@ pub fn promiseReactionJob(
 }
 
 test "promiseReactionJob roots reaction and value while allocating job" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
@@ -622,9 +622,9 @@ pub const PreparedPromiseReactionJobs = struct {
 };
 
 test "prepared promise reaction jobs expose direct symbol payloads to an explicit root frame" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const reaction = try core.Object.create(rt, core.class.ids.object, null);
 
@@ -748,9 +748,9 @@ pub fn promiseSettleValue(
 }
 
 test "promiseSettleValue handles result self-assignment" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
@@ -768,8 +768,8 @@ test "promiseSettleValue handles result self-assignment" {
 }
 
 test "promiseSettleValue roots direct symbol result while preparing reaction jobs" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    const ctx = try core.JSContext.create(rt);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const ctx = try core.JSContext.create(rt, .{});
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
     ctx.global = global;
@@ -804,9 +804,9 @@ test "promiseSettleValue roots direct symbol result while preparing reaction job
 }
 
 test "promiseSettleValue preserves pending state across reaction prepare and FIFO reserve OOM" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
@@ -1104,10 +1104,10 @@ fn appendDummyPromiseReaction(rt: *core.JSRuntime, promise: *core.Object) !void 
 }
 
 test "Promise executor recursive OOM rejects with preallocated reason" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     @import("standard_globals.zig").configureRuntime(rt);
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     defer rt.setMemoryLimit(null);
     const global = try zjs_vm.contextGlobal(ctx);
@@ -1138,10 +1138,10 @@ test "Promise executor recursive OOM rejects with preallocated reason" {
 }
 
 test "direct Promise resolve OOM is owned by FIFO after resolving pair collection" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     @import("standard_globals.zig").configureRuntime(rt);
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     defer rt.setMemoryLimit(null);
     const global = try zjs_vm.contextGlobal(ctx);
@@ -1196,10 +1196,10 @@ test "direct Promise resolve OOM is owned by FIFO after resolving pair collectio
 }
 
 test "custom Promise reaction capability bare error becomes runOne exception exactly once" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     @import("standard_globals.zig").configureRuntime(rt);
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try zjs_vm.contextGlobal(ctx);
 
@@ -1233,10 +1233,10 @@ test "custom Promise reaction capability bare error becomes runOne exception exa
 }
 
 test "Promise reaction OOM transfers internal settle to FIFO without invoking handler twice" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     @import("standard_globals.zig").configureRuntime(rt);
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     defer rt.setMemoryLimit(null);
     const global = try zjs_vm.contextGlobal(ctx);
@@ -1273,10 +1273,10 @@ test "Promise reaction OOM transfers internal settle to FIFO without invoking ha
 }
 
 test "Promise resolving OOM keeps FIFO owner after then getter and resolver collection" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     @import("standard_globals.zig").configureRuntime(rt);
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     defer rt.setMemoryLimit(null);
     const global = try zjs_vm.contextGlobal(ctx);
@@ -1315,10 +1315,10 @@ test "Promise resolving OOM keeps FIFO owner after then getter and resolver coll
 }
 
 test "Promise resolving getter throw plus settle OOM rejects once after resolver collection" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     @import("standard_globals.zig").configureRuntime(rt);
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     defer rt.setMemoryLimit(null);
     const global = try zjs_vm.contextGlobal(ctx);
@@ -1357,10 +1357,10 @@ test "Promise resolving getter throw plus settle OOM rejects once after resolver
 }
 
 test "Promise thenable OOM resumes rejection without invoking then twice" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     @import("standard_globals.zig").configureRuntime(rt);
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     defer rt.setMemoryLimit(null);
     const global = try zjs_vm.contextGlobal(ctx);
@@ -1390,9 +1390,9 @@ test "Promise thenable OOM resumes rejection without invoking then twice" {
 }
 
 test "Job.initPromiseThenable roots direct function bytecode then callback while creating job" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
@@ -1889,7 +1889,7 @@ pub fn promiseKeyedResult(rt: *core.JSRuntime, keys: *core.Object, values: *core
 }
 
 test "promiseKeyedResult roots direct symbol values while defining keyed result" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const keys = try core.Object.createArray(rt, null);
@@ -1936,7 +1936,7 @@ test "promiseKeyedResult roots direct symbol values while defining keyed result"
 pub const promiseSettlementRecord = call_mod.createPromiseSettlementRecord;
 
 test "promiseSettlementRecord roots direct symbol payload while defining status" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-settlement-record-symbol");
@@ -1977,7 +1977,7 @@ pub fn promiseCombinatorState(rt: *core.JSRuntime, resolve_value: core.JSValue, 
 }
 
 test "promiseCombinatorState roots direct function bytecode resolve while creating state" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const values = try core.Object.create(rt, core.class.ids.array, null);
@@ -2756,9 +2756,9 @@ test "fulfilled await preparation OOM never publishes a partial FIFO job" {
     var failures: usize = 0;
     var successes: usize = 0;
     for ([_]usize{ 0, 40, 80, 160, 240, 320, 640, 1280 }) |allowance| {
-        const rt = try core.JSRuntime.create(std.testing.allocator);
+        const rt = try core.JSRuntime.create(std.testing.allocator, .{});
         defer rt.destroy();
-        const ctx = try core.JSContext.create(rt);
+        const ctx = try core.JSContext.create(rt, .{});
         defer ctx.destroy();
         const global = try testStandardGlobal(ctx);
         var continuation = (try core.Object.create(rt, core.class.ids.object, null)).value();
@@ -2844,9 +2844,9 @@ pub fn asyncFunctionResumeCallbackCall(
 }
 
 test "async resume callbacks keep only internal state and trace their continuation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try testStandardGlobal(ctx);
     const function_proto = functionPrototypeFromGlobal(rt, global).?;
@@ -2891,9 +2891,9 @@ test "async resume callbacks keep only internal state and trace their continuati
 }
 
 test "async resume callback allocation failure preserves its continuation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try testStandardGlobal(ctx);
     var continuation: ?*core.Object = try core.Object.create(rt, core.class.ids.object, null);
@@ -2915,9 +2915,9 @@ test "async resume callback allocation failure preserves its continuation" {
 }
 
 test "async resume callback continuation barrier preserves young state" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try testStandardGlobal(ctx);
     const initial = try core.Object.create(rt, core.class.ids.object, null);
@@ -2999,9 +2999,9 @@ test "asyncFunctionSettle roots continuation target and result through interrupt
             return false;
         }
     };
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try testStandardGlobal(ctx);
     var promise_value = core.JSValue.undefinedValue();
@@ -3041,9 +3041,9 @@ test "asyncFunctionSettle roots continuation target and result through interrupt
 }
 
 test "asyncFunctionSettle needs no allocation for scalar completion" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try testStandardGlobal(ctx);
     var promise_value = core.JSValue.undefinedValue();
@@ -3075,9 +3075,9 @@ test "asyncFunctionSettle needs no allocation for scalar completion" {
 }
 
 test "asyncFunctionSettle fits the allocation budget of its shared state" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try testStandardGlobal(ctx);
     // Warm metadata and allocator classes before pricing the one completion.
@@ -3102,9 +3102,9 @@ test "asyncFunctionSettle fits the allocation budget of its shared state" {
 }
 
 test "asyncFunctionSettle transfers getter OOM completion to FIFO exactly once" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try testStandardGlobal(ctx);
     defer rt.setMemoryLimit(null);
@@ -3147,8 +3147,8 @@ test "asyncFunctionSettle transfers getter OOM completion to FIFO exactly once" 
 }
 
 test "asyncFunctionSettle roots direct symbol result before promise stores it" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    const ctx = try core.JSContext.create(rt);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const ctx = try core.JSContext.create(rt, .{});
     const global = try testStandardGlobal(ctx);
     const continuation = try core.Object.create(rt, core.class.ids.generator, null);
     defer {
@@ -3475,9 +3475,9 @@ pub fn promiseFinallyCallback(
 }
 
 test "promiseFinallyCallback roots direct symbol payload while allocating callback" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try testStandardGlobal(ctx);
 
@@ -3640,10 +3640,10 @@ pub fn performPromiseThen(
 }
 
 test "already-rejected Promise remains tracked when then preparation OOMs" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     @import("standard_globals.zig").configureRuntime(rt);
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     defer rt.setMemoryLimit(null);
     const global = try zjs_vm.contextGlobal(ctx);
@@ -3837,8 +3837,8 @@ pub fn settlePendingPromiseReaction(
 }
 
 test "settlePendingPromiseReaction roots callback and arg after clearing promise slots" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    const ctx = try core.JSContext.create(rt);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const ctx = try core.JSContext.create(rt, .{});
     const global = try testStandardGlobal(ctx);
     const promise = try core.Object.create(rt, core.class.ids.promise, null);
     defer {
@@ -4160,9 +4160,9 @@ fn countPromiseJob(_: *core.JSContext, args: []const core.JSValue) core.JSValue 
 }
 
 test "promise enqueues reactions and executes jobs via engine" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
@@ -4177,7 +4177,7 @@ test "promise enqueues reactions and executes jobs via engine" {
 }
 
 test "promise reaction carrier uses a dedicated traced payload" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const u = core.JSValue.undefinedValue();
     const value = try promiseReactionRecord(rt, u, u, u, u);
@@ -4190,7 +4190,7 @@ test "promise reaction carrier uses a dedicated traced payload" {
 }
 
 test "promise reaction carrier barriers cover all four slots" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const u = core.JSValue.undefinedValue();
     var record: ?*core.Object = try core.Object.expect(try promiseReactionRecord(rt, u, u, u, u));
@@ -4221,7 +4221,7 @@ test "promise reaction carrier barriers cover all four slots" {
 }
 
 test "promise reaction carrier promotion preserves values across OOM and GC" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     var values: [4]core.JSValue = undefined;
     var symbols: [4]core.Atom = undefined;
@@ -4256,7 +4256,7 @@ test "promise reaction carrier promotion preserves values across OOM and GC" {
 }
 
 test "promise reaction carrier allocation failure preserves input roots" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     var input: ?*core.Object = try core.Object.create(rt, core.class.ids.object, null);
     var record: ?*core.Object = null;
@@ -4280,9 +4280,9 @@ test "promise reaction carrier allocation failure preserves input roots" {
 }
 
 test "P-Cap target and error realm edges survive remembered and declared-only tracing" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     var record: ?*core.Object = try core.Object.createPromiseReactionRecord(rt);
     var roots = core.runtime.rootObjects(.{&record});
@@ -4315,9 +4315,9 @@ test "P-Cap target and error realm edges survive remembered and declared-only tr
 }
 
 test "P-Cap intrinsic construction OOM leaves no published reaction" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try testStandardGlobal(ctx);
     const constructor = try promiseDefaultConstructor(ctx, global);
@@ -4340,9 +4340,9 @@ test "P-Cap intrinsic construction OOM leaves no published reaction" {
 
 test "fulfilled await uses only its reserved FIFO slot" {
     for (0..3) |kind| {
-        const rt = try core.JSRuntime.create(std.testing.allocator);
+        const rt = try core.JSRuntime.create(std.testing.allocator, .{});
         defer rt.destroy();
-        const ctx = try core.JSContext.create(rt);
+        const ctx = try core.JSContext.create(rt, .{});
         defer ctx.destroy();
         const global = try testStandardGlobal(ctx);
         var continuation = (try core.Object.create(rt, core.class.ids.object, null)).value();

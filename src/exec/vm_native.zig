@@ -51,14 +51,14 @@ pub noinline fn dispatch(
     var result: core.JSValue = undefined;
     var handled = false;
     if (entry.kind == .leaf) {
-        if (shape == .method) frame.pc += 3; // argc + cache_idx
+        if (shape == .method) frame.pc += 2; // argc
         if (builtin_dispatch.invokeLeafFastEntry(entry, args)) |value| {
             result = value;
             handled = true;
         }
     } else {
         if (entry.flags.forwards_call) return .miss;
-        if (shape == .method) frame.pc += 3; // argc + cache_idx
+        if (shape == .method) frame.pc += 2; // argc
     }
     if (!handled) {
         const this_value = if (shape == .method) stack.values[region_base] else core.JSValue.undefinedValue();

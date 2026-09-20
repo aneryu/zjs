@@ -19,6 +19,7 @@ const parser_core = engine.parser.Parser;
 const ParseState = parser_core.ParseState;
 const op = engine.bytecode.opcode.op;
 const JSContext = @import("js_context.zig").JSContext;
+const test262_host = @import("test262_host.zig");
 
 const helpers = @This();
 
@@ -41,49 +42,80 @@ pub fn installHostGlobalsBare(rt: *core.JSRuntime, global: *core.Object) !void {
     try exec_call.installHostGlobals(rt, global);
 }
 
-pub fn makeFunction(rt: *core.JSRuntime, code: []const u8) !engine.bytecode.Bytecode {
-    const name = try rt.internAtom("exec");
-    var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    errdefer function.deinit(rt);
-    try setCodeAndStackSize(&function, code);
-    return function;
+/// A published, rooted `FunctionBytecode` built from raw final-form bytecode:
+/// the fixture shape for tests that execute hand-written instruction
+/// streams. `release` drops the root; the collector reclaims the artifact.
+pub const Fixture = struct {
+    fb: *engine.bytecode.FunctionBytecode,
+    value: core.JSValue,
+    scope: core.runtime.ValueRootScope(1),
+
+    pub fn release(self: *Fixture, rt: *core.JSRuntime) void {
+        self.scope.deactivate(rt);
+        rt.memory.destroy(Fixture, self);
+    }
+};
+
+pub const FixtureSpec = struct {
+    name: []const u8 = "exec",
+    code: []const u8,
+    /// Constant-pool values addressed by `push_const`.
+    cpool: []const core.JSValue = &.{},
+    /// Ordinary global names addressed by `get_var` / `put_var`, in index
+    /// order: each becomes a `.global` closure row exactly as a compiled
+    /// script root carries them.
+    globals: []const core.Atom = &.{},
+    arg_count: u16 = 0,
+    var_count: u16 = 0,
+    var_ref_count: u16 = 0,
+    flags: engine.bytecode.FunctionBytecode.Flags = .{},
+    /// Computed by the stack-size pass when null; give an explicit value to
+    /// bypass that proof for a deliberately malformed stream.
+    stack_size: ?u16 = null,
+};
+
+pub fn makeFixture(rt: *core.JSRuntime, realm: ?*core.JSContext, spec: FixtureSpec) !*Fixture {
+    const stack_size = spec.stack_size orelse
+        try engine.bytecode.pipeline.stack_size.compute(spec.code, .{});
+    const fb = try engine.bytecode.FunctionBytecode.createFixture(rt, .{
+        .name = try rt.internAtom(spec.name),
+        .realm = realm,
+        .flags = spec.flags,
+        .arg_count = spec.arg_count,
+        .var_count = spec.var_count,
+        .var_ref_count = spec.var_ref_count,
+        .closure_var_count = spec.globals.len,
+        .cpool_count = spec.cpool.len,
+        .stack_size = stack_size,
+        .byte_code = spec.code,
+    });
+    errdefer fb.destroyUnpublishedFixture(rt);
+    @memcpy(fb.cpoolSlice(), spec.cpool);
+    for (fb.closureVar(), spec.globals) |*cv, name| {
+        cv.* = engine.bytecode.function_bytecode.BytecodeClosureVar.init(.{
+            .closure_type = .global,
+            .var_idx = 0,
+            .var_name = name,
+        });
+    }
+    const fixture = try rt.memory.create(Fixture);
+    fixture.* = .{
+        .fb = fb,
+        .value = core.JSValue.functionBytecode(&fb.header),
+        .scope = .{},
+    };
+    fb.publishFixtureNoFail(rt);
+    fixture.scope = core.runtime.rootValues(.{&fixture.value});
+    fixture.scope.activate(rt);
+    return fixture;
 }
 
-pub fn makeUncheckedFunction(rt: *core.JSRuntime, code: []const u8) !engine.bytecode.Bytecode {
-    const name = try rt.internAtom("exec");
-    var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    errdefer function.deinit(rt);
-    try function.setCode(code);
-    return function;
-}
-
-pub fn setCodeAndStackSize(function: *engine.bytecode.Bytecode, code: []const u8) !void {
-    try function.setCode(code);
-    function.stack_size = try engine.bytecode.pipeline.stack_size.compute(function.code, .{});
-}
-
-pub fn runFunction(rt: *core.JSRuntime, ctx: *core.JSContext, function: *const engine.bytecode.Bytecode) !core.JSValue {
+/// Run a fixture as a script root on a fresh VM with the bare host globals.
+pub fn runFixture(rt: *core.JSRuntime, ctx: *core.JSContext, fb: *const engine.bytecode.FunctionBytecode) !core.JSValue {
     registerStandardGlobalsBare(rt);
     var vm_instance = engine.exec.Vm.init(ctx);
     defer vm_instance.deinit();
-    return runMutableVm(&vm_instance, function);
-}
-
-pub fn runMutableVm(vm: *engine.exec.Vm, function: *const engine.bytecode.Bytecode) !core.JSValue {
-    // Fixture top-level Bytecode lives on the native stack (it is not a
-    // registered gc object), and its malloc'd cpool array holds the only
-    // strong refs to child FunctionBytecodes. Neither precise roots nor the
-    // conservative stack scan can reach those children (the scan does not
-    // chase malloc'd arrays), so a tracing collection during the run would
-    // sweep them mid-execution (wide-fclosure autopsy, 2026-08-24). Root the
-    // cpool window for the duration of the run.
-    const rt = vm.ctx.runtime;
-    var cpool_roots = [_]core.runtime.ValueRootSlice{.{ .borrowed = function.cpoolSlice() }};
-    var fixture_frame = core.runtime.ValueRootFrame{ .slices = &cpool_roots };
-    fixture_frame.activate(rt);
-    defer fixture_frame.deactivate(rt);
-    var execution_adapter: engine.bytecode.LegacyExecutionAdapter = undefined;
-    return vm.run(execution_adapter.init(function));
+    return vm_instance.run(fb);
 }
 
 /// Reclaim whatever the test has made unreachable.
@@ -279,7 +311,7 @@ pub const TestEngine = struct {
     }
 
     pub fn initWithOptions(options: EngineOptions) !TestEngine {
-        const rt = try core.JSRuntime.createWithOptions(options.allocator, .{
+        const rt = try core.JSRuntime.create(options.allocator, .{
             .trace_writer = options.trace_writer,
             .memory_limit = options.limits.memory_bytes,
             .gc_threshold = options.limits.gc_threshold_bytes orelse core.runtime.default_gc_threshold,
@@ -288,7 +320,7 @@ pub const TestEngine = struct {
         errdefer rt.destroy();
         registerStandardGlobalsBare(rt);
         rt.setNativeStackSize(core.runtime.default_native_stack_size * 4);
-        const ctx = try core.JSContext.create(rt);
+        const ctx = try core.JSContext.create(rt, .{});
         errdefer ctx.destroy();
         const event_loop = try options.allocator.create(engine.runtime.EventLoop);
         errdefer options.allocator.destroy(event_loop);
@@ -307,8 +339,7 @@ pub const TestEngine = struct {
         wrapper.runJobs(null) catch {};
         self.event_loop.deinit();
         self.allocator.destroy(self.event_loop);
-        const run_test262 = @import("cli/run_test262.zig");
-        _ = run_test262.cleanupTest262Agents(self.runtime);
+        _ = test262_host.cleanupTest262Agents(self.runtime);
         engine.exec.zjs_vm.cleanupAtomicsWaitersForContext(self.context);
         self.context.destroy();
         self.runtime.destroy();
@@ -329,9 +360,8 @@ pub const TestEngine = struct {
     pub fn ensureTest262GlobalsInstalled(self: *TestEngine) !void {
         if (self.context.global == null) {
             const global_obj = try engine.exec.zjs_vm.contextGlobal(self.context);
-            const run_test262 = @import("cli/run_test262.zig");
             var wrapper = JSContext.borrowCore(self.context);
-            try run_test262.installTest262Globals(self.runtime, &wrapper, global_obj);
+            try test262_host.installTest262Globals(self.runtime, &wrapper, global_obj);
         }
     }
 
@@ -774,33 +804,32 @@ fn resetSharedEngineAfterTest(eng: *TestEngine) void {
 pub const vm_helpers = struct {
     pub fn parseAndRunWithTopLevelChildren(rt: *core.JSRuntime, ctx: *core.JSContext, src: []const u8) !core.JSValue {
         const name = try rt.internAtom("test");
-        var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-        defer function.deinit(rt);
-
         var lex = QjsLexer.init(std.testing.allocator, &rt.atoms, src);
-        var state = try ParseState.initWithRuntime(rt, &lex, &function);
+        var state = try ParseState.initWithRuntime(rt, &lex, name);
         defer state.deinit(rt);
-        state.root_mode = .canonical;
         try parser_core.parseExpr(&state);
         try parser_core.Emitter.op(&state, op.@"return");
 
-        try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, .{ .realm = ctx });
+        return runLoweredRoot(rt, ctx, &state.function_def);
+    }
 
-        helpers.registerStandardGlobalsBare(rt);
-        var vm = engine.exec.Vm.init(ctx);
-        defer vm.deinit();
-        return helpers.runMutableVm(&vm, &function);
+    /// Finalize the parsed root into its canonical FunctionBytecode and run
+    /// it as a script root. The artifact is GC-owned; it is rooted for the
+    /// duration of the run.
+    fn runLoweredRoot(rt: *core.JSRuntime, ctx: *core.JSContext, fd: *engine.bytecode.FunctionDef) !core.JSValue {
+        const artifacts = try engine.bytecode.pipeline.finalize.createFunctionBytecode(fd, .{ .realm = ctx });
+        var root_value = core.JSValue.functionBytecode(&artifacts[0].header);
+        var roots = core.runtime.rootValues(.{&root_value});
+        roots.activate(rt);
+        defer roots.deactivate(rt);
+        return helpers.runFixture(rt, ctx, &artifacts[0]);
     }
 
     pub fn parseStmtAndRunWithTopLevelChildren(rt: *core.JSRuntime, ctx: *core.JSContext, src: []const u8) !core.JSValue {
         const name = try rt.internAtom("test");
-        var function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-        defer function.deinit(rt);
-
         var lex = QjsLexer.init(std.testing.allocator, &rt.atoms, src);
-        var state = try ParseState.initWithRuntime(rt, &lex, &function);
+        var state = try ParseState.initWithRuntime(rt, &lex, name);
         defer state.deinit(rt);
-        state.root_mode = .canonical;
         state.top_level_lexical_as_global_ref = true;
         state.function_def.is_eval = true;
         state.function_def.is_global_var = true;
@@ -815,12 +844,7 @@ pub const vm_helpers = struct {
         }
         try state.finalizeEvalReturn();
 
-        try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, .{ .realm = ctx });
-
-        helpers.registerStandardGlobalsBare(rt);
-        var vm = engine.exec.Vm.init(ctx);
-        defer vm.deinit();
-        return helpers.runMutableVm(&vm, &function);
+        return runLoweredRoot(rt, ctx, &state.function_def);
     }
 };
 

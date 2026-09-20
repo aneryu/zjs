@@ -2,6 +2,132 @@
 
 ## Unreleased
 
+- **Build:** the CLI executable builds again. 617e6941 imported the CLI and
+  stress test families from `src/internal_root.zig` behind a comptime `if`;
+  Zig assigns files to modules when it collects imports, so `zig build zjs`
+  failed with a module clash in every optimize mode. `src/unified_tests.zig`
+  is now the unified test root (it mirrors `internal_root`, comptime
+  checked), `src/cli/run_test262_host.zig` moved into the engine tree as
+  `src/test262_host.zig` (shared by `run-test262` and the test helpers), and
+  engine files never import `src/cli/` or `src/stress.zig`.
+  `tools/gates/bytecode_fingerprint.sh` is back as the identity gate.
+- **Bytecode:** the call-site cache is gone. Every variable-arity call
+  instruction carried a trailing `cache_idx:u8` into a `call_sites` FAM tail
+  of `CallSiteCache` slots (24 bytes each, allocated, zeroed and freed with
+  every FunctionBytecode) that no handler ever read: dispatch skipped the
+  byte. `call` / `tail_call` / `call_method` / `tail_call_method` /
+  `call_method_apply_fwd` are plain `npop` (`argc:u16`) again and `call0..3`
+  are one byte (`none_npop`); `Format.npop_u8` / `npopx`, `CallSiteCache`,
+  `FunctionLayout.call_sites_off`, the hot extension's `call_sites` pointer
+  and count (the extension is 56 bytes, was 64), `Bytecode.call_site_count`,
+  `Builder.emitCallOp` and the resolver's site allocator are deleted. This
+  changes the final bytecode of every function with a call, so the
+  fingerprint corpus moves by design; test262 is the identity check.
+- **Exec:** the dispatch table proves its own cover at compile time: every
+  id the physical ledger marks `claimed` must have a handler that is not the
+  `op_invalid` trap, and no unclaimed id may have one.
+- **Bytecode:** the hand-written inline/forward policy reject lists that
+  `traitsOf` had to reproduce form for form are deleted; the declaration is
+  the only copy.
+- **Bytecode/Exec:** `FunctionBytecode` is the only executable artifact.
+  The stack-only `LegacyExecutionAdapter` that let a mutable compile-time
+  `Bytecode` masquerade as a `FunctionBytecode` (negative `byte_code_len`
+  sentinel, pointer slot after the hot extension) is deleted, and with it
+  every `legacyBytecodeAdapter()` branch in the FB accessors (`byteCode`,
+  `cpoolSlice`, `closureVar`, `varRef*`, `entryContract`, `pc2lineBuf`,
+  `lineNum`/`colNum`, `sourceText`, `scriptOrModule`, `realmContext`,
+  `isGlobalVar`), the exec gates that tested for it (`zjs_vm.run`,
+  `runWithArgs`, `runWithArgsState`, `vm_call.initFrameVarRefs`,
+  `vm_property`, `call_runtime`), the frame-entry cell reconstruction that
+  only the adapter reached (`legacyInitialClosureVarRef`, the
+  `var_ref_names` arm), the runtime global-declaration instantiation it
+  alone triggered (`instantiateGlobalVarDeclarationCells`,
+  `defineGlobalDeclVarCell`, `CallEnv.global_declarations_prevalidated`),
+  and the `Bytecode.var_ref_names` mirror plus its `varRef*` accessors.
+  Tests that executed hand-written bytecode now build a real published
+  fixture through `testing.makeFixture` / `runFixture` (over
+  `FunctionBytecode.createFixture`), frame tests use unpublished fixtures,
+  and the two `vm_helpers` fragment runners finalize through
+  `createFunctionBytecode`. Three tests that pinned adapter-only behaviour
+  (synthetic var-ref name mirrors, adapter layout, one-slot-at-a-time
+  global declaration rebinding) are gone with the mechanism.
+- **API (breaking):** `JSRuntime.create(allocator, options)` and
+  `JSContext.create(rt, options)` take their options directly; the
+  `createWithOptions` pair is deleted (`createWithOptionsMeasured` is
+  `createMeasured`). Pass `.{}` for the defaults. README, the embedding
+  cookbook, the public-API contract, `tests/embedding_examples.zig`,
+  `tests/oom.zig` and every unit test are updated.
+- **Parser:** the parse root no longer needs a `Bytecode` carrier. `State`
+  carries `memory` / `atoms` / `root_name` and owns the module record
+  (`ensureModule`, `takeModuleRecord`); `State.init(lex, memory, atoms, name)`
+  and `initWithRuntime(rt, lex, name)` replace the carrier-taking
+  constructors (`initCanonicalRootWithRuntime` is gone), `State.deinit`
+  takes a `*JSRuntime`. `parser.compile` builds no carrier: the root
+  flags it used to publish on one were never read, and the module record
+  moves straight from the State to the module artifact. `Bytecode` is now
+  purely the finalize staging record (`module_record` / `ensureModule`
+  deleted). Bytecode fingerprint identical.
+- **Bytecode/Compiler:** `src/bytecode.zig` (11.1k lines) is split by
+  namespace into files; the hub keeps the import surface (`bytecode.opcode`,
+  `bytecode.pipeline.{pc2line,stack_size,finalize}`, `bytecode.module`,
+  `bytecode.dump`, `bytecode.function_def`, `bytecode.function_bytecode`,
+  `bytecode.carrier`) and the compile policy/context types.
+  `bytecode/opcode.zig`, `function_def.zig`, `carrier.zig` (the `Bytecode`
+  parse-root / staging record, formerly the private `function_mod`),
+  `function_bytecode.zig`, `module.zig`, `pc2line.zig`, `dump.zig` sit under
+  `src/bytecode/`; `binding_rules.zig`, `stack_size.zig`, `finalize.zig`
+  under `src/compiler/`. The `pipeline_pc2line` / `pipeline_stack_size` /
+  `pipeline_finalize` spellings are gone (`bytecode.pipeline.*` was already
+  the public path). Pure move: bytecode fingerprint identical.
+- **Compiler/Bytecode:** the non-packed lowering path is gone. Production
+  always finalized through `createFunctionBytecode`; a second entry
+  (`runWithFunctionDef` / `runWithFunctionDefRuntime` /
+  `lowerAttachedBuilder`) lowered into the mutable `Bytecode` carrier for
+  test fixtures only, copying the FunctionDef pool into a mirror
+  `Bytecode.constants` (a reserved BigInt then had two owners) and
+  publishing `vardefs` / `argdefs` / `closure_var` mirrors nothing executed.
+  Deleted: those entries, `syncFunctionDefCpool`, `syncBytecode{VarNames,
+  ArgDefs,ClosureVars}`, `publishLoweredMetadata`'s comptime variants,
+  `constant.Pool`, the `Bytecode` mirror fields and their accessors
+  (`argVarDefs`, `varDefs`, `closureVar`, `cpoolSlice`, `constantAt`,
+  `addConstant`, `traceCompileRoots`), the root-carrier streaming API
+  (`appendAtomOperand`, `appendSourceLoc`, `truncateSourceLocs`),
+  `codeMaterializesArgumentsObject`, `compiler.compileFunctionForPackedFinalize`
+  (`compileFunction` is the packed entry), `resolve_labels.run{Impl,
+  ForPackedFinalize}` with the duplicate `validateProductCode` /
+  `validateFinalOutput` walks. `Bytecode.deinit` takes no runtime. Parser
+  tests inspect the published `FunctionBytecode` through a `Lowered` view
+  (final code, cpool, closure rows, atom operands, module record) and the
+  phase-1 tests through a `Raw` view over the live Builder, so the
+  ownership ledger samples the artifact the VM runs. Three module export
+  tests that relied on the old path skipping local-export resolution now
+  declare the bindings they export.
+- **Parser:** the test-only `RootMode.raw_bytecode` root is retired with
+  it: `State.root_mode`, `emit_to_function_def`, the emission snapshots
+  (`EmissionSnapshot`, `takeEmissionSnapshot`, `rollbackEmission`, the
+  label-count / code-len / atom-len probes), `ParameterListState.capture_child`
+  and the `FunctionDef` byte-stream mirror fields (`byte_code`,
+  `atom_operands`, `label_slots`, `jump_slots`, `source_loc_slots` and
+  their append/truncate helpers) are deleted; the root is always a
+  `FunctionDef` with an attached Builder, constants always go to the
+  FunctionDef pool, and `this` / `new.target` / `super` are always scope
+  lookups.
+- **Compiler:** the Debug/ReleaseSafe exact-CFG oracle is retired.
+  `src/compiler/cfg.zig` (3.8k lines, 64% oracle) becomes
+  `src/compiler/temp_stream.zig` (the bind-index row, the phase-1 instruction
+  view, `SourcePoint`). Gone with it: `cfg.build`, `auditInstructionOwnership`,
+  `auditBoundaryUniqueness`, the anchor-split and fan-out censuses and their
+  `ZJS_V2_*` reports, `formatOracleReport`, the resolver's per-fold boundary
+  records, `markReachableEvalCaptures`, the audit-only `oracle_plan`
+  parameters, `binding_rules.planScopeVarAction` / `planScopeVarLowering`
+  (an oracle that re-derived the production plan), `resolve_labels`'
+  canonical-identity audit and `shortSlotOp` self-check, and the Builder's
+  control index (`ControlSlot`, `recordControl`, `enableControlIndex`) that
+  only the CFG read. Liveness is QuickJS `update_label` bookkeeping in every
+  build mode; three resolver unit tests that had pinned the audit-only
+  answer now pin the shipped one. Bytecode fingerprint identical over the
+  54k-file corpus.
+
 - **Tests:** Zig unit tests sit in package `tests.zig` files pulled from
   the package root (`src/core/tests.zig`, `src/exec/tests.zig`,
   `src/parser/tests.zig`, `src/bytecode/tests.zig`, matching

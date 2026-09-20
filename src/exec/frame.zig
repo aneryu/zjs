@@ -185,8 +185,7 @@ pub fn originalArgCount(argc: usize, need_original_snapshot: bool) usize {
 
 pub fn frameVarRefStorageCount(function: *const bytecode.FunctionBytecode, inherited_var_refs: []const *core.VarRef) usize {
     if (inherited_var_refs.len != 0) return inherited_var_refs.len;
-    if (function.closureVar().len != 0) return function.closureVar().len;
-    return function.varRefNamesLen();
+    return function.closureVar().len;
 }
 
 pub fn frameOpenVarRefStorageCount(function: *const bytecode.FunctionBytecode) usize {
@@ -619,16 +618,14 @@ pub const Frame = struct {
 };
 
 test "Frame setLocal preserves inline locals while growing" {
-    var rt = try JSRuntime.create(std.testing.allocator);
+    var rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("frame-inline-local-growth-test");
-    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer function.deinit(rt);
+    const function = try bytecode.FunctionBytecode.createFixture(rt, .{ .name = name });
+    defer function.destroyUnpublishedFixture(rt);
 
-    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
-    const execution_function = execution_adapter.init(&function);
-    var exec_frame = Frame.init(execution_function);
+    var exec_frame = Frame.init(function);
     defer exec_frame.deinit(&rt.memory, rt);
 
     try exec_frame.setLocal(&rt.memory, 0, JSValue.int32(11));

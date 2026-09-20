@@ -378,7 +378,7 @@ pub fn literal(rt: *core.JSRuntime, names: []const core.Atom, values: []const co
 }
 
 test "object literal roots direct function bytecode values while creating object" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const key = try rt.internAtom("value");
@@ -1041,9 +1041,9 @@ pub fn appendObjectGroupByValue(
 }
 
 test "Object.groupBy new group define failure releases group once" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);

@@ -376,28 +376,6 @@ pub const compile_entry = struct {
         return if (end > start) end - start else 0;
     }
 
-    fn initCompileCarrier(
-        rt: *JSRuntime,
-        filename_atom: atom.Atom,
-        options: OptionsImpl,
-        effective_strict: bool,
-    ) bytecode.Bytecode {
-        var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, filename_atom);
-        if (options.script_or_module) |script_or_module| {
-            function.script_or_module = script_or_module;
-        }
-        function.line_num = 1;
-        function.col_num = 1;
-        function.flags.is_strict = options.mode == .module or effective_strict;
-        function.flags.is_global_var = switch (options.mode) {
-            .script, .module => true,
-            .eval_direct, .eval_indirect => !effective_strict,
-        };
-        function.flags.is_module = options.mode == .module;
-        function.flags.is_direct_or_indirect_eval = options.mode == .eval_direct or options.mode == .eval_indirect;
-        return function;
-    }
-
     pub fn compile(compile_context: bytecode.CompileContext, source: []const u8, options: OptionsImpl) !ResultImpl {
         const rt = compile_context.realm.runtime;
         var arena = std.heap.ArenaAllocator.init(rt.memory.persistent_allocator);
@@ -423,12 +401,6 @@ pub const compile_entry = struct {
         // QuickJS learns directive strictness while parsing the directive
         // prologue. Only an explicit host option is known before tokenization;
         // comments and source substrings are never a second strictness source.
-        const effective_strict = options.strict;
-
-        var function = initCompileCarrier(rt, filename_atom, options, effective_strict);
-        var function_owned = true;
-        errdefer if (function_owned) function.deinit(rt);
-
         // JSX is not part of the grammar: `.tsx` / `.jsx` sources are
         // rejected up front instead of failing on the first `<tag>`.
         if (std.mem.endsWith(u8, options.filename, ".tsx") or std.mem.endsWith(u8, options.filename, ".jsx")) {
@@ -444,8 +416,6 @@ pub const compile_entry = struct {
                 "JSX is not supported",
             );
             result.parse_path = .syntax_error_guard;
-            function.deinit(rt);
-            function_owned = false;
             arena.deinit();
             arena_owned = false;
             return result;
@@ -454,7 +424,9 @@ pub const compile_entry = struct {
         var features = std.EnumSet(FeatureImpl).initEmpty();
         var pending_diagnostic: ?parser_impl.PendingDiagnostic = null;
 
-        const canonical_root = compileQjsProgram(rt, source, options, compile_context, &function, &features, &pending_diagnostic) catch |err| switch (err) {
+        var module_record: ?bytecode.module.Record = null;
+        errdefer if (module_record) |*record| record.deinit();
+        const canonical_root = compileQjsProgram(rt, source, options, compile_context, filename_atom, &module_record, &features, &pending_diagnostic) catch |err| switch (err) {
             error.OutOfMemory => return err,
             // qjs:libregexp.c and quickjs.c js_parse_error "stack overflow"
             error.StackOverflow => {
@@ -467,8 +439,6 @@ pub const compile_entry = struct {
                 } else {
                     try setFallbackSyntaxError(&result, rt, filename_atom, source, "stack overflow");
                 }
-                function.deinit(rt);
-                function_owned = false;
                 arena.deinit();
                 arena_owned = false;
                 return result;
@@ -485,8 +455,6 @@ pub const compile_entry = struct {
                 } else {
                     try setFallbackSyntaxError(&result, rt, filename_atom, source, @errorName(err));
                 }
-                function.deinit(rt);
-                function_owned = false;
                 arena.deinit();
                 arena_owned = false;
                 return result;
@@ -498,8 +466,8 @@ pub const compile_entry = struct {
             .features = features,
         };
         if (options.mode == .module) {
-            const record = function.module_record orelse return error.InvalidBytecode;
-            function.module_record = null;
+            const record = module_record orelse return error.InvalidBytecode;
+            module_record = null;
             result.artifact = .{ .module = .{
                 .function_bytecode = canonical_root,
                 .record = record,
@@ -507,8 +475,6 @@ pub const compile_entry = struct {
         } else {
             result.artifact = .{ .function_bytecode = canonical_root };
         }
-        function.deinit(rt);
-        function_owned = false;
         arena.deinit();
         arena_owned = false;
         result.parse_path = .normal;
@@ -520,7 +486,8 @@ pub const compile_entry = struct {
         source: []const u8,
         options: OptionsImpl,
         compile_context: bytecode.CompileContext,
-        function: *bytecode.Bytecode,
+        filename_atom: atom.Atom,
+        module_record_out: *?bytecode.module.Record,
         features: *std.EnumSet(FeatureImpl),
         pending_diagnostic: *?parser_impl.PendingDiagnostic,
     ) !*bytecode.FunctionBytecode {
@@ -530,8 +497,9 @@ pub const compile_entry = struct {
         defer lex.deinit();
         lex.is_strict_mode = options.mode == .module or effective_strict;
         lex.is_module = options.mode == .module;
-        var state = try parser_core.ParseState.initCanonicalRootWithRuntime(rt, &lex, function);
+        var state = try parser_core.ParseState.initWithRuntime(rt, &lex, filename_atom);
         defer state.deinit(rt);
+        if (options.script_or_module) |script_or_module| state.function_def.script_or_module = script_or_module;
         // TGC S3-b: the parse's own interval roots (atoms + cpool values),
         // nested inside the scope `compile` opened.
         try state.activateCompileRoots();
@@ -553,7 +521,6 @@ pub const compile_entry = struct {
         state.function_def.has_arguments_binding = false;
         state.function_def.has_this_binding = options.mode != .eval_direct;
         state.function_def.arguments_allowed = if (options.mode == .eval_direct) options.eval_arguments_allowed else true;
-        state.root_mode = .canonical;
         // Script top-level let/const become global VarRef cells (qjs JS_CLOSURE_GLOBAL_DECL):
         // single-storage in ctx.lexicals, shared into frame.var_refs by pointer.
         state.top_level_lexical_as_global_ref = options.mode == .script;
@@ -583,7 +550,7 @@ pub const compile_entry = struct {
         if (options.mode == .module) {
             state.ctx.in_async = true;
             state.top_level_lexical_as_module_ref = true;
-            _ = function.ensureModule();
+            _ = state.ensureModule();
         }
 
         try state.beginProgramEmission();
@@ -610,8 +577,6 @@ pub const compile_entry = struct {
         };
         state.eval_global_var_bindings = (options.eval_global_var_bindings or options.mode == .eval_indirect) and
             !((options.mode == .eval_direct or options.mode == .eval_indirect) and parsed_strict);
-        function.flags.is_strict = parsed_strict;
-        function.flags.is_global_var = state.function_def.is_global_var;
 
         const decl_mask = parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true };
         parser_core.parseProgramStatements(&state, decl_mask) catch |err| return state.propagateFailureHere(err);
@@ -652,7 +617,7 @@ pub const compile_entry = struct {
         rt.memory.allocator = compile_context.artifactAllocator();
         defer rt.memory.allocator = parse_allocator;
         const root_slice = try (if (options.mode == .module) blk: {
-            const record = if (function.module_record) |*owned| owned else return error.InvalidBytecode;
+            const record = if (state.module_record) |*owned| owned else return error.InvalidBytecode;
             break :blk bytecode.pipeline.finalize.createModuleFunctionBytecode(
                 &state.function_def,
                 record,
@@ -663,6 +628,7 @@ pub const compile_entry = struct {
             timing.finalize_ns += elapsedNanosSince(finalize_start);
         }
         features.* = state.features;
+        module_record_out.* = state.takeModuleRecord();
         return &root_slice[0];
     }
 

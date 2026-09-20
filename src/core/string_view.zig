@@ -209,7 +209,7 @@ fn writeUtf8CodePoint(out: []u8, code_point: u32) usize {
 
 test "JSValue.asString views latin1 units without allocation" {
     const core = @import("root.zig");
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const str = try core.string.String.createUtf8(rt, "hello");
@@ -226,7 +226,7 @@ test "JSValue.asString views latin1 units without allocation" {
 
 test "JSString.units views an eager substring copy" {
     const core = @import("root.zig");
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const parent = try core.string.String.createUtf8(rt, "prefix-needle-suffix");
@@ -250,7 +250,7 @@ test "JSString.units views an eager substring copy" {
 
 test "JSString converts utf16 surrogate pairs to owned utf8" {
     const core = @import("root.zig");
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const str = try core.string.String.createUtf16(rt, &.{ 0xd83d, 0xde00 });
@@ -264,7 +264,7 @@ test "JSString converts utf16 surrogate pairs to owned utf8" {
 
 test "JSString CString CESU-8 mode preserves surrogate code units" {
     const core = @import("root.zig");
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const str = try core.string.String.createUtf16(rt, &.{ 0xd83d, 0xde00 });
@@ -278,7 +278,7 @@ test "JSString CString CESU-8 mode preserves surrogate code units" {
 
 test "JSString.Utf8 borrows latin1 ascii without allocation" {
     const core = @import("root.zig");
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const str = try core.string.String.createUtf8(rt, "ascii/path.txt");
@@ -296,7 +296,7 @@ test "JSString.Utf8 borrows latin1 ascii without allocation" {
 
 test "JSString.Utf8 transcodes latin1 non-ascii through scratch allocator" {
     const core = @import("root.zig");
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const str = try core.string.String.createUtf8(rt, "é");
@@ -313,7 +313,7 @@ test "JSString.Utf8 transcodes latin1 non-ascii through scratch allocator" {
 
 test "JSString.Utf8 transcodes utf16 through scratch allocator" {
     const core = @import("root.zig");
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const str = try core.string.String.createUtf16(rt, &.{ 0x0100, 0xd83d, 0xde00 });

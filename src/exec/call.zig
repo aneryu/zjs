@@ -594,9 +594,9 @@ fn installTestStandardRealm(ctx: *core.JSContext) !*core.Object {
 }
 
 test "createPromiseCapability roots builtin promise capability under GC" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const global = try installTestStandardRealm(ctx);
@@ -702,7 +702,7 @@ pub noinline fn createPromiseSettlementRecord(rt: *core.JSRuntime, rejected: boo
 }
 
 test "createPromiseSettlementRecord roots direct symbol payload while defining status" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-call-promise-settlement-record-symbol");
@@ -765,7 +765,7 @@ fn createPromiseCombinatorState(
 }
 
 test "createPromiseCombinatorState roots direct function bytecode resolve while creating state" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const values = try core.Object.create(rt, core.class.ids.array, null);
@@ -1411,9 +1411,9 @@ pub fn primitiveWrapper(ctx: *core.JSContext, class_id: core.class.ClassId, prim
 }
 
 test "primitiveWrapper roots direct symbol while creating call wrapper" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-call-wrapper-symbol");
@@ -1544,9 +1544,9 @@ fn createBoundFunction(
 }
 
 test "createBoundFunction roots bound this and args while creating function" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     _ = try installTestStandardRealm(ctx);
     const target = try core.function.nativeFunction(ctx, "target", 0);
@@ -1585,9 +1585,9 @@ test "createBoundFunction roots bound this and args while creating function" {
 }
 
 test "callValueWithThisGlobalsAndGlobal roots inline args before bound argument merge" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     _ = try installTestStandardRealm(ctx);
 
@@ -1665,9 +1665,9 @@ test "callValueWithThisGlobalsAndGlobal roots inline args before bound argument 
 }
 
 test "callValueWithThisGlobalsAndGlobal roots overflow args across the copy allocation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     _ = try installTestStandardRealm(ctx);
 
@@ -2330,7 +2330,7 @@ fn descriptorObject(rt: *core.JSRuntime, desc: core.Descriptor) !core.JSValue {
 }
 
 test "descriptorObject roots direct symbol value while creating descriptor object" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-call-descriptor-object-symbol");
@@ -2408,7 +2408,7 @@ fn isFunctionClass(class_id: core.ClassId) bool {
 }
 
 test "four-class bytecode callable consumers accept every class" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const class_ids = [_]core.ClassId{
@@ -2500,7 +2500,6 @@ pub fn evalGlobalScriptSource(
             .strict_unresolved_get_var = function.isStrictMode(),
             .current_function_value = root_function_value,
             .direct_eval_vars_reach_global = true,
-            .global_declarations_prevalidated = true,
         }) catch |err| exception_ops.normalizeEvalRuntimeError(err);
     };
 

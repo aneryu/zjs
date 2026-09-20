@@ -48,12 +48,12 @@ pub fn runWithOutput(
     function: *const bytecode.FunctionBytecode,
     output: ?*std.Io.Writer,
 ) !core.JSValue {
-    // Modules keep their explicit legacy owner/state machine until W1e. Every
-    // canonical ordinary FB, including a borrowed embedding/test input, enters
-    // through a real root function object. A borrowed caller duplicates at this
-    // outer boundary; the closure2 attach itself still consumes exactly one
-    // owned reference without an internal dup/free round trip.
-    if (!function.isModule() and function.legacyBytecodeAdapter() == null) {
+    // Modules keep their explicit owner/state machine. Every ordinary FB,
+    // including a borrowed embedding/test input, enters through a real root
+    // function object. A borrowed caller duplicates at this outer boundary;
+    // the closure2 attach itself still consumes exactly one owned reference
+    // without an internal dup/free round trip.
+    if (!function.isModule()) {
         const realm = function.realmContext() orelse return error.InvalidBuiltinRegistry;
         const global_object = try contextGlobal(realm);
         const owned_function = core.JSValue.functionBytecode(@constCast(&function.header));
@@ -79,7 +79,6 @@ pub fn runWithOutput(
             .strict_unresolved_get_var = function.isStrictMode(),
             .current_function_value = root_function_value,
             .direct_eval_vars_reach_global = true,
-            .global_declarations_prevalidated = true,
         }) catch |err| {
             if (!realm.preserve_uncaught_exception and err != error.JSException and err != error.Interrupted and realm.hasException()) realm.clearException();
             return err;
@@ -162,7 +161,7 @@ pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
 /// fields are owned by the canonical root builder.
 pub fn runWithArgs(env: CallEnv) !core.JSValue {
     const ctx = env.ctx;
-    const result = if (env.function.legacyBytecodeAdapter() == null and !env.function.isModule())
+    const result = if (!env.function.isModule())
         runCanonicalRootWithArgs(env)
     else
         runWithCallEnv(env);
@@ -240,7 +239,6 @@ fn runCanonicalRootWithArgs(env: CallEnv) HostError!core.JSValue {
         .stop_on_yield = env.stop_on_yield,
         .current_function_value = root_function_value,
         .direct_eval_vars_reach_global = true,
-        .global_declarations_prevalidated = true,
     });
 }
 
@@ -279,7 +277,6 @@ pub const CallEnv = struct {
     /// The real root function object already completed closure2 pass 1 and
     /// installed its final GLOBAL_DECL cells. Legacy bare-root entries leave
     /// this false and perform both steps inside runWithArgsState.
-    global_declarations_prevalidated: bool = false,
     suspend_on_module_await: bool = false,
     initial_pc: usize = 0,
     prepared_entry_frame: ?*const PreparedEntryFrame = null,
@@ -355,17 +352,9 @@ fn runWithArgsState(env: CallEnv) HostError!core.JSValue {
 
     // Ordinary canonical entry always has the real function object built by
     // closure2. Generator/async execution may instead carry its explicit
-    // resident state, and legacy module/fixture adapters keep their W1e seam.
-    if (env.function.legacyBytecodeAdapter() == null and
-        env.generator_state == null and
+    // resident state.
+    if (env.generator_state == null and
         env.current_function_value.is(.undefined_value)) return error.InvalidBytecode;
-
-    // qjs js_closure2 PASS1: validate the complete
-    // GLOBAL_DECL table before creating a single declaration cell. Direct eval
-    // already ran this pass before constructing its caller-capture array.
-    if (env.function.isGlobalVar() and !env.global_declarations_prevalidated) {
-        try vm_property_globals.validateGlobalVarDeclarations(env.ctx, env.global, env.function, env.is_eval_code);
-    }
 
     // Frame storage (locals/env.args/env.var_refs) may be carved from the VM stack
     // arena; reclaim the watermark after the frame has released its values.
@@ -468,10 +457,7 @@ fn runWithArgsState(env: CallEnv) HostError!core.JSValue {
     // set directly — identical to what initArguments would store (`actual_arg_count = env.args.len`).
     const skip_resume_slab = if (env.generator_state) |gen| gen.generatorExecutionState().has_frame else false;
     if (!skip_resume_slab) {
-        try initFreshEntryFrame(env.ctx, env.stack, env.function, &frame_storage, env.global, env.args, env.var_refs, env.generator_state, env.prepared_entry_frame);
-    }
-    if (env.generator_state == null and env.function.isGlobalVar() and !env.global_declarations_prevalidated) {
-        try vm_property_globals.instantiateGlobalVarDeclarationCells(env.ctx, env.global, env.function, &frame_storage, env.is_eval_code);
+        try initFreshEntryFrame(env.ctx, env.stack, env.function, &frame_storage, env.args, env.var_refs, env.generator_state, env.prepared_entry_frame);
     }
 
     frame_storage.pc = env.initial_pc;
@@ -516,7 +502,6 @@ noinline fn initFreshEntryFrame(
     entry_stack: *stack_mod.Stack,
     entry_function: *const bytecode.FunctionBytecode,
     frame_storage: *frame_mod.Frame,
-    global: *core.Object,
     args: []const core.JSValue,
     var_refs: []const *core.VarRef,
     entry_generator_state: ?*core.Object,
@@ -587,7 +572,7 @@ noinline fn initFreshEntryFrame(
     try vm_call.initFrameLocals(ctx, entry_function, frame_storage, use_inline_frame_storage, frame_windows);
     try frame_storage.initArguments(&ctx.runtime.memory, frame_arena, args, need_original_args, frame_windows);
     if (frame_windows.open_var_refs) |open_refs| try frame_storage.installOpenVarRefSlots(open_refs) else if (open_var_ref_count != 0) try frame_storage.ensureOpenVarRefSlots(&ctx.runtime.memory, frame_arena);
-    try vm_call.initFrameVarRefs(ctx, global, entry_function, frame_storage, var_refs, use_inline_frame_storage, frame_windows);
+    try vm_call.initFrameVarRefs(ctx, entry_function, frame_storage, var_refs, use_inline_frame_storage, frame_windows);
 }
 
 /// Tail-call dispatcher entry: publish the Machine's current level into its

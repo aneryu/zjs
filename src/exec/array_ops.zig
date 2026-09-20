@@ -1227,9 +1227,9 @@ pub fn typedArraySetCall(
 }
 
 test "typedArraySetCall roots typed array snapshot while reading source" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     const array_buffer_prototype = try core.Object.create(rt, core.class.ids.object, null);
@@ -6349,7 +6349,7 @@ pub fn createArrayFromArgs(rt: *core.JSRuntime, global: *core.Object, args: []co
 }
 
 test "createArrayFromArgs roots direct function bytecode args while creating array" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
@@ -6642,9 +6642,9 @@ pub fn objectEntryArrayValue(
 }
 
 test "objectEntryArrayValue roots direct symbol value while creating entry array" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try zjs_vm.contextGlobal(ctx);
 
@@ -6672,9 +6672,9 @@ test "objectEntryArrayValue roots direct symbol value while creating entry array
 }
 
 test "objectEnumerableOwnPropertiesCall roots direct symbol values while creating output array" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try zjs_vm.contextGlobal(ctx);
 

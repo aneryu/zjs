@@ -10755,7 +10755,7 @@ pub const Object = extern struct {
 };
 
 test "object value refs keep nested symbol bodies without external symbol roots" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const object = try Object.create(rt, class.ids.object, null);
@@ -11230,7 +11230,7 @@ pub fn stringIterator(ctx: *context_mod.RealmContext, receiver: JSValue) !JSValu
 }
 
 test "M-cut Object handle conversion keeps the head at the handle address" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const object = try Object.createPlainObject(rt, null);
 
@@ -11247,7 +11247,7 @@ test "M-cut Object handle conversion keeps the head at the handle address" {
 }
 
 test "first named property allocates initial_prop_size slots" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const object = try Object.create(rt, class.ids.object, null);
@@ -11259,7 +11259,7 @@ test "first named property allocates initial_prop_size slots" {
 }
 
 test "block Object accounting uses physical cell body capacity" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const objects = [_]*Object{
@@ -11299,7 +11299,7 @@ test "block Object accounting uses physical cell body capacity" {
 }
 
 test "shape-sized trailing property storage grows externally and compacts in place" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     // Put a wider empty root at the head of the same hash chain. Tracing's
@@ -11363,7 +11363,7 @@ test "shape-sized trailing property storage grows externally and compacts in pla
 }
 
 test "slots2 spill OOM rollback restores inline representation" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const object = try Object.createPlainObjectReserved2(rt, null);
     const names = [_][]const u8{ "m_oom_0", "m_oom_1", "m_oom_2" };
@@ -11394,7 +11394,7 @@ test "slots2 spill OOM rollback restores inline representation" {
 }
 
 test "plain objects do not allocate class payload storage" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const object = try Object.create(rt, class.ids.object, null);
@@ -11405,7 +11405,7 @@ test "plain objects do not allocate class payload storage" {
 }
 
 test "iterator classes store iterator state in class payload" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const iterator = try Object.create(rt, class.ids.array_iterator, null);
@@ -11418,7 +11418,7 @@ test "iterator classes store iterator state in class payload" {
 }
 
 test "collection classes store entries in class payload" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const map = try Object.create(rt, class.ids.map, null);
@@ -11431,7 +11431,7 @@ test "collection classes store entries in class payload" {
 }
 
 test "buffer and typed array state use payload storage" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const buffer = try Object.create(rt, class.ids.array_buffer, null);
@@ -11457,7 +11457,7 @@ test "buffer and typed array state use payload storage" {
 }
 
 test "shared buffer store reports external memory for its owner runtime" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const byte_length: usize = 4096;
@@ -11481,7 +11481,7 @@ test "shared buffer store reports external memory for its owner runtime" {
 }
 
 test "regexp internals use inline storage and lastIndex uses first shape slot" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const source = try string.String.createAscii(rt, "a+");
@@ -11506,7 +11506,7 @@ test "regexp internals use inline storage and lastIndex uses first shape slot" {
 }
 
 test "bound function state uses payload storage" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const bound = try Object.create(rt, class.ids.bound_function, null);
@@ -11531,7 +11531,7 @@ test "bound function state uses payload storage" {
 }
 
 test "proxy state uses payload storage" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const proxy = try Object.create(rt, class.ids.proxy, null);
@@ -11547,7 +11547,7 @@ test "proxy state uses payload storage" {
 }
 
 test "mapped arguments state uses inline var-ref storage" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const arguments = try Object.create(rt, class.ids.mapped_arguments, null);
@@ -11565,7 +11565,7 @@ test "mapped arguments state uses inline var-ref storage" {
 }
 
 test "unmapped arguments share a prepared shape and use dense element storage" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const template = try Object.createWithOwnPropertyCapacity(rt, class.ids.arguments, null, 3);
@@ -11620,7 +11620,7 @@ test "unmapped arguments share a prepared shape and use dense element storage" {
 }
 
 test "object data state uses payload storage" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const object = try Object.create(rt, class.ids.string, null);
@@ -11634,7 +11634,7 @@ test "object data state uses payload storage" {
 }
 
 test "array element state uses inline fast-array storage" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const dense = try Object.createArray(rt, null);
@@ -11650,7 +11650,7 @@ test "array element state uses inline fast-array storage" {
 }
 
 test "promise state uses payload storage" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const promise = try Object.create(rt, class.ids.promise, null);
@@ -11669,7 +11669,7 @@ test "promise state uses payload storage" {
 }
 
 test "generator state uses payload storage" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const generator = try Object.create(rt, class.ids.generator, null);

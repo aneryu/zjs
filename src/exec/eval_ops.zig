@@ -488,7 +488,6 @@ pub fn directEval(
         .eval_global_var_bindings = eval_global_var_bindings,
         .direct_eval_vars_reach_global = eval_global_var_bindings,
         .is_eval_code = true,
-        .global_declarations_prevalidated = true,
     });
     return result;
 }

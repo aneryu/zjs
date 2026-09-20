@@ -694,7 +694,6 @@ pub fn runModuleDeclarationInstantiation(
         .var_refs = object.functionCaptures(),
         .global = global,
         .current_function_value = record.funcObjectValue(),
-        .global_declarations_prevalidated = true,
     });
 }
 
@@ -732,7 +731,6 @@ pub fn runModuleEvaluationStep(
         .generator_state = module_state,
         .resume_value = resume_value,
         .current_function_value = record.funcObjectValue(),
-        .global_declarations_prevalidated = true,
         .suspend_on_module_await = true,
     });
 }

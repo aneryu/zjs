@@ -140,70 +140,70 @@
 - **实现**：aarch64 内联汇编；其它架构 `JSValue.loadSlotAsIntPair`。宽度纪律与 `Vm.takeNativeReturnInto` 一致，保证 store-to-load forwarding。
 - **所有权 / 错误 / 调用**：纯位拷贝。
 
-### `pinnedStore` (`src/exec/call_site.zig:279`)
+### `pinnedStore` (`src/exec/call_site.zig:276`)
 
 - **签名**：`pub inline fn pinnedStore(slot: *JSValue, value: JSValue) void`。
 - **作用**：`pinnedLoad` 的孪生 store（`stp`）。
 - **实现**：aarch64 `stp`；否则 `storeSlotAsIntPair`。
 - **所有权 / 错误 / 调用**：只写调用方给的槽位，不分配、不抛、不做屏障（窗口是栈上临时数组，不是堆槽）。调用方：本文件 `call1`..`call4` 的窗口构造与 `callGeneric` 的结果写出（`call_site.zig:411`），以及 binding 门面 `src/js_context.zig:912`/`918`/`919`。
 
-### `callOnceInto` (`src/exec/call_site.zig:298`)
+### `callOnceInto` (`src/exec/call_site.zig:293`)
 
 - **签名**：`pub inline fn callOnceInto( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: JSValue, callee: JSValue, args: []const JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, out: *JSValue, ) HostError!void`。
 - **作用**：一次性 `initInternal`+`callInto`，不物化站点（给 `JSContext.callFunction`）。
 - **实现**：poll。若有活动 invocation：解析 inline，Machine 匹配则 `runOnInvocation`。否则若 `hostEligible`：`HostInvocation.acquire` + `oneShotRoute` 缓存命中则 publish/跑/unpublish。否则 `callGeneric`。嵌套宿主→JS 禁止改写空闲 Machine 的 one-shot 缓存。
 - **所有权 / 错误 / 调用**：不 pin。one-shot 缓存靠 `one_shot_pin` 保 callee 身份。
 
-### `hostEligible` (`src/exec/call_site.zig:342`)
+### `hostEligible` (`src/exec/call_site.zig:337`)
 
 - **签名**：`inline fn hostEligible(ctx: *core.JSContext, global: *core.Object) bool`。
 - **作用**：常驻 host Machine 只跑调用者自己的 Realm。
 - **实现**：`ctx.global == global`；无全局则 false。根路径会切到 callee Realm，所以跨 Realm 不能走 host。
 - **所有权 / 错误 / 调用**：`resolveRoute` 与 `callOnceInto` 共用。
 
-### `enterBytecode` (`src/exec/call_site.zig:350`)
+### `enterBytecode` (`src/exec/call_site.zig:345`)
 
 - **签名**：`inline fn enterBytecode( comptime fixed_argc: ?usize, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, route: *BytecodeRoute, target: *const inline_calls.InlineTarget, this_value: *const JSValue, callee: *const JSValue, args: []const JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, lean: ?*inline_calls.LeanFrame, out: *JSValue, ) HostError!void`。
 - **作用**：bytecode 臂选 Machine。
 - **实现**：活动 invocation 等于 `route.invocation` 或 `machineMatches` → `runOnInvocation`；否则 `host_eligible` → `runOnHostInvocation`；否则 `callGeneric`。`this_value`/`callee` 用指针，避免每次 32 字节 q 临时量。
 - **所有权 / 错误 / 调用**：`callInto` / `callWithThisInto`。
 
-### `machineMatches` (`src/exec/call_site.zig:378`)
+### `machineMatches` (`src/exec/call_site.zig:373`)
 
 - **签名**：`inline fn machineMatches(machine: *const inline_calls.Machine, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) bool`。
 - **作用**：执行权威三元组比较。
 - **实现**：指针相等 `ctx`/`global`/`output`。
 - **所有权 / 错误 / 调用**：纯指针比较，不分配、不抛。调用方只有本文件两处：`call_site.zig:320`（`callOnceInto` 的嵌套宿主→JS 臂）与 `373`（`enterBytecode` 进入前复核活动 invocation）。`resolveRoute` 在 `499` 把同样三个比较写开，没有走这个 helper。
 
-### `callGeneric` (`src/exec/call_site.zig:385`)
+### `callGeneric` (`src/exec/call_site.zig:380`)
 
 - **签名**：`fn callGeneric( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: JSValue, callee: JSValue, args: []const JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, out: *JSValue, ) HostError!void`。
 - **作用**：JS_Call 形根路径：在 callee Realm 开新执行根。
 - **实现**：`callValueOrBytecodeDispatchAfterInterruptPoll(..., copy_argv=true)`，`pinnedStore` 到 `out`。
 - **所有权 / 错误 / 调用**：bound/proxy/native/generator/跨 Realm 都落到这里。
 
-### `runOnInvocation` (`src/exec/call_site.zig:410`)
+### `runOnInvocation` (`src/exec/call_site.zig:405`)
 
 - **签名**：`inline fn runOnInvocation( comptime fixed_argc: ?usize, comptime idle_machine: bool, invocation: *inline_calls.ActiveInvocation, simple: bool, target: *const inline_calls.InlineTarget, ctx: *core.JSContext, global: *core.Object, this_value: *const JSValue, callee: *const JSValue, args: []const JSValue, lean: ?*inline_calls.LeanFrame, out: *JSValue, ) HostError!void`。
 - **作用**：在已有 Machine 上压 Entry 跑到 native_boundary。
 - **实现**：`simple` → `runSyncInlineRouteCopiedArgs`；否则 `runSyncInlineRouteOwnedCopy`。
 - **所有权 / 错误 / 调用**：`idle_machine=true` 时跳过外层 dispatch 快照。
 
-### `runOnHostInvocation` (`src/exec/call_site.zig:434`)
+### `runOnHostInvocation` (`src/exec/call_site.zig:429`)
 
 - **签名**：`inline fn runOnHostInvocation( comptime fixed_argc: ?usize, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, route: *BytecodeRoute, target: *const inline_calls.InlineTarget, this_value: *const JSValue, callee: *const JSValue, args: []const JSValue, lean: ?*inline_calls.LeanFrame, out: *JSValue, ) HostError!void`。
 - **作用**：无活动 invocation：publish 常驻 host Machine，入口与内建回调相同。
 - **实现**：cached `route.host` 且 epoch 匹配则复用；否则 `acquireForRoute`。`publish` / `defer unpublish` / `runOnInvocation(..., idle_machine=true)`。
 - **所有权 / 错误 / 调用**：只对 `host_eligible` 路由 publish。
 
-### `acquireForRoute` (`src/exec/call_site.zig:462`)
+### `acquireForRoute` (`src/exec/call_site.zig:457`)
 
 - **签名**：`noinline fn acquireForRoute( rt: *core.JSRuntime, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, route: *BytecodeRoute, ) HostError!*host_invocation_mod.HostInvocation`。
 - **作用**：绑定站点到常驻 invocation 的冷臂。
 - **实现**：`HostInvocation.acquire`，写 `route.host` 与 `host_epoch`。
 - **所有权 / 错误 / 调用**：首次创建或其它调用者 retarget 后走这里。
 
-### `resolveRoute` (`src/exec/call_site.zig:479`)
+### `resolveRoute` (`src/exec/call_site.zig:474`)
 
 - **签名**：`inline fn resolveRoute( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: JSValue, callee: JSValue, ) Route`。
 - **作用**：解析一次：class + inline 资格 + 活动 invocation + host 资格。
@@ -249,42 +249,42 @@
 - **实现**：payload/tag、FB 指针、`var_refs` 基址都匹配且 `isIntact` 则返回；否则 `leanFrameInit`。
 - **所有权 / 错误 / 调用**：只在 call 存活、嵌入者持有 callee 时读。
 
-### `HostInvocation.leanFrameInit` (`src/exec/host_invocation.zig:166`)
+### `HostInvocation.leanFrameInit` (`src/exec/host_invocation.zig:165`)
 
 - **签名**：`noinline fn leanFrameInit(self: *HostInvocation, rt: *core.JSRuntime, target: *const inline_calls.InlineTarget) ?*inline_calls.LeanFrame`。
 - **作用**：重建 lean 帧。
 - **实现**：清 valid；`initInPlace` 失败返回 null；记下 `lean_callee`。
 - **所有权 / 错误 / 调用**：形状不合格返回 null。
 
-### `HostInvocation.oneShotRoute` (`src/exec/host_invocation.zig:184`)
+### `HostInvocation.oneShotRoute` (`src/exec/host_invocation.zig:183`)
 
 - **签名**：`pub inline fn oneShotRoute( self: *HostInvocation, rt: *core.JSRuntime, global: *core.Object, callee: core.JSValue, this_value: core.JSValue, ) ?OneShotRoute`。
 - **作用**：`callFunction` 循环同一回调时只解析一次。
 - **实现**：global + callable 位相等则 `storeSlotAsIntPair` 写 this（不取调用方地址，避免 `str q`），返回 cached target/lean/simple。未命中 `oneShotRouteResolve`。
 - **所有权 / 错误 / 调用**：只从「无活动 invocation」臂读取，不会与嵌套回调竞态。
 
-### `HostInvocation.oneShotRouteResolve` (`src/exec/host_invocation.zig:209`)
+### `HostInvocation.oneShotRouteResolve` (`src/exec/host_invocation.zig:207`)
 
 - **签名**：`noinline fn oneShotRouteResolve( self: *HostInvocation, rt: *core.JSRuntime, global: *core.Object, callee: core.JSValue, this_value: core.JSValue, ) ?OneShotRoute`。
 - **作用**：解析并 pin 新的 one-shot callee。
 - **实现**：释放旧 pin；`resolveInlineFunction` 失败返回 null；先 pin 再发布分辨率；bind target；算 simple；`leanFrameFor`。
 - **所有权 / 错误 / 调用**：pin 失败当非资格（null），走根路径。
 
-### `HostInvocation.retire` (`src/exec/host_invocation.zig:233`)
+### `HostInvocation.retire` (`src/exec/host_invocation.zig:231`)
 
 - **签名**：`fn retire(rt: *core.JSRuntime, ptr: *anyopaque) void`。
 - **作用**：runtime 销毁钩子。
 - **实现**：ptrCast 后 `destroy`。
 - **所有权 / 错误 / 调用**：`rt.host_invocation_retire`。
 
-### `HostInvocation.publish` (`src/exec/host_invocation.zig:240`)
+### `HostInvocation.publish` (`src/exec/host_invocation.zig:238`)
 
 - **签名**：`pub inline fn publish(self: *HostInvocation, rt: *core.JSRuntime) void`。
 - **作用**：一次 call 期间成为 `active_invocation` 与 backtrace 链头。
 - **实现**：断言 idle、无活动 invocation；把 `backtrace_frame` 链进 `rt.hot`；设 `active_invocation`。Debug/ReleaseSafe 置 `published`。`rt` 由参数传入，避免再从 ctx 加载。
 - **所有权 / 错误 / 调用**：必须 `unpublish`。GC 在 idle 时看不见它。
 
-### `HostInvocation.unpublish` (`src/exec/host_invocation.zig:259`)
+### `HostInvocation.unpublish` (`src/exec/host_invocation.zig:257`)
 
 - **签名**：`pub inline fn unpublish(self: *HostInvocation, rt: *core.JSRuntime) void`。
 - **作用**：撤掉活动根。

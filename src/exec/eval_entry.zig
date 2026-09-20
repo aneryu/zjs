@@ -298,7 +298,6 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
                 .direct_eval_vars_reach_global = options.mode == .script or
                     (options.mode == .eval_indirect and !root_function.isStrictMode()),
                 .is_eval_code = is_eval_code,
-                .global_declarations_prevalidated = true,
             });
         } else return error.InvalidBytecode;
         if (options.timing) |timing| timing.vm_run_ns += platform_clock.elapsedNanosSince(vm_start);

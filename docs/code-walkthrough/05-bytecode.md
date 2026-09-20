@@ -34,10 +34,6 @@ parser.zig 发射 phase-1 流（temp opcode 占用 178..196）
 
 操作数格式标签，对齐 `quickjs-opcode.h` 的 `FMT()`。zjs 多两个：`npop_u8`（`argc:u16` + `cache_idx:u8`，调用族）与 `atom_cache_u8`（`atom:u32` + `cache_idx:u8`，W1 属性站点）。`src/opcode_logical.zig` 有一份字段对字段相同的 `Format`；`bytecode.zig` comptime 断言两者一致。旧的 `format` 诊断命名空间（`Operand`/`Description`/`describe`/`operandSize`）已无调用方并被删除，反汇编与生产路径都只走 `opcode.decode` 的 `OperandLayout`。
 
-### `constant.Pool`
-
-编译期常量池：`[]JSValue` + MemoryAccount。精确 `len+1` 增长。未发布的 BigInt 仍可能是 reserved，deinit 走 `BigInt.destroyIfReservedValue`。
-
 ### `module.Record`
 
 编译期模块记录：requests / imports / exports / indirect_exports / star_exports / import_attributes。atom 只登记不在这里做 rc。运行时模块图在 `exec/module.zig`。
@@ -54,56 +50,13 @@ parser.zig 发射 phase-1 流（temp opcode 占用 178..196）
 
 ### `dump` / `pipeline` re-export / 公开别名
 
-`pub const pipeline = .{ pc2line, stack_size, finalize }`。文件末尾把 `FunctionBytecode` / `FunctionDef` / `Bytecode` / `FunctionLayout` / `CallSiteCache` / `PropSiteCache` / `CallFacts` / `LegacyExecutionAdapter` 再导出。`SparseDecodeTestOracle` 只给等价测试，生产 decode 用上面的权威表。
+`pub const pipeline = .{ pc2line, stack_size, finalize }`。文件末尾把 `FunctionBytecode` / `FunctionDef` / `Bytecode` / `FunctionLayout` / `PropSiteCache` / `CallFacts` 再导出。`SparseDecodeTestOracle` 只给等价测试，生产 decode 用上面的权威表。
 
 ## 函数
 
-### `constant`
-
-### `constant.freeOwnedValue` (`src/bytecode.zig:2773`)
-
-- **签名**：`fn freeOwnedValue(value: JSValue, rt: anytype) void`。
-- **作用**：释放尚未发布进 FunctionBytecode 的常量池值。
-- **实现**：只对 reserved BigInt 调 `destroyIfReservedValue`；其它 JSValue 的所有权在 tracing GC 下不在这里 rc-free。
-- **所有权 / 错误 / 调用**：Pool.deinit / FunctionDef.deinit 调用。
-
-
-### `constant.Pool.init` (`src/bytecode.zig:2784`)
-
-- **签名**：`pub fn init(account: *memory.MemoryAccount, atoms: *atom.AtomTable) Pool`。
-- **作用**：空常量池。
-- **实现**：记下 MemoryAccount 与 AtomTable，values 为空切片。
-- **所有权 / 错误 / 调用**：不分配，只把 `MemoryAccount` 与 `AtomTable` 两个**借来的**指针装进按值返回的 `Pool`；`values` 起始为空切片，真正的缓冲由 `append`/`appendOwned` 分配、由 `deinit` 释放。无 error set。唯一调用方 `BytecodeImpl.init`（`bytecode.zig:11630`）。
-
-
-### `constant.Pool.deinit` (`src/bytecode.zig:2788`)
-
-- **签名**：`pub fn deinit(self: *Pool, rt: anytype) void`。
-- **作用**：释放池内值与数组。
-- **实现**：先把切片摘下，对每项 `freeOwnedValue`，再 `memory.free`。
-- **所有权 / 错误 / 调用**：rt 用于 BigInt reserved 销毁。
-
-
-### `constant.Pool.append` (`src/bytecode.zig:2799`)
-
-- **签名**：`pub fn append(self: *Pool, value: JSValue) !u32`。
-- **作用**：追加一个 JSValue，返回下标。
-- **实现**：每次 `alloc(len+1)`+memcpy+free 旧缓冲（编译期池，不是热路径）。
-- **所有权 / 错误 / 调用**：`error.OutOfMemory`。rc 时代的 `appendOwned` 与本函数逐字相同，现已降为一行别名 `pub const appendOwned = append;`——池从不取引用，两个名字只是调用点的意图标注。
-
-
-### `constant.Pool.get` (`src/bytecode.zig:2814`)
-
-- **签名**：`pub fn get(self: Pool, index: usize) ?JSValue`。
-- **作用**：按下标取常量，越界 null。
-- **实现**：长度检查。
-- **所有权 / 错误 / 调用**：边界检查后按值返回 `JSValue`——**借用，不转移所有权**，调用方不得 release。不分配、无 error set，越界返回 null。调用方 `BytecodeImpl.constantAt`（`bytecode.zig:11678`），再由 VM/测试读取。
-
-
-
 ### `module`
 
-### `module.Record.init` (`src/bytecode.zig:2876`)
+### `module.Record.init` (`src/bytecode/module.zig:58`)
 
 - **签名**：`pub fn init(account: *memory.MemoryAccount, atoms: *atom.AtomTable) Record`。
 - **作用**：空模块记录。
@@ -111,7 +64,7 @@ parser.zig 发射 phase-1 流（temp opcode 占用 178..196）
 - **所有权 / 错误 / 调用**：不分配，只装借来的 `MemoryAccount` 与 `AtomTable` 指针；六条列表都从空切片起步，由各 `add*` 经 `module.append` 分配、由 `deinit` 释放。无 error set。唯一调用方 `BytecodeImpl.ensureModule`（`bytecode.zig:11977`）。
 
 
-### `module.Record.deinit` (`src/bytecode.zig:2880`)
+### `module.Record.deinit` (`src/bytecode/module.zig:62`)
 
 - **签名**：`pub fn deinit(self: *Record) void`。
 - **作用**：释放六张表。
@@ -119,7 +72,7 @@ parser.zig 发射 phase-1 流（temp opcode 占用 178..196）
 - **所有权 / 错误 / 调用**：释放六条列表的缓冲（走 `self.memory`）并清空字段；无 error set。记录里的 atom 是借来的 id，不做 release——rc 时代留下的四个空 `for` 循环已删。唯一调用方 `BytecodeImpl.deinit`。
 
 
-### `module.Record.addRequest` (`src/bytecode.zig:2903`)
+### `module.Record.addRequest` (`src/bytecode/module.zig:85`)
 
 - **签名**：`pub fn addRequest(self: *Record, module_name: atom.Atom) !u32`。
 - **作用**：登记一条 import 请求，返回下标。
@@ -127,7 +80,7 @@ parser.zig 发射 phase-1 流（temp opcode 占用 178..196）
 - **所有权 / 错误 / 调用**：经 `module.append` 用 `reallocElements` 增长 `requests`，缓冲归 `Record`；`module_name` 只复制 atom id，不 retain。失败返回 `error.OutOfMemory`（计数溢出也折成它）。调用方 `parser.zig:15401`（`addModuleRequestFromCurrentString`），它把错误重映射进 parser 的 `Error`。
 
 
-### `module.Record.addImport` (`src/bytecode.zig:2909`)
+### `module.Record.addImport` (`src/bytecode/module.zig:91`)
 
 - **签名**：`pub fn addImport( self: *Record, request_index: u32, import_name: atom.Atom, local_name: atom.Atom, var_idx: u16, is_namespace: bool, ) !void`。
 - **作用**：登记一条 import 绑定（含闭包下标与 namespace 标志）。
@@ -135,7 +88,7 @@ parser.zig 发射 phase-1 流（temp opcode 占用 178..196）
 - **所有权 / 错误 / 调用**：同上增长 `imports`；`import_name`/`local_name` 只复制 id，不 retain。`error.OutOfMemory`。调用方 `parser.zig:15363`（`addModuleImportBinding`）。注意 `exec/module.zig` 里同名的 `pending.addImport` 是运行时模块记录的另一套 API，不是本函数。
 
 
-### `module.Record.addExport` (`src/bytecode.zig:2926`)
+### `module.Record.addExport` (`src/bytecode/module.zig:108`)
 
 - **签名**：`pub fn addExport(self: *Record, export_name: atom.Atom, local_name: atom.Atom) !void`。
 - **作用**：登记本地 export。
@@ -143,7 +96,7 @@ parser.zig 发射 phase-1 流（temp opcode 占用 178..196）
 - **所有权 / 错误 / 调用**：增长 `exports`，两个 atom 只复制 id；`var_idx` 留给模块根 finalizer 回填。`error.OutOfMemory`。调用方 `parser.zig:15322`（`addModuleExportName`）。
 
 
-### `module.Record.addIndirectExport` (`src/bytecode.zig:2933`)
+### `module.Record.addIndirectExport` (`src/bytecode/module.zig:115`)
 
 - **签名**：`pub fn addIndirectExport( self: *Record, request_index: u32, export_name: atom.Atom, import_name: atom.Atom, is_namespace: bool, ) !void`。
 - **作用**：登记 re-export。
@@ -151,7 +104,7 @@ parser.zig 发射 phase-1 流（temp opcode 占用 178..196）
 - **所有权 / 错误 / 调用**：增长 `indirect_exports`，atom 只复制 id。`error.OutOfMemory`。调用方 `parser.zig:15388`（`addModuleIndirectExport`）。
 
 
-### `module.Record.addStarExport` (`src/bytecode.zig:2948`)
+### `module.Record.addStarExport` (`src/bytecode/module.zig:130`)
 
 - **签名**：`pub fn addStarExport(self: *Record, request_index: u32, export_name: atom.Atom) !void`。
 - **作用**：登记 `export *`。
@@ -159,7 +112,7 @@ parser.zig 发射 phase-1 流（temp opcode 占用 178..196）
 - **所有权 / 错误 / 调用**：增长 `star_exports`，atom 只复制 id。`error.OutOfMemory`。调用方 `parser.zig:15395`（`addModuleStarExport`）。
 
 
-### `module.Record.addImportAttribute` (`src/bytecode.zig:2955`)
+### `module.Record.addImportAttribute` (`src/bytecode/module.zig:137`)
 
 - **签名**：`pub fn addImportAttribute(self: *Record, request_index: u32, key: atom.Atom, value: atom.Atom) !void`。
 - **作用**：登记 import attribute。
@@ -167,7 +120,7 @@ parser.zig 发射 phase-1 流（temp opcode 占用 178..196）
 - **所有权 / 错误 / 调用**：增长 `import_attributes`，key/value 两个 atom 都只复制 id。`error.OutOfMemory`。调用方 `parser.zig:15338`（`addModuleImportAttribute`）。
 
 
-### `module.append` (`src/bytecode.zig:2964`)
+### `module.append` (`src/bytecode/module.zig:146`)
 
 - **签名**：`inline fn append(account: *memory.MemoryAccount, comptime T: type, slice: *[]T, item: T) !void`。
 - **作用**：把一项精确追加到模块记录切片。
@@ -178,7 +131,7 @@ parser.zig 发射 phase-1 流（temp opcode 占用 178..196）
 
 ### `CompileContext`
 
-### `CompileContext.artifactAllocator` (`src/bytecode.zig:3022`)
+### `CompileContext.artifactAllocator` (`src/bytecode.zig:76`)
 
 - **签名**：`pub inline fn artifactAllocator(self: CompileContext) @import("std").mem.Allocator`。
 - **作用**：发布产物用的持久分配器。
@@ -189,7 +142,7 @@ parser.zig 发射 phase-1 流（temp opcode 占用 178..196）
 
 ### `dump`
 
-### `dump.dumpFunctionBytecode` (`src/bytecode.zig:11812`)
+### `dump.dumpFunctionBytecode` (`src/bytecode/dump.zig:28`)
 
 - **签名**：`pub fn dumpFunctionBytecode( writer: *std.Io.Writer, fb: *const function_bytecode.FunctionBytecode, atoms: *atom.AtomTable, opts: Options, ) !void`。
 - **作用**：反汇编已发布 FunctionBytecode。
@@ -197,7 +150,7 @@ parser.zig 发射 phase-1 流（temp opcode 占用 178..196）
 - **所有权 / 错误 / 调用**：atoms 由 Runtime 提供。
 
 
-### `dump.dumpArtifact` (`src/bytecode.zig:11821`)
+### `dump.dumpArtifact` (`src/bytecode/dump.zig:37`)
 
 - **签名**：`fn dumpArtifact( writer: *std.Io.Writer, atoms: *atom.AtomTable, name: atom.Atom, arg_count: u16, var_count: u16, stack_size: u16, code: []const u8, constant_count: usize, opts: Options, ) !void`。
 - **作用**：打印头与指令。解码失败则按单原始字节继续（必须能渲染损坏流）。
@@ -205,7 +158,7 @@ parser.zig 发射 phase-1 流（temp opcode 占用 178..196）
 - **所有权 / 错误 / 调用**：writer 错误上抛。
 
 
-### `dump.printOperandsFromLayout` (`src/bytecode.zig:11885`)
+### `dump.printOperandsFromLayout` (`src/bytecode/dump.zig:101`)
 
 - **签名**：`fn printOperandsFromLayout( writer: *std.Io.Writer, atoms: *atom.AtomTable, h: opcode.decode.Header, code: []const u8, ) !void`。
 - **作用**：按槽打印：atom 查名字，label 打 `L#`，`.flags` 槽在 `dyn_env_probe` 上解成 `kind[,with]`，其余按十进制。那段特判原先错挂在 `.sub_opcode` 臂上因而永不执行（`dyn_env_probe` 的 fmt 是 `atom_label_u8`，第三槽声明为 `.flags`；带 `.sub_opcode` 槽的只有 `ext0`），现已挪到 `.flags` 臂，反汇编恢复可读输出。
@@ -216,7 +169,7 @@ parser.zig 发射 phase-1 流（temp opcode 占用 178..196）
 
 ### `SparseDecodeTestOracle`
 
-### `SparseDecodeTestOracle.layoutsEqual` (`src/bytecode.zig:11983`)
+### `SparseDecodeTestOracle.layoutsEqual` (`src/bytecode.zig:101`)
 
 - **签名**：`fn layoutsEqual(a: OperandLayout, b: OperandLayout) bool`。
 - **作用**：等价测试：只比较已初始化前缀。
@@ -224,7 +177,7 @@ parser.zig 发射 phase-1 流（temp opcode 占用 178..196）
 - **所有权 / 错误 / 调用**：历史稀疏表 vs 权威表。
 
 
-### `SparseDecodeTestOracle.layoutOf` (`src/bytecode.zig:12014`)
+### `SparseDecodeTestOracle.layoutOf` (`src/bytecode.zig:132`)
 
 - **签名**：`fn layoutOf(form: logical.LogicalOpcode) *const OperandLayout`。
 - **作用**：经去重池取 layout 指针。
@@ -232,7 +185,7 @@ parser.zig 发射 phase-1 流（temp opcode 占用 178..196）
 - **所有权 / 错误 / 调用**：测试。
 
 
-### `SparseDecodeTestOracle.dynamicShape` (`src/bytecode.zig:12028`)
+### `SparseDecodeTestOracle.dynamicShape` (`src/bytecode.zig:146`)
 
 - **签名**：`fn dynamicShape(form: logical.LogicalOpcode) ?logical.DynamicStack.Shape`。
 - **作用**：查 dynamic_stack 下标表。

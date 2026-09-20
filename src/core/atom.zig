@@ -2653,7 +2653,7 @@ pub fn freeAtomList(rt: *JSRuntime, list: []Atom) void {
 /// and appending a borrowed one were already the same byte-for-byte routine.
 pub const appendOwnedAtom = appendAtom;
 test "atom replace handles self-assignment without releasing dynamic atom" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var slot = try rt.internAtom("dynamic-atom-self-replace");
@@ -2699,7 +2699,7 @@ test "predefined atoms preserve QuickJS order and kinds" {
 }
 
 test "atom table interns predefined dynamic and integer atoms" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     try std.testing.expectEqual(ids.length, try rt.internAtom("length"));
@@ -2725,7 +2725,7 @@ test "atom table interns predefined dynamic and integer atoms" {
 }
 
 test "symbol atoms are unique even with the same description" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const a = try rt.atoms.newSymbol("desc", .symbol);
@@ -2736,7 +2736,7 @@ test "symbol atoms are unique even with the same description" {
 }
 
 test "registered symbol index ignores unique symbols and private names" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const registry_name = "Symbol.for:registry-isolation";
@@ -2770,7 +2770,7 @@ test "registered symbol index ignores unique symbols and private names" {
 }
 
 test "registered value symbols keep a single registry ref" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const registry_name = "Symbol.for:registered-value-ref";
@@ -2798,7 +2798,7 @@ test "atom table deinit balances live empty dynamic symbol bytes" {
 }
 
 test "atom table retains its cached string until the atom dies" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const predefined = try rt.atoms.toStringValueForPush(rt, ids.name);

@@ -143,7 +143,7 @@ pub fn parseImport(s: *State) Error!void {
             }
 
             if (!type_only) {
-                try imports.append(s.function.memory.allocator, .{
+                try imports.append(s.memory.allocator, .{
                     .import_name = import_name,
                     .local_name = local_name,
                 });
@@ -193,20 +193,20 @@ fn moduleHasExportName(record: *const bytecode_module.Record, export_name: Atom)
 }
 
 pub fn addModuleExportName(s: *State, export_name: Atom, local_name: Atom) Error!void {
-    const record = s.function.ensureModule();
+    const record = s.ensureModule();
     if (moduleHasExportName(record, export_name)) return s.failExpectedDescription("unique export name");
     try record.addExport(export_name, local_name);
 }
 
 pub fn validateModuleLocalExports(s: *State) Error!void {
-    const record = s.function.module_record orelse return;
+    const record = s.module_record orelse return;
     for (record.exports) |entry| {
         if (!identifiers.hasKnownBinding(s, entry.local_name)) return s.failExpectedDescription("local export binding");
     }
 }
 
 fn addModuleImportAttribute(s: *State, request_index: u32, key: Atom, value: Atom) Error!void {
-    const record = s.function.ensureModule();
+    const record = s.ensureModule();
     for (record.import_attributes) |entry| {
         if (entry.request_index == request_index and entry.key == key)
             return s.failExpectedDescription("unique import attribute key");
@@ -235,7 +235,7 @@ fn addModuleImportBinding(
         .var_name = local_name,
     });
     if (raw_var_idx < 0 or raw_var_idx > std.math.maxInt(u16)) return error.BytecodeOverflow;
-    const record = s.function.ensureModule();
+    const record = s.ensureModule();
     try record.addImport(
         request_index,
         import_name,
@@ -259,13 +259,13 @@ fn addModuleIndirectExport(
     import_name: Atom,
     is_namespace: bool,
 ) Error!void {
-    const record = s.function.ensureModule();
+    const record = s.ensureModule();
     if (moduleHasExportName(record, export_name)) return s.failExpectedDescription("unique export name");
     try record.addIndirectExport(request_index, export_name, import_name, is_namespace);
 }
 
 fn addModuleStarExport(s: *State, request_index: u32, export_name: Atom) Error!void {
-    const record = s.function.ensureModule();
+    const record = s.ensureModule();
     if (export_name != atom_star and moduleHasExportName(record, export_name))
         return s.failExpectedDescription("unique export name");
     try record.addStarExport(request_index, export_name);
@@ -273,13 +273,13 @@ fn addModuleStarExport(s: *State, request_index: u32, export_name: Atom) Error!v
 
 fn addModuleRequestFromCurrentString(s: *State) Error!u32 {
     const module_name = try moduleStringAtom(s);
-    const record = s.function.ensureModule();
+    const record = s.ensureModule();
     return try record.addRequest(module_name);
 }
 
 fn moduleStringAtom(s: *State) Error!Atom {
     if (s.peekKind() != .string) return s.failExpectedDescription("module string");
-    return try s.function.atoms.internString(s.token.payload.str.bytes);
+    return try s.atoms.internString(s.token.payload.str.bytes);
 }
 
 pub fn isModuleNameToken(kind: tok.TokenKind) bool {
@@ -314,11 +314,11 @@ fn isWellFormedModuleString(bytes: []const u8) bool {
 }
 
 fn freeModuleImportSpecs(s: *State, imports: *std.ArrayList(ModuleImportSpec)) void {
-    imports.deinit(s.function.memory.allocator);
+    imports.deinit(s.memory.allocator);
 }
 
 fn freeModuleExportSpecs(s: *State, exports: *std.ArrayList(ModuleExportSpec)) void {
-    exports.deinit(s.function.memory.allocator);
+    exports.deinit(s.memory.allocator);
 }
 
 /// Parse export statement
@@ -496,7 +496,7 @@ fn parseExportList(s: *State) Error!void {
         }
 
         if (!type_only) {
-            try export_specs.append(s.function.memory.allocator, .{
+            try export_specs.append(s.memory.allocator, .{
                 .export_name = export_name,
                 .import_name = local_name,
                 .import_name_is_string = local_name_was_string,

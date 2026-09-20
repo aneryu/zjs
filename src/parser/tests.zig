@@ -20,9 +20,9 @@ const test_entry = zjs.compiler.test_entry;
 
 test "scope proof cache bounds ancestor scans across sibling functions" {
     const ScopeProofTestCounters = function_def.ScopeProofTestCounters;
-    const rt = try core.runtime.JSRuntime.create(std.testing.allocator);
+    const rt = try core.runtime.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const realm = try core.context.RealmContext.create(rt);
+    const realm = try core.context.RealmContext.create(rt, .{});
     defer realm.destroy();
 
     const sibling_count = 32;
@@ -56,7 +56,7 @@ test "scope proof cache bounds ancestor scans across sibling functions" {
 const LexerTestEnv = struct {
     rt: *engine.core.runtime.JSRuntime,
     fn init() !LexerTestEnv {
-        return .{ .rt = try engine.core.runtime.JSRuntime.create(std.testing.allocator) };
+        return .{ .rt = try engine.core.runtime.JSRuntime.create(std.testing.allocator, .{}) };
     }
     fn deinit(self: *LexerTestEnv) void {
         self.rt.destroy();
@@ -265,7 +265,7 @@ test "F1.2: numeric literals (decimal, hex, octal, binary, exponent, separators)
 }
 
 test "direct eval this is a scope_get_var against the caller seed" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const this_atom = try rt.internAtom("this");
@@ -715,11 +715,11 @@ const ParserTestEnv = struct {
     realm: *core.RealmContext,
 
     fn init() !TestEnv {
-        const rt = try engine.core.runtime.JSRuntime.create(std.testing.allocator);
+        const rt = try engine.core.runtime.JSRuntime.create(std.testing.allocator, .{});
         errdefer rt.destroy();
         return .{
             .rt = rt,
-            .realm = try core.RealmContext.create(rt),
+            .realm = try core.RealmContext.create(rt, .{}),
         };
     }
     fn deinit(self: *TestEnv) void {
@@ -736,178 +736,229 @@ const ParserTestEnv = struct {
 /// finalized FB exercises the production RealmRef owner without paying for or
 /// depending on standard-global materialization.
 fn compileForTest(rt: *core.JSRuntime, source: []const u8, options: parser.Options) !parser.Result {
-    const realm = try core.RealmContext.create(rt);
+    const realm = try core.RealmContext.create(rt, .{});
     defer realm.destroy();
     return parser.compile(.{ .realm = realm }, source, options);
 }
 
-/// The helpers below exercise parser/lowering fragments rather than runnable
-/// function bodies. Give finalize a real terminator so it can enforce the
-/// production CFG invariant, then restore the fragment-only view that these
-/// byte-sequence tests are designed to inspect. These returned fixtures are
-/// never dispatched by the VM.
-fn restoreFinalizedFragmentView(function: *engine.bytecode.Bytecode) !void {
-    // An already-abrupt fragment (`return`, `throw`) causes lowering to drop
-    // the unreachable helper terminator; its view already needs no repair.
-    if (function.code.len == 0 or function.code[function.code.len - 1] != op.return_undef) return;
-    function.code = function.code[0 .. function.code.len - 1];
+/// A parser fragment lowered through the production finalizer. `fb` is the
+/// GC-owned root artifact, rooted for the fixture's lifetime; the remaining
+/// fields are the views the byte-sequence tests inspect. Fragment helpers
+/// append a helper terminator so finalize can enforce the production CFG
+/// invariant; `code` restores the fragment-only view those tests are written
+/// against. These fixtures are never dispatched by the VM.
+const Lowered = struct {
+    fb: *engine.bytecode.FunctionBytecode,
+    root: *Root,
+    code: []const u8,
+    constants: Constants,
+    closure_var: []const engine.bytecode.function_bytecode.BytecodeClosureVar,
+    vardefs: []const engine.bytecode.function_bytecode.BytecodeVarDef,
+    /// Atom operands of `code`, in instruction order.
+    atom_operands: []core.Atom,
+    /// The module record the parse root produced, taken from the State
+    /// exactly as `parser.compile` does.
+    module_record: ?engine.bytecode.module.Record,
+
+    const Root = struct {
+        value: core.JSValue,
+        scope: core.runtime.ValueRootScope(1),
+    };
+
+    pub const Constants = struct {
+        values: []const core.JSValue,
+
+        pub fn get(self: Constants, index: usize) ?core.JSValue {
+            if (index >= self.values.len) return null;
+            return self.values[index];
+        }
+    };
+
+    const View = enum {
+        /// Drop the helper terminator the fragment helpers append. An
+        /// already-abrupt fragment (`return`, `throw`) makes lowering drop the
+        /// unreachable terminator itself; its view needs no repair.
+        fragment,
+        /// The finalized body as published.
+        body,
+    };
+
+    fn finalize(env: *TestEnv, state: *ParseState, view: View) !Lowered {
+        const fd = &state.function_def;
+        const artifacts = if (state.module_record) |*record|
+            try engine.bytecode.pipeline.finalize.createModuleFunctionBytecode(fd, record, env.compileContext())
+        else
+            try engine.bytecode.pipeline.finalize.createFunctionBytecode(fd, env.compileContext());
+        const fb = &artifacts[0];
+
+        const root = try std.testing.allocator.create(Root);
+        errdefer std.testing.allocator.destroy(root);
+        root.* = .{ .value = core.JSValue.functionBytecode(&fb.header), .scope = .{} };
+        root.scope = core.runtime.rootValues(.{&root.value});
+        root.scope.activate(env.rt);
+        errdefer root.scope.deactivate(env.rt);
+
+        var code: []const u8 = fb.byteCode();
+        if (view == .fragment and code.len != 0 and code[code.len - 1] == op.return_undef) {
+            code = code[0 .. code.len - 1];
+        }
+        const atom_operands = try finalAtomOperands(code);
+        errdefer std.testing.allocator.free(atom_operands);
+
+        const module_record = state.takeModuleRecord();
+        return .{
+            .fb = fb,
+            .root = root,
+            .code = code,
+            .constants = .{ .values = fb.cpoolSlice() },
+            .closure_var = fb.closureVar(),
+            .vardefs = fb.varDefs(),
+            .atom_operands = atom_operands,
+            .module_record = module_record,
+        };
+    }
+
+    pub fn deinit(self: *Lowered, rt: *core.JSRuntime) void {
+        std.testing.allocator.free(self.atom_operands);
+        if (self.module_record) |*record| record.deinit();
+        self.root.scope.deactivate(rt);
+        std.testing.allocator.destroy(self.root);
+        self.* = undefined;
+    }
+};
+
+/// Atom operands of final-form `code`, in instruction order: the atom-owner
+/// sequence the byte-sequence tests pin.
+fn finalAtomOperands(code: []const u8) ![]core.Atom {
+    var atoms: std.ArrayList(core.Atom) = .empty;
+    errdefer atoms.deinit(std.testing.allocator);
+    var pc: u32 = 0;
+    while (pc < code.len) {
+        const h = try engine.bytecode.opcode.decode.headerAt(.final, code, pc);
+        if (h.hasAtom()) {
+            const layout = h.layout();
+            const offset = layout.slots[layout.atom_slot.?].offset.?;
+            const raw = std.mem.readInt(u32, code[h.payload_pc() + offset ..][0..4], .little);
+            try atoms.append(std.testing.allocator, atom.Atom.fromRaw(raw));
+        }
+        pc = h.next_pc();
+    }
+    return atoms.toOwnedSlice(std.testing.allocator);
 }
 
-/// Helper: parse `src` as an expression, run the F10 pipeline, and
-/// return the produced final-form bytecode for byte-sequence
-/// comparison. Raw parser output contains scope_get_var/scope_put_var and other
-/// Phase 1 temp opcodes; `pipeline.finalize.runWithFunctionDef`
-/// lowers them to the final shapes the tests assert against
+/// Helper: parse `src` as an expression, run the production finalizer, and
+/// return the lowered root for byte-sequence comparison. Raw parser output
+/// contains scope_get_var/scope_put_var and other Phase 1 temp opcodes; the
+/// finalizer lowers them to the final shapes the tests assert against
 /// (including get_loc/put_loc for vars in `function_def.vars`).
-fn parseExpr(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
+fn parseExpr(env: *TestEnv, src: []const u8) !Lowered {
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
     try parser_core.parseExpr(&state);
     try state.emitReturnUndefined();
-    try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
-    try restoreFinalizedFragmentView(&function);
-    return function;
+    return Lowered.finalize(env, &state, .fragment);
 }
 
-fn parseExprWithTopLevelChildren(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
+fn parseExprWithTopLevelChildren(env: *TestEnv, src: []const u8) !Lowered {
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
-    state.root_mode = .canonical;
     try parser_core.parseExpr(&state);
     try state.emitReturnUndefined();
-    try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
-    try restoreFinalizedFragmentView(&function);
-    return function;
+    return Lowered.finalize(env, &state, .fragment);
 }
 
-fn parseExprStrict(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
+fn parseExprStrict(env: *TestEnv, src: []const u8) !Lowered {
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
     lex.is_strict_mode = true;
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
     state.is_strict = true;
     state.function_def.is_strict_mode = true;
     try parser_core.parseExpr(&state);
     try state.emitReturnUndefined();
-    try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
-    try restoreFinalizedFragmentView(&function);
-    return function;
+    return Lowered.finalize(env, &state, .fragment);
 }
 
-/// Helper: parse `src` as a statement, run the F10 pipeline, and
-/// return the produced final-form bytecode for byte-sequence comparison.
-fn parseStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
+/// Helper: parse `src` as a statement, run the production finalizer, and
+/// return the lowered root for byte-sequence comparison.
+fn parseStatement(env: *TestEnv, src: []const u8) !Lowered {
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try state.emitReturnUndefined();
-    try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
-    try restoreFinalizedFragmentView(&function);
-    return function;
+    return Lowered.finalize(env, &state, .fragment);
 }
 
-fn parseTSStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
+fn parseTSStatement(env: *TestEnv, src: []const u8) !Lowered {
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
     defer lex.deinit();
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try state.emitReturnUndefined();
-    try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
-    try restoreFinalizedFragmentView(&function);
-    return function;
+    return Lowered.finalize(env, &state, .fragment);
 }
 
-fn parseTSProgram(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
+fn parseTSProgram(env: *TestEnv, src: []const u8) !Lowered {
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
     defer lex.deinit();
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
-    state.root_mode = .canonical;
     try state.beginProgramEmission();
     try parser_core.parseDirectives(&state);
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try state.emitReturnUndefined();
-    try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
-    try restoreFinalizedFragmentView(&function);
-    return function;
+    return Lowered.finalize(env, &state, .fragment);
 }
 
-fn parseStatementWithTopLevelChildren(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
+fn parseStatementWithTopLevelChildren(env: *TestEnv, src: []const u8) !Lowered {
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
-    state.root_mode = .canonical;
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try state.emitReturnUndefined();
-    try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
-    try restoreFinalizedFragmentView(&function);
-    return function;
+    return Lowered.finalize(env, &state, .fragment);
 }
 
-fn parseModuleStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
+fn parseModuleStatement(env: *TestEnv, src: []const u8) !Lowered {
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    function.flags.is_module = true;
-    errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
     lex.is_module = true;
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
     test_entry.configureModuleRoot(&state);
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try state.emitReturnUndefined();
-    try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
-    try restoreFinalizedFragmentView(&function);
-    return function;
+    return Lowered.finalize(env, &state, .fragment);
 }
 
-fn parseModuleRefStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
+fn parseModuleRefStatement(env: *TestEnv, src: []const u8) !Lowered {
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    function.flags.is_module = true;
-    errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
     lex.is_module = true;
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
     test_entry.configureModuleRoot(&state);
     try state.beginProgramEmission();
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try state.emitReturnUndefined();
-    try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
-    try restoreFinalizedFragmentView(&function);
-    return function;
+    return Lowered.finalize(env, &state, .fragment);
 }
 
 fn moduleBodyStart(code: []const u8) !usize {
@@ -924,7 +975,7 @@ fn moduleBodyStart(code: []const u8) !usize {
     return @intCast(target);
 }
 
-fn moduleRecord(function: *const engine.bytecode.Bytecode) !*const engine.bytecode.module.Record {
+fn moduleRecord(function: *const Lowered) !*const engine.bytecode.module.Record {
     if (function.module_record) |*record| return record;
     return error.TestExpectedEqual;
 }
@@ -1486,33 +1537,27 @@ fn expectModuleStarExport(
     try expectAtomName(env, entry.export_name, export_name);
 }
 
-fn parseFunctionBodyStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
+fn parseFunctionBodyStatement(env: *TestEnv, src: []const u8) !Lowered {
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
     state.return_depth = 1;
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
-    return function;
+    return Lowered.finalize(env, &state, .body);
 }
 
 /// Same single-statement harness, but the synthesized function is strict —
 /// the strict-only PTC fold in resolve_labels keys off `fd.is_strict_mode`.
-fn parseStrictFunctionBodyStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
+fn parseStrictFunctionBodyStatement(env: *TestEnv, src: []const u8) !Lowered {
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    errdefer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
     state.return_depth = 1;
     state.function_def.is_strict_mode = true;
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
-    return function;
+    return Lowered.finalize(env, &state, .body);
 }
 
 fn expectParseStatementError(env: *TestEnv, src: []const u8) !void {
@@ -1706,7 +1751,7 @@ test "W5: signed bigint-i32 neg matches QuickJS final bytecode boundaries" {
         try std.testing.expectEqual(op.push_bigint_i32, fn_bc.code[0]);
         try std.testing.expectEqual(case.expected, readI32(fn_bc.code, 1));
         try std.testing.expectEqual(@as(usize, 0), countOpcode(fn_bc.code, op.neg));
-        try std.testing.expectEqual(@as(usize, 0), fn_bc.cpoolSlice().len);
+        try std.testing.expectEqual(@as(usize, 0), fn_bc.constants.values.len);
     }
 
     for ([_][]const u8{ "-(2147483648n)", "-(2147483649n)" }) |source| {
@@ -1714,8 +1759,8 @@ test "W5: signed bigint-i32 neg matches QuickJS final bytecode boundaries" {
         defer fn_bc.deinit(env.rt);
 
         try expectOpcodeSequence(fn_bc.code, &.{ op.push_const8, op.neg });
-        try std.testing.expectEqual(@as(usize, 1), fn_bc.cpoolSlice().len);
-        const constant = fn_bc.constantAt(readConstIndexAtOpcode(fn_bc.code, 0)).?;
+        try std.testing.expectEqual(@as(usize, 1), fn_bc.constants.values.len);
+        const constant = fn_bc.constants.get(readConstIndexAtOpcode(fn_bc.code, 0)).?;
         try std.testing.expect(constant.isBigInt());
     }
 
@@ -1748,7 +1793,7 @@ test "W5: folded parenthesized bigint keeps the unary minus source position" {
 
     try std.testing.expectEqual(op.push_bigint_i32, fn_bc.code[0]);
     try std.testing.expectEqual(@as(i32, -1), readI32(fn_bc.code, 1));
-    const source_loc = try engine.bytecode.pipeline.pc2line.findSourceLocation(fn_bc.pc2lineBuf(), 0);
+    const source_loc = try engine.bytecode.pipeline.pc2line.findSourceLocation(fn_bc.fb.pc2lineBuf(), 0);
     try std.testing.expectEqual(@as(i32, 2), source_loc.line_num);
     try std.testing.expectEqual(@as(i32, 1), source_loc.col_num);
 }
@@ -1899,7 +1944,7 @@ test "F4: identifier reads global via get_var" {
     try std.testing.expectEqual(op.get_var, fn_bc.code[0]);
     try std.testing.expectEqual(@as(u16, 0), readU16AtOpcode(fn_bc.code, 0));
     try std.testing.expectEqual(@as(usize, 0), fn_bc.atom_operands.len);
-    try std.testing.expectEqual(@as(usize, 1), fn_bc.var_ref_names.len);
+    try std.testing.expectEqual(@as(usize, 1), fn_bc.closure_var.len);
 }
 
 test "F4: parseExprBinary level 1 (mul/div/mod)" {
@@ -2208,10 +2253,8 @@ test "F4: logical producer uses one source-less shared merge label" {
 
     for (fixtures) |fixture| {
         const name = try env.rt.internAtom("runtime-expression");
-        var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-        defer function.deinit(env.rt);
         var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, fixture.source);
-        var state = try ParseState.initWithRuntime(env.rt, &lex, &function);
+        var state = try ParseState.initWithRuntime(env.rt, &lex, name);
         defer state.deinit(env.rt);
         try parser_core.parseExpr(&state);
 
@@ -2297,7 +2340,7 @@ test "F4: collapsed multiline logical branches retain source progression" {
         if (opcode_id == op.if_false8) {
             try std.testing.expect(branch_count < expected_sources.len);
             const source_loc = try engine.bytecode.pipeline.pc2line.findSourceLocation(
-                function.pc2lineBuf(),
+                function.fb.pc2lineBuf(),
                 @intCast(pc),
             );
             try std.testing.expectEqual(expected_sources[branch_count].line_num, source_loc.line_num);
@@ -2699,10 +2742,8 @@ test "M3.1 F4: the program root's scope marker and source authority are stream e
     defer env.deinit();
 
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "x;");
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
     try state.beginProgramEmission();
@@ -2719,8 +2760,9 @@ test "M3.1 F4: the program root's scope marker and source authority are stream e
     try std.testing.expectEqual(@as(i32, 1), b.source_slots[0].line);
 
     try state.emitReturnUndefined();
-    try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
-    try std.testing.expect(std.mem.indexOfScalar(u8, function.code, op.line_num) == null);
+    var lowered = try Lowered.finalize(&env, &state, .body);
+    defer lowered.deinit(env.rt);
+    try std.testing.expect(std.mem.indexOfScalar(u8, lowered.code, op.line_num) == null);
 }
 
 test "M3.1 F4: computed object method emits define_method_computed" {
@@ -3266,7 +3308,7 @@ test "F4: optional length call consumer preserves get_field2 and its atom operan
         op.call_method,
     });
     try std.testing.expectEqual(@as(usize, 10), readRelTarget32(fn_bc.code, 5));
-    try std.testing.expectEqual(@as(usize, 20), fn_bc.code.len);
+    try std.testing.expectEqual(@as(usize, 19), fn_bc.code.len);
     try std.testing.expectEqual(core.atom.ids.length.raw(), readU32(fn_bc.code, 11));
     try std.testing.expectEqual(@as(u16, 0), readU16AtOpcode(fn_bc.code, 16));
     try std.testing.expectEqualSlices(core.Atom, &.{core.atom.ids.length}, fn_bc.atom_operands);
@@ -3435,86 +3477,6 @@ test "F4: tagged template on member access obj.tag`hello` rewrites to call_metho
     try std.testing.expectEqual(@as(u16, 1), readU16AtOpcode(fn_bc.code, 30));
 }
 
-test "call-site cache: every final call instruction carries a cache_idx and the function owns one slot per site" {
-    var env = try ParserTestEnv.init();
-    defer env.deinit();
-    // call0 / call1 / call (argc 5) / call_method / call2 + return: five
-    // sites, indices 0..4 in emission order.
-    var fn_bc = try parseExprWithTopLevelChildren(&env, "(function f(a, b) { g(); g(1); g(1, 2, 3, 4, 5); o.m(); return h(a, b); })");
-    defer fn_bc.deinit(env.rt);
-    const child = try expectFunctionConstant(fn_bc, 0);
-    try std.testing.expectEqual(@as(u16, 5), child.callSiteCount());
-
-    const code = child.byteCode();
-    var pc: usize = 0;
-    var seen: [5]bool = @splat(false);
-    var sites: usize = 0;
-    while (pc < code.len) {
-        const size = engine.bytecode.opcode.sizeOf(code[pc]);
-        try std.testing.expect(size != 0 and pc + size <= code.len);
-        const idx_at: ?usize = switch (code[pc]) {
-            op.call0, op.call1, op.call2, op.call3 => pc + 1,
-            op.call, op.tail_call, op.call_method, op.tail_call_method, op.call_method_apply_fwd => pc + 3,
-            else => null,
-        };
-        if (idx_at) |at| {
-            const idx = code[at];
-            try std.testing.expect(idx < 5);
-            try std.testing.expect(!seen[idx]);
-            seen[idx] = true;
-            sites += 1;
-            // The slot the operand names is the idx'th entry of the tail.
-            const slot = child.callSiteCache(idx) orelse return error.TestExpectedEqual;
-            try std.testing.expectEqual(@intFromPtr(child.callSiteCache(0).?) + @as(usize, idx) * @sizeOf(engine.bytecode.CallSiteCache), @intFromPtr(slot));
-            try std.testing.expect(slot.entry == null and slot.handler == null);
-            try std.testing.expectEqual(@as(u8, 0), slot.misses);
-            try std.testing.expectEqual(@intFromEnum(engine.bytecode.CallSiteCache.State.empty), slot.state);
-        }
-        pc += size;
-    }
-    try std.testing.expectEqual(@as(usize, 5), sites);
-    // Out of range and the no-cache index resolve to no slot.
-    try std.testing.expect(child.callSiteCache(5) == null);
-    try std.testing.expect(child.callSiteCache(engine.bytecode.CallSiteCache.no_cache_idx) == null);
-    // The root expression (`fclosure` + return) has no call of its own.
-    try std.testing.expectEqual(@as(u16, 0), fn_bc.call_site_count);
-}
-
-test "call-site cache: sites past the 255-slot budget carry the no-cache index" {
-    var env = try ParserTestEnv.init();
-    defer env.deinit();
-    var source = std.ArrayList(u8).empty;
-    defer source.deinit(std.testing.allocator);
-    try source.appendSlice(std.testing.allocator, "(function f() {");
-    var n: usize = 0;
-    while (n < 300) : (n += 1) try source.appendSlice(std.testing.allocator, " g();");
-    try source.appendSlice(std.testing.allocator, " })");
-    var fn_bc = try parseExprWithTopLevelChildren(&env, source.items);
-    defer fn_bc.deinit(env.rt);
-    const child = try expectFunctionConstant(fn_bc, 0);
-    try std.testing.expectEqual(@as(u16, 255), child.callSiteCount());
-
-    const code = child.byteCode();
-    var pc: usize = 0;
-    var next: usize = 0;
-    while (pc < code.len) {
-        const size = engine.bytecode.opcode.sizeOf(code[pc]);
-        try std.testing.expect(size != 0 and pc + size <= code.len);
-        if (code[pc] == op.call0) {
-            const expected: u8 = if (next < 255) @intCast(next) else engine.bytecode.CallSiteCache.no_cache_idx;
-            try std.testing.expectEqual(expected, code[pc + 1]);
-            if (next < 255) {
-                try std.testing.expect(child.callSiteCache(code[pc + 1]) != null);
-            } else {
-                try std.testing.expect(child.callSiteCache(code[pc + 1]) == null);
-            }
-            next += 1;
-        }
-        pc += size;
-    }
-    try std.testing.expectEqual(@as(usize, 300), next);
-}
-
 test "prop-site cache: every final field instruction carries a cache_idx and the function owns one slot per site" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
@@ -3559,7 +3521,7 @@ test "prop-site cache: every final field instruction carries a cache_idx and the
     try std.testing.expect(child.propSiteCache(@intCast(count)) == null);
     try std.testing.expect(child.propSiteCache(engine.bytecode.PropSiteCache.no_cache_idx) == null);
     // The root expression (`fclosure` + return) reads no property of its own.
-    try std.testing.expectEqual(@as(u16, 0), fn_bc.prop_site_count);
+    try std.testing.expectEqual(@as(u16, 0), fn_bc.fb.propSiteCount());
 }
 
 test "prop-site cache: sites past the 255-slot budget carry the no-cache index" {
@@ -3603,8 +3565,7 @@ test "F4: tagged template tag`a${x}b${y}c` argc = 3 (template + 2 subs)" {
     var fn_bc = try parseExpr(&env, "tag`a${x}b${y}c`");
     defer fn_bc.deinit(env.rt);
 
-    // `call3 idx`: the opcode sits before its cache-index byte.
-    try std.testing.expectEqual(op.call3, fn_bc.code[fn_bc.code.len - 2]);
+    try std.testing.expectEqual(op.call3, fn_bc.code[fn_bc.code.len - 1]);
 }
 
 test "F4: optional call without chain receiver a?.()(b) — chain only on first call" {
@@ -4634,10 +4595,8 @@ test "F5: sloppy var initializer captures dynamic reference before RHS" {
     const name = try env.rt.internAtom("test");
     const x_atom = try env.rt.internAtom("x");
 
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "with (obj) { var x = 1; }");
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
 
     try state.beginProgramEmission();
@@ -4689,10 +4648,8 @@ test "F5: destructuring dynamic reference publishes an exact long-tail label" {
     const name = try env.rt.internAtom("destructuring-long-ref");
     const target_atom = try env.rt.internAtom("target");
 
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, source);
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
 
     try state.beginProgramEmission();
@@ -5638,7 +5595,7 @@ test "F8: export default statement" {
 test "F8: export named statement" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
-    var fn_bc = try parseModuleStatement(&env, "export { x, y };");
+    var fn_bc = try parseModuleRefStatement(&env, "let x, y; export { x, y };");
     defer fn_bc.deinit(env.rt);
 
     const record = try moduleRecord(&fn_bc);
@@ -5716,7 +5673,6 @@ test "comma expression does not infer an anonymous class name" {
         "let C = (0, class { static { globalThis.commaSeen = this.name; } });",
         .{ .mode = .script, .filename = "anonymous-class-comma.js" },
     );
-    defer function.deinit();
     try std.testing.expectEqual(
         @as(usize, 1),
         countDefineClassNamedRecursive(&function, env.rt, op.define_class, ""),
@@ -5736,7 +5692,6 @@ test "inferred function names do not become named-expression self bindings" {
         "let inferred = function () { return inferred; }; let explicit = function Inner() { return Inner; };",
         .{ .mode = .script, .filename = "function-inferred-self-binding.js" },
     );
-    defer function.deinit();
 
     const inferred = findFunctionConstantNamed(&function, env.rt, "") orelse return error.TestExpectedEqual;
     const explicit = findFunctionConstantNamed(&function, env.rt, "Inner") orelse return error.TestExpectedEqual;
@@ -5746,7 +5701,7 @@ test "inferred function names do not become named-expression self bindings" {
 }
 
 test "W1d: finalized private operations have no raw private atom operands" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -5919,12 +5874,9 @@ test "F7: private name in uses scope temp before resolver" {
     defer env.deinit();
 
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "class C { #x; m(o) { return #x in o; } }");
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
-    state.root_mode = .canonical;
 
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
@@ -5938,8 +5890,9 @@ test "F7: private name in uses scope temp before resolver" {
     try std.testing.expect(saw_temp);
 
     try state.emitReturnUndefined();
-    try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
-    try expectOpcodeRecursive(&function, op.private_in);
+    var lowered = try Lowered.finalize(&env, &state, .body);
+    defer lowered.deinit(env.rt);
+    try expectOpcodeRecursive(&lowered, op.private_in);
 }
 
 test "unresolved descendant lookup threads direct eval var objects inside-out" {
@@ -5947,8 +5900,6 @@ test "unresolved descendant lookup threads direct eval var objects inside-out" {
     defer env.deinit();
 
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms,
         \\function outer() {
         \\  eval("");
@@ -5958,9 +5909,8 @@ test "unresolved descendant lookup threads direct eval var objects inside-out" {
         \\  }
         \\}
     );
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
-    state.root_mode = .canonical;
 
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     // QuickJS does not blanket-copy every ancestor <var> object during
@@ -5969,7 +5919,8 @@ test "unresolved descendant lookup threads direct eval var objects inside-out" {
     // environments. Run the real finalization pass before asserting that
     // resolution-time chain.
     try state.emitReturnUndefined();
-    try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
+    var lowered = try Lowered.finalize(&env, &state, .body);
+    defer lowered.deinit(env.rt);
 
     try std.testing.expectEqual(@as(usize, 1), state.function_def.child_list.len);
     const outer_fd = state.function_def.child_list[0];
@@ -5982,7 +5933,7 @@ test "unresolved descendant lookup threads direct eval var objects inside-out" {
     // W1c3 moves closure-name owners out of finalized FunctionDefs. Inspect
     // the published artifacts while retaining compile-only source indices from
     // the raw FunctionDef shells for the topology comparison below.
-    const outer = findFunctionConstantNamed(&function, env.rt, "outer") orelse return error.TestExpectedEqual;
+    const outer = findFunctionConstantNamed(&lowered, env.rt, "outer") orelse return error.TestExpectedEqual;
     const middle = findFunctionConstantNamed(outer, env.rt, "middle") orelse return error.TestExpectedEqual;
     const inner = findFunctionConstantNamed(middle, env.rt, "inner") orelse return error.TestExpectedEqual;
 
@@ -6013,20 +5964,18 @@ test "direct eval pseudo var objects follow eval and parameter-expression gates"
     defer env.deinit();
 
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms,
         \\function defaults(a = eval("")) { eval(""); }
         \\function pattern({ a = eval("") }) { eval(""); }
         \\function rest(...values) { eval(""); }
     );
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
-    state.root_mode = .canonical;
 
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try state.emitReturnUndefined();
-    try engine.bytecode.pipeline.finalize.runWithFunctionDefRuntime(&function, &state.function_def, env.compileContext());
+    var lowered = try Lowered.finalize(&env, &state, .body);
+    defer lowered.deinit(env.rt);
 
     try std.testing.expectEqual(@as(usize, 3), state.function_def.child_list.len);
     const defaults = state.function_def.child_list[0];
@@ -6045,15 +5994,14 @@ test "direct eval pseudo var objects follow eval and parameter-expression gates"
     try std.testing.expectEqual(@as(?u16, null), rest.arg_var_object_idx);
 
     const eval_name = try env.rt.internAtom("eval-test");
-    var eval_function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, eval_name);
-    defer eval_function.deinit(env.rt);
     var eval_lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "eval('')");
-    var eval_state = try ParseState.init(&eval_lex, &eval_function);
+    var eval_state = try ParseState.init(&eval_lex, &env.rt.memory, &env.rt.atoms, eval_name);
     defer eval_state.deinit(env.rt);
     try eval_state.enableEvalReturn();
     try parser_core.parseProgramStatements(&eval_state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try eval_state.finalizeEvalReturn();
-    try engine.bytecode.pipeline.finalize.runWithFunctionDef(&eval_function, &eval_state.function_def);
+    var eval_lowered = try Lowered.finalize(&env, &eval_state, .body);
+    defer eval_lowered.deinit(env.rt);
 
     try std.testing.expect(eval_state.function_def.is_eval);
     try std.testing.expect(eval_state.function_def.has_eval_call);
@@ -6066,15 +6014,12 @@ test "parameter pre-scan balances regexp and template delimiters like QuickJS" {
     defer env.deinit();
 
     const name = try env.rt.internAtom("parameter-balanced-scan");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms,
         \\function regular(a = /[)=}]/, { b = `x${/[}]/.test("}")}` } = {}) {}
         \\const arrow = (a = /[)]/, b = { x: /[=]/ }) => [a, b];
     );
-    var state = try ParseState.initWithRuntime(env.rt, &lex, &function);
+    var state = try ParseState.initWithRuntime(env.rt, &lex, name);
     defer state.deinit(env.rt);
-    state.root_mode = .canonical;
 
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
@@ -6084,7 +6029,7 @@ test "parameter pre-scan balances regexp and template delimiters like QuickJS" {
 }
 
 test "parameter initializer direct eval emits active global-declaration carriers" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const x_atom = try rt.internAtom("parameterEvalHoist");
@@ -6125,7 +6070,7 @@ test "parameter initializer direct eval emits active global-declaration carriers
 }
 
 test "nested direct eval does not capture a parent global declaration carrier" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -6244,7 +6189,7 @@ test "F8: mixed import" {
 test "F8: export named" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
-    var fn_bc = try parseModuleStatement(&env, "export { x, y }");
+    var fn_bc = try parseModuleRefStatement(&env, "let x, y; export { x, y }");
     defer fn_bc.deinit(env.rt);
 
     const record = try moduleRecord(&fn_bc);
@@ -6256,7 +6201,7 @@ test "F8: export named" {
 test "F8: export renamed" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
-    var fn_bc = try parseModuleStatement(&env, "export { x as a, y as b }");
+    var fn_bc = try parseModuleRefStatement(&env, "let x, y; export { x as a, y as b }");
     defer fn_bc.deinit(env.rt);
 
     const record = try moduleRecord(&fn_bc);
@@ -6733,42 +6678,65 @@ fn fdLabelOffset(fd: *const engine.bytecode.FunctionDef, label_index: u32) u32 {
     return fd.builder.?.label_slots[label_index].bound_offset;
 }
 
-/// Publish the parser's compact phase-1 stream onto `function` so the
-/// byte-sequence tests below can inspect it after the ParseState — which owns
-/// the Builder the parser emitted into — is torn down.
-fn publishPhase1Stream(function: *engine.bytecode.Bytecode, state: *ParseState) !void {
-    const b = state.function_def.builder orelse return;
-    try function.setCode(b.code[0..b.code_len]);
-    for (b.atom_operands[0..b.atom_len]) |atom_id| try function.appendAtomOperand(atom_id);
-    for (b.source_slots[0..b.source_len]) |slot| {
-        try function.appendSourceLoc(slot.temp_offset, slot.line, slot.col);
+/// The parser's compact phase-1 stream, kept alive with the ParseState that
+/// owns it so the byte-sequence tests below can inspect the pre-lowering
+/// form: temp opcodes, the atom ledger, and the FunctionDef constant pool.
+const Raw = struct {
+    lex: *QjsLexer,
+    state: *ParseState,
+    code: []const u8,
+    atom_operands: []const core.Atom,
+    constants: Lowered.Constants,
+
+    const Entry = enum { statement, expression_with_runtime };
+
+    fn parse(env: *TestEnv, name: []const u8, src: []const u8, entry: Entry) !Raw {
+        const name_atom = try env.rt.internAtom(name);
+        const lex = try std.testing.allocator.create(QjsLexer);
+        errdefer std.testing.allocator.destroy(lex);
+        lex.* = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
+        errdefer lex.deinit();
+        const state = try std.testing.allocator.create(ParseState);
+        errdefer std.testing.allocator.destroy(state);
+        switch (entry) {
+            .statement => {
+                state.* = try ParseState.init(lex, &env.rt.memory, &env.rt.atoms, name_atom);
+                errdefer state.deinit(env.rt);
+                test_entry.configureScriptRoot(state);
+                try state.beginProgramEmission();
+                try parser_core.parseStatementOrDecl(state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
+            },
+            .expression_with_runtime => {
+                state.* = try ParseState.initWithRuntime(env.rt, lex, name_atom);
+                errdefer state.deinit(env.rt);
+                try parser_core.parseExpr(state);
+            },
+        }
+        const b = state.function_def.builder.?;
+        return .{
+            .lex = lex,
+            .state = state,
+            .code = b.code[0..b.code_len],
+            .atom_operands = b.atom_operands[0..b.atom_len],
+            .constants = .{ .values = state.function_def.cpool },
+        };
     }
+
+    pub fn deinit(self: *Raw, rt: *core.JSRuntime) void {
+        self.state.deinit(rt);
+        std.testing.allocator.destroy(self.state);
+        self.lex.deinit();
+        std.testing.allocator.destroy(self.lex);
+        self.* = undefined;
+    }
+};
+
+fn parseRawStatement(env: *TestEnv, src: []const u8) !Raw {
+    return Raw.parse(env, "scope-events", src, .statement);
 }
 
-fn parseRawStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
-    const name = try env.rt.internAtom("scope-events");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    errdefer function.deinit(env.rt);
-    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
-    var state = try ParseState.init(&lex, &function);
-    defer state.deinit(env.rt);
-    test_entry.configureScriptRoot(&state);
-    try state.beginProgramEmission();
-    try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try publishPhase1Stream(&function, &state);
-    return function;
-}
-
-fn parseRawExprWithRuntime(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode {
-    const name = try env.rt.internAtom("runtime-expression");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    errdefer function.deinit(env.rt);
-    var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, src);
-    var state = try ParseState.initWithRuntime(env.rt, &lex, &function);
-    defer state.deinit(env.rt);
-    try parser_core.parseExpr(&state);
-    try publishPhase1Stream(&function, &state);
-    return function;
+fn parseRawExprWithRuntime(env: *TestEnv, src: []const u8) !Raw {
+    return Raw.parse(env, "runtime-expression", src, .expression_with_runtime);
 }
 
 fn parseRawTSProgram(env: *TestEnv, src: []const u8) !test_entry.Program {
@@ -6782,7 +6750,7 @@ fn parseRawTSProgram(env: *TestEnv, src: []const u8) !test_entry.Program {
 }
 
 test "escapedIdentifier reserved-word CurrentContext shares the Binding walk" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const rejected = [_][]const u8{
@@ -7062,17 +7030,14 @@ test "M-SCOPE event producers: structural body scopes stay identity-only, namesp
     }
 
     const name = try env.rt.internAtom("scope-body-identities");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
     var lex = QjsLexer.init(
         std.testing.allocator,
         &env.rt.atoms,
         "function body(){;} function params(value = 1){} const concise = () => 1; class C { field = 1; }",
     );
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
-    state.root_mode = .canonical;
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
     var saw_body = false;
@@ -7179,10 +7144,8 @@ fn expectContinueTargetFollowsBodyLeave(
     target_event: usize,
 ) !void {
     const name = try env.rt.internAtom("scope-events");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, source);
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
     try state.beginProgramEmission();
@@ -7234,17 +7197,14 @@ test "M-SCOPE negative contract: return cleanup and throw synthesize no scope le
 
     {
         const name = try env.rt.internAtom("return-scope-events");
-        var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-        defer function.deinit(env.rt);
         var lex = QjsLexer.init(
             std.testing.allocator,
             &env.rt.atoms,
             "function f(){ for (const value of []) { try { return value; } finally { ; } } }",
         );
-        var state = try ParseState.init(&lex, &function);
+        var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
         defer state.deinit(env.rt);
         test_entry.configureScriptRoot(&state);
-        state.root_mode = .canonical;
         try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
         try std.testing.expectEqual(@as(usize, 1), state.function_def.child_list.len);
         const child = state.function_def.child_list[0];
@@ -7278,11 +7238,9 @@ test "F10.1a FunctionDef: program root has var scope 0 and body scope 1" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "");
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
 
     // js_new_function_def creates scope 0; JS_Eval immediately pushes the
@@ -7300,8 +7258,6 @@ test "F10.1a FunctionDef: QuickJS root declaration rows keep body and block orig
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
 
     const a_atom = try env.rt.internAtom("a");
     const b_atom = try env.rt.internAtom("b");
@@ -7309,7 +7265,7 @@ test "F10.1a FunctionDef: QuickJS root declaration rows keep body and block orig
     const d_atom = try env.rt.internAtom("d");
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "var a; let b; { var c; let d; }");
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
 
@@ -7334,14 +7290,11 @@ test "F10.1a FunctionDef: function vars retain parser origins without entering l
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "function f(p){ var x; { var y; let z; } let w; }");
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
-    state.root_mode = .canonical;
 
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
     try std.testing.expectEqual(@as(usize, 1), state.function_def.child_list.len);
@@ -7370,14 +7323,11 @@ test "F10.1a FunctionDef: every parsed function body has identity except class f
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "const arrow = () => 1; class C { x = 1; }");
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
-    state.root_mode = .canonical;
     try parser_core.parseProgramStatements(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
 
     var arrow: ?*function_def_mod.FunctionDef = null;
@@ -7400,7 +7350,7 @@ test "F10.1a FunctionDef: every parsed function body has identity except class f
 }
 
 test "defineVar core matches pinned QuickJS declaration collision matrix" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const cases = [_]struct { source: []const u8, fails: bool }{
@@ -7468,7 +7418,7 @@ fn compilePaddedDeclarationIndexCase(
 }
 
 test "parser declaration index preserves unique and duplicate same-scope lexical declarations" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     try std.testing.expect(!try compilePaddedDeclarationIndexCase(
@@ -7484,7 +7434,7 @@ test "parser declaration index preserves unique and duplicate same-scope lexical
 }
 
 test "parser declaration index preserves shadowing and catch plus two scopes" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     try std.testing.expect(!try compilePaddedDeclarationIndexCase(
@@ -7505,7 +7455,7 @@ test "parser declaration index preserves shadowing and catch plus two scopes" {
 }
 
 test "parser declaration index preserves function-var ancestor and sibling origins" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     try std.testing.expect(try compilePaddedDeclarationIndexCase(
@@ -7524,12 +7474,10 @@ test "parser declaration index rebuilds after bypassed linked and function-var w
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("declaration-index-bypass");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "");
     defer lex.deinit();
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
 
     var padding_atoms: [declaration_index_padding_count]core.Atom = undefined;
@@ -7579,11 +7527,9 @@ fn runParserDeclarationIndexOomRetry(
     defer atoms.deinit();
 
     const name = try atoms.internString("parser-declaration-index-oom");
-    var function = engine.bytecode.Bytecode.init(&account, &atoms, name);
-    defer function.deinit(cleanup_rt);
     var lex = QjsLexer.init(failing.allocator(), &atoms, "");
     defer lex.deinit();
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &account, &atoms, name);
     defer state.deinit(cleanup_rt);
 
     var declaration_atoms: [declaration_index_padding_count]core.Atom = undefined;
@@ -7632,7 +7578,7 @@ fn runParserDeclarationIndexOomRetry(
 }
 
 test "parser declaration index activation is retryable across allocation failures" {
-    const cleanup_rt = try core.JSRuntime.create(std.testing.allocator);
+    const cleanup_rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer cleanup_rt.destroy();
 
     var fail_offset: usize = 0;
@@ -7646,11 +7592,9 @@ test "F10.1a FunctionDef: empty ordinary block does not create a scope" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "{ }");
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
 
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
@@ -7666,11 +7610,9 @@ test "F10.1a FunctionDef: non-empty ordinary block pushes and pops one scope" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "{ 0; }");
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
 
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
@@ -7683,11 +7625,9 @@ test "F10.1a FunctionDef: nested blocks build parent chain" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "{ let a; { let b; } }");
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
 
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
@@ -7706,13 +7646,11 @@ test "F10.1a FunctionDef: nested scope inherits the visible lexical head" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
 
     const outer_atom = try env.rt.internAtom("outer");
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "{ let outer; { 0; } }");
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
 
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
@@ -7730,13 +7668,11 @@ test "F10.1a FunctionDef: let registers as lexical, non-const" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
 
     const x_atom = try env.rt.internAtom("x");
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "let x = 1;");
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
 
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
@@ -7756,11 +7692,9 @@ test "F10.1a FunctionDef: const registers as lexical + const" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "const k = 42;");
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
 
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
@@ -7774,11 +7708,9 @@ test "F10.1a FunctionDef: top-level block var registers as global var" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "{ var v = 1; }");
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
     test_entry.configureScriptRoot(&state);
 
@@ -7795,11 +7727,9 @@ test "F10.1a FunctionDef: let in nested block attaches to inner scope" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "{ let a; { let b; } }");
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
 
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
@@ -7815,13 +7745,11 @@ test "F10.1a FunctionDef: simple catch binding keeps catch provenance" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
 
     const caught_atom = try env.rt.internAtom("caught");
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "try {} catch (caught) {}");
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
 
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
@@ -7842,14 +7770,12 @@ test "F10.1a FunctionDef: catch has binding wrapper and body scopes" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
 
     const caught_atom = try env.rt.internAtom("caught");
     const body_atom = try env.rt.internAtom("body");
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "try {} catch (caught) { let body; }");
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
 
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
@@ -7872,13 +7798,11 @@ test "F10.1a FunctionDef: for-of lexical head owns one binding" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
 
     const x_atom = try env.rt.internAtom("x");
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "for (let x of [1]) { x; }");
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
 
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
@@ -7915,11 +7839,9 @@ test "F10.1a FunctionDef: assignment for-of still owns a head scope" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "for (x of [1]) { x; }");
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
 
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
@@ -7935,11 +7857,9 @@ test "F10.1a FunctionDef: if statement owns one wrapper scope" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "if (true) 0; else 1;");
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
 
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
@@ -7952,11 +7872,9 @@ test "F10.1a FunctionDef: classic for always owns a head scope" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "for (;;) break;");
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
 
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
@@ -7969,11 +7887,9 @@ test "F10.1a FunctionDef: with scope emits its enter event" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "with ({}) 0;");
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
 
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
@@ -7999,13 +7915,11 @@ test "F10.1a FunctionDef: class has name and private scopes" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
 
     const class_atom = try env.rt.internAtom("C");
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "class C {}");
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
 
     try parser_core.parseExpr(&state);
@@ -8027,15 +7941,13 @@ test "F10.1a FunctionDef: findVar locates by name" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
 
     const x_atom = try env.rt.internAtom("x");
     const y_atom = try env.rt.internAtom("y");
     const z_atom = try env.rt.internAtom("z");
 
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "let x; let y;");
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
 
     try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
@@ -8050,13 +7962,11 @@ test "F10.1b Nested function: cur_func stack management" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
 
     // Parse a nested function expression: (function() { (function() {}) })
     // Note: using function expressions which are allowed in expression contexts
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "(function() { (function() {}) })");
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
 
     try parser_core.parseExpr(&state);
@@ -8079,7 +7989,7 @@ test "nested function declarations fit the QuickJS native parser stack budget" {
     try source.appendSlice(std.testing.allocator, "return 1;");
     for (0..depth) |_| try source.append(std.testing.allocator, '}');
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.updateNativeStackTop();
 
@@ -8102,7 +8012,7 @@ test "function expressions preserve closure operands across constant index 255" 
     }
     try source.appendSlice(std.testing.allocator, "]; functions[256]();");
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, source.items, .{
@@ -8131,7 +8041,7 @@ test "function expressions preserve closure operands across constant index 255" 
 }
 
 test "QuickJS hoist metadata keeps only the final body local function initializer" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -8158,7 +8068,7 @@ test "QuickJS hoist metadata keeps only the final body local function initialize
 }
 
 test "QuickJS hoist metadata keeps only the final parameter function initializer" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -8185,7 +8095,7 @@ test "QuickJS hoist metadata keeps only the final parameter function initializer
 }
 
 test "QuickJS block function metadata does not also use the body prologue fallback" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     // The parameter collision suppresses Annex B's outer var mirror, leaving
@@ -8206,7 +8116,7 @@ test "QuickJS block function metadata does not also use the body prologue fallba
 }
 
 test "QuickJS final linkage rebuild includes implicit arguments by scope level" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -8231,7 +8141,7 @@ test "QuickJS final linkage rebuild includes implicit arguments by scope level" 
 }
 
 test "QuickJS add_eval_variables stages pseudo locals in VarDef append order" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -8297,7 +8207,7 @@ test "QuickJS add_eval_variables stages pseudo locals in VarDef append order" {
 }
 
 test "QuickJS direct eval arguments pseudo is distinct from a simple formal" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -8332,7 +8242,7 @@ test "QuickJS direct eval arguments pseudo is distinct from a simple formal" {
 }
 
 test "QuickJS entry contract carries grammar while bindings live in vardefs" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var script = try compileForTest(
@@ -8397,7 +8307,7 @@ test "QuickJS entry contract carries grammar while bindings live in vardefs" {
 }
 
 test "QuickJS parameter expression scope initializes lexical TDZ on entry" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -8420,7 +8330,7 @@ test "QuickJS parameter expression scope initializes lexical TDZ on entry" {
 }
 
 test "QuickJS global declaration carriers precede child finalization" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -8454,7 +8364,7 @@ test "QuickJS global declaration carriers precede child finalization" {
 }
 
 test "dynamic global writes keep put_var distinct from plain var-ref stores" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -8535,7 +8445,7 @@ test "dynamic global writes keep put_var distinct from plain var-ref stores" {
 }
 
 test "QuickJS open binding indices follow child capture demand order" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     // The child resolves `arg` before `local`. qjs finalizes the child first;
@@ -8584,7 +8494,7 @@ test "QuickJS open binding indices follow child capture demand order" {
 }
 
 test "dead scope refs do not capture across a live merge" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -8625,7 +8535,7 @@ test "dead scope refs do not capture across a live merge" {
 }
 
 test "QuickJS postorder capture topology records exact forwarding rows" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -8663,7 +8573,7 @@ test "QuickJS postorder capture topology records exact forwarding rows" {
 }
 
 test "QuickJS postorder capture topology follows lexical scope order" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -8697,7 +8607,7 @@ test "QuickJS postorder capture topology follows lexical scope order" {
 }
 
 test "QuickJS direct eval capture prefix preserves shadowed binding identities" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -8738,7 +8648,7 @@ test "QuickJS direct eval capture prefix preserves shadowed binding identities" 
 }
 
 test "QuickJS direct eval capture prefix follows lexical scope order" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -8778,7 +8688,7 @@ test "QuickJS direct eval capture prefix follows lexical scope order" {
 }
 
 test "QuickJS eval prefix is stable before descendant capture demand" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -8812,7 +8722,7 @@ test "QuickJS eval prefix is stable before descendant capture demand" {
 }
 
 test "QuickJS eval root appends child and own ordinary globals after declarations" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -8843,7 +8753,7 @@ test "QuickJS eval root appends child and own ordinary globals after declaration
 }
 
 test "final eval operands address compact vardef chains" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -8915,7 +8825,7 @@ test "final eval operands address compact vardef chains" {
 }
 
 test "final eval marker is combined and belongs only to the eval unit" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var script = try compileForTest(rt, "1;", .{ .mode = .script, .filename = "script.js" });
@@ -8942,7 +8852,7 @@ test "final eval marker is combined and belongs only to the eval unit" {
 }
 
 test "direct eval capture hints preserve the former parameter flag bit as scope data" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var source = std.ArrayList(u8).empty;
@@ -8988,7 +8898,7 @@ test "direct eval capture hints preserve the former parameter flag bit as scope 
 }
 
 test "QuickJS direct eval captures only loop bindings live at the call site" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var after_loop = try compileForTest(
@@ -9022,7 +8932,7 @@ test "QuickJS direct eval captures only loop bindings live at the call site" {
 }
 
 test "QuickJS class private direct eval has complete capture events" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -9039,7 +8949,7 @@ test "QuickJS class private direct eval has complete capture events" {
 }
 
 test "QuickJS module closure order keeps all imports before global declarations" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -9064,7 +8974,7 @@ test "QuickJS module closure order keeps all imports before global declarations"
 }
 
 test "QuickJS module declarations append without parser closure remapping" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -9138,7 +9048,7 @@ test "QuickJS module declarations append without parser closure remapping" {
 }
 
 test "QuickJS parent module declarations exist before child direct-eval seeding" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -9172,7 +9082,7 @@ test "QuickJS parent module declarations exist before child direct-eval seeding"
 }
 
 test "QuickJS module instantiation guard separates function hoists from the body" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -9210,7 +9120,7 @@ test "QuickJS module instantiation guard separates function hoists from the body
 }
 
 test "QuickJS module instantiation guard excludes frame lexical preparation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -9231,7 +9141,7 @@ test "QuickJS module instantiation guard excludes frame lexical preparation" {
 }
 
 test "QuickJS module callback captures keep parent declaration indices" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt,
@@ -9268,7 +9178,7 @@ test "QuickJS module callback captures keep parent declaration indices" {
 }
 
 test "QuickJS global eval capture stays distinct from appended declaration carrier" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const x_atom = try rt.internAtom("x");
@@ -9293,7 +9203,7 @@ test "QuickJS global eval capture stays distinct from appended declaration carri
 }
 
 test "QuickJS script global functions publish from bytecode through the first declaration carrier" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -9331,7 +9241,7 @@ test "QuickJS script global functions publish from bytecode through the first de
 }
 
 test "QuickJS direct eval hoist target walk distinguishes closure var-object and lexical conflict" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const f_atom = try rt.internAtom("f");
@@ -9386,14 +9296,11 @@ test "F10.1c Nested function: bytecode dual-buffering" {
     var env = try ParserTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
 
     // Parse a nested function expression: (function() { 42 })
     var lex = QjsLexer.init(std.testing.allocator, &env.rt.atoms, "(function() { 42 })");
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
-    state.root_mode = .canonical;
 
     try parser_core.parseExpr(&state);
 
@@ -9407,9 +9314,6 @@ test "F10.1c Nested function: bytecode dual-buffering" {
     try std.testing.expect(child.parent_cpool_idx != null);
     try expectOpcode(fdPhase1Code(child), op.push_i32);
     try expectOpcode(fdPhase1Code(child), op.return_undef);
-
-    // Verify emit_to_function_def flag is false after parsing
-    try std.testing.expectEqual(false, state.emit_to_function_def);
 }
 
 test "TS: Class Constructor Parameter Properties" {
@@ -9554,7 +9458,7 @@ test "TS: Inline Object Type Parameter Constraints Are Skipped" {
 }
 
 test "TS: decorators and import = require are rejected with a clear message" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var decorated = try compileForTest(rt,
@@ -9702,7 +9606,7 @@ fn countFunctionClosures(code: []const u8) usize {
 }
 
 test "try finally parses one shared finalizer body for every abrupt exit" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt,
@@ -9756,7 +9660,7 @@ test "try finally parses one shared finalizer body for every abrupt exit" {
 }
 
 test "try catch fixed topology removes calls to its empty finalizer" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -9774,7 +9678,7 @@ test "try catch fixed topology removes calls to its empty finalizer" {
 }
 
 test "empty finally producer reaches the phase2 and phase3 cascade" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -9899,7 +9803,7 @@ fn expectFunctionKindRecursive(function: anytype, kind: function_def.FunctionKin
 }
 
 test "arrow lexical this and new.target are ordinary closure captures" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -9926,7 +9830,7 @@ test "arrow lexical this and new.target are ordinary closure captures" {
 }
 
 test "arrow super property captures lexical this through an ordinary cell" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -9953,7 +9857,7 @@ test "arrow super property captures lexical this through an ordinary cell" {
 }
 
 test "arrow super call captures active constructor state through ordinary cells" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -10016,7 +9920,7 @@ test "syntax error deinit balances empty message allocation" {
 }
 
 test "source positions and syntax errors carry filename line and column" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "let x = (\n1", .{ .mode = .script, .filename = "bad.js" });
@@ -10030,7 +9934,7 @@ test "source positions and syntax errors carry filename line and column" {
 }
 
 test "compile syntax errors report the failing token position" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const cases = [_]struct {
@@ -10054,7 +9958,7 @@ test "compile syntax errors report the failing token position" {
 }
 
 test "expectToken syntax errors name the expected and actual token kinds" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "if (true {\n  print(\"bad\");\n}", .{ .mode = .script, .filename = "expected-token.js" });
@@ -10066,7 +9970,7 @@ test "expectToken syntax errors name the expected and actual token kinds" {
 }
 
 test "parser error long tail names the unexpected source token" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const cases = [_]struct {
@@ -10092,7 +9996,7 @@ test "parser error long tail names the unexpected source token" {
 }
 
 test "parser error long tail names binding pattern and module tokens" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const cases = [_]struct {
@@ -10118,7 +10022,7 @@ test "parser error long tail names binding pattern and module tokens" {
 }
 
 test "parser error long tail closes semantic and lookahead diagnostics" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const cases = [_]struct {
@@ -10148,7 +10052,7 @@ test "parser error long tail closes semantic and lookahead diagnostics" {
 }
 
 test "parser source-reachable invariant masks carry specific diagnostics" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const cases = [_]struct {
@@ -10195,7 +10099,7 @@ test "parser source-reachable invariant masks carry specific diagnostics" {
 }
 
 test "lexer syntax errors retain the failing token position" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "const a = 1;\nconst s = \"unterminated", .{ .mode = .script, .filename = "lexer-position.js" });
@@ -10207,7 +10111,7 @@ test "lexer syntax errors retain the failing token position" {
 }
 
 test "direct eval propagates script or module identity without changing display filename" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const referrer = try rt.internAtom("/fixture/scripts/main.mjs");
@@ -10248,7 +10152,7 @@ test "direct eval propagates script or module identity without changing display 
 }
 
 test "script parse mode emits bytecode metadata without AST execution" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "var x = 1; x + 2;", .{ .mode = .script, .filename = "script.js" });
@@ -10264,7 +10168,7 @@ test "script parse mode emits bytecode metadata without AST execution" {
 }
 
 test "production root modes end in visible return opcodes" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var empty_script = try compileForTest(rt, "", .{ .mode = .script, .filename = "empty.js" });
@@ -10306,7 +10210,7 @@ test "production root modes end in visible return opcodes" {
 }
 
 test "ordinary script compile publishes one canonical function bytecode root" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "function child() { return 42; } child;", .{
@@ -10324,7 +10228,7 @@ test "ordinary script compile publishes one canonical function bytecode root" {
 }
 
 test "canonical root ownership moves out of parser Result exactly once" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "function child() { return 42; } child;", .{
@@ -10349,7 +10253,7 @@ test "canonical root ownership moves out of parser Result exactly once" {
 }
 
 test "canonical module artifact ownership moves out of parser Result exactly once" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "import { value } from './dep.js'; export { value };", .{
@@ -10379,9 +10283,9 @@ test "canonical module artifact ownership moves out of parser Result exactly onc
 }
 
 test "implicit arguments always resolves before final global var opcodes" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const realm = try core.RealmContext.create(rt);
+    const realm = try core.RealmContext.create(rt, .{});
     defer realm.destroy();
 
     const sources = [_][]const u8{
@@ -10436,9 +10340,9 @@ test "implicit arguments always resolves before final global var opcodes" {
 }
 
 test "canonical root and child independently keep their compile realm alive" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const realm = try core.RealmContext.create(rt);
+    const realm = try core.RealmContext.create(rt, .{});
     var realm_alive = true;
     defer if (realm_alive) realm.destroy();
 
@@ -10471,9 +10375,9 @@ test "canonical root and child independently keep their compile realm alive" {
 }
 
 test "runtime strict compile policy is published by root and child finalizers" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const realm = try core.RealmContext.create(rt);
+    const realm = try core.RealmContext.create(rt, .{});
     defer realm.destroy();
 
     var parsed = try parser.compile(
@@ -10497,7 +10401,7 @@ test "runtime strict compile policy is published by root and child finalizers" {
 }
 
 test "module compile publishes one canonical function bytecode plus metadata artifact" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "export const value = 1;", .{
@@ -10513,9 +10417,9 @@ test "module compile publishes one canonical function bytecode plus metadata art
 }
 
 test "module nested function independently keeps its compile realm alive" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const realm = try core.RealmContext.create(rt);
+    const realm = try core.RealmContext.create(rt, .{});
     var realm_alive = true;
     defer if (realm_alive) realm.destroy();
 
@@ -10547,7 +10451,7 @@ test "module nested function independently keeps its compile realm alive" {
 }
 
 test "canonical root and child survive parser arena release allocation churn and GC" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const source =
@@ -10615,7 +10519,7 @@ test "canonical root and child survive parser arena release allocation churn and
 }
 
 test "root strictness comes from directives or host options, never source comments" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var commented = try compileForTest(
@@ -10647,7 +10551,7 @@ test "root strictness comes from directives or host options, never source commen
 }
 
 test "eval type owns var and lexical declaration carriers like pinned QuickJS" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var indirect_sloppy = try compileForTest(
@@ -10709,7 +10613,7 @@ test "eval type owns var and lexical declaration carriers like pinned QuickJS" {
 }
 
 test "ordinary block string literal is not a function-body directive" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -10725,7 +10629,7 @@ test "ordinary block string literal is not a function-body directive" {
 }
 
 test "function body declarations preserve QuickJS source VarDef order" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -10743,7 +10647,7 @@ test "function body declarations preserve QuickJS source VarDef order" {
 }
 
 test "body var discovery does not cross arrow or class method boundaries" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -10763,7 +10667,7 @@ test "body var discovery does not cross arrow or class method boundaries" {
 }
 
 test "generic for-of accepts complete parenthesized and indexed member targets" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const cases = [_][]const u8{
@@ -10782,7 +10686,7 @@ test "generic for-of accepts complete parenthesized and indexed member targets" 
 }
 
 test "for-of contextual async lookahead follows QuickJS grammar" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var invalid = try compileForTest(
@@ -10812,7 +10716,7 @@ test "for-of contextual async lookahead follows QuickJS grammar" {
 }
 
 test "generic for-of parses computed target exactly once in source order" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -10829,7 +10733,7 @@ test "generic for-of parses computed target exactly once in source order" {
 }
 
 test "for statement dispatch only scans top-level semicolons" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const cases = [_][]const u8{
@@ -10851,7 +10755,7 @@ test "for statement dispatch only scans top-level semicolons" {
 }
 
 test "for-in-of keeps Annex B call targets and rejects other invalid assignment targets" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var annex_b_call = try compileForTest(
@@ -10874,7 +10778,7 @@ test "for-in-of keeps Annex B call targets and rejects other invalid assignment 
 }
 
 test "script top-level lexical captured before declaration uses QuickJS global op" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt,
@@ -10895,7 +10799,7 @@ test "script top-level lexical captured before declaration uses QuickJS global o
 }
 
 test "captured reads encode lexical TDZ in the final var-ref opcode" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var plain = try compileForTest(
@@ -10925,7 +10829,7 @@ test "captured reads encode lexical TDZ in the final var-ref opcode" {
 }
 
 test "named function self-binding writes do not reach var-ref stores" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var sloppy = try compileForTest(
@@ -10982,7 +10886,7 @@ test "named function self-binding writes do not reach var-ref stores" {
 }
 
 test "final bytecode authorizes plain var-ref stores before execution" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const cases = [_]struct {
@@ -11209,7 +11113,7 @@ test "final bytecode authorizes plain var-ref stores before execution" {
 }
 
 test "assignment target scan ignores atom operand bytes" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var held_atoms = std.ArrayList(core.Atom).empty;
@@ -11234,7 +11138,7 @@ test "assignment target scan ignores atom operand bytes" {
 }
 
 test "print calls emit global lookup generic call and receiver-preserving property call bytecode" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "print(1 + 2 * 3); console.log(\"ok\");", .{ .mode = .script, .filename = "print.js" });
@@ -11270,7 +11174,7 @@ test "print calls emit global lookup generic call and receiver-preserving proper
 }
 
 test "simple variable assignments emit var bytecode" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "let value = 5; value = value + 7; print(value);", .{ .mode = .script, .filename = "vars.js" });
@@ -11288,7 +11192,7 @@ test "simple variable assignments emit var bytecode" {
 }
 
 test "quick parser emits compound assignment and update statements" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "let x = 1; x += 2; x++; print(x);", .{ .mode = .script, .filename = "quick-compound-update.js" });
@@ -11303,7 +11207,7 @@ test "quick parser emits compound assignment and update statements" {
 }
 
 test "add_loc finalization accepts only QuickJS RHS producers" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt,
@@ -11396,7 +11300,7 @@ test "add_loc finalization accepts only QuickJS RHS producers" {
 }
 
 test "add_loc finalization attributes a multiline local RHS to the operator" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt,
@@ -11437,7 +11341,7 @@ test "add_loc finalization attributes a multiline local RHS to the operator" {
 }
 
 test "quick parser emits arithmetic compound assignment operators" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "let x = 10; x -= 3; x *= 2; x /= 7; x %= 2; print(x);", .{ .mode = .script, .filename = "quick-compound-arithmetic.js" });
@@ -11451,7 +11355,7 @@ test "quick parser emits arithmetic compound assignment operators" {
 }
 
 test "quick parser does not claim update expression values" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "let x = 1; print(x++);", .{ .mode = .script, .filename = "quick-update-expression-fallback.js" });
@@ -11461,7 +11365,7 @@ test "quick parser does not claim update expression values" {
 }
 
 test "quick parser emits basic array and object literals" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "const arr = [1, 2, 3]; const obj = { a: arr[0], b: 2 }; print(obj.a + obj.b);", .{ .mode = .script, .filename = "quick-literals.js" });
@@ -11479,7 +11383,7 @@ test "quick parser emits basic array and object literals" {
 }
 
 test "quick parser emits object property assignment" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "const obj = { x: 1 }; obj.x = obj.x + 2; print(obj.x);", .{ .mode = .script, .filename = "quick-property-assignment.js" });
@@ -11494,7 +11398,7 @@ test "quick parser emits object property assignment" {
 }
 
 test "quick parser emits optional property access for object and nullish bases" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "const obj = { a: { b: 42 } }; print(obj?.a?.b); print(obj?.x?.y); print(undefined?.a);", .{ .mode = .script, .filename = "quick-optional-property.js" });
@@ -11507,7 +11411,7 @@ test "quick parser emits optional property access for object and nullish bases" 
 }
 
 test "quick parser preserves parenthesized postfix bases" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "const obj = { x: 1 }; print((obj).x); print(({ y: obj.x + 2 }).y); print(([3, 4])[1]); print(({ n: null })?.n);", .{ .mode = .script, .filename = "quick-parenthesized-postfix.js" });
@@ -11524,7 +11428,7 @@ test "quick parser preserves parenthesized postfix bases" {
 }
 
 test "quick parser keeps conditional member callee branches at one stack slot" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const source =
@@ -11550,7 +11454,7 @@ test "quick parser keeps conditional member callee branches at one stack slot" {
 }
 
 test "quick parser retrofits forward var captures into nested closures" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const source =
@@ -11578,7 +11482,7 @@ test "quick parser retrofits forward var captures into nested closures" {
 }
 
 test "quick parser still promotes unconditional parenthesized member calls" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "var o = { x: function () {} }; (o.x)(); ((o.x))(); ((A ?? o).x)();", .{ .mode = .script, .filename = "parenthesized-member-call.js" });
@@ -11590,7 +11494,7 @@ test "quick parser still promotes unconditional parenthesized member calls" {
 }
 
 test "call consumers use final-op provenance for eval with super and comma tags" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var eval_calls = try compileForTest(
@@ -11648,7 +11552,7 @@ test "call consumers use final-op provenance for eval with super and comma tags"
 }
 
 test "quick parser lowers JSON stringify and parse to transitional JSON bytecode" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "const text = JSON.stringify({ a: 1 }); print(JSON.parse(text).a);", .{ .mode = .script, .filename = "quick-json-domain.js" });
@@ -11659,7 +11563,7 @@ test "quick parser lowers JSON stringify and parse to transitional JSON bytecode
 }
 
 test "quick parser lowers Math calls to transitional Math bytecode" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "print(Math.abs(-5)); print(Math.pow(2, 3)); print(Math.min(1, 2, 3));", .{ .mode = .script, .filename = "quick-math-domain.js" });
@@ -11670,7 +11574,7 @@ test "quick parser lowers Math calls to transitional Math bytecode" {
 }
 
 test "quick parser lowers URI calls to transitional URI bytecode" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "console.log(encodeURI(\"a b?x=1&y=2#z\")); print(decodeURIComponent(\"a%20b%3Fx%3D1\"));", .{ .mode = .script, .filename = "quick-uri-domain.js" });
@@ -11681,7 +11585,7 @@ test "quick parser lowers URI calls to transitional URI bytecode" {
 }
 
 test "quick parser lowers Number parse helpers to transitional number bytecode" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -11696,7 +11600,7 @@ test "quick parser lowers Number parse helpers to transitional number bytecode" 
 }
 
 test "quick parser lowers supported Date helpers to receiver-preserving property calls" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -11713,7 +11617,7 @@ test "quick parser lowers supported Date helpers to receiver-preserving property
 }
 
 test "quick parser lowers supported RegExp helpers to receiver-preserving property calls" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -11729,7 +11633,7 @@ test "quick parser lowers supported RegExp helpers to receiver-preserving proper
 }
 
 test "RegExp property calls keep QuickJS call_method bytecode" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var cached = try compileForTest(
@@ -11756,7 +11660,7 @@ test "RegExp property calls keep QuickJS call_method bytecode" {
 }
 
 test "function predeclare scan skips slash-equals regexp literals" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -11778,7 +11682,7 @@ test "function predeclare scan skips slash-equals regexp literals" {
 }
 
 test "quick parser lowers supported Promise helpers to receiver-preserving property calls" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -11802,7 +11706,7 @@ test "quick parser lowers supported Promise helpers to receiver-preserving prope
 }
 
 test "quick parser lowers supported collection helpers to receiver-preserving property calls" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -11840,7 +11744,7 @@ test "quick parser lowers supported collection helpers to receiver-preserving pr
 }
 
 test "template interpolation emits string concatenation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "const x = 10; const y = 20; print(`${x} + ${y} = ${x + y}`);", .{ .mode = .script, .filename = "template.js" });
@@ -11854,7 +11758,7 @@ test "template interpolation emits string concatenation" {
 }
 
 test "simple arrays emit receiver-preserving property calls" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "const arr = [1, 2, 3]; print(arr); print(arr.length); print(arr[0]); print(arr.map(x => x * 2));", .{ .mode = .script, .filename = "array.js" });
@@ -11872,7 +11776,7 @@ test "simple arrays emit receiver-preserving property calls" {
 }
 
 test "simple functions and arrows emit inline helper bytecode" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "function add(a, b) { return a + b; } print(add(2, 3)); const double = x => x * 2; print(double(21)); function fact(n) { return n <= 1 ? 1 : n * fact(n - 1); } print(fact(6));", .{ .mode = .script, .filename = "functions.js" });
@@ -11895,7 +11799,7 @@ test "simple functions and arrows emit inline helper bytecode" {
 }
 
 test "unsupported spread call reports syntax guard" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "print(...[1]);", .{ .mode = .script, .filename = "fallback.js" });
@@ -11905,7 +11809,7 @@ test "unsupported spread call reports syntax guard" {
 }
 
 test "test262 frontmatter does not affect quick parser behavior" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const source =
@@ -11928,7 +11832,7 @@ test "test262 frontmatter does not affect quick parser behavior" {
 }
 
 test "test262 prelude frontmatter parses nested private methods after line_num temp" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const source =
@@ -11973,7 +11877,7 @@ test "test262 prelude frontmatter parses nested private methods after line_num t
 }
 
 test "arrow early errors reject non-simple strict and invalid rest parameters" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const cases = [_][]const u8{
@@ -11994,7 +11898,7 @@ test "arrow early errors reject non-simple strict and invalid rest parameters" {
 }
 
 test "strict parameter binding names follow directive and method grammar" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const rejected = [_][]const u8{
@@ -12039,7 +11943,7 @@ test "strict parameter binding names follow directive and method grammar" {
 }
 
 test "retroactive strict arrow parameter errors retain the binding position" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const cases = [_][]const u8{
@@ -12066,7 +11970,7 @@ test "retroactive strict arrow parameter errors retain the binding position" {
 }
 
 test "arrow early error checks do not reject valid nested rest destructuring" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "var f; f = ([...[...x]]) => {};", .{ .mode = .script, .filename = "arrow-valid-rest.js" });
@@ -12082,7 +11986,7 @@ test "arrow early error checks do not reject valid nested rest destructuring" {
 }
 
 test "destructuring rest parameter defaults enforce await and yield early errors" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const cases = [_][]const u8{
@@ -12101,7 +12005,7 @@ test "destructuring rest parameter defaults enforce await and yield early errors
 }
 
 test "assignment destructuring early errors reject invalid rest forms" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const cases = [_][]const u8{
@@ -12148,7 +12052,7 @@ test "assignment destructuring early errors reject invalid rest forms" {
 }
 
 test "assignment destructuring early errors allow reserved property names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const cases = [_]struct {
@@ -12171,7 +12075,7 @@ test "assignment destructuring early errors allow reserved property names" {
 }
 
 test "assignment early errors reject invalid assignment target types" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const cases = [_][]const u8{
@@ -12189,7 +12093,7 @@ test "assignment early errors reject invalid assignment target types" {
 }
 
 test "async arrow early errors reject await-context parse negatives" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const cases = [_][]const u8{
@@ -12206,7 +12110,7 @@ test "async arrow early errors reject await-context parse negatives" {
 }
 
 test "object computed property names parse async arrow and module await expressions" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var async_arrow = try compileForTest(rt, "let o = { [async () => {}]: 1 };", .{ .mode = .script, .filename = "computed-async-arrow.js" });
@@ -12235,7 +12139,7 @@ test "object computed property names parse async arrow and module await expressi
 }
 
 test "class early errors reject class parse negatives" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const source =
@@ -12256,7 +12160,7 @@ test "class early errors reject class parse negatives" {
 }
 
 test "module parse mode records import export metadata and strict flag" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -12305,7 +12209,7 @@ test "module parse mode records import export metadata and strict flag" {
 }
 
 test "module parser preserves regex literals across zod-like lookahead scans" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const source =
@@ -12354,7 +12258,7 @@ test "module parser preserves regex literals across zod-like lookahead scans" {
 }
 
 test "parser rescans divide-assign token as regex literal beginning with equals" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const source =
@@ -12385,7 +12289,7 @@ test "parser rescans divide-assign token as regex literal beginning with equals"
 }
 
 test "module import local names are compiled as module var refs" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -12417,7 +12321,7 @@ test "module import local names are compiled as module var refs" {
 }
 
 test "module parser rejects duplicate exported names across export forms" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const cases = [_][]const u8{
@@ -12434,7 +12338,7 @@ test "module parser rejects duplicate exported names across export forms" {
 }
 
 test "module parser validates local export bindings after full body parse" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const valid_cases = [_][]const u8{
@@ -12460,7 +12364,7 @@ test "module parser validates local export bindings after full body parse" {
 }
 
 test "module parser rejects duplicate import attribute keys per with clause" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const invalid_cases = [_][]const u8{
@@ -12484,7 +12388,7 @@ test "module parser rejects duplicate import attribute keys per with clause" {
 }
 
 test "module parser accepts empty side-effect import attributes" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "import './dep.js' with {};", .{ .mode = .module, .filename = "side-effect-import-attr.js" });
@@ -12496,7 +12400,7 @@ test "module parser accepts empty side-effect import attributes" {
 }
 
 test "module parser validates string module export names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const invalid_cases = [_][]const u8{
@@ -12517,7 +12421,7 @@ test "module parser validates string module export names" {
 }
 
 test "module namespace metadata is syntax-driven when the imported name is star" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -12542,7 +12446,7 @@ test "module namespace metadata is syntax-driven when the imported name is star"
 }
 
 test "module parser rejects comma expression as default export expression" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var invalid = try compileForTest(rt, "export default null, null;", .{ .mode = .module, .filename = "invalid-default-export.js" });
@@ -12555,7 +12459,7 @@ test "module parser rejects comma expression as default export expression" {
 }
 
 test "module parser accepts keyword module export and import names" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -12572,7 +12476,7 @@ test "module parser accepts keyword module export and import names" {
 }
 
 test "module parser allows duplicate top-level var declarations" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "var test262; var test262; for (var other; false;) {} for (var other; false;) {}", .{ .mode = .module, .filename = "dup-module-var.js" });
@@ -12582,7 +12486,7 @@ test "module parser allows duplicate top-level var declarations" {
 }
 
 test "module parser hoists block var declarations to module var refs" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "if (true) { var proto = {}; proto; }", .{ .mode = .module, .filename = "block-var-module.js" });
@@ -12602,7 +12506,7 @@ test "module parser hoists block var declarations to module var refs" {
 }
 
 test "direct eval closure seed lowers unresolved read to var ref" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const x_atom = try rt.internAtom("x");
@@ -12638,7 +12542,7 @@ test "direct eval closure seed lowers unresolved read to var ref" {
 }
 
 test "direct eval rebuilds private grammar bindings from ordered closure rows" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const near_x = try rt.atoms.newSymbol("#x", .private);
@@ -12700,7 +12604,7 @@ test "direct eval rebuilds private grammar bindings from ordered closure rows" {
 }
 
 test "only direct eval enables private grammar from closure seeds" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const private_x = try rt.atoms.newSymbol("#x", .private);
@@ -12723,7 +12627,7 @@ test "only direct eval enables private grammar from closure seeds" {
 }
 
 test "direct eval ref closure seed preserves table identity only" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const x_atom = try rt.internAtom("x");
@@ -12750,7 +12654,7 @@ test "direct eval ref closure seed preserves table identity only" {
 }
 
 test "parameter direct eval keeps arg var object ahead of declaration globals" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const seed = [_]parser.EvalClosureSeed{.{
@@ -12782,7 +12686,7 @@ test "parameter direct eval keeps arg var object ahead of declaration globals" {
 }
 
 test "QuickJS direct eval destructuring declares through the variable object" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const binding_atom = try rt.internAtom("evalDestructFallback");
@@ -12838,7 +12742,7 @@ test "QuickJS direct eval destructuring declares through the variable object" {
 }
 
 test "parser accepts dynamic import call expressions" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var module_parsed = try compileForTest(rt, "try { await import('dep', { with: {} }); } catch (e) {}", .{ .mode = .module, .filename = "dynamic-import.mjs" });
@@ -12867,7 +12771,7 @@ test "parser accepts dynamic import call expressions" {
 }
 
 test "dynamic import arguments do not leak anonymous function named evaluation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -12883,7 +12787,7 @@ test "dynamic import arguments do not leak anonymous function named evaluation" 
 }
 
 test "parser rejects invalid dynamic import call syntax" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var new_import = try compileForTest(rt, "new import('dep');", .{ .mode = .script, .filename = "bad-dynamic-import.js" });
@@ -12896,7 +12800,7 @@ test "parser rejects invalid dynamic import call syntax" {
 }
 
 test "module parser accepts default as explicit namespace export name" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(rt, "export * as default from './dep.js';", .{ .mode = .module, .filename = "default-star.js" });
@@ -12910,7 +12814,7 @@ test "module parser accepts default as explicit namespace export name" {
 }
 
 test "eval function class private destructuring spread async generator features are recorded" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var parsed = try compileForTest(
@@ -12945,23 +12849,6 @@ test "eval function class private destructuring spread async generator features 
     try expectOpcodeRecursive(&parsed, qop.import);
 }
 
-test "bytecode constants retain values through Phase 4 structures" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    const name = try rt.internAtom("emit");
-
-    var function_bc = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer function_bc.deinit(rt);
-
-    const text = try core.string.String.createAscii(rt, "hello");
-    const value = text.value();
-    const const_index = try function_bc.addConstant(value);
-
-    try std.testing.expectEqual(@as(u32, 0), const_index);
-    try std.testing.expectEqual(@as(usize, 1), function_bc.constants.values.len);
-}
-
 // F1 — QuickJS-aligned lexer tests (separate file)
 
 // Cut A pin: every construct that mutates label operands or the code tail
@@ -12970,7 +12857,7 @@ test "bytecode constants retain values through Phase 4 structures" {
 // queries directly), so compiling these snippets IS the assertion; the
 // explicit checks only pin that each compile kept succeeding.
 test "label/patch/move/truncate corpus keeps compiling after a flow-tail rewrite" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const cases = [_][]const u8{
         // end-targeting loop exit: epilogue must append a landing terminator
@@ -13018,10 +12905,8 @@ test "FunctionDef builder emit and deinit releases it" {
     var env = try LexerTestEnv.init();
     defer env.deinit();
     const name = try env.rt.internAtom("test");
-    var function = engine.bytecode.Bytecode.init(&env.rt.memory, &env.rt.atoms, name);
-    defer function.deinit(env.rt);
     var lex = env.lexer("1 + 2");
-    var state = try ParseState.init(&lex, &function);
+    var state = try ParseState.init(&lex, &env.rt.memory, &env.rt.atoms, name);
     defer state.deinit(env.rt);
 
     try state.beginBuilderEmissionForTest();
@@ -13067,7 +12952,7 @@ test "parser releases identifier and private-name token atoms" {
     // `next_token` interned into the token. Without
     // that release every identifier occurrence leaks one atom retain, so the
     // atom table never returns to its pre-compile balance.
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const source =
@@ -13126,7 +13011,7 @@ test "parser releases identifier and private-name token atoms" {
 }
 
 test "parser releases module and import-attribute token atoms" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const source =
@@ -13168,7 +13053,7 @@ test "parser returns the atom table to balance across every token-bearing constr
     // token (declarations, patterns, class bodies, labels, modules, TS enum and
     // namespace). Any path that forgets to retain-then-release shows up as a
     // non-zero delta over an identical second compile.
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const Case = struct { src: []const u8, file: []const u8, mode: parser.Mode };
@@ -13497,14 +13382,6 @@ pub const phase_ownership = struct {
         return result;
     }
 
-    fn attachedSourceCount(function: *const engine.bytecode.Bytecode) usize {
-        var count: usize = 0;
-        for (function.source_loc_slots) |slot| {
-            if (slot.pc < function.code.len) count += 1;
-        }
-        return count;
-    }
-
     /// Relocations the parser produced, over the whole FunctionDef tree: the
     /// live population the resolver must consume before the artifact exists.
     fn builderRelocCount(fd: *const engine.bytecode.FunctionDef) usize {
@@ -13524,7 +13401,10 @@ pub const phase_ownership = struct {
         rt: *core.JSRuntime,
         shape: *const Shape,
         baseline: Baseline,
-        function: engine.bytecode.Bytecode,
+        /// The published root, rooted from `finalize` until `releaseArtifact`.
+        fb: ?*engine.bytecode.FunctionBytecode,
+        fb_root: core.JSValue,
+        fb_scope: core.runtime.ValueRootScope(1),
         lex: QjsLexer,
         state: ParseState,
         artifact_live: bool,
@@ -13543,7 +13423,9 @@ pub const phase_ownership = struct {
                 .rt = rt,
                 .shape = shape,
                 .baseline = Baseline.capture(rt),
-                .function = undefined,
+                .fb = null,
+                .fb_root = core.JSValue.undefinedValue(),
+                .fb_scope = .{},
                 .lex = undefined,
                 .state = undefined,
                 .artifact_live = false,
@@ -13553,31 +13435,23 @@ pub const phase_ownership = struct {
                 .b1_source_created = 0,
             };
 
-            self.function = engine.bytecode.Bytecode.init(&rt.memory, &rt.atoms, atom.ids.empty_string);
             self.artifact_live = true;
             errdefer self.deinit();
 
             self.lex = QjsLexer.init(std.testing.allocator, &rt.atoms, shape.source);
             self.lexer_live = true;
-            // The non-canonical root emitter: code lands in the mutable
-            // Bytecode rather than in the FunctionDef, which is what keeps the
-            // per-phase driving in the compile-only path legal. `initWithRuntime`
-            // additionally carries the JSContext-equivalent the parser needs for
-            // runtime-owned constants.
-            self.state = try ParseState.initWithRuntime(rt, &self.lex, &self.function);
+            // `initWithRuntime` carries the JSContext-equivalent the parser
+            // needs for runtime-owned constants.
+            self.state = try ParseState.initWithRuntime(rt, &self.lex, atom.ids.empty_string);
             self.state_live = true;
-            try std.testing.expect(self.state.root_mode == .raw_bytecode);
             self.state.function_def.is_eval = true;
             self.state.function_def.is_global_var = true;
-            // Tier 1 leaves the root childless so `resolve_variables` and
-            // `resolve_labels` can be driven one at a time. Tier 2 opts into the
-            // production script-root policy, where every top-level function
-            // becomes a child FunctionDef that finalization later materializes
-            // into a published FunctionBytecode.
-            if (shape.tier == .nested_function_bytecode) {
-                self.state.root_mode = .canonical;
-                self.state.top_level_lexical_as_global_ref = true;
-            }
+            // Tier 1 sources declare no function, so the root stays childless
+            // and `resolve_variables` / `resolve_labels` can be driven one at
+            // a time. Tier 2 sources declare one; every top-level function is
+            // a child FunctionDef that finalization later materializes into a
+            // published FunctionBytecode.
+            self.state.top_level_lexical_as_global_ref = true;
             try parser_core.parseDirectives(&self.state);
             try parser_core.parseProgramStatements(&self.state, .{ .func = true, .func_with_label = true, .other = true });
             try self.state.emitReturnUndefined();
@@ -13600,9 +13474,37 @@ pub const phase_ownership = struct {
             }
         }
 
+        /// Publish the root through the production finalizer; the artifact
+        /// stays rooted until `releaseArtifact`.
+        pub fn finalize(self: *Window, realm: *core.RealmContext) !void {
+            const artifacts = try engine.bytecode.pipeline.finalize.createFunctionBytecode(
+                &self.state.function_def,
+                .{ .realm = realm },
+            );
+            self.fb = &artifacts[0];
+            self.fb_root = core.JSValue.functionBytecode(&artifacts[0].header);
+            self.fb_scope = core.runtime.rootValues(.{&self.fb_root});
+            self.fb_scope.activate(self.rt);
+        }
+
+        /// Source markers retained by lowering: one pc2line entry each.
+        fn finalSourceCount(self: *Window) !usize {
+            const fb = self.fb orelse return 0;
+            if (fb.pc2lineBuf().len == 0) return 0;
+            const slots = try engine.bytecode.pipeline.pc2line.decode(
+                std.testing.allocator,
+                .{ .bytes = fb.pc2lineBuf(), .memory = &self.rt.memory },
+            );
+            defer std.testing.allocator.free(slots);
+            return slots.len;
+        }
+
         pub fn releaseArtifact(self: *Window) void {
             if (!self.artifact_live) return;
-            self.function.deinit(self.rt);
+            if (self.fb != null) {
+                self.fb_scope.deactivate(self.rt);
+                self.fb = null;
+            }
             self.artifact_live = false;
             // TGC S3-c: dropping the last holder no longer retires the atom
             // entries this window interned; the collector does. The terminal
@@ -13624,7 +13526,7 @@ pub const phase_ownership = struct {
                 .phase1 => CodeCensus{
                     .label_markers = if (self.state_live) builderRelocCount(&self.state.function_def) else 0,
                 },
-                .final => if (self.artifact_live) censusCode(self.function.code, .final) else CodeCensus{},
+                .final => if (self.fb) |fb| censusCode(fb.byteCode(), .final) else CodeCensus{},
             };
             try std.testing.expect(code_census.valid);
             const fixups = if (self.state_live) pendingFixupCount(&self.state) else 0;
@@ -13647,12 +13549,12 @@ pub const phase_ownership = struct {
             const builder_released = releases - self.baseline.releases;
             const builder_owned = self.rt.memory.allocation_count - self.baseline.allocation_count;
 
-            // BytecodeImpl.deinit releases source_loc_slots and pc2line_buf.
-            // Slots are attached only when pc < code.len; discarded is the B1
-            // slot census minus the slots retained by lowering.
+            // The published FunctionBytecode owns the retained markers as its
+            // pc2line table; discarded is the B1 marker census minus the
+            // markers retained by lowering.
             const source_created = switch (phase) {
                 .phase1 => if (self.state_live) builderSourceCount(&self.state.function_def) else 0,
-                .final => if (self.artifact_live) self.function.source_loc_slots.len else 0,
+                .final => try self.finalSourceCount(),
             };
             const source_discarded = if (self.b1_source_created >= source_created)
                 self.b1_source_created - source_created
@@ -13676,11 +13578,8 @@ pub const phase_ownership = struct {
                 },
                 .source = .{
                     .created = source_created,
-                    .attached = switch (phase) {
-                        .phase1 => source_created,
-                        .final => if (self.artifact_live) attachedSourceCount(&self.function) else 0,
-                    },
-                    .committed = if (self.artifact_live) self.function.pc2line_buf.len else 0,
+                    .attached = source_created,
+                    .committed = if (self.fb) |fb| fb.pc2lineBuf().len else 0,
                     .discarded = source_discarded,
                     .outstanding = source_created,
                 },
@@ -13761,9 +13660,10 @@ pub const phase_ownership = struct {
         try std.testing.expectEqual(@as(usize, 0), snapshot.source.committed);
     }
 
-    pub fn publishedFunctionBytecodeCount(function: *const engine.bytecode.Bytecode) usize {
+    pub fn publishedFunctionBytecodeCount(window: *const Window) usize {
+        const fb = window.fb orelse return 0;
         var count: usize = 0;
-        for (function.constants.values) |value| {
+        for (fb.cpoolSlice()) |value| {
             count += @intFromBool(value.tagOf() == core.value.Tag.function_bytecode);
         }
         return count;
@@ -13808,7 +13708,7 @@ pub const phase_ownership = struct {
 
 test "four-ledger phase-boundary ownership accounting parse-only" {
     for (&phase_ownership.shapes) |*shape| {
-        const rt = try core.JSRuntime.create(std.testing.allocator);
+        const rt = try core.JSRuntime.create(std.testing.allocator, .{});
         defer rt.destroy();
 
         try phase_ownership.warmRuntime(rt, shape);
@@ -13827,7 +13727,7 @@ test "four-ledger phase-boundary ownership accounting parse-only" {
         // so the parse-only residual is zero for both tiers.
         try std.testing.expectEqual(
             @as(usize, 0),
-            phase_ownership.publishedFunctionBytecodeCount(&window.function),
+            phase_ownership.publishedFunctionBytecodeCount(&window),
         );
         switch (shape.tier) {
             .exact_leaf => try std.testing.expectEqual(@as(usize, 0), window.state.function_def.child_list.len),

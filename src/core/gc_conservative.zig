@@ -326,7 +326,7 @@ pub fn spillRegistersAndScan(
 }
 
 test "spillRegistersAndScan covers a non-empty stack range" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     var metrics: Metrics = .{};
     const shade = struct {

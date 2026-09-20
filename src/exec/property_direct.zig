@@ -388,7 +388,7 @@ fn dataSlotAt(object: *core.Object, index: usize, atom_id: core.Atom) ?DataSlot 
 }
 
 test "fast own data property replacement retains private brand atom" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const object = try core.Object.create(rt, core.class.ids.object, null);
 
@@ -417,7 +417,7 @@ test "fast own data property replacement retains private brand atom" {
 }
 
 test "global own data slot helpers preserve lookup and write ownership" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
 
@@ -428,16 +428,13 @@ test "global own data slot helpers preserve lookup and write ownership" {
     const initial = try core.string.String.createAscii(rt, "initial");
     try global.defineOwnProperty(rt, key, core.Descriptor.data(initial.value(), .all));
 
-    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer function.deinit(rt);
-    function.closure_var = try rt.memory.alloc(bytecode.function_bytecode.BytecodeClosureVar, 1);
-    function.closure_var[0] = bytecode.function_bytecode.BytecodeClosureVar.init(.{
+    const execution_function = try bytecode.FunctionBytecode.createFixture(rt, .{ .name = name, .closure_var_count = 1 });
+    defer execution_function.destroyUnpublishedFixture(rt);
+    execution_function.closureVar()[0] = bytecode.function_bytecode.BytecodeClosureVar.init(.{
         .closure_type = .global_decl,
         .var_idx = 0,
         .var_name = key,
     });
-    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
-    const execution_function = execution_adapter.init(&function);
 
     const lookup = globalOwnDataPropertyBorrowedLookup(global, key).?;
     try std.testing.expectEqual(@as(usize, 0), lookup.index);
@@ -501,7 +498,7 @@ test "global own data slot helpers preserve lookup and write ownership" {
 }
 
 test "global own data slot helpers reject readonly and accessor writes" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
 

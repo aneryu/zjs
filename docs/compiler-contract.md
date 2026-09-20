@@ -18,11 +18,11 @@ migrates from QuickJS is its **control-flow identity model**:
 - resolve passes are separate (`resolve_variables.zig`, then
   `resolve_labels.zig`), and **byte addresses exist only after final layout**.
 
-What is preserved from zjs: exact-CFG semantics as the auditing oracle,
-ownership validation (atom ledger, item-wise release), OOM transactional
-discipline (no consumer may observe half-published state), and the
-Debug/ReleaseSafe fail-loud oracles. Absolute PC exits the core identity
-system; zjs language semantics do not change.
+What is preserved from zjs: ownership validation (atom ledger, item-wise
+release) and OOM transactional discipline (no consumer may observe
+half-published state). Absolute PC exits the core identity system; zjs
+language semantics do not change. The Debug/ReleaseSafe exact-CFG oracles
+that once audited the passes were retired on 2026-09-20 (section 5).
 
 Finalized lexical links (`scopes[].first` / `vars[].scope_next`) have a
 separate structural proof. `resolve_variables.run` validates its current
@@ -42,14 +42,14 @@ finalization-time topology mutations must preserve this invalidation boundary.
 ## 1. Identity taxonomy
 
 These are the only identities a v2 producer may create. Every later stage
-(S3R exact-CFG liveness, `resolve_labels.zig`) keys off them.
+(`resolve_variables.zig`, `resolve_labels.zig`) keys off them.
 
 | Identity | Definition | Role |
 | --- | --- | --- |
 | `LabelId` | `src/compiler/labels.zig` — function-scoped `enum(u32)` creation index | **Jump identity.** The 4-byte operand of every jump-format instruction holds the `LabelId` (little-endian) until final emission. Stable across detach/splice: a moved block keeps its `LabelId`s; only slot offsets rebind. |
-| bound label (a `LabelSlot` with `flags.bound`) | `bound_offset` is the temporary-stream position of the bind | **Block boundary.** The bind slot subsumes the in-stream `op.label` pseudo-op of the deleted legacy emitter; it is the exact-CFG node key S3R consumes. `emitterBindLabel` = bind **and** invalidate `last_opcode_pos` (control-flow merge, qjs `emit_label`); `emitterBindLabelRaw` = bind only (provenance-preserving, qjs `emit_label_raw`; used by the optional-chain close). |
+| bound label (a `LabelSlot` with `flags.bound`) | `bound_offset` is the temporary-stream position of the bind | **Block boundary.** The bind slot subsumes the in-stream `op.label` pseudo-op of the deleted legacy emitter; it is the boundary key both resolve passes consume. `emitterBindLabel` = bind **and** invalidate `last_opcode_pos` (control-flow merge, qjs `emit_label`); `emitterBindLabelRaw` = bind only (provenance-preserving, qjs `emit_label_raw`; used by the optional-chain close). |
 | aux label | same `LabelId`, referenced through a `RelocEntry` of kind `.aux32` | The `scope_make_ref` secondary operand (op + atom(4) + label(4) + scope(2)); `Builder.emitScopeRefOpOwned`. The put side **binds** it (qjs `put_lvalue` `emit_label`). |
-| `ref_count` | `LabelSlot.ref_count`, bumped on every referencing emission, decremented on rollback/detach/dead-code removal, moved wholesale by `Builder.retargetLabelRefs` | qjs `update_label` bookkeeping retained for the `resolve_labels` short-form pass. Since S3R it is **never a liveness input**: dead-code decisions come from the exact block CFG (see section 5). |
+| `ref_count` | `LabelSlot.ref_count`, bumped on every referencing emission, decremented on rollback/detach/dead-code removal, moved wholesale by `Builder.retargetLabelRefs` | qjs `update_label` bookkeeping: the liveness input of both resolve passes (a boundary whose labels all have zero references is dead, quickjs.c `skip_dead_code`) and the short-form bookkeeping of `resolve_labels` (see section 5). |
 | `backward_target` flag | set when a reference is emitted against an already-bound label (and on splice when the bound target precedes the operand) | Conservative loop marker for short-form bookkeeping. **Never a correctness input**; rollback deliberately does not clear it. |
 | source event | `SourceSlot { temp_offset, line, col }` | pc2line identity. Bound to the logical output event order, **not** to a byte pc of any final stream; final emission maps events to output positions (QuickJS shape — no old-PC relocation chain). Markers with `line <= 0 or col <= 0` are dropped at the sink. |
 | `last_opcode_pos` | `Builder.last_opcode_pos`, qjs `fd->last_opcode_pos` | The **sole target fact** for speculative-LHS rewinds (`getLValue`) and the straight-line half of liveness. Invalidated (−1) at every merge bind, `truncateTail`, `detachTail`, `spliceSegment`. |
@@ -492,25 +492,30 @@ anywhere in the group:
 
 No identity kinds beyond section 1 were required.
 
-## 5. Liveness note (S3 → S3R)
+## 5. Liveness
 
-`LabelSlot.ref_count` + `flags.backward_target` + `last_opcode_pos` were the
-qjs **linear** liveness model that S3 (`resolve_variables.zig`) consumed at
-first. Stage S3R (landed) replaced that consumer with zjs's exact-CFG model
-keyed on **bound labels as block boundaries** (`src/compiler/cfg.zig`):
-block starts are the dedup-sorted bound-label offsets plus stream start/end,
-edges are LabelId jump operands collected only before each block's first
-unconditional terminal (empty-gosub references excluded), and worklist
-reachability from entry decides every dead-code/ownership choice.
-`ref_count` remains as qjs `update_label` bookkeeping for the
-`resolve_labels.zig` short-form pass and never decides liveness again. A
-Debug/ReleaseSafe oracle (`cfg.auditInstructionOwnership`) recomputes
-legacy-style instruction-granularity reachability over the temp stream and
-panics on any divergence from `block_live && before-terminal` — the
-block/byte boundary-normalization equivalence is a proof obligation, not an
-assumption. The identity taxonomy above is the S3R input contract and must
-not be weakened (in particular: every label bound, binds ordered, ref_count
-exact under rollback/detach/splice).
+Liveness is QuickJS's linear model in every build mode: `LabelSlot.ref_count`
+(`update_label` bookkeeping), `flags.backward_target`, and
+`last_opcode_pos`. After an unconditional terminal, `resolve_variables`
+skips forward to the first boundary that still holds a referenced label
+(`deadBoundaryAt` / `skipDeadCode`, quickjs.c `skip_dead_code`), releasing
+the references of every jump it removes; `resolve_labels` repeats the same
+rule on its own output. A self-referencing unreachable loop therefore
+survives, exactly as it does in QuickJS.
+
+Until 2026-09-20 Debug and ReleaseSafe builds additionally ran an exact
+block-CFG model (`cfg.zig`) as an oracle, and the resolver's dead-boundary
+and eval-capture decisions took the CFG answer in those modes while
+ReleaseFast took the `ref_count` answer. The two agreed on every file of
+the test262 + fixtures corpus, but differed on synthetic streams (a dead
+self-loop, a fold that unreferences a block, an eval reached after a scope
+exit), so a Debug run could not stand in for the shipped compiler. The
+oracle, the CFG, the Builder's control index that only it consumed, and the
+per-fold boundary records were removed; the shared vocabulary that remains
+(`BindEntry`, the phase-1 instruction view, `SourcePoint`) is
+`src/compiler/temp_stream.zig`. The identity taxonomy above is still the
+input contract of both passes and must not be weakened (every label bound,
+binds ordered, `ref_count` exact under rollback/detach/splice).
 
 ## 6. Findings
 

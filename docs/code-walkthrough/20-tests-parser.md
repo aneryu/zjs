@@ -68,13 +68,6 @@
 - **实现**：Parser-only tests deliberately compile in a fresh bare realm so every finalized FB exercises the production RealmRef owner without paying for or depending on standard-global materialization.。热路径用 `try` 传播分配/引擎错误。`defer` 释放本次成功路径上的临时资源。关键调用：`core.RealmContext.create`、`realm.destroy`、`parser.compile`。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime（本文件不走共享 harness）。返回 `!parser.Result`，由测试 `try`/`expectError` 消费。
 
-### `restoreFinalizedFragmentView` (`src/tests/parser.zig:851`)
-
-- **签名**：`fn restoreFinalizedFragmentView(function: *engine.bytecode.Bytecode) !void`。
-- **作用**：The helpers below exercise parser/lowering fragments rather than runnable function bodies. Give finalize a real terminator so it can enforce the production CFG invariant, then restore the fragment-only view that these byte-sequence tests are designed to inspect. These returned fixtures are never dispatched by the VM.。
-- **实现**：先看 `function.code` 是否以 `op.return_undef` 结尾（空码或已是 `return`/`throw` 等 abrupt 结尾时直接返回，不做修复），是则把 `function.code` 切掉最后一个字节，恢复「片段视图」。不释放任何内存，只改切片长度。
-- **所有权 / 错误 / 调用**：返回 `!void`，由测试 `try`/`expectError` 消费。
-
 ### `parseExpr` (`src/tests/parser.zig:865`)
 
 - **签名**：`fn parseExpr(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode`。
@@ -635,13 +628,6 @@
 - **实现**：`fd.builder.?.label_slots[label_index].bound_offset`——直接取 label 槽的绑定偏移（无 builder 时会 panic）。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `publishPhase1Stream` (`src/tests/parser.zig:6844`)
-
-- **签名**：`fn publishPhase1Stream(function: *engine.bytecode.Bytecode, state: *ParseState) !void`。
-- **作用**：Publish the parser's compact phase-1 stream onto `function` so the byte-sequence tests below can inspect it after the ParseState — which owns the Builder the parser emitted into — is torn down.。
-- **实现**：Publish the parser's compact phase-1 stream onto `function` so the byte-sequence tests below can inspect it after the ParseState — which owns the Builder the parser emitted into — is torn down.。含循环。热路径用 `try` 传播分配/引擎错误。关键调用：`function.setCode`、`function.appendAtomOperand`、`function.appendSourceLoc`。
-- **所有权 / 错误 / 调用**：返回 `!void`，由测试 `try`/`expectError` 消费。
-
 ### `parseRawStatement` (`src/tests/parser.zig:6853`)
 
 - **签名**：`fn parseRawStatement(env: *TestEnv, src: []const u8) !engine.bytecode.Bytecode`。
@@ -810,13 +796,6 @@
 - **实现**：主体是 `switch` 分发。含循环。关键调用：`engine.bytecode.opcode.sizeOfPhase1`、`engine.bytecode.opcode.sizeOf`、`engine.bytecode.opcode.formatOfPhase1`、`engine.bytecode.opcode.formatOf`、`formatHasLabelOperand`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `phase_ownership.attachedSourceCount` (`src/tests/parser.zig:13583`)
-
-- **签名**：`fn attachedSourceCount(function: *const engine.bytecode.Bytecode) usize`。
-- **作用**：测试夹具/探针 `phase_ownership.attachedSourceCount`，给周围 `test` 块提供可注入行为或断言助手。
-- **实现**：遍历 `function.source_loc_slots`，只数 `slot.pc < function.code.len` 的槽——即真正落在当前码流内的 source 标记数。含循环。
-- **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
-
 ### `phase_ownership.builderRelocCount` (`src/tests/parser.zig:13593`)
 
 - **签名**：`fn builderRelocCount(fd: *const engine.bytecode.FunctionDef) usize`。
@@ -931,7 +910,7 @@
 
 ### `phase_ownership.publishedFunctionBytecodeCount` (`src/tests/parser.zig:13847`)
 
-- **签名**：`pub fn publishedFunctionBytecodeCount(function: *const engine.bytecode.Bytecode) usize`。
+- **签名**：`pub fn publishedFunctionBytecodeCount(window: *const Window) usize`。
 - **作用**：测试夹具/探针 `phase_ownership.publishedFunctionBytecodeCount`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：含循环。关键调用：`@intFromBool`、`value.tagOf`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。

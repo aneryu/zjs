@@ -28,7 +28,7 @@ embedder / CLI / tests
  src/core/             值、对象、形状、属性、GC、Runtime/Context   ← 禁止依赖 parser/exec/runtime/CLI
         ▲
         │
- src/parser.zig  →  src/compiler/  →  src/bytecode.zig  →  src/exec/  →  src/event_loop.zig
+ src/parser.zig  →  src/compiler/  →  src/bytecode/  →  src/exec/  →  src/event_loop.zig
    词法+语法+发射      变量/标签/布局         载体与 opcode 表         VM+内建+模块         事件循环
 ```
 
@@ -46,8 +46,8 @@ embedder / CLI / tests
 以嵌入代码为例：
 
 ```zig
-const rt = try zjs.JSRuntime.create(allocator);
-const ctx = try zjs.JSContext.create(rt);
+const rt = try zjs.JSRuntime.create(allocator, .{});
+const ctx = try zjs.JSContext.create(rt, .{});
 const result = try ctx.eval("let x = 1 + 2; x;", .{});
 ```
 
@@ -60,7 +60,7 @@ const result = try ctx.eval("let x = 1 + 2; x;", .{});
    - `builder.zig`：临时指令流、标签槽、重定位。
    - `resolve_variables.zig`：变量解析与活性。
    - `resolve_labels.zig`：最终布局、跳转穿线。生产布局 `short`，`plain` 只是 A/B 诊断。
-5. **`bytecode.zig`** 把 `FunctionDef` 收成 GC 管理的 `FunctionBytecode`（96 字节核心头 + packed 常量/变量/闭包/code + 可选 debug 尾 + zjs 自己的 call-facts 尾）。
+5. **`compiler/finalize.zig`** 把 `FunctionDef` 收成 GC 管理的 `FunctionBytecode`（96 字节核心头 + packed 常量/变量/闭包/code + 可选 debug 尾 + zjs 自己的 call-facts 尾）。
 6. **`zjs_vm.run`**（`exec/zjs_vm.zig`）为根函数造一个真实的函数对象，准备 `this` / var refs / 全局对象，进入 `tailcall_dispatch`。
 7. **opcode 处理**落在 `vm_*.zig` 与 `vm_property_*.zig`；值级运行时在 `*_ops.zig`；内建表在 `*_builtin_ops.zig`，经 `builtin_dispatch.zig`。
 8. 返回值是 `JSValue`。出了引擎边界必须用 handle（`Local` / `Persistent`），不能把裸 `JSValue` 活过一次调用。

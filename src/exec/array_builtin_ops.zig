@@ -692,9 +692,9 @@ fn arrayIterator(realm: *core.RealmContext, receiver: core.JSValue, kind: ArrayI
 }
 
 test "realm-aware primitive array iterator reuses the final realm prototype" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const realm = try core.RealmContext.create(rt);
+    const realm = try core.RealmContext.create(rt, .{});
     defer realm.destroy();
 
     const prototype = try core.Object.create(rt, core.class.ids.object, null);
@@ -751,7 +751,7 @@ fn iteratorResult(rt: *core.JSRuntime, value: core.JSValue, done: bool) !core.JS
 }
 
 test "array iteratorResult roots direct function bytecode value while creating result" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-iterator-result-bytecode-symbol");
@@ -777,7 +777,7 @@ test "array iteratorResult roots direct function bytecode value while creating r
 }
 
 test "array splice roots direct function bytecode insert values while creating removed array" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const array = try core.Object.createArray(rt, null);
@@ -821,7 +821,7 @@ test "array splice roots direct function bytecode insert values while creating r
 }
 
 test "array constructWithPrototype roots direct function bytecode elements while creating array" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-construct-bytecode-symbol");
@@ -848,7 +848,7 @@ test "array constructWithPrototype roots direct function bytecode elements while
 }
 
 test "array concat roots direct function bytecode argument while creating output array" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const receiver = try core.Object.createArray(rt, null);

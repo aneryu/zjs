@@ -543,10 +543,10 @@ fn ensureStandardGlobalsInstaller() void {
 /// (success or failure) release everything they allocated.
 fn runSnippet(allocator: std.mem.Allocator, snippet: Snippet) !void {
     ensureStandardGlobalsInstaller();
-    const rt = try core.JSRuntime.create(allocator);
+    const rt = try core.JSRuntime.create(allocator, .{});
     var rt_owned = true;
     errdefer if (rt_owned) rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     var ctx_owned = true;
     errdefer if (ctx_owned) ctx.destroy();
     var waiters_cleaned = false;
@@ -611,10 +611,10 @@ fn stickyFailureTailProbe(allocator: std.mem.Allocator) !void {
 /// execution. Uses a syntax-dense source so the sweep covers the parser
 /// allocation clusters and every root/child RealmRef publication rollback.
 fn runParseOnly(allocator: std.mem.Allocator, source: []const u8) !void {
-    const rt = try core.JSRuntime.create(allocator);
+    const rt = try core.JSRuntime.create(allocator, .{});
     var rt_owned = true;
     errdefer if (rt_owned) rt.destroy();
-    const realm = try core.RealmContext.create(rt);
+    const realm = try core.RealmContext.create(rt, .{});
     var realm_owned = true;
     errdefer if (realm_owned) realm.destroy();
     var result = try parser.compile(.{ .realm = realm }, source, .{
@@ -714,10 +714,10 @@ fn loadGraphModule(
 /// exercising module records, link, instantiate, and evaluation order.
 fn runEsmGraphLink(allocator: std.mem.Allocator) !void {
     ensureStandardGlobalsInstaller();
-    const rt = try core.JSRuntime.create(allocator);
+    const rt = try core.JSRuntime.create(allocator, .{});
     var rt_owned = true;
     errdefer if (rt_owned) rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     var ctx_owned = true;
     errdefer if (ctx_owned) ctx.destroy();
     var wrapper = BindingContext.borrowCore(ctx);
@@ -922,14 +922,14 @@ fn runRecoveryAttempt(injector: *OneShotFailingAllocator, snippet: Snippet) !voi
     defer OneShotFailingAllocator.disarmCellInjection();
     attempt: {
         ensureStandardGlobalsInstaller();
-        const rt = core.JSRuntime.create(injector.allocator()) catch |err| {
+        const rt = core.JSRuntime.create(injector.allocator(), .{}) catch |err| {
             // Injection landed inside runtime bootstrap: acceptable, the
             // constructor must fail cleanly (balance asserted below).
             if (err != error.OutOfMemory) return err;
             break :attempt;
         };
         defer rt.destroy();
-        const ctx = core.JSContext.create(rt) catch |err| {
+        const ctx = core.JSContext.create(rt, .{}) catch |err| {
             if (err != error.OutOfMemory) return err;
             break :attempt;
         };
@@ -1025,9 +1025,9 @@ fn expectIntrinsicBootstrapCleared(ctx: *core.JSContext) !void {
 
 test "oom recovery canary: ordinary GLOBAL selector retries auto-init" {
     ensureStandardGlobalsInstaller();
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try zjs.exec.zjs_vm.contextGlobal(ctx);
 
@@ -1068,9 +1068,9 @@ fn runContextGlobalRetryAttempt(fail_index: usize) !bool {
     defer OneShotFailingAllocator.disarmCellInjection();
     {
         ensureStandardGlobalsInstaller();
-        const rt = try core.JSRuntime.create(injector.allocator());
+        const rt = try core.JSRuntime.create(injector.allocator(), .{});
         defer rt.destroy();
-        const ctx = try core.JSContext.create(rt);
+        const ctx = try core.JSContext.create(rt, .{});
         defer ctx.destroy();
         defer zjs.exec.atomics_ops.cleanupAtomicsWaitersForContext(ctx);
         try std.testing.expect(ctx.isLive());
@@ -1128,13 +1128,13 @@ fn runBindingContextConstructionRetryAttempt(fail_index: usize) !bool {
     defer OneShotFailingAllocator.disarmCellInjection();
     {
         ensureStandardGlobalsInstaller();
-        const rt = try core.JSRuntime.create(injector.allocator());
+        const rt = try core.JSRuntime.create(injector.allocator(), .{});
         defer rt.destroy();
 
         // Keep one published Realm in the Runtime so publication of the
         // binding Realm must grow the one-entry root-provider array. This
         // makes the final fallible commit part of the injected surface.
-        const anchor = try core.JSContext.create(rt);
+        const anchor = try core.JSContext.create(rt, .{});
         defer anchor.destroy();
         try std.testing.expect(anchor.isLive());
         try std.testing.expectEqual(anchor, rt.firstContext().?);
@@ -1144,7 +1144,7 @@ fn runBindingContextConstructionRetryAttempt(fail_index: usize) !bool {
         injector.attempts = 0;
         injector.induced = false;
         injector.disarmed = false;
-        const first = BindingContext.create(rt);
+        const first = BindingContext.create(rt, .{});
         injector.disarmed = true;
         induced = injector.induced;
 
@@ -1164,7 +1164,7 @@ fn runBindingContextConstructionRetryAttempt(fail_index: usize) !bool {
                 try std.testing.expectEqual(@as(usize, 1), rt.root_providers.len);
                 try std.testing.expectEqual(native_count_before, rt.native_entries.items.len);
 
-                created = try BindingContext.create(rt);
+                created = try BindingContext.create(rt, .{});
             },
             else => return err,
         }
@@ -1192,7 +1192,7 @@ test "oom recovery canary: binding Realm construction rollback and retry" {
 }
 
 test "oom recovery canary: FunctionBytecode combined main FAM allocation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("oom-function-bytecode-fixture");
@@ -1215,7 +1215,6 @@ test "oom recovery canary: FunctionBytecode combined main FAM allocation" {
         fixture_options.var_count,
         fixture_options.closure_var_count,
         fixture_options.byte_code.len,
-        0,
         0,
     );
     // Above the slab ceiling, so the exact
@@ -1416,9 +1415,9 @@ test "oom cell injection: the hook is reached and a refusal is honoured" {
         never.arm();
         defer OneShotFailingAllocator.disarmCellInjection();
         ensureStandardGlobalsInstaller();
-        const rt = try core.JSRuntime.create(std.testing.allocator);
+        const rt = try core.JSRuntime.create(std.testing.allocator, .{});
         defer rt.destroy();
-        const ctx = try core.JSContext.create(rt);
+        const ctx = try core.JSContext.create(rt, .{});
         defer ctx.destroy();
         var wrapper = BindingContext.borrowCore(ctx);
         _ = try wrapper.eval(alloc_source, .{ .filename = corpus_filename });
@@ -1436,9 +1435,9 @@ test "oom cell injection: the hook is reached and a refusal is honoured" {
     refuse_first.arm();
     defer OneShotFailingAllocator.disarmCellInjection();
     ensureStandardGlobalsInstaller();
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     var wrapper = BindingContext.borrowCore(ctx);
     if (wrapper.eval(alloc_source, .{ .filename = corpus_filename })) |_| {} else |err| switch (err) {
@@ -1494,9 +1493,9 @@ fn runLookaheadRestoreAttempt(injector: *OneShotFailingAllocator, fail_index: us
     // bootstrap and teardown stay outside the counted window.
     injector.armCellInjection();
     defer OneShotFailingAllocator.disarmCellInjection();
-    const rt = try core.JSRuntime.create(injector.allocator());
+    const rt = try core.JSRuntime.create(injector.allocator(), .{});
     defer rt.destroy();
-    const realm = try core.RealmContext.create(rt);
+    const realm = try core.RealmContext.create(rt, .{});
     defer realm.destroy();
 
     injector.attempts = 0;

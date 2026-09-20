@@ -3452,7 +3452,7 @@ test "standard and annexB string method-id tables preserve load-bearing ids" {
 }
 
 test "default object tag distinguishes bytecode function classes" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const class_ids = [_]core.ClassId{

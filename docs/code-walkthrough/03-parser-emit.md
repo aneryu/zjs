@@ -2,35 +2,6 @@
 
 phase-1 opcode 经 `Emitter` → `builderEmit*` → `compiler.Builder`。`getLValue`/`putLValue` 把最后一条 getter 收成赋值目标。using / finally / 隐式 return 的清理也在这里。
 
-
-### `takeEmissionSnapshot` (`src/parser.zig:2804`)
-
-- **签名**：`fn takeEmissionSnapshot(self: *State) EmissionSnapshot`。
-- **作用**：给当前发射流拍一份回滚点。
-- **实现**：把四条可失败流的当前位置连同两项 provenance 装成一个 `EmissionSnapshot` 返回：`currentCodeLen()`、`currentAtomOperandLen()`、source_loc 槽数（按 `emit_to_function_def` 在 `curFunc()` 与 `self.function` 之间二选一）、`currentParserLabelCount()`，外加 `curFunc().last_opcode_pos` 与 `self.last_opcode_source_offset` 两项 provenance。纯读不改状态，配 `rollbackEmission` 使用：OOM 时把半发布的 code / atom / source 截回这个点，运行时仍可用——QuickJS 那边 DynBuf 失败会毒化整个编译。
-- **所有权 / 错误 / 调用**：不分配、不改状态：把 `curFunc()`（或 root 侧 `self.function`）里已有的四个长度和两项 provenance 抄进一个按值返回的 `EmissionSnapshot`，返回值不是借用、无需释放。无 error set。两个调用方都紧跟一条 `errdefer rollbackEmission`：`parseReturnStatement`、`parseThrowStatement`。
-
-### `rollbackEmission` (`src/parser.zig:2823`)
-
-- **签名**：`fn rollbackEmission(self: *State, snapshot: EmissionSnapshot) void`。
-- **作用**：把一次 parser 阶段发射期间写过的所有可失败流（字节码、atom 操作数、source_loc、label 计数、last_opcode 记号）退回快照点，使 OOM 失败不留半成品。
-- **实现**：按 `emit_to_function_def` 选 `curFunc()` 或 `self.function` 作为目标，依次 `truncateAtomOperands` / `truncateSourceLocs` / 截断字节码（FunctionDef 侧是 `truncateByteCode`，root 侧是 `truncateCode`）；再 `setParserLabelCount(snapshot.label_count)`、写回 `curFunc().last_opcode_pos` 与 `self.last_opcode_source_offset`。（增量维护的 flow-tail 摘要 `FlowTailSummary` 已随 phase-1 原始字节后端一起删除，这里不再有摘要要作废。）与 QuickJS 的差别也写在 doc 注释里：qjs 在 DynBuf 失败后毒化整个编译且不再恢复，zjs 返回 OOM 并保持 runtime 可用，因此绝不能让任何消费者看到这份半发布的 code/atom/source/provenance 状态。
-- **所有权 / 错误 / 调用**：只退长度，不释放也不重分配任何缓冲：`truncateAtomOperands` / `truncateSourceLocs` / `truncateByteCode`（root 侧 `truncateCode`）都只改 slice 的 len、保留容量。被丢掉的 atom 操作数只是 id——两个 `truncateAtomOperands`（`FunctionDefImpl` / `BytecodeImpl`）都只改 slice 长度，rc 时代那条 release 循环在 TGC S3-c 之后先变成空循环、本轮已删；编译期 atom 的存活统一由 `CompileAtomScope` 这个 GC RootProvider 负责，所以这里没有任何引用计数义务。不碰 `builder`（Builder 有自己的 `snapshot`/`rollback`），也不碰已发布的 `FunctionBytecode`。无 error set，两处调用全在 errdefer 上：`parseReturnStatement`、`parseThrowStatement`。
-
-### `currentParserLabelCount` (`src/parser.zig:2839`)
-
-- **签名**：`fn currentParserLabelCount(self: *State) u32`。
-- **作用**：读出当前发射目标已分配的 parser 阶段 label 个数（快照/回滚与新 label 编号都靠它）。
-- **实现**：`!self.emit_to_function_def` 时直接返回 root 侧的 `self.root_parser_label_count`；否则断言 `curFunc().label_count >= 0`（FunctionDef 用有符号计数）后 `@intCast` 成 `u32` 返回。
-- **所有权 / 错误 / 调用**：无：纯读访问器，不分配、无 error set，负计数只有 Debug 下的 `assert`（失败是 panic 不是错误返回）。调用方是两处快照构造——`takeEmissionSnapshot`（`src/parser.zig:2826`）与 `takeParserSnapshot`（`:13222`）。
-
-### `setParserLabelCount` (`src/parser.zig:2845`)
-
-- **签名**：`fn setParserLabelCount(self: *State, count: u32) void`。
-- **作用**：写侧镜像：设置当前发射目标已分配的 parser 阶段 label 个数（快照回滚时用）。
-- **实现**：`currentParserLabelCount` 的写侧镜像：`emit_to_function_def` 时 `curFunc().label_count = @intCast(count)`（回到有符号域），否则写 `self.root_parser_label_count = count`。
-- **所有权 / 错误 / 调用**：不分配、无 error set，就地写回计数（FunctionDef 侧转回有符号域）。唯一调用方 `rollbackEmission`（`src/parser.zig:2848`）。
-
 ### `markDirectEvalCall` (`src/parser.zig:2853`)
 
 - **签名**：`fn markDirectEvalCall(self: *State) Error!void`。
@@ -168,34 +139,6 @@ phase-1 opcode 经 `Emitter` → `builderEmit*` → `compiler.Builder`。`getLVa
 - **实现**：取 `activeBuilder()`；若 `source_len != 0`，比对最后一个 source 槽：`line` 与 `col` 都与本次相同就直接返回——对应 QuickJS 比较最后一个显式 source 指针、不为同一个语法点重复发 `OP_line_num`。否则 `v2b.addSourceMarker(@intCast(line_num), @intCast(col_num))`；Builder 自身会忽略非正坐标。
 - **所有权 / 错误 / 调用**：不自己分配：去重通过后由 `Builder.addSourceMarker` 在 `fd.memory` 上扩 `source_slots`。返回的是 **`compiler.builder.Error`**（不是 `parser_core.Error`），由调用方的 `mapBuilderError`（`src/parser.zig:7448`）折成 `OutOfMemory` / `BytecodeOverflow` / `ParserInvariant`。调用方：`Emitter.opAt`（`:7489`）、`Emitter.addSourceMarker`（`:7507`），另有单测 `src/tests/parser.zig:13070`。
 
-### `builderRecordPlainControl` (`src/parser.zig:3479`)
-
-- **签名**：`fn builderRecordPlainControl(self: *State, op_id: u8) compiler.builder.Error!void`。
-- **作用**：无立即数指令发出后，把其中的「终结基本块」事实登记进 Builder 的控制索引。
-- **实现**：一个 `switch (op_id)`：`op.return` / `op.return_undef` / `op.throw` / `op.ret` 四者归并到同一分支，调 `activeBuilder().recordControl(.terminal)`；`else` 什么都不做。
-- **所有权 / 错误 / 调用**：不分配；命中终结指令时调 `Builder.recordControl(.terminal)`，控制索引的增长在 `fd.memory` 上（`enableControlIndex` 已在 `ensureBuilderForFd` 打开）。error set 是 `compiler.builder.Error`，由上层 `mapBuilderError` 翻译。调用方 `builderEmitOp`（`src/parser.zig:3639`）与 `Emitter.opU8NoSource`（`:7553`）。
-
-### `builderRecordU16Control` (`src/parser.zig:3490`)
-
-- **签名**：`fn builderRecordU16Control(self: *State, op_id: u8) compiler.builder.Error!void`。
-- **作用**：带 u16 立即数的指令发出后的控制流登记。
-- **实现**：`switch (op_id)`：`op.tail_call` / `op.tail_call_method` 记 `.terminal`（尾调用不返回本帧），`op.apply_eval` 记 `.direct_eval`，其余 `else` 不记。
-- **所有权 / 错误 / 调用**：同族：不分配，只把 `tail_call*` 记成 `.terminal`、`apply_eval` 记成 `.direct_eval`，error set 为 `compiler.builder.Error`。调用方 `builderEmitOpU16`（`src/parser.zig:3649`）、`Emitter.opU16At`（`:7501`）、`Emitter.callOp`（`:7569`）。
-
-### `builderRecordU32Control` (`src/parser.zig:3498`)
-
-- **签名**：`fn builderRecordU32Control(self: *State, op_id: u8) compiler.builder.Error!void`。
-- **作用**：带 u32 立即数的指令发出后的控制流登记——这一族只有直接 eval 一种事实。
-- **实现**：单个 `if`：`op_id == opcode.op.eval` 时 `activeBuilder().recordControl(.direct_eval)`，否则什么都不做。
-- **所有权 / 错误 / 调用**：同族：不分配，只有 `op.eval` 一条臂记 `.direct_eval`，error set 为 `compiler.builder.Error`。调用方 `builderEmitOpU32`（`src/parser.zig:3654`）、`Emitter.opU32NoSource`（`:7619`）。
-
-### `builderRecordAtomU8Control` (`src/parser.zig:3503`)
-
-- **签名**：`fn builderRecordAtomU8Control(self: *State, op_id: u8) compiler.builder.Error!void`。
-- **作用**：带 atom + u8 立即数的指令发出后的控制流登记。
-- **实现**：单个 `if`：`op_id == opcode.op.throw_error` 时记 `.terminal`（这条抛错指令终结基本块），否则无动作。
-- **所有权 / 错误 / 调用**：不分配（字节码/atom/控制索引的增长都在 Builder 自己的 `fd.memory` 账上）；error set 是 **`compiler.builder.Error`**（`OutOfMemory` / `BytecodeOverflow` / `InvalidBytecode`），不是 `parser_core.Error`，也不归 `rollbackEmission` 管——Builder 自带 `snapshot`/`rollback`，翻译成 `Error.*` 是调用方 `mapBuilderError`（`:7448`）的事。唯一调用方 `builderEmitAtomOpU8Owned`（`:3669`）；树内唯一会命中的 opcode 是 `throw_error`。
-
 ### `builderEmitOp` (`src/parser.zig:3510`)
 
 - **签名**：`pub fn builderEmitOp(self: *State, op_id: u8) compiler.builder.Error!void`。
@@ -284,8 +227,8 @@ phase-1 opcode 经 `Emitter` → `builderEmit*` → `compiler.Builder`。`getLVa
 
 - **签名**：`pub fn ensureBuilderForFd(self: *State, fd: *function_def_mod.FunctionDef) compiler.builder.Error!void`。
 - **作用**：给一个 FunctionDef 装上属于它自己的 `Builder`（幂等）。
-- **实现**：`self` 未使用（`_ = self`）。仅当 `fd.builder == null` 时：`fd.memory.create(compiler.Builder)` 分配，`compiler.Builder.init(fd.memory, fd.atoms)` 初始化，`enableControlIndex()` 打开控制流索引，最后挂到 `fd.builder`。已经有则原样返回，因此可反复调用。每个被发射进去的 FunctionDef 都拥有一个 Builder。
-- **所有权 / 错误 / 调用**：**本族唯一真正分配的函数**：`fd.memory.create(compiler.Builder)` + `Builder.init(fd.memory, fd.atoms)` + `enableControlIndex()`，所有权归 `fd.builder`，由 `FunctionDef.deinit`（`bytecode.zig` 里那段「parse-time/error-path backstop」）或 v2 lowering 的消费点释放，本函数不负责。幂等（已有则直接返回）。失败是 `compiler.builder.Error`（`create`/`enableControlIndex` 的 OOM）；生产调用方大多写成 `catch return error.OutOfMemory`：`initRootEmitter`（`src/parser.zig:952`）、`pushFunction`（`:1396`）、`createClassFieldsInitFunction`（`:14302`）、`appendDefaultClassConstructor`（`:15117`），另有 `beginProgramEmission`（`:3729`）与测试钩子（`:3722`）。
+- **实现**：`self` 未使用（`_ = self`）。仅当 `fd.builder == null` 时：`fd.memory.create(compiler.Builder)` 分配，`compiler.Builder.init(fd.memory, fd.atoms)` 初始化，最后挂到 `fd.builder`。已经有则原样返回，因此可反复调用。每个被发射进去的 FunctionDef 都拥有一个 Builder。
+- **所有权 / 错误 / 调用**：**本族唯一真正分配的函数**：`fd.memory.create(compiler.Builder)` + `Builder.init(fd.memory, fd.atoms)`，所有权归 `fd.builder`，由 `FunctionDef.deinit`（`bytecode.zig` 里那段「parse-time/error-path backstop」）或 v2 lowering 的消费点释放，本函数不负责。幂等（已有则直接返回）。失败是 `compiler.builder.Error`（`create` 的 OOM）；生产调用方大多写成 `catch return error.OutOfMemory`：`initRootEmitter`（`src/parser.zig:952`）、`pushFunction`（`:1396`）、`createClassFieldsInitFunction`（`:14302`）、`appendDefaultClassConstructor`（`:15117`），另有 `beginProgramEmission`（`:3729`）与测试钩子（`:3722`）。
 
 ### `beginBuilderEmissionForTest` (`src/parser.zig:3594`)
 
@@ -301,20 +244,6 @@ phase-1 opcode 经 `Emitter` → `builderEmit*` → `compiler.Builder`。`getLVa
 - **实现**：先 `ensureBuilderForFd(self.curFunc())`；`curFunc().body_scope < 0` 视为 `error.InvalidBytecode`。取 Builder、`v2b.snapshot()` 并挂 `errdefer v2b.rollback(snapshot)`，再 `v2b.emitOpU16(opcode.op.enter_scope, @intCast(body_scope))`。之所以要补发：`initRootEmitter` 在任何 Builder 存在之前就确立了 body-scope 标识，这一个 enter 事件只能等 Builder 挂上后才落流（qjs 在 `js_parse_program` 之前由 `push_scope` 发 `OP_enter_scope`，无 source 事件，quickjs.c:24128-24135/31441）。
 - **所有权 / 错误 / 调用**：自己不分配，分配发生在转调的 `ensureBuilderForFd`（Builder 挂在 `fd.builder` 上）。error set 是 **`compiler.builder.Error`**：`body_scope < 0` 直接 `error.InvalidBytecode`，`enter_scope` 的发射失败由 `errdefer v2b.rollback(snapshot)` 把 Builder 退回本函数入口态（注意退的是 Builder 的快照，不是 `rollbackEmission`）。唯一调用方 `compileQjsProgram`（`:16255`）。
 
-### `currentCodeLen` (`src/parser.zig:3613`)
-
-- **签名**：`fn currentCodeLen(self: *State) usize`。
-- **作用**：读当前发射目标已写出的字节码长度，也就是下一条指令的起始 pc。
-- **实现**：`emit_to_function_def` 时返回 `curFunc().byte_code.len`，否则返回 root 的 `self.function.code.len`。
-- **所有权 / 错误 / 调用**：无：纯读长度，不分配、无 error set。读的是 phase-1 原始字节流（`curFunc().byte_code` / `self.function.code`），**不是** Builder 的 `code_len`——这两个流是分开的。调用方 3 处：`takeEmissionSnapshot`、`parseFunctionParamsAndBody`、`takeParserSnapshot`。
-
-### `currentAtomOperandLen` (`src/parser.zig:3618`)
-
-- **签名**：`fn currentAtomOperandLen(self: *State) usize`。
-- **作用**：读当前发射目标已记账的 atom 操作数个数。
-- **实现**：一个三元式：`emit_to_function_def` 时取 `curFunc().atom_operands.len`，否则取 `self.function.atom_operands.len`。`takeEmissionSnapshot` 用它记 atom 回滚点，`rollbackEmission` 的失败路径据此截回。
-- **所有权 / 错误 / 调用**：无：纯读长度，不分配、无 error set。调用方 3 处：`takeEmissionSnapshot`（`src/parser.zig:2821`）、`parseForStatement`（`:9445`）、`takeParserSnapshot`（`:13217`）。
-
 ### `parseLogicalAssignment` (`src/parser.zig:3946`)
 
 - **签名**：`fn parseLogicalAssignment( s: *State, flags: ParseFlags, lvalue: *LValue, kind: LogicalAssignKind, direct_lhs_atom: ?Atom, ) Error!void`。
@@ -322,7 +251,7 @@ phase-1 opcode 经 `Emitter` → `builderEmit*` → `compiler.Builder`。`getLVa
 - **实现**：按 `&&=` / `||=` / `??=` 的短路语义排指令（对照 qjs `js_parse_assign_expr2` 的逻辑赋值分支，quickjs.c:28167-28204；所有拓扑记账一律无 source）。先 `dup` 复制已读出的旧值；`kind == .nullish` 时再发 `is_undefined_or_null` 把判定转成布尔；新建 `skip_assign` 标签并按 kind 发条件跳转（`.lor` 用 `if_true`，其余用 `if_false`），短路成立就跳过整个赋值。赋值臂里：`drop` 丢掉旧值，用只保留 `in_accepted` 的 `rhs_flags` 调 `parseAssignExpr2` 解析 RHS；若 `direct_lhs_atom` 非空且与 lvalue 持有的 `name` 相同（匿名函数直接赋给标识符），补一次 `setObjectName`。随后按 `lvalue.depth` 把待存值排到正确深度：depth 3 走 `emitterOpU8(ext0, ext0_sub.insert4)`，0/1/2 分别是 `dup` / `insert2` / `insert3`（其他值 `unreachable`），再 `putLValue(..., .no_keep_depth)` 落存。最后新建 `end` 标签、`goto end`；`skip_assign` 臂按 `depth` 连发同样多条 `nip` 把 lvalue 的基址/键弹掉、只留旧值；两臂在 `end` 汇合。
 - **所有权 / 错误 / 调用**：不分配 JS 对象；全部产出是字节码与两个 Builder label（`skip_assign` / `end`，只是 Builder 内索引，无释放义务）。`lvalue` 是**借用**的可变指针，本函数消费它的 `depth` 与 `name` 但不接管它——释放仍归调用方的 `LValue.deinit`。失败来自 `parseAssignExpr2` 递归（可能是 `SyntaxError` / `StackOverflow`）与底层 Builder 的 OOM / 溢出（经 `mapBuilderError` 折成 `Error.*`）；`lvalue.depth` 超出 0-3 是 `unreachable`（Debug 下 panic）。树内唯一调用方 `parseAssignExpr2`（`:4097`）。
 
-### `LValue.deinit` (`src/parser.zig:4018`)
+### `LValue.deinit` (`src/parser.zig:163`)
 
 - **签名**：`fn deinit(self: *LValue, _: *State) void`。
 - **作用**：放弃描述符对 `name` atom 的所有权标记（`putLValue` 把 atom 交出去之后、或调用方中途放弃这个赋值目标时的收尾）。

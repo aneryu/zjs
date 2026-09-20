@@ -900,7 +900,7 @@ fn applyForwardCallMethod(
     const live_bytes = @intFromPtr(sp) - @intFromPtr(vm.stack.values);
     if (live_bytes < total * @sizeOf(JSValue)) return .threw;
     const region_start = sp - total;
-    vm.frame.pc += 3;
+    vm.frame.pc += 2;
     vm.stack.retreatToCallRegionFrom(&vm.machine.pending_call_region, sp, region_start);
     const receiver = region_start[0];
     const method = region_start[1];
@@ -1255,7 +1255,7 @@ inline fn finishForwardedEntry(
     // Vacated slots above the rewritten window hold stale copies; clear them
     // so nothing above the published top looks like a live root.
     if (new_total < old_total) @memset(region_start[new_total..old_total], JSValue.undefinedValue());
-    vm.frame.pc += 3;
+    vm.frame.pc += 2;
     vm.stack.retreatToCallRegionFrom(&vm.machine.pending_call_region, region_start + new_total, region_start);
     if (pollRetreatedCallRegion(vm, region_start, new_total)) return .threw;
     // O1 forwarded arm: the rewritten window is already the method layout the
@@ -1921,9 +1921,9 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
                 .two => 2,
                 .three => 3,
             };
-            // Instruction length: `call argc:u16 idx:u8` is 4 bytes, the
-            // burned-arity `call0..3 idx:u8` forms are 2.
-            const insn_len: usize = if (argc_source == .operand) 4 else 2;
+            // Instruction length: `call argc:u16` is 3 bytes, the burned-arity
+            // `call0..3` forms are 1.
+            const insn_len: usize = if (argc_source == .operand) 3 else 1;
             vm.syncPc(pc, insn_len);
             // Inline the common bytecode-to-bytecode resolution here instead of paying
             // execCall's 10-argument call boundary every iteration: resolveInlineTarget
@@ -2170,7 +2170,7 @@ fn op_async_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm
     const argc = readInt(u16, pc + 1);
     const region = sp - (@as(usize, argc) + 2);
     if (inline_calls.resolveNoSuspendAsync(vm.ctx, vm.global, region[1])) |target| {
-        vm.frame.pc += 3;
+        vm.frame.pc += 2;
         return enterNoSuspendAsync(vm, vb, sp, region, argc, .method, target);
     }
     // On a miss the method PC still points to argc, as callMethod requires.
@@ -2269,7 +2269,7 @@ fn op_apply(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(16) 
 // Keep this high-frequency tail-dispatch target on an I-cache boundary so
 // unrelated source/layout changes cannot move its prologue across a cache line.
 fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(64) linksection(op_handler_section) callconv(.c) Outcome {
-    vm.syncPc(pc, 1); // frame.pc now at the argc:u16 + cache_idx:u8 operands
+    vm.syncPc(pc, 1); // frame.pc now at the argc:u16 operand
     const argc = readInt(u16, pc + 1);
     // Inline the bytecode-method resolution (recv.method() where method is a plain
     // bytecode function — OOP recursion, chained calls) instead of paying
@@ -2300,17 +2300,17 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
         if (object_ops.objectFromValueTrustedExpression(method)) |method_obj| {
             if (method_obj.class_id == core.class.ids.bytecode_function) {
                 if (inline_calls.resolveInlineFunctionFromObject(vm.global, method_obj)) |resolved| {
-                    vm.frame.pc += 3;
+                    vm.frame.pc += 2;
                     vm.stack.retreatToCallRegionFrom(&vm.machine.pending_call_region, sp, region_start);
                     const execution = resolved.call_facts.execution;
                     // Method twin of the OP_call0 empty-leaf warm arm: `recv.m()` on a
                     // published leaf skips InlineTarget freight and the three-deep
                     // pushFrame/fallback/setup constructor chain. The receiver rides
                     // into the frame's owned raw `this` (identical ownership to the
-                    // general method arm); `pc + 4` (opcode + argc:u16 + cache_idx:u8)
+                    // general method arm); `pc + 3` (opcode + argc:u16)
                     // is the register-resident twin of the frame.pc advance above.
                     if (argc == 0 and execution.simple_inline_empty_leaf) {
-                        return pushWarmEmptyLeafAndEnter(.receiver, vb, vm, resolved.fb, resolved.call_facts, region_start, pc + 4, resolved.fb.byteCode().ptr);
+                        return pushWarmEmptyLeafAndEnter(.receiver, vb, vm, resolved.fb, resolved.call_facts, region_start, pc + 3, resolved.fb.byteCode().ptr);
                     }
                     // Strict methods and arrow-valued properties share the
                     // policy-independent receiver arm (the raw receiver transfers
@@ -2347,7 +2347,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                     if (leaf_kind != .none) {
                         if (argc == resolved.fb.arg_count) {
                             if (leaf_kind == .sloppy) {
-                                return pushWarmExactArgsLeafAndEnter(.receiver, .next, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, argc, pc + 4, resolved.fb.byteCode().ptr);
+                                return pushWarmExactArgsLeafAndEnter(.receiver, .next, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, argc, pc + 3, resolved.fb.byteCode().ptr);
                             }
                             return pushExactArgsLeafAndEnter(.receiver, .next, vb, vm, resolved.fb, resolved.call_facts, resolved.var_refs[0..resolved.fb.closureVarCount()], region_start, argc, resolved.fb.byteCode().ptr);
                         }
@@ -2373,7 +2373,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                         const args: []const JSValue = region_base_ptr[2..][0..argc];
                         if (builtin_dispatch.invokeLeafFastEntry(rec, args)) |value| {
                             storeValueAsIntPair(&region_base_ptr[0], value);
-                            return @call(.always_tail, next, .{ pc + 4, region_base_ptr + 1, vb, vm });
+                            return @call(.always_tail, next, .{ pc + 3, region_base_ptr + 1, vb, vm });
                         }
                     } else if (rec.kind == .method_leaf) {
                         // Lane K prim_self arm (`str.charCodeAt(i)`): same
@@ -2382,7 +2382,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                         const region_base_ptr = sp - (@as(usize, argc) + 2);
                         if (builtin_dispatch.invokeMethodLeafFastEntry(vm.ctx, rec, region_base_ptr[0], region_base_ptr[2..][0..argc])) |value| {
                             storeValueAsIntPair(&region_base_ptr[0], value);
-                            return @call(.always_tail, next, .{ pc + 4, region_base_ptr + 1, vb, vm });
+                            return @call(.always_tail, next, .{ pc + 3, region_base_ptr + 1, vb, vm });
                         }
                     } else if (rec.flags.forwards_call) {
                         // §5.4 window-rewrite arms: `f.call(...)` / `f.apply(...)`
@@ -2422,10 +2422,10 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                         // `console.log(x)`): receiver from the window.
                         if (method_obj.nativeCallTargetAssumeCFunction()) |target| {
                             const region_base_ptr = sp - (@as(usize, argc) + 2);
-                            vm.frame.pc += 3; // argc + cache_idx, as dispatch does
+                            vm.frame.pc += 2; // argc, as dispatch does
                             vm.stack.setTopPtr(sp);
                             const value = builtin_dispatch.callManagedFromWindow(vm.rt, target.realm, rec, method_obj, loadValueAsIntPair(&region_base_ptr[0]), region_base_ptr[2..][0..argc]);
-                            return managedInlineFinish(vm, value, region_base_ptr, pc + 4, vb);
+                            return managedInlineFinish(vm, value, region_base_ptr, pc + 3, vb);
                         }
                     } else if (vm_native.methodManagedInlineEligible(vm.rt, rec)) {
                         // Inline K2 managed arm (`world.query(i)`): receiver
@@ -2435,10 +2435,10 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
                         const this_value = loadValueAsIntPair(&region_base_ptr[0]);
                         if (builtin_dispatch.nativeReceiverSelf(this_value, rec)) |self_ptr| {
                             if (method_obj.nativeCallTargetAssumeCFunction()) |target| {
-                                vm.frame.pc += 3;
+                                vm.frame.pc += 2;
                                 vm.stack.setTopPtr(sp);
                                 const value = builtin_dispatch.callMethodManagedFromWindow(vm.rt, target.realm, rec, method_obj, self_ptr, this_value, region_base_ptr[2..][0..argc]);
-                                return managedInlineFinish(vm, value, region_base_ptr, pc + 4, vb);
+                                return managedInlineFinish(vm, value, region_base_ptr, pc + 3, vb);
                             }
                         }
                     }
@@ -2917,7 +2917,7 @@ fn op_for_of_next(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) alig
 // established `.text.zjs.op_handlers` island.
 fn op_tail_call(pc: [*]const u8, sp: [*]JSValue, vb: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section_tail) callconv(.c) Outcome {
     const argc = readInt(u16, pc + 1);
-    vm.syncPc(pc, 4); // argc:u16 + cache_idx:u8
+    vm.syncPc(pc, 3); // argc:u16
     vm.stack.setTopPtr(sp);
     switch (call_runtime.execCall(
         vm.ctx,

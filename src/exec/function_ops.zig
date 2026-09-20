@@ -483,7 +483,6 @@ pub fn constructDynamicFunctionFromSource(
         .global = function_global,
         .current_function_value = root_function_value,
         .is_eval_code = true,
-        .global_declarations_prevalidated = true,
     });
     // `runWithArgs` returns the completion value owned, but ALSO leaves an owned
     // copy on `nested_stack`. When that stack is a `vm_stack` arena window (the

@@ -7,7 +7,7 @@
 | 文件 | 覆盖 |
 | --- | --- |
 | [04-compiler-builder.md](04-compiler-builder.md) | `builder.zig`：临时流、标签槽、重定位、snapshot/rollback、detach/splice |
-| [04-compiler-cfg.md](04-compiler-cfg.md) | `cfg.zig`：精确块 CFG、活性、边界唯一性 oracle |
+| [04-compiler-temp-stream.md](04-compiler-temp-stream.md) | `temp_stream.zig`：两路 resolve 共用的 bind 索引行、phase-1 指令视图、SourcePoint |
 | [04-compiler-resolve-variables.md](04-compiler-resolve-variables.md) | `resolve_variables.zig`：作用域 lowering、死代码、S3 产物 |
 | [04-compiler-resolve-labels.md](04-compiler-resolve-labels.md) | `resolve_labels.zig`：最终布局、跳转穿线、short/plain |
 | [04-compiler-tests.md](04-compiler-tests.md) | `test_entry.zig`、`tests.zig`：测试入口与 harness |
@@ -21,15 +21,15 @@
 ```
 parser 发射
     │  compact temp stream：opcode + 立即数 + LabelId + Atom + scope
-    │  旁表：LabelSlot[] / RelocEntry[] / SourceSlot[] / ControlSlot[]
+    │  旁表：LabelSlot[] / RelocEntry[] / SourceSlot[]
     ▼
 Builder（builder.zig）
     │  跳转操作数永远是 LabelId（LE u32），不是绝对 PC
     ▼
 resolve_variables.run  （Stage 3）
     │  只读 Builder
-    │  建 BindEntry 索引 → cfg.build（精确块 CFG）
-    │  可达 eval 捕获 → 作用域 lowering → 死代码 skip
+    │  建 BindEntry 索引
+    │  作用域 lowering → 死代码 skip（qjs update_label 记账）
     │  输出 ResolvedProduct：code / atom ledger / 更新后的 LabelSlot / source
     │  first_reloc 清空；ref_count 按 qjs update_label 记账
     ▼
@@ -96,7 +96,7 @@ FunctionBytecode 打包（bytecode.zig，05 册）
 
 ## `labels.zig`
 
-### `LabelId.index` (`src/compiler/labels.zig:20`)
+### `LabelId.index` (`src/compiler/labels.zig:15`)
 
 - **签名**：`pub fn index(self: LabelId) u32`。
 - **作用**：把函数局部标签身份还原成槽下标，供数组索引和 LE 操作数写入。
@@ -107,56 +107,21 @@ FunctionBytecode 打包（bytecode.zig，05 册）
 
 ## `root.zig`
 
-`root.zig` 是 compiler 包入口：re-export `cfg` / `builder` / `labels` / 两路 resolve，以及 `compileFunction`。文件头写明：没有第二条编译器可比；正确性靠 CFG oracle、边界唯一性、atom 所有权审计和执行套件。
+`root.zig` 是 compiler 包入口：re-export `temp_stream` / `builder` / `labels` / 两路 resolve，以及 `compileFunction`。
 
-### `formatOracleReport` (`src/compiler/root.zig:43`)
-
-- **签名**：`pub fn formatOracleReport(buffer: []u8) []const u8`。
-- **作用**：把语料级 oracle 计数打成一行诊断；ReleaseFast 计数被 comptime 抹掉时返回空切片。
-- **实现**：`cfg.audit_oracles` 为假则 `return ""`；否则 `cfg.formatOracleReport(buffer, cfg.oracleReportSnapshot())`。
-- **所有权 / 错误 / 调用**：不分配。`buffer` 由调用方提供。scratch / 环境变量诊断用。
-
-### `compileFunction` (`src/compiler/root.zig:53`)
+### `compileFunction` (`src/compiler/root.zig:37`)
 
 - **签名**：`pub fn compileFunction( function: *bytecode.Bytecode, fd: *bytecode.function_def.FunctionDef, ) resolve_variables.Error!void`。
-- **作用**：每个 `FunctionDef` 的生产 lowering：先 S3 再 S4，把最终码装进 `function`。树递归与 packed ABI 仍在 `createFunctionBytecode`。
-- **实现**：转 `compileFunctionImpl(false, …)`，走带完整输出校验的 `resolve_labels.run`。
-- **所有权 / 错误 / 调用**：错误来自两路 resolve（OOM / InvalidBytecode / 绑定失败）。成功后 Builder 已释放；`function` 拥有最终码/atom/pc2line。调用方是 `pipeline_finalize.lowerAttachedBuilder`（`runWithFunctionDef` / `runWithFunctionDefRuntime` 片段级入口）；生产树递归走 `compileFunctionForPackedFinalize`。
+- **作用**：每个 `FunctionDef` 的唯一 lowering：S3 产物 → 立刻释放 Builder → S4 最终发射，把最终码装进 `function`（finalize 的 staging 载体）。树递归与 packed ABI 在 `createFunctionBytecode`。
+- **实现**：`var product = try resolve_variables.run(function, fd); defer product.deinitUncommitted();`，然后 `releaseConsumedBuilder(fd)`，再 `resolve_labels.run(default_layout, …)`。S4 只证明源槽；码/atom/var-ref 的最终证明留给 packed finalizer 的一次融合遍历。`noinline` 是架构边界，不是内联提示：无关遗留状态删除曾让 LLVM 把 lowering 折进 packed finalizer，crypto/code-load 回退（`docs/qcp1_switch_decision.md` §9.3）。
+- **所有权 / 错误 / 调用**：错误来自两路 resolve（OOM / InvalidBytecode / 绑定失败）。`deinitUncommitted` 覆盖 S4 失败：未提交的产物码/atom/标签 backing 被释放；S4 `commit` 成功后码/atom/源已交给 `function`，defer 仍幂等。唯一调用方 `pipeline_finalize.createFunctionBytecodeAfterChildren`。
 
-### `compileFunctionForPackedFinalize` (`src/compiler/root.zig:69`)
-
-- **签名**：`pub noinline fn compileFunctionForPackedFinalize( function: *bytecode.Bytecode, fd: *bytecode.function_def.FunctionDef, ) resolve_variables.Error!void`。
-- **作用**：packed FunctionBytecode 收口用的变体：跳过 S4 自包含码流校验，留给最终器一次融合遍历。
-- **实现**：`noinline` 是架构边界，不是内联提示。注释记录：无关遗留状态删除曾让 LLVM 把 V2 lowering 折进 packed finalizer，crypto/code-load 回退。转 `compileFunctionImpl(true, …)`。
-- **所有权 / 错误 / 调用**：调用方必须在发布产物前做码/atom/var-ref 证明。见 `docs/qcp1_switch_decision.md` §9.3。
-
-### `compileFunctionImpl` (`src/compiler/root.zig:76`)
-
-- **签名**：`fn compileFunctionImpl( comptime packed_finalize_validates_code: bool, function: *bytecode.Bytecode, fd: *bytecode.function_def.FunctionDef, ) resolve_variables.Error!void`。
-- **作用**：真正的两段式：S3 产物 → 立刻释放 Builder → S4 最终发射。
-- **实现**：`var product = try resolve_variables.run(function, fd); defer product.deinitUncommitted();`。然后 `releaseConsumedBuilder(fd)`。`packed_finalize_validates_code` 选 `resolve_labels.runForPackedFinalize` 或 `run`，布局都是 `default_layout`。audit 开时再 `emitIdentityHealth` / `emitAnchorSplit`。
-- **所有权 / 错误 / 调用**：`deinitUncommitted` 覆盖 S4 失败：未提交的产物码/atom/标签 backing 被释放。S4 `commit` 成功后码/atom/源已交给 `function`，`releaseConsumedStreams` 已把产物流掏空，defer 仍幂等。
-
-### `releaseConsumedBuilder` (`src/compiler/root.zig:103`)
+### `releaseConsumedBuilder` (`src/compiler/root.zig:52`)
 
 - **签名**：`fn releaseConsumedBuilder(fd: *bytecode.function_def.FunctionDef) void`。
 - **作用**：在消费点释放 Builder。S3 是紧凑流最后一个读者。
 - **实现**：`fd.builder` 为空则返回。置空指针，`consumed.deinit()`，断言五张表 capacity 均为 0，再 `fd.memory.destroy(Builder, consumed)`。
 - **所有权 / 错误 / 调用**：所有权在消费者侧。`FunctionDef.deinit` 只做解析失败/中途放弃的后盾。无 error。
-
-### `emitIdentityHealth` (`src/compiler/root.zig:113`)
-
-- **签名**：`fn emitIdentityHealth() void`。
-- **作用**：环境变量 `ZJS_V2_IDENTITY_HEALTH` 打开时，打印 fan-out / chain-depth 健康行。
-- **实现**：`getenv` 为空则返回。512 字节栈缓冲，`cfg.formatIdentityHealth` + `std.debug.print`。
-- **所有权 / 错误 / 调用**：仅 `audit_oracles` 编译进来。无分配。
-
-### `emitAnchorSplit` (`src/compiler/root.zig:127`)
-
-- **签名**：`fn emitAnchorSplit() void`。
-- **作用**：打印 F3 锚点分类：`ZJS_V2_ANCHOR_EXEMPLARS` 逐条打 exemplar（每个编译最多打尚未报告的那些）；`ZJS_V2_ANCHOR_SPLIT` 打累计 class 总计。
-- **实现**：模块级 `reported_anchor_exemplars` 保证整次运行最多 `anchor_exemplar_capacity` 条 exemplar。split 报告用 1024 字节缓冲。
-- **所有权 / 错误 / 调用**：exemplar 存在 `cfg.anchor_exemplars`。无分配失败路径。
 
 ---
 
@@ -171,7 +136,7 @@ FunctionBytecode 打包（bytecode.zig，05 册）
 ```sh
 python3 docs/code-walkthrough/_check_coverage.py \
     --docs 'docs/code-walkthrough/04-*.md' \
-    src/compiler/builder.zig src/compiler/cfg.zig src/compiler/labels.zig \
+    src/compiler/builder.zig src/compiler/temp_stream.zig src/compiler/labels.zig \
     src/compiler/resolve_labels.zig src/compiler/resolve_variables.zig \
     src/compiler/root.zig src/compiler/test_entry.zig src/compiler/tests.zig
 ```

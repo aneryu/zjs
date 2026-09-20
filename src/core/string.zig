@@ -2003,7 +2003,7 @@ test "string ascii byte helper covers byte boundary" {
 }
 
 test "string compare uses code-unit ordering for same and mixed width strings" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const latin_a = try String.createUtf8(rt, "abc");
@@ -2026,7 +2026,7 @@ test "string compare uses code-unit ordering for same and mixed width strings" {
 }
 
 test "flatStringsEqNear matches js_string_eq on same-width flats" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const a = try String.createUtf8(rt, "k0");
@@ -2049,7 +2049,7 @@ test "flatStringsEqNear matches js_string_eq on same-width flats" {
 }
 
 test "string compare short-circuits equal interned atom ids" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const first = try String.createUtf8(rt, "length");
@@ -2082,7 +2082,7 @@ fn tailBufferText(rt: *JSRuntime, allocator: std.mem.Allocator, value: JSValue) 
 }
 
 test "strings choose QuickJS-style 8-bit or 16-bit storage" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const ascii = try String.createUtf8(rt, "abc");
@@ -2120,7 +2120,7 @@ test "strings choose QuickJS-style 8-bit or 16-bit storage" {
 }
 
 test "ASCII suffix concatenation preserves source width with one result allocation" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const narrow_source = try String.createLatin1(rt, "ab");
@@ -2142,7 +2142,7 @@ test "ASCII suffix concatenation preserves source width with one result allocati
 }
 
 test "flat strings store characters inline in a single fixed-size allocation" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     // QuickJS `JSString` keeps characters inline (a flexible array member),
@@ -2178,7 +2178,7 @@ test "rope nodes keep the compact tree-only layout" {
 }
 
 test "S2-i tail buffer views read, compare and hash exactly like the flat string" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const left = try String.createLatin1(rt, "abcdefgh");
@@ -2211,7 +2211,7 @@ test "S2-i tail buffer views read, compare and hash exactly like the flat string
 }
 
 test "S2-i in-place append moves the extensible right and leaves the shorter view intact" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const seed_left = try String.createLatin1(rt, "0123456789");
@@ -2246,7 +2246,7 @@ test "S2-i in-place append moves the extensible right and leaves the shorter vie
 }
 
 test "S2-i tail buffer doubles on overflow and widens on a utf16 append" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const seed_left = try String.createLatin1(rt, "ab");
@@ -2282,7 +2282,7 @@ test "S2-i tail buffer doubles on overflow and widens on a utf16 append" {
 }
 
 test "rope index compare and hash traverse nested leaves without flattening" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const left = try String.createLatin1(rt, "ab");
@@ -2311,7 +2311,7 @@ test "rope index compare and hash traverse nested leaves without flattening" {
 }
 
 test "nested ropes preserve immutable child content" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const left = try String.createLatin1(rt, "abc");

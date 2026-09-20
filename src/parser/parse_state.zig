@@ -434,25 +434,18 @@ pub const ClassContext = struct {
     static_private_brand_needed: bool = false,
 };
 
-/// What the parse emits into at the top level.
-pub const RootMode = enum {
-    /// Production: the root is a real `FunctionDef`, every function
-    /// (including top-level declarations) is a child, and constants go to
-    /// the FunctionDef pool. `parser.compile` always parses this way.
-    canonical,
-    /// Parser-level tests: expressions and statements are emitted straight
-    /// into the root `Bytecode` carrier; a top-level function body is
-    /// inlined there instead of becoming a child. Methods are still
-    /// children. The four-ledger ownership tests measure this tier.
-    raw_bytecode,
-};
-
 pub const State = struct {
     pub const ScopeVarOptions = declarations.ScopeVarOptions;
     pub const DefineVarType = declarations.DefineVarType;
     pub const DefinedVar = declarations.DefinedVar;
     lex: *lexer_mod.Lexer,
-    function: *bytecode_function.Bytecode,
+    memory: *core.memory.MemoryAccount,
+    atoms: *atom_module.AtomTable,
+    /// Name of the parse root; the default name for a nameless declaration.
+    root_name: Atom,
+    /// The module record an ECMAScript module root accumulates while parsing;
+    /// `takeModuleRecord` hands it to the module artifact after finalize.
+    module_record: ?bytecode.module.Record = null,
     runtime: ?*core.JSRuntime = null,
     /// One-token lookahead. The lexer is the source of truth; we cache
     /// the most recently produced token here so the parser can `peek`.
@@ -492,8 +485,6 @@ pub const State = struct {
     eval_delete_bindings: bool = false,
     /// The class whose ClassTail is being parsed; see `ClassContext`.
     class: ClassContext = .{},
-    /// What the root of this parse is; see `RootMode`.
-    root_mode: RootMode = .raw_bytecode,
     /// Whether declarations are currently being parsed inside the synthetic
     /// CaseBlock lexical environment for a switch statement.
     in_switch_case_block_scope: bool = false,
@@ -506,7 +497,6 @@ pub const State = struct {
     ctx: FunctionContext = .{},
     /// Root-bytecode label identity counter. Nested FunctionDefs use their
     /// own `label_count`, matching QuickJS's per-function label namespace.
-    root_parser_label_count: u32 = 0,
     /// Function bodies currently anchor hoist/TDZ work in the finalizer
     /// instead of emitting their QuickJS `enter_scope` marker here. The
     /// body-event unification is tracked separately from ordinary blocks.
@@ -581,10 +571,6 @@ pub const State = struct {
     cur_func_stack_capacity: usize = 0,
     discarded_func_head: ?*function_def_mod.FunctionDef = null,
 
-    /// When true, emit bytecode to the current FunctionDef's byte_code
-    /// buffer instead of the Bytecode object's code buffer. Used for
-    /// nested functions to maintain separate bytecode buffers.
-    emit_to_function_def: bool = false,
     annex_b_if_function_decl_clause: bool = false,
     last_function_child_index: ?u16 = null,
     last_class_name_patch: ?ClassNamePatch = null,
@@ -616,21 +602,26 @@ pub const State = struct {
     class_private_elements: std.ArrayList(ClassPrivateElement) = .empty,
     class_private_bound_names: std.ArrayList(Atom) = .empty,
 
-    fn initRootEmitter(
+    /// A parse root: `name` is the root FunctionDef's name (the filename in
+    /// production) and doubles as the default name of a nameless
+    /// declaration; `script_or_module` defaults to it.
+    pub fn init(
         lex: *lexer_mod.Lexer,
-        function: *bytecode_function.Bytecode,
-        emit_root_to_function_def: bool,
+        account: *core.memory.MemoryAccount,
+        atoms: *atom_module.AtomTable,
+        name: Atom,
     ) Error!State {
         var state = State{
             .lex = lex,
-            .function = function,
+            .memory = account,
+            .atoms = atoms,
+            .root_name = name,
             .token = undefined,
-            .function_def = function_def_mod.FunctionDef.init(function.memory, function.atoms, function.name),
-            .atom_scope = atom_module.CompileAtomScope.init(function.atoms),
-            .emit_to_function_def = emit_root_to_function_def,
+            .function_def = function_def_mod.FunctionDef.init(account, atoms, name),
+            .atom_scope = atom_module.CompileAtomScope.init(atoms),
         };
         errdefer state.function_def.deinitInitFailure();
-        state.function_def.script_or_module = function.script_or_module;
+        state.function_def.script_or_module = name;
         state.function_def.line_num = 1;
         state.function_def.col_num = 1;
         // A standalone ParseState represents a script/eval-program root,
@@ -657,44 +648,34 @@ pub const State = struct {
         return state;
     }
 
-    pub fn init(lex: *lexer_mod.Lexer, function: *bytecode_function.Bytecode) Error!State {
-        return initRootEmitter(lex, function, false);
-    }
-
     /// Initialize a parser state that may emit runtime-owned constants.
     /// QuickJS's `JSParseState` always carries its `JSContext`; zjs keeps
     /// the runtime-less initializer for low-level parser-only tests, while
     /// production compilation and executable-bytecode helpers use this
     /// entry point.
-    pub fn initWithRuntime(
-        rt: *core.JSRuntime,
-        lex: *lexer_mod.Lexer,
-        function: *bytecode_function.Bytecode,
-    ) Error!State {
-        var state = try init(lex, function);
+    pub fn initWithRuntime(rt: *core.JSRuntime, lex: *lexer_mod.Lexer, name: Atom) Error!State {
+        var state = try init(lex, &rt.memory, &rt.atoms, name);
         state.runtime = rt;
         return state;
     }
 
-    /// Production ordinary script/eval roots emit into their real
-    /// FunctionDef from the first body-scope marker onward. This lets the
-    /// root take the exact same recursive finalizer as every child instead
-    /// of first constructing a mutable Bytecode twin.
-    pub fn initCanonicalRootWithRuntime(
-        rt: *core.JSRuntime,
-        lex: *lexer_mod.Lexer,
-        function: *bytecode_function.Bytecode,
-    ) Error!State {
-        var state = try initRootEmitter(lex, function, true);
-        state.runtime = rt;
-        return state;
+    /// The module record of a module root, created on first use.
+    pub fn ensureModule(self: *State) *bytecode.module.Record {
+        if (self.module_record == null) self.module_record = bytecode.module.Record.init(self.memory, self.atoms);
+        return &self.module_record.?;
+    }
+
+    /// Move the module record out; the caller owns it from here on.
+    pub fn takeModuleRecord(self: *State) ?bytecode.module.Record {
+        const record = self.module_record;
+        self.module_record = null;
+        return record;
     }
 
     /// Release State-owned resources. `rt` is forwarded to
     /// `FunctionDef.deinit` so constants in `function_def.cpool` can
-    /// be released. `anytype` matches `Bytecode.deinit`'s signature
-    /// so callers pass their existing runtime pointer.
-    pub fn deinit(self: *State, rt: anytype) void {
+    /// be released.
+    pub fn deinit(self: *State, rt: *core.JSRuntime) void {
         // First: every step below can free a FunctionDef the value
         // provider walks. The atom scope is the opposite -- it goes last,
         // because teardown still hands atom ids back to the table.
@@ -705,7 +686,7 @@ pub const State = struct {
             self.last_declared_atom = null;
         }
         if (self.source_line_starts.len != 0) {
-            self.function.memory.allocator.free(self.source_line_starts);
+            self.memory.allocator.free(self.source_line_starts);
             self.source_line_starts = &.{};
             self.source_line_starts_src = &.{};
         }
@@ -717,10 +698,10 @@ pub const State = struct {
         self.cur_func_stack_capacity = 0;
         for (cur_func_stack) |fd| {
             fd.deinit(rt);
-            self.function.memory.destroy(function_def_mod.FunctionDef, fd);
+            self.memory.destroy(function_def_mod.FunctionDef, fd);
         }
         if (cur_func_stack_capacity != 0) {
-            self.function.memory.free(*function_def_mod.FunctionDef, cur_func_stack.ptr[0..cur_func_stack_capacity]);
+            self.memory.free(*function_def_mod.FunctionDef, cur_func_stack.ptr[0..cur_func_stack_capacity]);
         }
         var discarded_func = self.discarded_func_head;
         self.discarded_func_head = null;
@@ -728,33 +709,35 @@ pub const State = struct {
             const next = fd.discard_next;
             fd.discard_next = null;
             fd.deinit(rt);
-            self.function.memory.destroy(function_def_mod.FunctionDef, fd);
+            self.memory.destroy(function_def_mod.FunctionDef, fd);
             discarded_func = next;
         }
-        self.break_fixups.deinit(self.function.memory.allocator);
-        self.break_frame_lens.deinit(self.function.memory.allocator);
-        self.break_frame_labels.deinit(self.function.memory.allocator);
-        self.continue_fixups.deinit(self.function.memory.allocator);
-        self.continue_frame_lens.deinit(self.function.memory.allocator);
-        self.continue_frame_labels.deinit(self.function.memory.allocator);
-        self.continue_frame_break_frame_indices.deinit(self.function.memory.allocator);
-        self.break_frame_catch_marker_depths.deinit(self.function.memory.allocator);
-        self.break_frame_cleanup_drops.deinit(self.function.memory.allocator);
-        self.break_frame_cross_cleanup_drops.deinit(self.function.memory.allocator);
-        self.continue_frame_catch_marker_depths.deinit(self.function.memory.allocator);
-        self.continue_frame_cleanup_drops.deinit(self.function.memory.allocator);
+        self.break_fixups.deinit(self.memory.allocator);
+        self.break_frame_lens.deinit(self.memory.allocator);
+        self.break_frame_labels.deinit(self.memory.allocator);
+        self.continue_fixups.deinit(self.memory.allocator);
+        self.continue_frame_lens.deinit(self.memory.allocator);
+        self.continue_frame_labels.deinit(self.memory.allocator);
+        self.continue_frame_break_frame_indices.deinit(self.memory.allocator);
+        self.break_frame_catch_marker_depths.deinit(self.memory.allocator);
+        self.break_frame_cleanup_drops.deinit(self.memory.allocator);
+        self.break_frame_cross_cleanup_drops.deinit(self.memory.allocator);
+        self.continue_frame_catch_marker_depths.deinit(self.memory.allocator);
+        self.continue_frame_cleanup_drops.deinit(self.memory.allocator);
         for (self.label_frames.items) |*frame| {
-            frame.deinit(self.function.memory.allocator);
+            frame.deinit(self.memory.allocator);
         }
-        self.label_frames.deinit(self.function.memory.allocator);
-        self.return_finally_frames.deinit(self.function.memory.allocator);
-        self.finally_body_control_frames.deinit(self.function.memory.allocator);
-        self.using_block_frames.deinit(self.function.memory.allocator);
+        self.label_frames.deinit(self.memory.allocator);
+        self.return_finally_frames.deinit(self.memory.allocator);
+        self.finally_body_control_frames.deinit(self.memory.allocator);
+        self.using_block_frames.deinit(self.memory.allocator);
         self.truncateClassPrivateElements(0);
-        self.class_private_elements.deinit(self.function.memory.allocator);
+        self.class_private_elements.deinit(self.memory.allocator);
         self.truncateClassPrivateBoundNames(0);
-        self.class_private_bound_names.deinit(self.function.memory.allocator);
+        self.class_private_bound_names.deinit(self.memory.allocator);
         self.function_def.deinit(rt);
+        if (self.module_record) |*record| record.deinit();
+        self.module_record = null;
         // Last: the scope has to outlive every teardown step above, all of
         // which can still hand atom ids back to the table.
         self.atom_scope.deinit();
@@ -785,7 +768,6 @@ pub const State = struct {
     ///     -- unlinked from the tree but still owning their cpool until
     ///     `State.deinit`.
     fn traceCompileValueRoots(self: *State, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
-        try self.function.traceCompileRoots(visitor);
         try self.function_def.traceCompileRoots(visitor);
         for (self.cur_func_stack) |fd| try fd.traceCompileRoots(visitor);
         var discarded = self.discarded_func_head;
@@ -856,14 +838,14 @@ pub const State = struct {
                 std.math.mul(usize, old_capacity, 2) catch return error.OutOfMemory;
             if (new_capacity < new_len) new_capacity = new_len;
 
-            const next = try self.function.memory.alloc(*function_def_mod.FunctionDef, new_capacity);
-            errdefer self.function.memory.free(*function_def_mod.FunctionDef, next);
+            const next = try self.memory.alloc(*function_def_mod.FunctionDef, new_capacity);
+            errdefer self.memory.free(*function_def_mod.FunctionDef, next);
             @memcpy(next[0..old_len], self.cur_func_stack);
             const old_stack: []*function_def_mod.FunctionDef = if (old_capacity != 0) self.cur_func_stack.ptr[0..old_capacity] else self.cur_func_stack[0..0];
             self.cur_func_stack = next[0..old_len];
             self.cur_func_stack_capacity = new_capacity;
             if (old_capacity != 0) {
-                self.function.memory.free(*function_def_mod.FunctionDef, old_stack);
+                self.memory.free(*function_def_mod.FunctionDef, old_stack);
             }
         }
 
@@ -891,7 +873,7 @@ pub const State = struct {
         declarations.discardDeclarationConflictIndex(self, fd);
         if (self.runtime) |rt| {
             fd.deinit(rt);
-            self.function.memory.destroy(function_def_mod.FunctionDef, fd);
+            self.memory.destroy(function_def_mod.FunctionDef, fd);
             return;
         }
         fd.discard_next = self.discarded_func_head;
@@ -1184,7 +1166,7 @@ pub const State = struct {
             return buffer[0..3];
         }
         if (tok.isKeyword(kind)) {
-            return self.function.atoms.name(tok.keywordAtom(kind)) orelse "keyword";
+            return self.atoms.name(tok.keywordAtom(kind)) orelse "keyword";
         }
         return switch (kind) {
             .number => "number",
@@ -1272,7 +1254,7 @@ pub const State = struct {
     }
 
     pub fn failUndefinedLabel(self: *State, atom_id: Atom) Error {
-        const label_name = self.function.atoms.name(atom_id) orelse return error.ParserInvariant;
+        const label_name = self.atoms.name(atom_id) orelse return error.ParserInvariant;
         var message_buffer: [PendingDiagnostic.message_capacity]u8 = undefined;
         const message = std.fmt.bufPrint(
             &message_buffer,
@@ -1355,7 +1337,7 @@ pub const State = struct {
         var continue_label: ?compiler.LabelId = null;
         if (allow_continue) continue_label = try Emitter.newLabel(s);
         break_label = try Emitter.newLabel(s);
-        try s.label_frames.append(s.function.memory.allocator, LabelFrame{
+        try s.label_frames.append(s.memory.allocator, LabelFrame{
             .atom = atom_id,
             .allow_continue = allow_continue,
             .catch_marker_depth = s.active_catch_marker_depth,
@@ -1385,7 +1367,7 @@ pub const State = struct {
 
     pub fn popLabelFrame(s: *State, frame_index: usize) void {
         std.debug.assert(frame_index + 1 == s.label_frames.items.len);
-        s.label_frames.items[frame_index].deinit(s.function.memory.allocator);
+        s.label_frames.items[frame_index].deinit(s.memory.allocator);
         _ = s.label_frames.pop().?;
     }
 
@@ -1424,7 +1406,7 @@ pub const State = struct {
     }
 
     fn deinitCurrentControlFrames(s: *State) void {
-        const allocator = s.function.memory.allocator;
+        const allocator = s.memory.allocator;
         s.break_fixups.deinit(allocator);
         s.break_frame_lens.deinit(allocator);
         s.break_frame_labels.deinit(allocator);
@@ -1880,66 +1862,6 @@ pub const State = struct {
         return statements.canTreatLetAsExpressionStatement(s, DeclMask{ .other = true });
     }
 
-    // ---- emit primitives -------------------------------------------------
-    //
-    // Direct byte writes into `function.code`. Keep these local until the
-    // remaining legacy emitter callers are retired.
-
-    const EmissionSnapshot = struct {
-        code_len: usize,
-        atom_len: usize,
-        source_loc_len: usize,
-        label_count: u32,
-        last_opcode_source_offset: ?u32,
-    };
-
-    pub fn takeEmissionSnapshot(self: *State) EmissionSnapshot {
-        return .{
-            .code_len = self.currentCodeLen(),
-            .atom_len = self.currentAtomOperandLen(),
-            .source_loc_len = if (self.emit_to_function_def)
-                self.curFunc().source_loc_slots.len
-            else
-                self.function.source_loc_slots.len,
-            .label_count = self.currentParserLabelCount(),
-            .last_opcode_source_offset = self.last_opcode_source_offset,
-        };
-    }
-
-    /// Restore every fallible stream touched by a parser-phase emission.
-    /// QuickJS poisons the whole compile after a DynBuf failure; zjs returns
-    /// OOM and keeps the runtime usable, so no consumer may observe the
-    /// half-published code/atom/source/provenance state that QuickJS never
-    /// resumes from.
-    pub fn rollbackEmission(self: *State, snapshot: EmissionSnapshot) void {
-        if (self.emit_to_function_def) {
-            const fd = self.curFunc();
-            fd.truncateAtomOperands(snapshot.atom_len);
-            fd.truncateSourceLocs(snapshot.source_loc_len);
-            fd.truncateByteCode(snapshot.code_len);
-        } else {
-            self.function.truncateAtomOperands(snapshot.atom_len);
-            self.function.truncateSourceLocs(snapshot.source_loc_len);
-            self.function.truncateCode(snapshot.code_len);
-        }
-        self.setParserLabelCount(snapshot.label_count);
-        self.last_opcode_source_offset = snapshot.last_opcode_source_offset;
-    }
-
-    pub fn currentParserLabelCount(self: *State) u32 {
-        if (!self.emit_to_function_def) return self.root_parser_label_count;
-        std.debug.assert(self.curFunc().label_count >= 0);
-        return @intCast(self.curFunc().label_count);
-    }
-
-    fn setParserLabelCount(self: *State, count: u32) void {
-        if (self.emit_to_function_def) {
-            self.curFunc().label_count = @intCast(count);
-        } else {
-            self.root_parser_label_count = count;
-        }
-    }
-
     pub fn markDirectEvalCall(self: *State) Error!void {
         const fd = self.curFunc();
         fd.has_eval_call = true;
@@ -2047,25 +1969,14 @@ pub const State = struct {
     }
 
     pub fn emitThisValue(self: *State) Error!void {
-        if (self.emit_to_function_def and self.curFunc().has_this_binding) {
-            // Explicit `this` reads use the ordinary lexical check and
-            // therefore create a TDZ ReferenceError in the constructor's
-            // own realm. The caller-realm checkthis opcode is reserved for
-            // the synthetic derived-return fallback in emitReturnValue.
-            try self.emitScopeGetVar(atom_this);
-        } else if (self.emit_to_function_def and
-            (self.curFunc().func_type == .arrow or
-                self.curFunc().func_type == .class_static_init or
-                self.curFunc().is_direct_eval))
-        {
-            // qjs TOK_THIS always emits OP_scope_get_var this
-            //. Direct eval has no own ThisBinding
-            //; resolve against the caller seed so a
-            // root-eval-captured `this` cannot shadow the method's this.
-            try self.emitScopeGetVar(atom_this);
-        } else {
-            try Emitter.op(self, opcode.op.push_this);
-        }
+        // qjs TOK_THIS always emits OP_scope_get_var this. Explicit `this`
+        // reads use the ordinary lexical check and therefore create a TDZ
+        // ReferenceError in the constructor's own realm; the caller-realm
+        // checkthis opcode is reserved for the synthetic derived-return
+        // fallback in emitReturnValue. Direct eval has no own ThisBinding
+        // and resolves against the caller seed, so a root-eval-captured
+        // `this` cannot shadow the method's this.
+        try self.emitScopeGetVar(atom_this);
     }
 
     pub fn emitBigIntLiteral(self: *State, text: []const u8, negate: bool) Error!void {
@@ -2076,15 +1987,15 @@ pub const State = struct {
 
         const parse_text = if (std.mem.indexOfScalar(u8, text, '_')) |_| blk: {
             var normalized = std.ArrayList(u8).empty;
-            errdefer normalized.deinit(self.function.memory.allocator);
+            errdefer normalized.deinit(self.memory.allocator);
             for (text) |ch| {
-                if (ch != '_') try normalized.append(self.function.memory.allocator, ch);
+                if (ch != '_') try normalized.append(self.memory.allocator, ch);
             }
-            break :blk try normalized.toOwnedSlice(self.function.memory.allocator);
+            break :blk try normalized.toOwnedSlice(self.memory.allocator);
         } else text;
-        defer if (parse_text.ptr != text.ptr) self.function.memory.allocator.free(parse_text);
+        defer if (parse_text.ptr != text.ptr) self.memory.allocator.free(parse_text);
 
-        var parsed = libs_bignum.parseAutoAlloc(self.function.memory.persistent_allocator, parse_text) catch return Error.InvalidNumberLiteral;
+        var parsed = libs_bignum.parseAutoAlloc(self.memory.persistent_allocator, parse_text) catch return Error.InvalidNumberLiteral;
         errdefer parsed.deinit();
         if (negate and !parsed.isZero()) parsed.negative = !parsed.negative;
 
@@ -2094,10 +2005,10 @@ pub const State = struct {
         // of the parse can neither sweep nor need to trace it. The parser
         // may run without a runtime, so allocation and the failure-path
         // free both go through the function's own account.
-        const big = try self.function.memory.create(core_bigint.BigInt);
+        const big = try self.memory.create(core_bigint.BigInt);
         big.initExternalFromOwned(parsed);
-        parsed = .{ .allocator = self.function.memory.persistent_allocator };
-        errdefer big.destroyWithAccount(self.function.memory);
+        parsed = .{ .allocator = self.memory.persistent_allocator };
+        errdefer big.destroyWithAccount(self.memory);
         try Emitter.pushConst(self, big.valueRef());
     }
 
@@ -2120,7 +2031,6 @@ pub const State = struct {
         if (fd.builder == null) {
             const v2b = try fd.memory.create(compiler.Builder);
             v2b.* = compiler.Builder.init(fd.memory, fd.atoms);
-            try v2b.enableControlIndex();
             fd.builder = v2b;
         }
     }
@@ -2146,17 +2056,6 @@ pub const State = struct {
     }
     // ===== end Builder wrappers =====
 
-    pub fn currentCodeLen(self: *State) usize {
-        if (self.emit_to_function_def) return self.curFunc().byte_code.len;
-        return self.function.code.len;
-    }
-
-    pub fn currentAtomOperandLen(self: *State) usize {
-        return if (self.emit_to_function_def)
-            self.curFunc().atom_operands.len
-        else
-            self.function.atom_operands.len;
-    }
 };
 
 /// Chain-exit label identity for `?.`.

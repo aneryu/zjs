@@ -698,42 +698,42 @@
 - **实现**：用 `rt.memory.alloc(core.Atom, 1)` 分配一格并填入 `core.atom.ids.length`，即这个 exotic 钩子恒报「只有一个 own key：`length`」；切片由调用方按 `rt.memory` 释放。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。返回 `![]core.Atom`，由测试 `try`/`expectError` 消费。
 
-### `PoisonAllocator.alloc` (`src/libs/bigint.zig:1293`)
+### `PoisonAllocator.alloc` (`src/libs/bigint.zig:1291`)
 
 - **签名**：`fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8`。
 - **作用**：测试夹具/探针 `PoisonAllocator.alloc`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：向 backing 取内存，成功后用 `@memset(ptr[0..len], 0xa5)` 把新分配整块涂成非零模式——basecase 乘法漏写或先读后写的限位会因此改变乘积。关键调用：`self.backing.rawAlloc`、`@memset`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `PoisonAllocator.resize` (`src/libs/bigint.zig:1299`)
+### `PoisonAllocator.resize` (`src/libs/bigint.zig:1297`)
 
 - **签名**：`fn resize(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool`。
 - **作用**：测试夹具/探针 `PoisonAllocator.resize`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：不做涂写，原样转发 `self.backing.rawResize(buf, alignment, new_len, ra)`（原地扩缩不产生新的未初始化字节）。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `PoisonAllocator.remap` (`src/libs/bigint.zig:1303`)
+### `PoisonAllocator.remap` (`src/libs/bigint.zig:1301`)
 
 - **签名**：`fn remap(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8`。
 - **作用**：测试夹具/探针 `PoisonAllocator.remap`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：原样转发 `self.backing.rawRemap(buf, alignment, new_len, ra)`，不涂写。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `PoisonAllocator.free` (`src/libs/bigint.zig:1307`)
+### `PoisonAllocator.free` (`src/libs/bigint.zig:1305`)
 
 - **签名**：`fn free(ctx: *anyopaque, buf: []u8, alignment: std.mem.Alignment, ra: usize) void`。
 - **作用**：测试夹具/探针 `PoisonAllocator.free`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：原样转发 `self.backing.rawFree(buf, alignment, ra)`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `PoisonAllocator.allocator` (`src/libs/bigint.zig:1311`)
+### `PoisonAllocator.allocator` (`src/libs/bigint.zig:1309`)
 
 - **签名**：`fn allocator(self: *PoisonAllocator) std.mem.Allocator`。
 - **作用**：测试夹具/探针 `PoisonAllocator.allocator`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：用 `self` 和 alloc/resize/remap/free 四个函数组出 `std.mem.Allocator`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `referenceMul` (`src/libs/bigint.zig:1320`)
+### `referenceMul` (`src/libs/bigint.zig:1318`)
 
 - **签名**：`fn referenceMul(alloc: std.mem.Allocator, lhs: []const engine.libs.bigint.Limb, rhs: []const engine.libs.bigint.Limb) ![]engine.libs.bigint.Limb`。
 - **作用**：Deliberately zero-initialized schoolbook multiply, kept in the test rather than in the kernel: it is the thing the production path stopped doing, so it has to exist somewhere independent to compare against. Returns unnormalized limbs with trailing zeros stripped, matching what `mulAlloc` returns.。
@@ -761,56 +761,56 @@
 - **实现**：按 comptime 的 `want_inline` 走两条路：内联路径 `core.bigint.BigInt.createInlineUninitialized(rt, limbs.len)` 开一个未初始化内联 BigInt，`@memcpy(big.capacitySliceMut(), limbs)` 灌数据后 `big.publishInline(limbs.len, negative)` 发布；外部路径先用 `@constCast(limbs)` 拼一个借用式 `bigint.BigInt`（allocator 取 `rt.memory.allocator`），再交给 `core.bigint.BigInt.createFromBigInt(rt, owned)` 造出外部存储形态。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。返回 `!*core.bigint.BigInt`，由测试 `try`/`expectError` 消费。
 
-### `DivFailAllocator.allocator` (`src/libs/bigint.zig:1357`)
+### `DivFailAllocator.allocator` (`src/libs/bigint.zig:1355`)
 
 - **签名**：`fn allocator(self: *DivFailAllocator) std.mem.Allocator`。
 - **作用**：测试夹具/探针 `DivFailAllocator.allocator`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：用 `self` 和 alloc/resize/remap/free 四个函数组出 `std.mem.Allocator`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `DivFailAllocator.alloc` (`src/libs/bigint.zig:1366`)
+### `DivFailAllocator.alloc` (`src/libs/bigint.zig:1364`)
 
 - **签名**：`fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8`。
 - **作用**：测试夹具/探针 `DivFailAllocator.alloc`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：两条拒绝路径优先于转发：`refuse_next_alloc` 置位时消费掉该标志、置 `induced` 并返回 null；否则按 `alloc_attempts` 编号，编号等于 `fail_alloc_index` 时同样置 `induced` 返回 null。都不命中才转发 backing，并给 `live` 加一。关键调用：`self.backing.rawAlloc`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `DivFailAllocator.resize` (`src/libs/bigint.zig:1386`)
+### `DivFailAllocator.resize` (`src/libs/bigint.zig:1384`)
 
 - **签名**：`fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool`。
 - **作用**：测试夹具/探针 `DivFailAllocator.resize`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：`fail_shrink` 且 `new_len < memory.len` 时直接返回 false，其余转发 backing。关键调用：`self.backing.rawResize`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `DivFailAllocator.remap` (`src/libs/bigint.zig:1392`)
+### `DivFailAllocator.remap` (`src/libs/bigint.zig:1390`)
 
 - **签名**：`fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8`。
 - **作用**：测试夹具/探针 `DivFailAllocator.remap`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：`fail_shrink` 且 `new_len < memory.len` 时返回 null，并顺手置 `refuse_next_alloc`，让标准分配器的 alloc-and-copy 回退也失败，从而真正走到 `normalize` 的错误路径；其余转发 backing。关键调用：`self.backing.rawRemap`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `DivFailAllocator.free` (`src/libs/bigint.zig:1403`)
+### `DivFailAllocator.free` (`src/libs/bigint.zig:1401`)
 
 - **签名**：`fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void`。
 - **作用**：测试夹具/探针 `DivFailAllocator.free`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：先给 `live` 减一再转发 backing，`live` 归零即所有权已对称交还。关键调用：`self.backing.rawFree`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `expectDivisionUnderInjection` (`src/libs/bigint.zig:1410`)
+### `expectDivisionUnderInjection` (`src/libs/bigint.zig:1408`)
 
 - **签名**：`fn expectDivisionUnderInjection( inject: *DivFailAllocator, lhs_limbs: []const engine.libs.bigint.Limb, lhs_negative: bool, rhs_limbs: []const engine.libs.bigint.Limb, rhs_negative: bool, expected_quotient: engine.libs.bigint.BigInt, expected_remainder: engine.libs.bigint.BigInt, ) !void`。
 - **作用**：测试夹具/探针 `expectDivisionUnderInjection`，给周围 `test` 块提供可注入行为或断言助手。
 - **实现**：用 `inject.allocator()` 拼两个借用 limb 切片的 `bigint.BigInt`，再 `bigint.divRemAlloc(alloc, lhs, rhs)`：成功臂（`defer` 各自 `deinit`）要求商与余数 `compare` 期望值均为 `.eq`——注入下侥幸成功也必须算对；失败臂只允许 `error.OutOfMemory`。两条路径之后都统一收尾：`inject.live` 必须回到 `0`（无悬挂分配），且 `lhs_limbs` / `rhs_limbs` 与输入逐 limb 相等（输入仍归调用方所有、不得被就地改写）。
 - **所有权 / 错误 / 调用**：返回 `!void`，由测试 `try`/`expectError` 消费。
 
-### `expectDivisionIdentity` (`src/libs/bigint.zig:1443`)
+### `expectDivisionIdentity` (`src/libs/bigint.zig:1441`)
 
 - **签名**：`fn expectDivisionIdentity( lhs_limbs: []const engine.libs.bigint.Limb, lhs_negative: bool, rhs_limbs: []const engine.libs.bigint.Limb, rhs_negative: bool, ) !void`。
 - **作用**：Checks `q * b + r == a`, `abs(r) < abs(b)`, the remainder's sign, and that neither result carries a leading zero limb.。
 - **实现**：在 `std.testing.allocator` 上拼两个借用式 `BigInt`，取 `lhs.div(rhs)` 与 `lhs.rem(rhs)`（各 `defer deinit`），再 `mulAlloc(quotient, rhs)` + `addAlloc(product, remainder)` 还原出 `recovered`，断言 `recovered.compare(lhs) == .eq`（即 `q*b + r == a`）。随后另拼两个去符号的 `BigInt` 断言 `|r| < |b|`；余数非零时符号必须跟被除数一致，商非零时符号必须是 `lhs_negative != rhs_negative`；最后要求商与余数的最高 limb 都非零（无前导零 limb）。
 - **所有权 / 错误 / 调用**：测试分配器或调用方传入的 `Allocator` 负责非 GC 堆。返回 `!void`，由测试 `try`/`expectError` 消费。
 
-### `Case.check` (`src/libs/bigint.zig:1852`)
+### `Case.check` (`src/libs/bigint.zig:1850`)
 
 - **签名**：`fn check(high: Limb, low: Limb, divisor: Limb) !void`。
 - **作用**：测试夹具/探针 `Case.check`，给周围 `test` 块提供可注入行为或断言助手。
@@ -2386,14 +2386,14 @@
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「zero-ref release drains a deep acyclic object chain iteratively」。
-- **实现**：直接 `JSRuntime.createWithOptions`（`gc_threshold = 256 MiB`），精确根/手工对象图。
+- **实现**：直接 `JSRuntime.create`（`gc_threshold = 256 MiB`），精确根/手工对象图。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
 ### `test "cycle scan preserves a deeply rooted object chain without recursion"` (`src/tests/core.zig:8614`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「cycle scan preserves a deeply rooted object chain without recursion」。
-- **实现**：直接 `JSRuntime.createWithOptions`（`gc_threshold = 256 MiB`），精确根/手工对象图。断言 2 处 `std.testing.expect*`。约 2 个 Zig expect、0 个 JS `assert.*`。
+- **实现**：直接 `JSRuntime.create`（`gc_threshold = 256 MiB`），精确根/手工对象图。断言 2 处 `std.testing.expect*`。约 2 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
 ### `test "closed object property cycle is released by runtime cycle removal"` (`src/tests/core.zig:8695`)
@@ -3226,7 +3226,7 @@
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「weak map deep value chain releases without recursive destruction」。
-- **实现**：直接 `JSRuntime.createWithOptions`（`gc_threshold = 256 MiB`），精确根/手工对象图。强制 major / 环回收后比对 `liveCount` 或对象身份。断言 2 处 `std.testing.expect*`。约 2 个 Zig expect、0 个 JS `assert.*`。
+- **实现**：直接 `JSRuntime.create`（`gc_threshold = 256 MiB`），精确根/手工对象图。强制 major / 环回收后比对 `liveCount` 或对象身份。断言 2 处 `std.testing.expect*`。约 2 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
 ### `test "weak map cycle sweep clears index after removing dead keys"` (`src/tests/core.zig:12220`)
@@ -3275,14 +3275,14 @@
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「object allocation collects reclaimable cycles before memory-limit rejection」。
-- **实现**：直接 `JSRuntime.createWithOptions`（`gc_threshold = 256 MiB`），精确根/手工对象图。随后 `setGCThreshold(0)` + `setMemoryLimit(allocated_bytes)`，逼分配边界先回收可达环再做上限检查，替换对象因此仍能分配成功（不断言 OOM）。
+- **实现**：直接 `JSRuntime.create`（`gc_threshold = 256 MiB`），精确根/手工对象图。随后 `setGCThreshold(0)` + `setMemoryLimit(allocated_bytes)`，逼分配边界先回收可达环再做上限检查，替换对象因此仍能分配成功（不断言 OOM）。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
 ### `test "cache-miss root shape is owned before the object allocation GC boundary"` (`src/tests/core.zig:12515`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「cache-miss root shape is owned before the object allocation GC boundary」。
-- **实现**：直接 `JSRuntime.createWithOptions`（`gc_threshold = 256 MiB`），精确根/手工对象图。阈值设在 `allocated_before + @sizeOf(Object)`、内存上限设在 `allocated_before + root shape 字节`，钉 cache-miss root Shape 先于对象分配 GC 边界被拥有，分配成功而非 OOM。断言 6 处 `std.testing.expect*`。约 6 个 Zig expect、0 个 JS `assert.*`。
+- **实现**：直接 `JSRuntime.create`（`gc_threshold = 256 MiB`），精确根/手工对象图。阈值设在 `allocated_before + @sizeOf(Object)`、内存上限设在 `allocated_before + root shape 字节`，钉 cache-miss root Shape 先于对象分配 GC 边界被拥有，分配成功而非 OOM。断言 6 处 `std.testing.expect*`。约 6 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
 ### `test "post-shape object OOM rolls back construction owners and retries in the same runtime"` (`src/tests/core.zig:12556`)

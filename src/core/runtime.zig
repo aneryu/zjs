@@ -1535,12 +1535,7 @@ pub const JSRuntime = struct {
     }
 
     /// Returns an owned runtime. Caller must release it with `destroy`.
-    pub fn create(allocator: std.mem.Allocator) !*JSRuntime {
-        return createWithOptions(allocator, .{});
-    }
-
-    /// Returns an owned runtime. Caller must release it with `destroy`.
-    pub fn createWithOptions(allocator: std.mem.Allocator, options: RuntimeOptions) !*JSRuntime {
+    pub fn create(allocator: std.mem.Allocator, options: RuntimeOptions) !*JSRuntime {
         var account = if (options.trace_writer) |writer|
             memory.MemoryAccount.initWithTrace(allocator, writer)
         else
@@ -4853,7 +4848,7 @@ test "VM stack arena allocation failure is retryable and keeps accounting balanc
 }
 
 test "runtime allocator facades share memory accounting" {
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const baseline = rt.memory.allocated_bytes;
@@ -4877,9 +4872,9 @@ test "runtime allocator facades share memory accounting" {
 
 test "runtime and context init-deinit are leak free" {
     for (0..3) |_| {
-        const rt = try JSRuntime.create(std.testing.allocator);
-        const ctx1 = try context_mod.JSContext.create(rt);
-        const ctx2 = try context_mod.JSContext.create(rt);
+        const rt = try JSRuntime.create(std.testing.allocator, .{});
+        const ctx1 = try context_mod.JSContext.create(rt, .{});
+        const ctx2 = try context_mod.JSContext.create(rt, .{});
         ctx2.destroy();
         ctx1.destroy();
         rt.destroy();

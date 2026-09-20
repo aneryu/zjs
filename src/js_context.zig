@@ -70,8 +70,8 @@ fn ensureStandardGlobalsRegistered(rt: *JSRuntime) void {
 }
 
 /// Internal diagnostics for the two stable sub-phases inside public
-/// `JSContext.createWithOptions`. The complete public-ready boundary remains
-/// the caller's outer measurement around `createWithOptionsMeasured`.
+/// `JSContext.create`. The complete public-ready boundary remains
+/// the caller's outer measurement around `createMeasured`.
 pub const ContextCreateTiming = struct {
     raw_create_ns: u64 = 0,
     bootstrap_ns: u64 = 0,
@@ -102,7 +102,7 @@ fn initWithOptionsImpl(
     if (measure) timing.bootstrap_ns += platform_clock.elapsedNanosSince(bootstrap_start);
 }
 
-fn createWithOptionsImpl(
+fn createImpl(
     comptime measure: bool,
     rt: *JSRuntime,
     options: core.ContextOptions,
@@ -116,12 +116,12 @@ fn createWithOptionsImpl(
 
 /// Internal measurement entry. It executes the exact public constructor
 /// implementation; only the two requested monotonic-clock reads are added.
-pub fn createWithOptionsMeasured(
+pub fn createMeasured(
     rt: *JSRuntime,
     options: core.ContextOptions,
     timing: *ContextCreateTiming,
 ) !*JSContext {
-    return createWithOptionsImpl(true, rt, options, timing);
+    return createImpl(true, rt, options, timing);
 }
 
 pub const JSContext = struct {
@@ -135,12 +135,8 @@ pub const JSContext = struct {
         return .{ .core = core_ctx };
     }
 
-    pub fn create(rt: *JSRuntime) !*JSContext {
-        return createWithOptions(rt, .{});
-    }
-
-    pub fn createWithOptions(rt: *JSRuntime, options: core.ContextOptions) !*JSContext {
-        return createWithOptionsImpl(false, rt, options, {});
+    pub fn create(rt: *JSRuntime, options: core.ContextOptions) !*JSContext {
+        return createImpl(false, rt, options, {});
     }
 
     pub fn init(self: *JSContext, rt: *JSRuntime, options: core.ContextOptions) !void {
@@ -754,9 +750,9 @@ fn arrayObjectFromValue(value: JSValue) !?*Object {
 }
 
 test "JSContext.toString performs ECMAScript ToString instead of tag assertion" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     var wrapper = JSContext.borrowCore(ctx);

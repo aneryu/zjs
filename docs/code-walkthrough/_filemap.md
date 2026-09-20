@@ -10,12 +10,22 @@
 | `build/perf.zig` | 1 | [20-build.md](20-build.md) |
 | `build/tests.zig` | 4 | [20-build.md](20-build.md) |
 | `build.zig` | 1 | [20-build.md](20-build.md) |
-| `src/bytecode.zig` | 507 | [05-bytecode-binding.md](05-bytecode-binding.md), [05-bytecode-function-def.md](05-bytecode-function-def.md), [05-bytecode-function.md](05-bytecode-function.md), [05-bytecode-opcodes.md](05-bytecode-opcodes.md), [05-bytecode-pipeline.md](05-bytecode-pipeline.md), [05-bytecode.md](05-bytecode.md) |
+| `src/bytecode.zig` | 4 | [05-bytecode.md](05-bytecode.md) |
+| `src/bytecode/opcode.zig` | 60 | [05-bytecode-opcodes.md](05-bytecode-opcodes.md) |
+| `src/bytecode/module.zig` | 9 | [05-bytecode.md](05-bytecode.md) |
+| `src/bytecode/dump.zig` | 3 | [05-bytecode.md](05-bytecode.md) |
+| `src/bytecode/function_bytecode.zig` | 123 | [05-bytecode-function.md](05-bytecode-function.md) |
+| `src/bytecode/function_def.zig` | 40 | [05-bytecode-function-def.md](05-bytecode-function-def.md) |
+| `src/bytecode/carrier.zig` | 49 | [05-bytecode-function-def.md](05-bytecode-function-def.md) |
+| `src/bytecode/pc2line.zig` | 11 | [05-bytecode-pipeline.md](05-bytecode-pipeline.md) |
+| `src/compiler/binding_rules.zig` | 138 | [05-bytecode-binding.md](05-bytecode-binding.md) |
+| `src/compiler/stack_size.zig` | 6 | [05-bytecode-pipeline.md](05-bytecode-pipeline.md) |
+| `src/compiler/finalize.zig` | 17 | [05-bytecode-pipeline.md](05-bytecode-pipeline.md) |
 | `src/cli/cli_process.zig` | 3 | [18-cli.md](18-cli.md) |
 | `src/cli/panic_policy.zig` | 0 | [18-cli.md](18-cli.md) |
 | `src/cli/run_test262.zig` | 30 | [18-test262.md](18-test262.md) |
 | `src/cli/run_test262_config.zig` | 12 | [18-test262.md](18-test262.md) |
-| `src/cli/run_test262_host.zig` | 66 | [18-test262.md](18-test262.md) |
+| `src/test262_host.zig` | 66 | [18-test262.md](18-test262.md) |
 | `src/cli/run_test262_known_errors.zig` | 13 | [18-test262.md](18-test262.md) |
 | `src/cli/run_test262_metadata.zig` | 9 | [18-test262.md](18-test262.md) |
 | `src/cli/run_test262_names.zig` | 18 | [18-test262.md](18-test262.md) |
@@ -24,7 +34,7 @@
 | `src/cli/run_test262_source.zig` | 17 | [18-test262.md](18-test262.md) |
 | `src/cli/zjs.zig` | 48 | [18-cli.md](18-cli.md) |
 | `src/compiler/builder.zig` | 43 | [04-compiler-builder.md](04-compiler-builder.md) |
-| `src/compiler/cfg.zig` | 95 | [04-compiler-cfg.md](04-compiler-cfg.md) |
+| `src/compiler/temp_stream.zig` | 3 | [04-compiler-temp-stream.md](04-compiler-temp-stream.md) |
 | `src/compiler/labels.zig` | 1 | [04-compiler.md](04-compiler.md) |
 | `src/compiler/resolve_labels.zig` | 109 | [04-compiler-resolve-labels.md](04-compiler-resolve-labels.md) |
 | `src/compiler/resolve_variables.zig` | 91 | [04-compiler-resolve-variables.md](04-compiler-resolve-variables.md) |

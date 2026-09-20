@@ -117,7 +117,7 @@ pub fn functionFrameBindingShadowsGlobal(rt: *core.JSRuntime, function: *const b
 }
 
 fn functionHasDynamicScopeBindings(function: *const bytecode.FunctionBytecode, frame: *const frame_mod.Frame) bool {
-    if (function.legacyBytecodeAdapter() == null and frame.var_refs.len != 0) {
+    if (frame.var_refs.len != 0) {
         std.debug.assert(frame.var_refs.len == function.closureVar().len);
     }
     return function.varRefNamesLen() != 0 or frame.var_refs.len != 0;

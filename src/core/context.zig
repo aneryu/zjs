@@ -454,13 +454,7 @@ pub const JSContext = struct {
     /// in TGC S1-b; the realm dies in the next major that finds it
     /// unreachable), and `createRealm` transfers the child's create-ref onto
     /// the realm-record value instead of returning it here.
-    pub fn create(rt: *JSRuntime) !*JSContext {
-        return createWithOptions(rt, .{});
-    }
-
-    /// Returns an owned context. Caller must release that host reference with
-    /// `destroy` exactly once.
-    pub fn createWithOptions(rt: *JSRuntime, options: ContextOptions) !*JSContext {
+    pub fn create(rt: *JSRuntime, options: ContextOptions) !*JSContext {
         return createWithPublication(rt, options, true);
     }
 

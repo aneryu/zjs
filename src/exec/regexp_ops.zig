@@ -588,7 +588,7 @@ fn constructCompiled(rt: *core.JSRuntime, realm_global: ?*core.Object, source: c
 }
 
 test "constructCompiled roots string source while creating regexp object" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const source = try core.string.String.createAscii(rt, "a");

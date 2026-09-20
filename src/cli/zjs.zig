@@ -231,7 +231,6 @@ fn runFileModule(
 
 pub fn main(init: std.process.Init) !void {
     const total_start = platform_clock.monotonicNanos();
-    setupV2OracleReportExitDump(init.environ_map);
     const allocator = init.gpa;
     const arena = init.arena.allocator();
     const io = init.io;
@@ -267,7 +266,7 @@ pub fn main(init: std.process.Init) !void {
     var eval_ns: u64 = 0;
     var jobs_ns: u64 = 0;
     const runtime_start = platform_clock.monotonicNanos();
-    const rt = zjs.JSRuntime.createWithOptions(allocator, .{
+    const rt = zjs.JSRuntime.create(allocator, .{
         .trace_writer = if (commandRuntimeOptions(command).trace_memory) &stdout_writer.interface else null,
         .memory_limit = commandRuntimeOptions(command).memory_limit,
         .gc_threshold = zjs.default_gc_threshold,
@@ -277,7 +276,7 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
     errdefer rt.destroy();
-    const ctx = zjs.JSContext.create(rt) catch |err| {
+    const ctx = zjs.JSContext.create(rt, .{}) catch |err| {
         try cli_process.printErrorJoin(io, &.{ "zjs: context init failed: ", @errorName(err), "\n" });
         std.process.exit(1);
     };
@@ -1461,23 +1460,6 @@ fn dumpOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) 
         if (entry.value.* == 0) continue;
         try output.print("{s:<20} {d:>9}\n", .{ @tagName(entry.key), entry.value.* });
     }
-}
-
-extern "c" fn atexit(callback: *const fn () callconv(.c) void) c_int;
-
-fn setupV2OracleReportExitDump(environ_map: *std.process.Environ.Map) void {
-    if (comptime !engine.compiler.oracle_report_enabled) return;
-    const flag = environ_map.get("ZJS_V2_ORACLE_REPORT") orelse return;
-    if (flag.len == 0 or std.mem.eql(u8, flag, "0")) return;
-    _ = atexit(writeV2OracleReportAtExit);
-}
-
-fn writeV2OracleReportAtExit() callconv(.c) void {
-    if (comptime !engine.compiler.oracle_report_enabled) return;
-    var buffer: [1024]u8 = undefined;
-    const text = engine.compiler.formatOracleReport(&buffer);
-    if (text.len == 0) return;
-    std.debug.print("{s}\n", .{text});
 }
 
 /// The executed opcodes as rows sorted by time, then count, then opcode.

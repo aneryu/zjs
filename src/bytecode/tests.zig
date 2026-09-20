@@ -10,95 +10,8 @@ const parser = zjs.parser;
 const parser_tests = @import("../parser/tests.zig");
 const helpers = @import("../testing.zig");
 
-test "constant pool retains and releases values" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    var pool = bytecode.constant.Pool.init(&rt.memory, &rt.atoms);
-    defer pool.deinit(rt);
-
-    const text = try core.string.String.createAscii(rt, "constant");
-    const value = text.value();
-    const index = try pool.append(value);
-    try std.testing.expectEqual(@as(u32, 0), index);
-
-    _ = pool.get(0).?;
-}
-
-test "constant pool appendOwned transfers refcounted values" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    var pool = bytecode.constant.Pool.init(&rt.memory, &rt.atoms);
-    defer pool.deinit(rt);
-
-    const text = try core.string.String.createAscii(rt, "owned-constant");
-    const value = text.value();
-    _ = try pool.appendOwned(value);
-}
-
-test "constant pool retains owned unique symbol atoms until release" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    var pool = bytecode.constant.Pool.init(&rt.memory, &rt.atoms);
-    var pool_alive = true;
-    defer if (pool_alive) pool.deinit(rt);
-
-    const borrowed_symbol = try rt.atoms.newValueSymbol("gc-bytecode-constant-pool-symbol");
-    var borrowed_value = try rt.symbolValue(borrowed_symbol);
-    // TGC S3-c: a value-symbol entry lives exactly as long as its BODY is
-    // reachable. The native `Pool`/`FunctionDef` is not itself a root provider
-    // (that gap is tracked with the compile-time cpool roots), so the test
-    // declares the value root the compile pipeline owes it.
-    var value_roots = core.runtime.rootValues(.{&borrowed_value});
-    value_roots.activate(rt);
-    _ = try pool.append(borrowed_value);
-
-    _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(rt.atoms.name(borrowed_symbol) != null);
-
-    pool.deinit(rt);
-    pool_alive = false;
-    borrowed_value = core.JSValue.undefinedValue();
-    value_roots.deactivate(rt);
-
-    _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(rt.atoms.name(borrowed_symbol) == null);
-}
-
-test "constant pool appendOwned retains unique symbol atoms until release" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    var pool = bytecode.constant.Pool.init(&rt.memory, &rt.atoms);
-    var pool_alive = true;
-    defer if (pool_alive) pool.deinit(rt);
-
-    const owned_symbol = try rt.atoms.newValueSymbol("gc-bytecode-constant-pool-owned-symbol");
-    var owned_value = try rt.takeSymbolValue(owned_symbol);
-    // TGC S3-c: a value-symbol entry lives exactly as long as its BODY is
-    // reachable. The native `Pool`/`FunctionDef` is not itself a root provider
-    // (that gap is tracked with the compile-time cpool roots), so the test
-    // declares the value root the compile pipeline owes it.
-    var value_roots = core.runtime.rootValues(.{&owned_value});
-    value_roots.activate(rt);
-    _ = try pool.appendOwned(owned_value);
-
-    _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(rt.atoms.name(owned_symbol) != null);
-
-    pool.deinit(rt);
-    pool_alive = false;
-    owned_value = core.JSValue.undefinedValue();
-    value_roots.deactivate(rt);
-
-    _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(rt.atoms.name(owned_symbol) == null);
-}
-
-test "function bytecode owns code constants and module metadata" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+test "bytecode owns its code and a module record its metadata" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("compiled");
@@ -106,14 +19,14 @@ test "function bytecode owns code constants and module metadata" {
     const dep = try rt.internAtom("dep.mjs");
 
     var function_bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer function_bc.deinit(rt);
+    defer function_bc.deinit();
 
     try function_bc.setCode(&.{ 1, 2, 3 });
     try std.testing.expectEqual(@as(usize, 3), function_bc.code.len);
-    _ = try function_bc.addConstant(core.JSValue.int32(7));
-    try std.testing.expectEqual(@as(usize, 1), function_bc.constants.values.len);
 
-    const mod_record = function_bc.ensureModule();
+    var record = bytecode.module.Record.init(&rt.memory, &rt.atoms);
+    defer record.deinit();
+    const mod_record = &record;
     const req_index = try mod_record.addRequest(dep);
     const default_atom = core.atom.predefinedId("*default*", .string).?;
     try mod_record.addImport(req_index, default_atom, local, 0, false);
@@ -132,7 +45,7 @@ test "function bytecode owns code constants and module metadata" {
 }
 
 test "script or module metadata owns each bytecode transfer" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const display_filename = try rt.internAtom("<eval>");
@@ -140,7 +53,7 @@ test "script or module metadata owns each bytecode transfer" {
 
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, display_filename);
     var function_alive = true;
-    defer if (function_alive) function.deinit(rt);
+    defer if (function_alive) function.deinit();
     function.script_or_module = referrer;
 
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, display_filename);
@@ -165,16 +78,16 @@ test "script or module metadata owns each bytecode transfer" {
     fd.deinit(rt);
     fd_alive = false;
 
-    function.deinit(rt);
+    function.deinit();
     function_alive = false;
 }
 
 test "bytecode setCode owns exactly the visible code bytes" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var function_bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    defer function_bc.deinit(rt);
+    defer function_bc.deinit();
 
     try function_bc.setCode(&.{});
     try std.testing.expectEqual(@as(usize, 0), function_bc.code.len);
@@ -190,11 +103,11 @@ test "bytecode setCode owns exactly the visible code bytes" {
 }
 
 test "bytecode appendCode preserves eval-looking atom operand bytes as data" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var function_bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    defer function_bc.deinit(rt);
+    defer function_bc.deinit();
 
     const op = bytecode.opcode.op;
     var instruction = [_]u8{ op.push_atom_value, 0, 0, 0, 0 };
@@ -208,7 +121,7 @@ test "bytecode appendCode preserves eval-looking atom operand bytes as data" {
 }
 
 test "bytecode module record add failure releases duplicated atom references" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var record = bytecode.module.Record.init(&rt.memory, &rt.atoms);
@@ -291,11 +204,10 @@ fn emitTestBody(
             .loc8,
             .const8,
             .npop,
-            .npopx,
+            .none_npop,
             .u16,
             .i16,
             .npop_u16,
-            .npop_u8,
             .loc,
             .arg,
             .var_ref,
@@ -306,8 +218,6 @@ fn emitTestBody(
                 0 => try b.emitOp(op_id),
                 1 => try b.emitOpU8(op_id, operands[0]),
                 2 => try b.emitOpU16(op_id, std.mem.readInt(u16, operands[0..2], .little)),
-                // `argc:u16 cache_idx:u8`; the phase-1 index byte is a placeholder.
-                3 => try b.emitCallOp(op_id, std.mem.readInt(u16, operands[0..2], .little)),
                 4 => try b.emitOpU32(op_id, std.mem.readInt(u32, operands[0..4], .little)),
                 else => return error.InvalidBytecode,
             },
@@ -348,41 +258,39 @@ fn createTestFunctionBytecode(
         const root_scope = try fd.appendScope(-1);
         if (root_scope != 0) return error.TestUnexpectedResult;
     }
-    const realm = try core.RealmContext.create(rt);
+    const realm = try core.RealmContext.create(rt, .{});
     defer realm.destroy();
     return pipeline.finalize.createFunctionBytecode(fd, .{ .realm = realm });
 }
 
 test "createFunctionBytecode rejects a cross-runtime compile context before moving owners" {
-    const owner_rt = try core.JSRuntime.create(std.testing.allocator);
+    const owner_rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer owner_rt.destroy();
-    const foreign_rt = try core.JSRuntime.create(std.testing.allocator);
+    const foreign_rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer foreign_rt.destroy();
-    const foreign_realm = try core.RealmContext.create(foreign_rt);
+    const foreign_realm = try core.RealmContext.create(foreign_rt, .{});
     defer foreign_realm.destroy();
 
     const name = try owner_rt.internAtom("cross-runtime-function-bytecode");
     var fd = function_def.FunctionDef.init(&owner_rt.memory, &owner_rt.atoms, name);
     defer fd.deinit(owner_rt);
     _ = try fd.appendScope(-1);
-    try fd.appendByteCode(&.{bytecode.opcode.op.return_undef});
+    try emitTestBody(&fd, &.{bytecode.opcode.op.return_undef}, &.{});
 
-    const code_ptr = fd.byte_code.ptr;
     const owner_bytes = owner_rt.memory.allocated_bytes;
     const foreign_bytes = foreign_rt.memory.allocated_bytes;
     try std.testing.expectError(
         error.InvalidBytecode,
         pipeline.finalize.createFunctionBytecode(&fd, .{ .realm = foreign_realm }),
     );
-    try std.testing.expectEqual(@intFromPtr(code_ptr), @intFromPtr(fd.byte_code.ptr));
-    try std.testing.expectEqualSlices(u8, &.{bytecode.opcode.op.return_undef}, fd.byte_code);
+    try std.testing.expect(fd.builder != null);
     try std.testing.expectEqual(name, fd.func_name);
     try std.testing.expectEqual(owner_bytes, owner_rt.memory.allocated_bytes);
     try std.testing.expectEqual(foreign_bytes, foreign_rt.memory.allocated_bytes);
 }
 
 test "FunctionBytecode uses the exact QJS base and optional inline tails" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const extension_bytes = @sizeOf(bytecode.function_bytecode.FunctionBytecodeHotExtension);
@@ -414,7 +322,6 @@ test "FunctionBytecode uses the exact QJS base and optional inline tails" {
         try std.testing.expectEqual(fb.layout().mainPayloadBytes(), fb.heapByteSize());
         try std.testing.expectEqual(case.debug, fb.hasDebug());
         try std.testing.expectEqual(case.extension, fb.hasExtension());
-        try std.testing.expect(fb.legacyBytecodeAdapter() == null);
         try std.testing.expectEqual(@as(usize, 0), @intFromPtr(fb) % 8);
         try std.testing.expectEqual(@as(usize, 8), @intFromPtr(fb) - @intFromPtr(fb.header.meta()));
         try std.testing.expectEqual(core.gc.GcKind.function_bytecode, fb.header.meta().flags.kind);
@@ -454,7 +361,7 @@ test "FunctionBytecode uses the exact QJS base and optional inline tails" {
     }
 
     try std.testing.expectEqual(
-        @as(usize, 64),
+        @as(usize, 56),
         @sizeOf(bytecode.function_bytecode.FunctionBytecodeHotExtension),
     );
     try std.testing.expectEqual(
@@ -480,7 +387,6 @@ test "FunctionLayout matches the QJS-order core pack" {
         2,
         2,
         3,
-        0,
         0,
     );
     const value_size = @sizeOf(core.JSValue);
@@ -573,7 +479,6 @@ test "FunctionLayout has no padding between QJS core segments or after extension
             case.closure_count,
             case.code_len,
             0,
-            0,
         );
         const core_end: usize = @sizeOf(bytecode.FunctionBytecode) +
             (if (case.has_debug) @as(usize, @sizeOf(bytecode.function_bytecode.DebugInfo)) else 0);
@@ -600,7 +505,7 @@ test "FunctionLayout has no padding between QJS core segments or after extension
 }
 
 test "FunctionLayout places the exact hot tail at every code-end residue" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const code = [_]u8{
@@ -621,7 +526,7 @@ test "FunctionLayout places the exact hot tail at every code-end residue" {
         });
         defer fb.destroyUnpublishedFixture(rt);
 
-        const expected = try bytecode.FunctionLayout.init(false, true, 0, 0, 0, 0, code_len, 0, 0);
+        const expected = try bytecode.FunctionLayout.init(false, true, 0, 0, 0, 0, code_len, 0);
         const actual = fb.layout();
         const expected_hot_extension_off = actual.byte_code_end;
         const expected_total_size =
@@ -665,19 +570,19 @@ test "FunctionLayout rejects every checked size overflow class" {
     const max = std.math.maxInt(usize);
     try std.testing.expectError(
         error.BytecodeOverflow,
-        bytecode.FunctionLayout.init(false, false, max, 0, 0, 0, 0, 0, 0),
+        bytecode.FunctionLayout.init(false, false, max, 0, 0, 0, 0, 0),
     );
     try std.testing.expectError(
         error.BytecodeOverflow,
-        bytecode.FunctionLayout.init(false, false, 0, max, 1, 0, 0, 0, 0),
+        bytecode.FunctionLayout.init(false, false, 0, max, 1, 0, 0, 0),
     );
     try std.testing.expectError(
         error.BytecodeOverflow,
-        bytecode.FunctionLayout.init(false, false, 0, 0, 0, max, 0, 0, 0),
+        bytecode.FunctionLayout.init(false, false, 0, 0, 0, max, 0, 0),
     );
     try std.testing.expectError(
         error.BytecodeOverflow,
-        bytecode.FunctionLayout.init(true, true, 0, 0, 0, 0, max, 0, 0),
+        bytecode.FunctionLayout.init(true, true, 0, 0, 0, 0, max, 0),
     );
 }
 
@@ -685,7 +590,7 @@ test "CallFacts is one 16-bit execution snapshot" {
     try std.testing.expectEqual(@as(usize, 2), @sizeOf(bytecode.CallFacts));
     try std.testing.expectEqual(@as(usize, 0), @bitOffsetOf(bytecode.CallFacts, "execution"));
     try std.testing.expectEqual(
-        @as(usize, 64),
+        @as(usize, 56),
         @sizeOf(bytecode.function_bytecode.FunctionBytecodeHotExtension),
     );
     try std.testing.expectEqual(
@@ -700,7 +605,7 @@ test "CallFacts is one 16-bit execution snapshot" {
         @as(usize, 4),
         @offsetOf(bytecode.function_bytecode.FunctionBytecodeHotExtension, "script_or_module"),
     );
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
@@ -735,7 +640,7 @@ test "CallFacts is one 16-bit execution snapshot" {
 }
 
 test "FunctionBytecode raw flag bytes and packed nullable pointers are canonical" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const code = [_]u8{bytecode.opcode.op.return_undef};
@@ -779,7 +684,7 @@ test "FunctionBytecode raw flag bytes and packed nullable pointers are canonical
     try std.testing.expect(fb.cpool != null);
     try std.testing.expect(fb.cpoolSlice()[0].is(.undefined_value));
 
-    const expected_layout = try bytecode.FunctionLayout.init(true, true, 1, 1, 1, 1, 1, 0, 0);
+    const expected_layout = try bytecode.FunctionLayout.init(true, true, 1, 1, 1, 1, 1, 0);
     const layout = fb.layout();
     try std.testing.expect(std.meta.eql(expected_layout, layout));
     try std.testing.expectEqual(@intFromPtr(fb) + layout.cpool_off, @intFromPtr(fb.cpool.?));
@@ -794,7 +699,7 @@ test "FunctionBytecode raw flag bytes and packed nullable pointers are canonical
 }
 
 test "packed FunctionBytecode zero-count pointers stay null beside non-empty segments" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
@@ -805,7 +710,7 @@ test "packed FunctionBytecode zero-count pointers stay null beside non-empty seg
     });
     defer fb.destroyUnpublishedFixture(rt);
 
-    const expected_layout = try bytecode.FunctionLayout.init(false, true, 1, 0, 1, 0, 0, 0, 0);
+    const expected_layout = try bytecode.FunctionLayout.init(false, true, 1, 0, 1, 0, 0, 0);
     const layout = fb.layout();
     try std.testing.expect(std.meta.eql(expected_layout, layout));
     try std.testing.expect(fb.cpool != null);
@@ -827,7 +732,7 @@ test "packed FunctionBytecode zero-count pointers stay null beside non-empty seg
 }
 
 test "non-empty W1c5 fixture does not force the optional extension" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const before_bytes = rt.memory.allocated_bytes;
@@ -838,7 +743,7 @@ test "non-empty W1c5 fixture does not force the optional extension" {
         .has_extension = false,
     });
 
-    const expected_layout = try bytecode.FunctionLayout.init(false, false, 0, 0, 0, 0, code.len, 0, 0);
+    const expected_layout = try bytecode.FunctionLayout.init(false, false, 0, 0, 0, 0, code.len, 0);
     const layout = fb.layout();
     try std.testing.expect(std.meta.eql(expected_layout, layout));
     try std.testing.expect(!fb.hasDebug());
@@ -856,7 +761,7 @@ test "non-empty W1c5 fixture does not force the optional extension" {
 }
 
 test "FunctionBytecode FAM builder zeroes a reused slab payload without touching metadata" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const code = [_]u8{
@@ -939,7 +844,7 @@ test "FunctionBytecode FAM builder zeroes a reused slab payload without touching
 }
 
 test "published no-debug no-extension FunctionBytecode uses the deferred zero-FAM free path" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     errdefer rt.destroy();
 
     const fb = try bytecode.FunctionBytecode.createFixture(rt, .{
@@ -958,7 +863,7 @@ test "published no-debug no-extension FunctionBytecode uses the deferred zero-FA
 }
 
 test "published packed FunctionBytecode preserves its exact FAM size through deferred free" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     errdefer rt.destroy();
 
     const code = [_]u8{
@@ -975,7 +880,7 @@ test "published packed FunctionBytecode preserves its exact FAM size through def
         .has_debug = true,
         .has_extension = true,
     });
-    const expected_layout = try bytecode.FunctionLayout.init(true, true, 1, 1, 1, 1, code.len, 0, 0);
+    const expected_layout = try bytecode.FunctionLayout.init(true, true, 1, 1, 1, 1, code.len, 0);
     try std.testing.expect(std.meta.eql(expected_layout, fb.layout()));
     try std.testing.expect(fb.famBytes() > @sizeOf(bytecode.function_bytecode.DebugInfo));
     fb.publishFixtureNoFail(rt);
@@ -986,18 +891,8 @@ test "published packed FunctionBytecode preserves its exact FAM size through def
     rt.destroy();
 }
 
-fn finalizeMutableWithTestRealm(
-    function: *bytecode.Bytecode,
-    fd: *function_def.FunctionDef,
-    rt: *core.JSRuntime,
-) !void {
-    const realm = try core.RealmContext.create(rt);
-    defer realm.destroy();
-    return pipeline.finalize.runWithFunctionDefRuntime(function, fd, .{ .realm = realm });
-}
-
 test "FunctionDef: init/deinit" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("test");
@@ -1009,36 +904,13 @@ test "FunctionDef: init/deinit" {
     try std.testing.expectEqual(@as(i32, 0), fd.var_count);
     try std.testing.expectEqual(@as(i32, 0), fd.arg_count);
     try std.testing.expectEqual(@as(i32, 0), fd.scope_count);
-    try std.testing.expectEqual(@as(i32, 0), fd.label_count);
     try std.testing.expectEqual(@as(i32, 0), fd.closure_var_count);
-    try std.testing.expectEqual(@as(i32, 0), fd.jump_count);
     try std.testing.expectEqual(@as(i32, 0), fd.global_var_count);
-    try std.testing.expectEqual(@as(i32, 0), fd.source_loc_count);
     try std.testing.expectEqual(@as(i32, 0), fd.child_list.len);
 }
 
-test "FunctionDef appendByteCode does not infer direct eval from atom operand bytes" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    const name = try rt.internAtom("operand-bytes");
-
-    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
-    defer fd.deinit(rt);
-
-    const op = bytecode.opcode.op;
-    var instruction = [_]u8{ op.push_atom_value, 0, 0, 0, 0 };
-    const synthetic_atom = @as(u32, op.eval) | (@as(u32, op.apply_eval) << 8);
-    std.mem.writeInt(u32, instruction[1..5], synthetic_atom, .little);
-
-    try std.testing.expectEqual(op.eval, instruction[1]);
-    try std.testing.expectEqual(op.apply_eval, instruction[2]);
-    try fd.appendByteCode(&instruction);
-    try std.testing.expect(!fd.has_eval_call);
-}
-
 test "FunctionDef: cpool transfers refcounted owned values" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("cpool-owned");
@@ -1051,7 +923,7 @@ test "FunctionDef: cpool transfers refcounted owned values" {
 }
 
 test "FunctionDef: cpool retains unique symbol atoms until release" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("cpool-symbol");
@@ -1083,7 +955,7 @@ test "FunctionDef: cpool retains unique symbol atoms until release" {
 }
 
 test "FunctionDef: cpool appendOwned retains unique symbol atoms until release" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("cpool-owned-symbol");
@@ -1115,7 +987,7 @@ test "FunctionDef: cpool appendOwned retains unique symbol atoms until release" 
 }
 
 test "FunctionDef: add var" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("x");
@@ -1138,7 +1010,7 @@ test "FunctionDef: add var" {
 }
 
 test "FunctionDef: add scope" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("test");
@@ -1154,7 +1026,7 @@ test "FunctionDef: add scope" {
 }
 
 test "FunctionDef final scope proof reseals late arguments links and rejects cycles" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("scope-proof-arguments");
@@ -1194,14 +1066,14 @@ test "FunctionDef final scope proof reseals late arguments links and rejects cyc
 }
 
 test "compiler run rejects cyclic scope links before trusted lookup" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("scope-proof-run");
     const local = try rt.internAtom("local");
 
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer function.deinit(rt);
+    defer function.deinit();
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     defer fd.deinit(rt);
     _ = try fd.appendScope(-1);
@@ -1224,7 +1096,7 @@ test "compiler run rejects cyclic scope links before trusted lookup" {
 }
 
 test "compiler parent miss proves corrupt and cyclic synthetic ancestors" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("scope-proof-parent-run");
@@ -1232,7 +1104,7 @@ test "compiler parent miss proves corrupt and cyclic synthetic ancestors" {
     const parent_local = try rt.internAtom("parent-local");
 
     var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer function.deinit(rt);
+    defer function.deinit();
     var parent = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     defer parent.deinit(rt);
     _ = try parent.appendScope(-1);
@@ -1273,7 +1145,7 @@ test "compiler parent miss proves corrupt and cyclic synthetic ancestors" {
 }
 
 test "FunctionDef: closure_var" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("test");
@@ -1293,40 +1165,6 @@ test "FunctionDef: closure_var" {
     try std.testing.expectEqual(@as(i32, 1), fd.closure_var_count);
     try std.testing.expectEqual(function_def.ClosureType.local, fd.closure_var[0].closureType());
     try std.testing.expectEqual(cv_name, fd.closure_var[0].var_name);
-}
-
-test "FunctionDef: LabelSlot and JumpSlot" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-
-    const name = try rt.internAtom("test");
-
-    var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
-    defer fd.deinit(rt);
-
-    // Add a label slot
-    const label_next = try rt.memory.alloc(function_def.LabelSlot, fd.label_slots.len + 1);
-    errdefer rt.memory.free(function_def.LabelSlot, label_next);
-    @memcpy(label_next[0..fd.label_slots.len], fd.label_slots);
-    label_next[fd.label_slots.len] = .{ .ref_count = 1, .pos = 10 };
-    if (fd.label_slots.len != 0) rt.memory.free(function_def.LabelSlot, fd.label_slots);
-    fd.label_slots = label_next;
-    fd.label_count = @intCast(fd.label_slots.len);
-
-    try std.testing.expectEqual(@as(i32, 1), fd.label_count);
-    try std.testing.expectEqual(@as(i32, 10), fd.label_slots[0].pos);
-
-    // Add a jump slot
-    const jump_next = try rt.memory.alloc(function_def.JumpSlot, fd.jump_slots.len + 1);
-    errdefer rt.memory.free(function_def.JumpSlot, jump_next);
-    @memcpy(jump_next[0..fd.jump_slots.len], fd.jump_slots);
-    jump_next[fd.jump_slots.len] = .{ .op = 100, .size = 5, .pos = 0, .label = 0 };
-    if (fd.jump_slots.len != 0) rt.memory.free(function_def.JumpSlot, fd.jump_slots);
-    fd.jump_slots = jump_next;
-    fd.jump_count = @intCast(fd.jump_slots.len);
-
-    try std.testing.expectEqual(@as(i32, 1), fd.jump_count);
-    try std.testing.expectEqual(@as(i32, 100), fd.jump_slots[0].op);
 }
 
 test "resolve_labels converges for a large branch topology" {
@@ -1350,10 +1188,10 @@ test "resolve_labels converges for a large branch topology" {
     }
     try source.appendSlice(std.testing.allocator, "return value; }");
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.updateNativeStackTop();
-    const realm = try core.RealmContext.create(rt);
+    const realm = try core.RealmContext.create(rt, .{});
     defer realm.destroy();
 
     var parsed = try parser.compile(
@@ -1366,14 +1204,12 @@ test "resolve_labels converges for a large branch topology" {
 }
 
 test "finalize: runs the full v2 lowering pipeline" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("test");
     const x_atom = try rt.internAtom("x");
 
-    var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
-    defer bc.deinit(rt);
     var fd = function_def.FunctionDef.init(&rt.memory, &rt.atoms, name);
     defer fd.deinit(rt);
     _ = try fd.appendScope(-1);
@@ -1392,24 +1228,24 @@ test "finalize: runs the full v2 lowering pipeline" {
     try b.emitOp(op.return_undef);
     try b.emitOpU16(op.leave_scope, 0);
 
-    try finalizeMutableWithTestRealm(&bc, &fd, rt);
+    const fb_slice = try createTestFunctionBytecode(&fd, rt);
+    const fb = &fb_slice[0];
 
     // Expected: get_var <var_ref x> ; return_undef (3 + 1 = 4 bytes)
     // enter_scope, leave_scope, and the label should all be dropped
-    try std.testing.expectEqual(@as(u16, 1), bc.stack_size);
-    try std.testing.expectEqual(@as(usize, 4), bc.code.len);
-    try std.testing.expectEqual(op.get_var, bc.code[0]);
-    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, bc.code[1..3], .little));
-    try std.testing.expectEqual(op.return_undef, bc.code[3]);
-    try std.testing.expectEqual(@as(usize, 1), bc.var_ref_names.len);
-    try std.testing.expectEqual(x_atom, bc.var_ref_names[0]);
-    try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
+    try std.testing.expectEqual(@as(u16, 1), fb.stack_size);
+    try std.testing.expectEqual(@as(usize, 4), fb.byteCode().len);
+    try std.testing.expectEqual(op.get_var, fb.byteCode()[0]);
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, fb.byteCode()[1..3], .little));
+    try std.testing.expectEqual(op.return_undef, fb.byteCode()[3]);
+    try std.testing.expectEqual(@as(usize, 1), fb.closureVar().len);
+    try std.testing.expectEqual(x_atom, fb.closureVar()[0].var_name);
 }
 
 test "parent finalization failure releases its published child realm owner" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const realm = try core.RealmContext.create(rt);
+    const realm = try core.RealmContext.create(rt, .{});
     defer realm.destroy();
 
     const name = try rt.internAtom("parent-finalize-failure");
@@ -1457,9 +1293,9 @@ test "parent finalization failure releases its published child realm owner" {
 }
 
 test "parent finalization moves an existing child FunctionBytecode cpool owner without rc churn" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const realm = try core.RealmContext.create(rt);
+    const realm = try core.RealmContext.create(rt, .{});
     defer realm.destroy();
 
     const name = try rt.internAtom("cpool-owner-transfer");
@@ -1534,7 +1370,7 @@ test "stack_size rejects ret without a gosub return PC" {
 // ---- M1.3 task1: createFunctionBytecode produces a usable structure ----
 
 test "createFunctionBytecode: moves final owners from FunctionDef without refcount churn" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("inner");
@@ -1692,7 +1528,7 @@ test "createFunctionBytecode: moves final owners from FunctionDef without refcou
 }
 
 test "finalize rejects a same-count mismatched inline atom owner before transfer" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const function_name = try rt.internAtom("mismatched_owner_function");
@@ -1720,7 +1556,7 @@ test "finalize rejects a same-count mismatched inline atom owner before transfer
 }
 
 test "FunctionDef source replacement preserves the prior NUL owner across OOM and retry" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     var name = try rt.internAtom("source-owner-retry");
     // TGC S3-c: keep the collection the failed allocation runs from turning
@@ -1749,9 +1585,9 @@ test "FunctionDef source replacement preserves the prior NUL owner across OOM an
 }
 
 test "abrupt FunctionBytecode finalization leaves the same runtime reusable" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const realm = try core.RealmContext.create(rt);
+    const realm = try core.RealmContext.create(rt, .{});
     defer realm.destroy();
     const name = try rt.internAtom("finalize-recovery");
 
@@ -1800,7 +1636,7 @@ test "final bytecode vardefs are compact arguments plus locals" {
     try std.testing.expect(!@hasField(FinalClosureVar, "source_depth"));
     try std.testing.expect(!@hasField(CompileClosureVar, "source_depth"));
 
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const function_name = try rt.internAtom("compact-vardefs");
@@ -1875,79 +1711,8 @@ test "final variable metadata matches pinned QuickJS physical ABI" {
     try std.testing.expectEqual(@as(u8, 0), std.mem.asBytes(&uncaptured)[9]);
 }
 
-test "legacy execution adapter delegates synthetic var-ref name mirrors" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
-    defer rt.destroy();
-    const realm = try core.RealmContext.create(rt);
-    defer realm.destroy();
-
-    try std.testing.expect(!@hasField(bytecode.FunctionBytecode.Flags, "backtrace_barrier"));
-    try std.testing.expect(!@hasField(bytecode.FunctionDef, "backtrace_barrier"));
-
-    const name = try rt.internAtom("legacy-var-ref-name");
-    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, core.atom.ids.empty_string);
-    defer function.deinit(rt);
-    try std.testing.expect(!@hasField(@TypeOf(function.flags), "backtrace_barrier"));
-    function.flags.is_strict = true;
-    function.flags.runtime_strict = true;
-    function.flags.has_mapped_arguments = true;
-    function.realm = realm;
-    function.arg_count = 2;
-    function.var_count = 3;
-    function.stack_size = 4;
-    function.open_var_ref_count = 1;
-    try function.setCode(&.{bytecode.opcode.op.return_undef});
-    function.var_ref_names = try rt.memory.alloc(atom_module.Atom, 1);
-    function.var_ref_names[0] = name;
-
-    var adapter: bytecode.LegacyExecutionAdapter = undefined;
-    const execution_function = adapter.init(&function);
-    try std.testing.expectEqual(@as(usize, 1), execution_function.varRefNamesLen());
-    try std.testing.expectEqual(name, execution_function.varRefName(0));
-    try std.testing.expect(!execution_function.varRefIsLexicalAt(0));
-    try std.testing.expect(!execution_function.varRefIsConstAt(0));
-    try std.testing.expect(!execution_function.varRefIsGlobalDeclAt(0));
-    try std.testing.expectEqualSlices(u8, function.code, execution_function.byteCode());
-    try std.testing.expect(execution_function.byte_code == null);
-    try std.testing.expectEqual(bytecode.legacy_byte_code_len_sentinel, execution_function.byte_code_len);
-    try std.testing.expect(execution_function.realm.borrow() == null);
-    try std.testing.expectEqual(realm, execution_function.realmContext());
-    try std.testing.expect(execution_function.isStrictMode());
-    try std.testing.expect(execution_function.runtimeStrictMode());
-    try std.testing.expectEqual(@as(u16, 2), execution_function.arg_count);
-    try std.testing.expectEqual(@as(u16, 3), execution_function.var_count);
-    try std.testing.expectEqual(@as(u16, 4), execution_function.stack_size);
-    try std.testing.expectEqual(@as(u16, 1), execution_function.openVarRefCount());
-    try std.testing.expect(execution_function.callFacts().execution.has_mapped_arguments);
-    try std.testing.expectEqual(
-        @as(usize, 160),
-        @sizeOf(bytecode.LegacyExecutionAdapter),
-    );
-    // The negative sentinel deliberately keeps this borrowed stack bridge out
-    // of canonical count-based FunctionLayout reconstruction. Its hot tail and
-    // borrowed pointer follow the active FunctionBytecode body even though the
-    // mirrored table counts and borrowed code are all non-empty. The body size
-    // is the offset authority in both representations.
-    try std.testing.expectEqual(
-        @sizeOf(bytecode.FunctionBytecode) +
-            @sizeOf(bytecode.function_bytecode.FunctionBytecodeHotExtension),
-        @offsetOf(bytecode.LegacyExecutionAdapter, "legacy_bytecode_adapter"),
-    );
-    try std.testing.expectEqual(
-        @intFromPtr(execution_function) + @sizeOf(bytecode.FunctionBytecode),
-        @intFromPtr(execution_function.hotExtension().?),
-    );
-    try std.testing.expectEqual(
-        @intFromPtr(execution_function) +
-            @sizeOf(bytecode.FunctionBytecode) +
-            @sizeOf(bytecode.function_bytecode.FunctionBytecodeHotExtension),
-        @intFromPtr(&adapter.legacy_bytecode_adapter),
-    );
-    try std.testing.expect(execution_function.legacyBytecodeAdapter().? == &function);
-}
-
 test "function bytecode separates strict and sloppy simple inline eligibility" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("simple-inline");
@@ -2073,7 +1838,7 @@ test "function bytecode separates strict and sloppy simple inline eligibility" {
 }
 
 test "function bytecode publishes exact-args leaf bytes by mode and geometry" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("exact-args-leaf");
@@ -2155,7 +1920,7 @@ test "function bytecode publishes exact-args leaf bytes by mode and geometry" {
 
 test "function bytecode publishes capture leaf kind by mode and geometry" {
     const LeafKind = bytecode.function_bytecode.ExactArgsLeafKind;
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("capture-leaf");
@@ -2383,7 +2148,7 @@ test "stack verifier rejects reachable end edges" {
 
 test "zero-arg empty leaf publication requires the return-balance proof" {
     const LeafKind = bytecode.function_bytecode.ExactArgsLeafKind;
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("leaf-balance");
@@ -2478,7 +2243,7 @@ test "zero-arg empty leaf publication requires the return-balance proof" {
 }
 
 test "direct eval reserves identity for visible function-scope locals and arguments" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const function_name = try rt.internAtom("direct-eval-open-bindings");
@@ -2520,7 +2285,7 @@ test "direct eval reserves identity for visible function-scope locals and argume
 }
 
 test "surviving local references reserve compact open VarRef storage" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const function_name = try rt.internAtom("open-ref-frame-sizing");
@@ -2558,7 +2323,7 @@ test "surviving local references reserve compact open VarRef storage" {
 }
 
 test "sloppy function-name references lower to an uncaptured dummy object property" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const function_name = try rt.internAtom("function-name-dummy-ref");
@@ -2611,7 +2376,7 @@ test "sloppy function-name references lower to an uncaptured dummy object proper
 }
 
 test "surviving argument references lower to make_arg_ref and reserve storage" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const function_name = try rt.internAtom("arg-open-ref-frame-sizing");
@@ -2654,8 +2419,8 @@ test "surviving argument references lower to make_arg_ref and reserve storage" {
     try std.testing.expectEqual(@as(?u16, 0), fb.argOpenBindingIndex(0));
 }
 
-test "direct Bytecode retains compact open VarRef frame sizing" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+test "finalize publishes the compact open VarRef frame sizing" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const function_name = try rt.internAtom("direct-open-ref-frame-sizing");
@@ -2666,8 +2431,6 @@ test "direct Bytecode retains compact open VarRef frame sizing" {
     _ = try fd.appendScope(-1);
     _ = try fd.addScopeVar(local_name, .normal, 0, .{});
 
-    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, function_name);
-    defer function.deinit(rt);
     // `scope_make_ref` carries a LabelId in the producer, not an address, so
     // the reference tail is a real label identity bound after the read.
     const b = try attachBuilder(&fd);
@@ -2683,33 +2446,29 @@ test "direct Bytecode retains compact open VarRef frame sizing" {
     try b.emitOp(bytecode.opcode.op.drop);
     try b.emitOp(bytecode.opcode.op.return_undef);
 
-    try finalizeMutableWithTestRealm(&function, &fd, rt);
+    const fb_slice = try createTestFunctionBytecode(&fd, rt);
+    const fb = &fb_slice[0];
 
-    try std.testing.expectEqual(@as(u16, 1), function.open_var_ref_count);
+    try std.testing.expectEqual(@as(u16, 1), fb.openVarRefCount());
     try std.testing.expect(fd.vars[0].is_captured);
-    try std.testing.expectEqual(bytecode.opcode.op.make_loc_ref, function.code[0]);
+    try std.testing.expectEqual(bytecode.opcode.op.make_loc_ref, fb.byteCode()[0]);
 }
 
 test "mapped frames use the exact compile-time open-binding count for every frame kind" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const function_name = try rt.internAtom("mapped-arg-open-ref-frame-sizing");
-    var function = bytecode.Bytecode.init(&rt.memory, &rt.atoms, function_name);
-    defer function.deinit(rt);
-    function.open_var_ref_count = 2;
-    function.flags.has_mapped_arguments = true;
-    var execution_adapter: bytecode.LegacyExecutionAdapter = undefined;
-
-    try std.testing.expectEqual(@as(usize, 2), frame_mod.frameOpenVarRefStorageCount(execution_adapter.init(&function)));
-    function.flags.is_generator = true;
-    try std.testing.expectEqual(@as(usize, 2), frame_mod.frameOpenVarRefStorageCount(execution_adapter.init(&function)));
-    function.flags.is_generator = false;
-    function.flags.is_async = true;
-    try std.testing.expectEqual(@as(usize, 2), frame_mod.frameOpenVarRefStorageCount(execution_adapter.init(&function)));
-    function.flags.is_async = false;
-    function.flags.has_mapped_arguments = false;
-    try std.testing.expectEqual(@as(usize, 2), frame_mod.frameOpenVarRefStorageCount(execution_adapter.init(&function)));
+    inline for (.{ .normal, .generator, .async, .async_generator }) |kind| {
+        const function = try bytecode.FunctionBytecode.createFixture(rt, .{
+            .name = function_name,
+            .var_ref_count = 2,
+            .flags = .{ .func_kind = kind },
+        });
+        defer function.destroyUnpublishedFixture(rt);
+        function.setExecutionFlags(.{ .has_mapped_arguments = kind == .normal });
+        try std.testing.expectEqual(@as(usize, 2), frame_mod.frameOpenVarRefStorageCount(function));
+    }
 
     const open_count: usize = 2;
     const layout: frame_mod.SlabLayout = .{ .args = 5, .locals = 2, .stack = 3, .var_refs = 3, .open_var_refs = open_count };
@@ -2724,7 +2483,7 @@ test "mapped frames use the exact compile-time open-binding count for every fram
 }
 
 test "createFunctionBytecode: final declaration metadata lives only in ClosureVar" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("global-var-records");
@@ -2767,7 +2526,7 @@ test "createFunctionBytecode: final declaration metadata lives only in ClosureVa
 
 test "createFunctionBytecode accounts large finalized payload in large space" {
     const large_threshold = @sizeOf(bytecode.FunctionBytecode) + 64;
-    const rt = try core.JSRuntime.createWithOptions(std.testing.allocator, .{
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{
         .gc_policy = .{
             .large_object_threshold = large_threshold,
             .major_debt_threshold = std.math.maxInt(usize),
@@ -2789,7 +2548,7 @@ test "createFunctionBytecode accounts large finalized payload in large space" {
     @memset(source, 'x');
     try fd.replaceSourceText(source);
 
-    const realm = try core.RealmContext.create(rt);
+    const realm = try core.RealmContext.create(rt, .{});
     var realm_alive = true;
     defer if (realm_alive) realm.destroy();
     const before_fb = rt.gcStats();
@@ -2863,11 +2622,11 @@ fn populateFunctionDefForFinalizeFailure(
 }
 
 fn runFunctionBytecodeFinalizeOomLifecycle(allocator: std.mem.Allocator) !void {
-    const rt = try core.JSRuntime.create(allocator);
+    const rt = try core.JSRuntime.create(allocator, .{});
     var rt_owned = true;
     errdefer if (rt_owned) rt.destroy();
 
-    const realm = try core.RealmContext.create(rt);
+    const realm = try core.RealmContext.create(rt, .{});
     var realm_owned = true;
     errdefer if (realm_owned) realm.destroy();
 
@@ -2908,8 +2667,7 @@ test "private class identity has no bytecode side metadata carrier" {
     try std.testing.expect(!@hasField(bytecode.Bytecode, "private_bound_names"));
     try std.testing.expect(!@hasField(bytecode.Bytecode, "class_private_names"));
     try std.testing.expect(!@hasField(bytecode.FunctionLayout, "side_off"));
-    try std.testing.expect(!@hasField(bytecode.LegacyExecutionAdapter, "side_extension"));
-    try std.testing.expect(@hasField(bytecode.LegacyExecutionAdapter, "legacy_bytecode_adapter"));
+    try std.testing.expect(!@hasDecl(bytecode, "LegacyExecutionAdapter"));
 }
 
 test "createFunctionBytecode exhaustively rolls back every precommit allocation failure" {
@@ -2922,7 +2680,7 @@ test "createFunctionBytecode exhaustively rolls back every precommit allocation 
 }
 
 test "installCodeWithCapacity/installAtomOperandsWithCapacity account the full backing across replacement and deinit" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("capacity-carry-replacement");
@@ -2931,7 +2689,7 @@ test "installCodeWithCapacity/installAtomOperandsWithCapacity account the full b
 
     var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     var bc_live = true;
-    defer if (bc_live) bc.deinit(rt);
+    defer if (bc_live) bc.deinit();
 
     const first_code = [_]u8{ 1, 2, 3, 4, 5 };
     const first_code_backing = try rt.memory.alloc(u8, 16);
@@ -2962,14 +2720,14 @@ test "installCodeWithCapacity/installAtomOperandsWithCapacity account the full b
     try std.testing.expectEqual(@as(usize, 2), bc.atom_operands.len);
     try std.testing.expectEqual(@as(usize, 6), bc.atom_operands_capacity);
 
-    bc.deinit(rt);
+    bc.deinit();
     bc_live = false;
     try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
     try std.testing.expectEqual(base_count, rt.memory.allocation_count);
 }
 
 test "capacity-carry install with zero used length still owns and frees the backing" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("capacity-carry-zero-used");
@@ -2978,7 +2736,7 @@ test "capacity-carry install with zero used length still owns and frees the back
 
     var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     var bc_live = true;
-    defer if (bc_live) bc.deinit(rt);
+    defer if (bc_live) bc.deinit();
 
     const code_backing = try rt.memory.alloc(u8, 12);
     bc.installCodeWithCapacity(code_backing.ptr[0..0], code_backing.len);
@@ -2990,14 +2748,14 @@ test "capacity-carry install with zero used length still owns and frees the back
     try std.testing.expectEqual(@as(usize, 0), bc.atom_operands.len);
     try std.testing.expectEqual(@as(usize, 4), bc.atom_operands_capacity);
 
-    bc.deinit(rt);
+    bc.deinit();
     bc_live = false;
     try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
     try std.testing.expectEqual(base_count, rt.memory.allocation_count);
 }
 
 test "phase-3 exact-fit replacement frees the carried capacity once and releases atom refs once" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("capacity-carry-phase-3-replacement");
@@ -3006,7 +2764,7 @@ test "phase-3 exact-fit replacement frees the carried capacity once and releases
 
     var bc = bytecode.Bytecode.init(&rt.memory, &rt.atoms, name);
     var bc_live = true;
-    defer if (bc_live) bc.deinit(rt);
+    defer if (bc_live) bc.deinit();
 
     const carried_code = [_]u8{ 1, 3, 5, 7, 9 };
     const carried_code_backing = try rt.memory.alloc(u8, 16);
@@ -3042,7 +2800,7 @@ test "phase-3 exact-fit replacement frees the carried capacity once and releases
     );
     try std.testing.expectEqual(base_count + 2, rt.memory.allocation_count);
 
-    bc.deinit(rt);
+    bc.deinit();
     bc_live = false;
     try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
     try std.testing.expectEqual(base_count, rt.memory.allocation_count);
@@ -3052,7 +2810,7 @@ test "four-ledger phase-boundary ownership accounting compile-only" {
     const ownership = parser_tests.phase_ownership;
 
     for (&ownership.shapes) |*shape| {
-        const rt = try core.JSRuntime.create(std.testing.allocator);
+        const rt = try core.JSRuntime.create(std.testing.allocator, .{});
         defer rt.destroy();
 
         try ownership.warmRuntime(rt, shape);
@@ -3060,7 +2818,7 @@ test "four-ledger phase-boundary ownership accounting compile-only" {
         // A realm is only needed to materialise child FunctionBytecodes. Create
         // it before the window so its own allocations and atoms sit outside the
         // measured baseline.
-        const realm = try core.RealmContext.create(rt);
+        const realm = try core.RealmContext.create(rt, .{});
         defer realm.destroy();
 
         var window: ownership.Window = undefined;
@@ -3072,7 +2830,7 @@ test "four-ledger phase-boundary ownership accounting compile-only" {
         // producer. Tier 2 therefore still starts at an exact census.
         try std.testing.expectEqual(
             @as(usize, 0),
-            ownership.publishedFunctionBytecodeCount(&window.function),
+            ownership.publishedFunctionBytecodeCount(&window),
         );
 
         // The resolver consumes the compact Builder and publishes the final
@@ -3086,22 +2844,18 @@ test "four-ledger phase-boundary ownership accounting compile-only" {
         } else {
             try std.testing.expectEqual(@as(usize, 0), window.state.function_def.child_list.len);
         }
-        try pipeline.finalize.runWithFunctionDefRuntime(
-            &window.function,
-            &window.state.function_def,
-            .{ .realm = realm },
-        );
+        try window.finalize(realm);
         var b3 = try window.sample(.final);
         // Finalization moves ownership under published FunctionBytecodes,
         // which the census does not descend into. TGC S3-c retired the atom
         // ledger that measured that residual, so what remains checkable here
         // is the structural fact it was derived from.
         if (shape.tier == .nested_function_bytecode) {
-            try std.testing.expect(ownership.publishedFunctionBytecodeCount(&window.function) > 0);
+            try std.testing.expect(ownership.publishedFunctionBytecodeCount(&window) > 0);
         } else {
             try std.testing.expectEqual(
                 @as(usize, 0),
-                ownership.publishedFunctionBytecodeCount(&window.function),
+                ownership.publishedFunctionBytecodeCount(&window),
             );
         }
 

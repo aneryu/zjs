@@ -1045,7 +1045,7 @@ test "R3 census names the native frame that rescued an unrooted stack JSValue" {
     // configuration this asserts.
     if (comptime !gc.roots_diag_enabled) return error.SkipZigTest;
 
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const object = try object_mod.Object.create(rt, @import("class.zig").ids.object, null);
@@ -1144,7 +1144,7 @@ noinline fn diagRescanFixedSlot(rt: *JSRuntime, slot: *[1]usize, count: usize) v
 test "R1-b verdict calls a stale interior slot residue" {
     if (comptime !gc.roots_diag_enabled) return error.SkipZigTest;
 
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const object = try object_mod.Object.create(rt, @import("class.zig").ids.object, null);
     const target: *gc.Header = object.gcHeader();
@@ -1171,7 +1171,7 @@ test "R1-b verdict calls a stale interior slot residue" {
 test "R1-b verdict calls a bare exact pointer in a deep slot a candidate root" {
     if (comptime !gc.roots_diag_enabled) return error.SkipZigTest;
 
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     // A fresh object per test: the header address is the handle the verdict
@@ -1214,7 +1214,7 @@ test "R1-b verdict calls a bare exact pointer in a deep slot a candidate root" {
 test "R1-b verdict calls an exact slot with drifting kinds residue" {
     if (comptime !gc.roots_diag_enabled) return error.SkipZigTest;
 
-    const rt = try JSRuntime.create(std.testing.allocator);
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     // Three DIFFERENT kinds through one header-exact slot. Exactness and kind

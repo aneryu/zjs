@@ -18,7 +18,7 @@
 
 一次顶层执行（`JSContext.eval` / `zjs_vm.run`）的控制流：
 
-1. **`zjs_vm.run` / `runWithOutput`**：普通 canonical FB 先 `createRootBytecodeFunctionObject` 造**真实根函数对象**（闭包 PASS1 的 GLOBAL_DECL 已装好），再进 `runWithCallEnv`。module 与 legacy adapter 仍走 `runWithArgs`。
+1. **`zjs_vm.run` / `runWithOutput`**：普通 canonical FB 先 `createRootBytecodeFunctionObject` 造**真实根函数对象**（闭包 PASS1 的 GLOBAL_DECL 已装好），再进 `runWithCallEnv`。module 仍走 `runWithArgs`。
 2. **`runWithCallEnv` → `runWithCallEnvAfterInterruptPoll`**：对齐 qjs `JS_CallInternal`：先在**调用者 Realm** 做 interrupt poll 与 `bytecodeFrameAllocaSize` 栈预算，再切到 `b->realm`。generator/async 的 alloca_size 为 0（堆上驻留帧）。
 3. **`runWithArgsState`**：打 `vm_stack` watermark；构造 `Frame`（同步壳或 `initResidentExecution`）；在**最终地址**上构造 `Machine`（不可再搬）；挂 `MachineBacktraceView.root` 与 `ActiveInvocation`（`rt.active_invocation`）；首次进入则 `initFreshEntryFrame`，resume 则跳过抛片。
 4. **`runTC`**：把当前 `ExecutionLevel` 写进 Machine 内驻留的 `tailcall_dispatch.Vm`（`function/frame/stack/code_base/catch_target/prop_sites`），调用 `runDispatchLoop`。
@@ -63,35 +63,35 @@ exec 子系统命名空间与嵌入用薄 `Vm` 门面。只 re-export 各域，�
 
 `pub const subsystem_name = "exec"`。随后一长串 `pub const zjs_vm = @import(...)` 把 frame/stack/call/module/promise/… 暴露给 `src/exec` 聚合者。
 
-### `opcodeName` (`src/exec/root.zig:72`)
+### `opcodeName` (`src/exec/root.zig:70`)
 
 - **签名**：`pub fn opcodeName(opcode: u8) []const u8`。
 - **作用**：把 opcode 字节映射成调试用名字（转调 `bytecode.opcode.nameOf`）。
 - **实现**：直接 `return bytecode.opcode.nameOf(opcode)`。给调试/剖析打印用，不碰栈。
 - **所有权 / 错误 / 调用**：错误：无。 调用：不是 VM 内部调用的函数——`src/root.zig` 的 `activateOpcodeProfile` 把它作为函数指针注册给 `core.profile.setOpcodeNameProvider`，供 CLI 打印 opcode 剖析表。
 
-### `Vm.init` (`src/exec/root.zig:83`)
+### `Vm.init` (`src/exec/root.zig:81`)
 
 - **签名**：`pub fn init(ctx: *core.JSContext) Vm`。
 - **作用**：`src/exec` 的嵌入门面构造器：把一个 `JSContext` 包成可以直接 `run(FunctionBytecode)` 的轻量执行器，自带一条按 `ctx.stackLimit()` 设限的操作数栈。
 - **实现**：保存 `ctx`，用 `ctx.runtime.memory` 与 `ctx.stackLimit()` 构造空 `Stack`。output/globals 保持默认空。
 - **所有权 / 错误 / 调用**：错误：无。 调用：嵌入门面，VM 内核自身不用；仓库内的调用方是 `src/tests/helpers.zig` / `src/tests/exec.zig` 这类嵌入式用例。
 
-### `Vm.initWithOutput` (`src/exec/root.zig:90`)
+### `Vm.initWithOutput` (`src/exec/root.zig:88`)
 
 - **签名**：`pub fn initWithOutput(ctx: *core.JSContext, output: *std.Io.Writer) Vm`。
 - **作用**：同 `init`，并挂嵌入方 `Writer` 给 print 一类输出。
 - **实现**：同 `init`，再挂上嵌入方提供的 `*std.Io.Writer`，供 `print` 一类宿主输出。
 - **所有权 / 错误 / 调用**：错误：无。 调用：同 `Vm.init`，仓库内只有嵌入式测试用例（`src/tests/exec.zig`）用它把 print 输出接到自己的 writer。
 
-### `Vm.deinit` (`src/exec/root.zig:98`)
+### `Vm.deinit` (`src/exec/root.zig:96`)
 
 - **签名**：`pub fn deinit(self: *Vm) void`。
 - **作用**：归还这个门面自己持有的两样东西——globals 槽数组与操作数栈 backing；`JSContext` 由调用方所有，不在此销毁。
 - **实现**：先把 `globals` 字段置空切片，再把取出的每个槽写成 undefined；长度非 0 才 `memory.free`；清空 `global_object`；`stack.deinit(runtime)`。不销毁 `JSContext`。
 - **所有权 / 错误 / 调用**：错误：无。 调用：嵌入方/测试用例在 `Vm` 生命期结束时调用；VM 内核不调。
 
-### `Vm.run` (`src/exec/root.zig:109`)
+### `Vm.run` (`src/exec/root.zig:107`)
 
 - **签名**：`pub fn run(self: *Vm, function: *const bytecode.FunctionBytecode) !core.JSValue`。
 - **作用**：执行一条 canonical `FunctionBytecode`。
@@ -112,101 +112,101 @@ exec 子系统命名空间与嵌入用薄 `Vm` 门面。只 re-export 各域，�
 
 - **签名**：`pub fn runWithOutput( ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, output: ?*std.Io.Writer, ) !core.JSValue`。
 - **作用**：带可选 writer 的根执行入口。
-- **实现**：非 module 且无 legacy adapter：取 `function.realmContext()`（为 null 则 `error.InvalidBuiltinRegistry`），在该 Realm 上 `contextGlobal` + `createRootBytecodeFunctionObject(.root_global)`，`rootValues` 护住根函数值，`runtimeStrictMode()` 时 `this` 为 undefined、否则为全局对象，captures 取根函数对象的 `functionCaptures()`，再 `runWithCallEnv`（`direct_eval_vars_reach_global` / `global_declarations_prevalidated` 为 true）。失败且非 JSException/Interrupted、未要求 preserve 且确有 pending 异常时 `clearException`。module/legacy 走 `runWithArgs`（module 或 strict 时 `this` 为 undefined）。
+- **实现**：非 module：取 `function.realmContext()`（为 null 则 `error.InvalidBuiltinRegistry`），在该 Realm 上 `contextGlobal` + `createRootBytecodeFunctionObject(.root_global)`，`rootValues` 护住根函数值，`runtimeStrictMode()` 时 `this` 为 undefined、否则为全局对象，captures 取根函数对象的 `functionCaptures()`，再 `runWithCallEnv`（`direct_eval_vars_reach_global` / `global_declarations_prevalidated` 为 true）。失败且非 JSException/Interrupted、未要求 preserve 且确有 pending 异常时 `clearException`。module/legacy 走 `runWithArgs`（module 或 strict 时 `this` 为 undefined）。
 - **所有权 / 错误 / 调用**：错误：error union，由直接调用方处理。 GC 根：`core.runtime.rootValues` 帧护住尚未入帧的根函数值。 调用：`zjs_vm.run` 与 `exec.Vm.run`。
 
-### `contextGlobalFast` (`src/exec/zjs_vm.zig:103`)
+### `contextGlobalFast` (`src/exec/zjs_vm.zig:110`)
 
 - **签名**：`pub inline fn contextGlobalFast(ctx: *core.JSContext) !*core.Object`。
 - **作用**：`contextGlobal` 的寄存器快臂：活 context 已有 global 则不再走 bootstrap。
 - **实现**：`ctx.global` 已有且 `ctx.isLive()` 则直接返回；否则落到 `contextGlobal` 做 bootstrap。
 - **所有权 / 错误 / 调用**：错误：error union，由直接调用方处理。 调用：嵌入 API 侧的 `src/js_context.zig`（宿主取全局的快路径）。
 
-### `contextGlobal` (`src/exec/zjs_vm.zig:110`)
+### `contextGlobal` (`src/exec/zjs_vm.zig:117`)
 
 - **签名**：`pub fn contextGlobal(ctx: *core.JSContext) !*core.Object`。
 - **作用**：懒构建并缓存 per-context 全局对象（标准构造器 + print/console）。
 - **实现**：已有 global：未 live 则 `publishLive` 后返回。否则按 `call_mod.contextGlobalOwnPropertyCapacity` 的容量 `Object.createWithOwnPropertyCapacity` 建 `class.ids.global_object`，`ensureGlobalPayload`，暂存 `ctx.global`（construction-only），`installHostGlobals`，建 `throwTypeErrorIntrinsicForGlobal`，首次时预分配 OOM 错误对象（无栈，对齐 qjs；失败吞成 null），读出 `eval` 缓存到 `ctx.eval_function`，`finishConstruction`。`errdefer` 调 `rollbackIntrinsicBootstrap` 并把 `ctx.global` 置回 null。
 - **所有权 / 错误 / 调用**：错误：error union，由直接调用方处理。 调用：`runWithOutput`、`eval_entry.zig`、`module_graph.zig`，以及嵌入层 `src/js_context.zig` / `src/binding/binding.zig`。
 
-### `runWithArgs` (`src/exec/zjs_vm.zig:151`)
+### `runWithArgs` (`src/exec/zjs_vm.zig:162`)
 
 - **签名**：`pub fn runWithArgs( ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, initial_this_value: core.JSValue, args: []const core.JSValue, var_refs: []const *core.VarRef, output: ?*std.Io.Writer, global: *core.Object, break_var_ref_cycles_on_exit: bool, strict_unresolved_get_var: bool, stop_on_yield: bool, ) !core.JSValue`。
 - **作用**：带显式 this/args/captures 的兼容入口。
 - **实现**：canonical 非 module 走 `runCanonicalRootWithArgs`；否则直接 `runWithCallEnv`。catch 后同样按 preserve/JSException/Interrupted 决定是否 `clearException`。
 - **所有权 / 错误 / 调用**：错误：error union，由直接调用方处理。 调用：`runWithOutput` 的 module/legacy 臂，以及 `src/tests/exec.zig` 的兼容用例。
 
-### `resolveSuppliedRootCapture` (`src/exec/zjs_vm.zig:202`)
+### `resolveSuppliedRootCapture` (`src/exec/zjs_vm.zig:178`)
 
 - **签名**：`fn resolveSuppliedRootCapture( opaque_context: ?*anyopaque, ctx: *core.JSContext, global: *core.Object, function: *const bytecode.FunctionBytecode, index: usize, cv: bytecode.function_bytecode.BytecodeClosureVar, ) HostError!*core.VarRef`。
 - **作用**：把调用方传入的 capture 数组按 index 交给闭包 PASS1。
 - **实现**：把 `opaque_context` 当成 `SuppliedRootCaptures`（为 null 也是 `InvalidBytecode`）；index 越界 `InvalidBytecode`；否则返回调用方提供的 cell。ctx/global/function/cv 有意忽略。
 - **所有权 / 错误 / 调用**：错误：`HostError`；上层把它变成 JS 异常或继续 unwind。 调用：不直接被调用——`runCanonicalRootWithArgs` 把它装进 `ClosureCaptureSource.custom`，由 `object_ops.createRootBytecodeFunctionObject` 的闭包 PASS1 逐 index 回调。
 
-### `runCanonicalRootWithArgs` (`src/exec/zjs_vm.zig:223`)
+### `runCanonicalRootWithArgs` (`src/exec/zjs_vm.zig:199`)
 
 - **签名**：`fn runCanonicalRootWithArgs( ctx: *core.JSContext, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, initial_this_value: core.JSValue, args: []const core.JSValue, var_refs: []const *core.VarRef, output: ?*std.Io.Writer, global: *core.Object, break_var_ref_cycles_on_exit: bool, strict_unresolved_get_var: bool, stop_on_yield: bool, ) HostError!core.JSValue`。
 - **作用**：为借用的 canonical FB 造与 parser.Result 相同的真实根函数对象再执行。
 - **实现**：校验 Realm/runtime/global 一致，captures 长度匹配。空 captures 用 `.root_global`，否则 custom resolver。造根函数对象、rootValues 护住，再 `runWithCallEnv`（`direct_eval_vars_reach_global` 与 `global_declarations_prevalidated` 为 true）。
 - **所有权 / 错误 / 调用**：错误：`HostError`；上层把它变成 JS 异常或继续 unwind。 GC 根：`core.runtime.rootValues` 帧护住新建的根函数值。 调用：只由 `runWithArgs` 的 canonical 臂调用。
 
-### `runWithCallEnv` (`src/exec/zjs_vm.zig:326`)
+### `runWithCallEnv` (`src/exec/zjs_vm.zig:291`)
 
 - **签名**：`pub fn runWithCallEnv(env: CallEnv) HostError!core.JSValue`。
 - **作用**：统一 `CallEnv` 入口：中断轮询后进入状态机。
 - **实现**：`generator_state != null` 且未 precharged：复制一份 env，把 `global` 换成 `ctx.global orelse env.global`，`enterCallDepth(..., 0)`（对齐 `async_func_resume` 的 `js_check_stack_overflow(rt, 0)`）、`pollInterrupt`，标记 `call_depth_precharged` 后进 AfterInterruptPoll。普通路径先 poll 再 AfterInterruptPoll。
 - **所有权 / 错误 / 调用**：错误：`HostError`；上层把它变成 JS 异常或继续 unwind。 调用：`runWithOutput` / `runWithArgs` / `runCanonicalRootWithArgs`，以及 `call.zig`、`call_runtime.zig`、`module.zig`、`eval_entry.zig`。
 
-### `runWithCallEnvAfterInterruptPoll` (`src/exec/zjs_vm.zig:350`)
+### `runWithCallEnvAfterInterruptPoll` (`src/exec/zjs_vm.zig:315`)
 
 - **签名**：`pub fn runWithCallEnvAfterInterruptPoll(env: CallEnv) HostError!core.JSValue`。
 - **作用**：调用者 Realm 已 poll 之后的最终字节码入口，避免跨 Realm 双计栈预算。
 - **实现**：在调用者 Realm 按 qjs 顺序做 `bytecodeFrameAllocaSize(function, args.len, copy_argv)` 栈守卫（generator 为 0），然后若 `function.realmContext()` 非空就把 `ctx/global` 切到该 Realm（realm 没有 global 则 `error.InvalidBuiltinRegistry`），最后把 `CallEnv` 摊平成参数调用 `runWithArgsState`。已 `call_depth_precharged` 则不再二次 enter。
 - **所有权 / 错误 / 调用**：错误：`HostError`；上层把它变成 JS 异常或继续 unwind。 调用：`runWithCallEnv`，以及已自行完成 poll 的 `call_runtime.zig` / `promise_ops.zig` 调用路径。
 
-### `runWithArgsState` (`src/exec/zjs_vm.zig:410`)
+### `runWithArgsState` (`src/exec/zjs_vm.zig:351`)
 
 - **签名**：`fn runWithArgsState( ctx: *core.JSContext, entry_stack: *stack_mod.Stack, entry_function: *const bytecode.FunctionBytecode, initial_this_value: core.JSValue, args: []const core.JSValue, var_refs: []const *core.VarRef, output: ?*std.Io.Writer, global: *core.Object, break_var_ref_cycles_on_exit: bool, entry_strict_unresolved_get_var: bool, entry_stop_on_yield: bool, entry_generator_state: ?*core.Object, resume_value: ?core.JSValue, entry_stop_before_pc: ?usize, current_function_value: core.JSValue, new_target_value: core.JSValue, entry_eval_global_var_bindings: bool, entry_direct_eval_vars_reach_global: bool, entry_is_eval_code: bool, entry_global_declarations_prevalidated: bool, entry_suspend_on_module_await: bool, entry_initial_pc: usize, entry_prepared_frame: ?*const PreparedEntryFrame, ) HostError!core.JSValue`。
 - **作用**：构造 Machine / 帧 / ActiveInvocation 并驱动 `runTC` 直到结束。
 - **实现**：真正的解释器入口。校验根函数对象；可选 GLOBAL_DECL 校验；给 `vm_stack` 打 watermark；generator 则 `Frame.initResidentExecution`，否则 `Frame.init`。构造不可移动的 `Machine` + `ActiveInvocation`（精确根开启时挂 `traceRoots`），push backtrace。非 resume 走 `initFreshEntryFrame` 切 `[args|locals|operand|var-ref]`；已有 `has_frame` 的 generator 跳过抛片，直接 `resumeExecutionState`。`runTC` 循环：错误时只有 `machine.depth > 0` 且 `unwindForError` 报告被捕获才 continue，否则原样返回错误。成功返回 `machine.vm.return_value`。
 - **所有权 / 错误 / 调用**：错误：`HostError`；上层把它变成 JS 异常或继续 unwind。 同步帧优先 `VmStackArena` 切窗口，入口处 `mark()` / `defer restore()` 成批回收，不逐值挂 root。 驻留帧：storage 所有权在 `GeneratorExecutionState`，Frame 只借窗口。 `break_var_ref_cycles_on_exit` 时退出前跑一次 `tryRunObjectCycleRemovalWithValueRoots(.engine_active)`。 调用：唯一调用方是 `runWithCallEnvAfterInterruptPoll`。
 
-### `initFreshEntryFrame` (`src/exec/zjs_vm.zig:594`)
+### `initFreshEntryFrame` (`src/exec/zjs_vm.zig:500`)
 
 - **签名**：`noinline fn initFreshEntryFrame( ctx: *core.JSContext, entry_stack: *stack_mod.Stack, entry_function: *const bytecode.FunctionBytecode, frame_storage: *frame_mod.Frame, global: *core.Object, args: []const core.JSValue, var_refs: []const *core.VarRef, entry_generator_state: ?*core.Object, entry_prepared_frame: ?*const PreparedEntryFrame, ) HostError!void`。
 - **作用**：仅首次进入时切 `[args|original_args?|locals|operand|var-ref]` 窗口。resume 的 generator 已经在 execution state 里拥有这些窗口，把分配留在 `runWithArgsState` 会撑大每次 resume 的 native 帧。
 - **实现**：非 generator/async 且无 generator_state 则用 `ctx.runtime.vm_stack`。`need_original_args` / `frame_arg_count` / `open_var_ref_count` 优先取 `PreparedEntryFrame`，否则按 FB 与 `args.len` 算。slab：有 prepared 则 `installResidentStorage`；有 generator combined storage 则 `FrameSlab.partitionStorage`；否则 arena `FrameSlab.carve`，carve 失败或无 arena 则 `allocHeap` + `installOwnedStorage`。根帧 `entry_stack.capacity==0` 且 slab 带 stack 窗口时把 `entry_stack` 改成 `Stack.initArenaWindow`。然后 `initFrameLocals`、`initArguments`、安装 open var-ref 槽、`initFrameVarRefs`。
 - **所有权 / 错误 / 调用**：arena 窗口借 `VmStackArena` watermark；heap 窗口 `ownership.storage=.owned`，Frame 析构才 free。generator 驻留片 Frame 只借。错误：`HostError`（OOM）。调用：`runWithArgsState` 非 resume 臂。
 
-### `runTC` (`src/exec/zjs_vm.zig:701`)
+### `runTC` (`src/exec/zjs_vm.zig:584`)
 
 - **签名**：`fn runTC(m: *inline_calls.Machine) HostError!void`。
 - **作用**：把 Machine 当前层发布进驻留 `Vm`，启动 handler 链。
 - **实现**：先断言 `vm.ctx/rt/global` 与 Machine 一致，再发布 `machine` 本身与 `currentLevel()` 的 `function`（随之 `publishPropSites(func)`，避免上一函数的 prop-site 镜像按序号错配）、`frame`、`stack`、`code_base = func.byteCode().ptr`、`catch_target`，然后 `tailcall_dispatch.runDispatchLoop(vm)`。ctx/rt/global/output 与两张驻留尾表（`resident_tail_tbl` / `property_tail_tbl`）在 `Vm.initResident` 时已写好。
 - **所有权 / 错误 / 调用**：错误：`HostError`；上层把它变成 JS 异常或继续 unwind。 调用：`runWithArgsState` 的主循环、`runActiveInvocationUntilNativeBoundary`、`runActiveInvocationAfterNativeBoundaryError`。
 
-### `runActiveInvocationUntilNativeBoundary` (`src/exec/zjs_vm.zig:724`)
+### `runActiveInvocationUntilNativeBoundary` (`src/exec/zjs_vm.zig:607`)
 
 - **签名**：`pub inline fn runActiveInvocationUntilNativeBoundary( invocation: *inline_calls.ActiveInvocation, scope: anytype, ) HostError!void`。
 - **作用**：在已激活 Machine 上跑回调 Entry，直到 `.native_boundary` 把控制交回 Zig 内建。
 - **实现**：断言 depth > fence。`runTC` 成功则断言回到 fence 且 top 匹配。失败走 outlined `runActiveInvocationAfterNativeBoundaryError`：在 fence 内 `unwindForErrorToDepth` 循环，捕获则再 `runTC`，未捕获把错误交回 native。
 - **所有权 / 错误 / 调用**：错误：`HostError`；上层把它变成 JS 异常或继续 unwind。 调用：`call_runtime.zig` 的宿主回调边界（内建在自己的原生帧里驱动 JS 回调）。
 
-### `runPushedEntryUntilNativeBoundary` (`src/exec/zjs_vm.zig:740`)
+### `runPushedEntryUntilNativeBoundary` (`src/exec/zjs_vm.zig:623`)
 
 - **签名**：`pub inline fn runPushedEntryUntilNativeBoundary( invocation: *inline_calls.ActiveInvocation, scope: anytype, entry: *inline_calls.Entry, target: *const inline_calls.InlineTarget, ) HostError!void`。
 - **作用**：刚 push 的 Entry 用 pusher 寄存器发布 per-level 字段后跑到原生栅栏。
 - **实现**：`vm.publishPushedEntry` 用 pusher 寄存器发布新层（pc0 = code_base），`runDispatchLoopPublished` 直入。错误同样走栅栏 unwind。
 - **所有权 / 错误 / 调用**：错误：`HostError`；上层把它变成 JS 异常或继续 unwind。 调用：`call_runtime.zig` 中刚 `pushCall` 完 Entry 的两条宿主→JS 路径。
 
-### `runActiveInvocationAfterNativeBoundaryError` (`src/exec/zjs_vm.zig:763`)
+### `runActiveInvocationAfterNativeBoundaryError` (`src/exec/zjs_vm.zig:646`)
 
 - **签名**：`noinline fn runActiveInvocationAfterNativeBoundaryError( machine: *inline_calls.Machine, fence_depth: usize, expected_top: ?*inline_calls.Entry, initial_err: HostError, ) HostError!void`。
 - **作用**：把「回调抛错」的完整有界 unwind 循环从成功同步返回驱动里拆出去：短回调只付一次 `runTC` + 一次结果检查。
 - **实现**：`pending_err = initial_err`。循环：若 `depth <= fence_depth` 或 `unwindForErrorToDepth(global, fence, pending)` 未捕获，断言回到 fence 且 top 匹配，返回 `pending_err`。捕获则再 `runTC`：失败把 `pending_err` 换成新错 continue；成功同样断言 fence/top 后 `return`。
 - **所有权 / 错误 / 调用**：不越过 fence 去碰挂起的外层字节码帧。错误原样交回 native builtin。调用：`runActiveInvocationUntilNativeBoundary` / `runPushedEntryUntilNativeBoundary` 的 `runTC`/`runDispatchLoopPublished` catch 臂。
 
-### `reserveEntryFrameCapacity` (`src/exec/zjs_vm.zig:792`)
+### `reserveEntryFrameCapacity` (`src/exec/zjs_vm.zig:675`)
 
 - **签名**：`fn reserveEntryFrameCapacity(entry_stack: *stack_mod.Stack, entry_function: *const bytecode.FunctionBytecode) !void`。
 - **作用**：按 FB `stack_size` 预留操作数栈（Debug 允许未 finalize 的夹具用 code 长度）。

@@ -127,7 +127,7 @@ own retains; those keep the `JSContext` allocated until they drop.
 
 Who owns that host reference:
 
-- `JSContext.create` / `createWithOptions` returns it to the caller. Destroy
+- `JSContext.create` returns it to the caller. Destroy
   that returned context exactly once.
 - `JSContext.createRealm` (and `$262.createRealm()`) transfers the child's
   create reference onto the realm-record `JSValue`. Free that value. Do not

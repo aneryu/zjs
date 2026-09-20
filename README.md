@@ -100,10 +100,10 @@ const zjs = @import("zjs");
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
-    const rt = try zjs.JSRuntime.create(allocator);
+    const rt = try zjs.JSRuntime.create(allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt);
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const result = try ctx.eval("let x = 1 + 2; x;", .{});

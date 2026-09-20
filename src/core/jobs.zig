@@ -749,9 +749,9 @@ fn runGenericOneForTest(queue: *Queue) RunOneStatus {
 }
 
 test "Queue runOne reports three states and preserves FIFO after exception" {
-    const runtime = try core.JSRuntime.create(std.testing.allocator);
+    const runtime = try core.JSRuntime.create(std.testing.allocator, .{});
     defer runtime.destroy();
-    const context = try core.JSContext.create(runtime);
+    const context = try core.JSContext.create(runtime, .{});
     defer context.destroy();
 
     const TestJob = struct {
@@ -779,9 +779,9 @@ test "Queue runOne reports three states and preserves FIFO after exception" {
 }
 
 test "Promise settlement continuation owns target and direct symbol completion" {
-    const runtime = try core.JSRuntime.create(std.testing.allocator);
+    const runtime = try core.JSRuntime.create(std.testing.allocator, .{});
     defer runtime.destroy();
-    const context = try core.JSContext.create(runtime);
+    const context = try core.JSContext.create(runtime, .{});
     defer context.destroy();
 
     try runtime.job_queue.reserveEntries(1);
@@ -805,9 +805,9 @@ test "Promise settlement continuation owns target and direct symbol completion" 
 }
 
 test "Queue runOne keeps existing tail ahead of jobs enqueued by the active job" {
-    const runtime = try core.JSRuntime.create(std.testing.allocator);
+    const runtime = try core.JSRuntime.create(std.testing.allocator, .{});
     defer runtime.destroy();
-    const context = try core.JSContext.create(runtime);
+    const context = try core.JSContext.create(runtime, .{});
     defer context.destroy();
 
     const observed = try core.Object.createArray(runtime, null);
@@ -855,9 +855,9 @@ test "Queue runOne keeps existing tail ahead of jobs enqueued by the active job"
 }
 
 test "runtime takes typed Promise jobs without allocation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     try rt.job_queue.ensureCapacity(2);
@@ -887,9 +887,9 @@ test "runtime takes typed Promise jobs without allocation" {
 }
 
 test "typed job reservations preserve capacity without claiming a FIFO position" {
-    const rt = try core.JSRuntime.create(std.testing.allocator);
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const ctx = try core.JSContext.create(rt);
+    const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     try rt.job_queue.enqueuePromise(ctx, core.JSValue.int32(10));

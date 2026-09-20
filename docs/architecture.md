@@ -5,8 +5,8 @@ reference. Validation commands live in [GUIDE.md](../GUIDE.md) Part B.6; this
 page does not repeat them. Function-level Chinese walkthrough of every
 `src/` function: [code-walkthrough/README.md](code-walkthrough/README.md).
 
-Start from the layer you are changing. Do not read `parser.zig`, `object.zig`,
-or `bytecode.zig` from the first line to the last — those files are large
+Start from the layer you are changing. Do not read `parser.zig` or `object.zig`
+from the first line to the last — those files are large
 reference shapes, matching QuickJS’s own monoliths.
 
 ## Layers
@@ -14,7 +14,7 @@ reference shapes, matching QuickJS’s own monoliths.
 ```
 embedder  →  src/root.zig  →  src/js_context.zig + src/native.zig  →  src/core/
 CLI/tests →  src/internal_root.zig
-compile   →  src/parser.zig  →  src/compiler/  →  src/bytecode.zig
+compile   →  src/parser.zig  →  src/compiler/  →  src/bytecode/
 execute   →  src/exec/  (VM, builtins, modules, promises)
 host      →  src/event_loop.zig
 ```
@@ -129,19 +129,32 @@ is an A/B diagnostic.
 | `builder.zig` | temporary stream and binds |
 | `resolve_variables.zig` | liveness / variable resolve |
 | `resolve_labels.zig` | final layout and jump threading |
-| `cfg.zig` | Debug/ReleaseSafe CFG oracles |
+| `temp_stream.zig` | bind index rows, phase-1 instruction view, source point (shared by both resolve passes) |
 
 Normative contract: [compiler-contract.md](compiler-contract.md).
 
-## Bytecode carrier — `src/bytecode.zig`
+## Bytecode carrier — `src/bytecode.zig` + `src/bytecode/`
 
-Compile-time `FunctionDef` / `Bytecode` and the GC-managed
-`FunctionBytecode` that the VM runs. Logical opcodes are declared in
-`src/opcode_logical.zig` (form-keyed rows plus `ext0` carrier sub-codes);
-QuickJS ordering is the historical starting point, not the current
-contract. Some pipeline namespaces
-(`pipeline_stack_size`, finalize, pc2line) still live in this file; they are
-not separate `stack_size.zig` sources.
+`src/bytecode.zig` is the import surface (`bytecode.opcode`,
+`bytecode.pipeline.finalize`, …) plus the compile policy/context types;
+the namespaces are files:
+
+| file | owns |
+| --- | --- |
+| `bytecode/opcode.zig` | physical ISA table, decode layer, temp/short views |
+| `bytecode/function_def.zig` | compile-time `FunctionDef` (scopes, vars, closure rows, cpool) |
+| `bytecode/carrier.zig` | `Bytecode`: the finalize staging record |
+| `bytecode/function_bytecode.zig` | GC-managed `FunctionBytecode` the VM runs |
+| `bytecode/module.zig` | compile-time module record |
+| `bytecode/pc2line.zig` | pc → line/column encoding |
+| `bytecode/dump.zig` | disassembler |
+| `compiler/binding_rules.zig` | scope/binding lowering rules used by `resolve_variables` |
+| `compiler/stack_size.zig` | stack-depth BFS + final artifact validation |
+| `compiler/finalize.zig` | `createFunctionBytecode`: lowering, packing, publication |
+
+Logical opcodes are declared in `src/opcode_logical.zig` (form-keyed rows
+plus `ext0` carrier sub-codes); QuickJS ordering is the historical starting
+point, not the current contract.
 
 ## Execution — `src/exec/`
 
@@ -225,9 +238,17 @@ exactly like a builtin (`src/exec/vm_native.zig`); native -> JS goes through
   natural ordering, `run_test262_metadata.zig` owns frontmatter parsing,
   `run_test262_known_errors.zig` owns the expected-failure ledger, and
   `run_test262_source.zig` owns harness caching, local source overrides, and
-  source assembly. `run_test262_host.zig` owns Test262 globals and the
-  `$262.agent` coordinator. `run_test262_reporter.zig` owns synchronized
+  source assembly. `run_test262_reporter.zig` owns synchronized
   stderr, failure buckets, directory summaries, and report files
+- `src/test262_host.zig`: Test262 globals (`$262`) and the `$262.agent`
+  coordinator. It lives in the engine tree because both `run-test262` and
+  the in-tree test helpers use it; the CLI only wraps it.
+- The unified Zig test binary has two modules: the engine (`zjs`, root
+  `src/internal_root.zig`, the same shape the CLI links) and the test root
+  `src/unified_tests.zig`, which adds the stress and CLI test families.
+  Engine files never import `src/cli/` or `src/stress.zig`; that rule is
+  what keeps the CLI executable, whose root is `src/cli/zjs.zig`, free of a
+  module clash.
 - Zig unit tests sit next to the code they exercise: package `tests.zig`
   (`src/core/tests.zig`, `src/exec/tests.zig`, `src/parser/tests.zig`,
   `src/bytecode/tests.zig`, `src/compiler/tests.zig`) plus colocated
@@ -253,7 +274,7 @@ subsystem difference baseline
 zjs is already a bytecode interpreter:
 
 - `parser.zig` parses and emits QuickJS-aligned stack bytecode;
-- `bytecode.zig` performs resolve, stack-size, pc2line, and finalize;
+- `compiler/` performs resolve, stack-size, pc2line, and finalize;
 - `zjs_vm.zig` / `tailcall_dispatch.zig` execute opcodes;
 - `vm_*.zig` and `vm_property_*` own the concrete opcode families.
 
