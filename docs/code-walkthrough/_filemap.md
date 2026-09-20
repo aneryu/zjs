@@ -32,7 +32,7 @@
 | `src/cli/run_test262_options.zig` | 10 | [18-test262.md](18-test262.md) |
 | `src/cli/run_test262_reporter.zig` | 21 | [18-test262.md](18-test262.md) |
 | `src/cli/run_test262_source.zig` | 17 | [18-test262.md](18-test262.md) |
-| `src/cli/zjs.zig` | 48 | [18-cli.md](18-cli.md) |
+| `src/cli/zjs.zig` | 52 | [18-cli.md](18-cli.md) |
 | `src/compiler/builder.zig` | 43 | [04-compiler-builder.md](04-compiler-builder.md) |
 | `src/compiler/temp_stream.zig` | 3 | [04-compiler-temp-stream.md](04-compiler-temp-stream.md) |
 | `src/compiler/labels.zig` | 1 | [04-compiler.md](04-compiler.md) |

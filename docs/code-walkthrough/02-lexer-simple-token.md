@@ -67,7 +67,7 @@ parser 三处入口：
 - **签名**：`pub inline fn next(source: []const u8, pos: *usize, no_line_terminator: bool) Kind`。
 - **作用**：从 `pos.*` 跳过 trivia 并分类一个子集 token，推进 pos 到已识别的位置；identifier 分支不保证消费整个单词。
 - **实现**：本地 `p` 循环。CR/LF：禁止跨行则 `finish(..., line_terminator)` 且 **不**前进越过 LF。ASCII 空白跳过。`/`：`//` 在禁止跨行时直接当 line terminator（对齐 QuickJS `peek_token(..., TRUE)` 不扫注释体）；否则 `skipLineComment`。`/*`：块内 CR/LF 同样受 `no_line_terminator` 约束；块内 `>=0x80` 且禁止跨行 → `unsupported`（不复制全量 lexer 的 LS/PS 错误路径）。`=>` `.` `(` 特判。`i`/`e` 走 `identifierOrKeyword`（`import`/`export`）。其它 ASCII ident start → 只吃一字节当 `identifier`（不扫完单词——箭头测试只需要「是 ident」）。非 ASCII：`decodeAt`，LS/PS 当行终结，空白跳过，`IdentifierStart` → ident（宽度整码点），否则 `other`。坏 UTF-8 → `unsupported`。
-- **所有权 / 错误 / 调用**：不分配。`pos` 是调用方局部变量，不是 `LexerImpl.pos`。`simpleNextIsArrowNoLineTerminator`（`src/lexer.zig:316`）用 `true`；CLI 的 `sourceLooksLikeModule`（`src/cli/zjs.zig:573`）用 `false` 连扫两枚 token 做模块探测，`import_keyword` / `export_keyword` 只有它一个消费者。无 error set。
+- **所有权 / 错误 / 调用**：不分配。`pos` 是调用方局部变量，不是 `LexerImpl.pos`。`simpleNextIsArrowNoLineTerminator`（`src/lexer.zig:316`）用 `true`；CLI 的 `sourceLooksLikeModule`（`src/cli/zjs.zig:752`）用 `false` 连扫两枚 token 做模块探测，`import_keyword` / `export_keyword` 只有它一个消费者。无 error set。
 
 ### `balancedAfterOpen` (`src/simple_token.zig:145`)
 

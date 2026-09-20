@@ -57,6 +57,15 @@
   `createMeasured`). Pass `.{}` for the defaults. README, the embedding
   cookbook, the public-API contract, `tests/embedding_examples.zig`,
   `tests/oom.zig` and every unit test are updated.
+- **CLI:** `zjs` `main` is decomposed into `loadSource` / `configureRuntime`
+  / `evalSource` / `failEvaluation` (`!noreturn`) / `exitIfRequested`.
+  `Command` is a flat struct whose `input` (`.eval` / `.file`) is the only
+  input-form discriminant; reading the file, owning the buffer and module
+  detection derive from it, so a file literally named `<eval>` is read like
+  any other. The fabricated `TypeError: not a function ... :7:20` stack
+  printed for an exception-less `error.TypeError` is gone; that path now
+  reports `zjs: evaluation failed: TypeError` like every other bare error.
+  Flags, usage and all other output are unchanged.
 - **Parser:** the parse root no longer needs a `Bytecode` carrier. `State`
   carries `memory` / `atoms` / `root_name` and owns the module record
   (`ensureModule`, `takeModuleRecord`); `State.init(lex, memory, atoms, name)`

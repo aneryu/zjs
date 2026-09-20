@@ -103,7 +103,7 @@ Windows 路径用 `GetStdHandle` / `WaitForSingleObject`；POSIX `@cImport` `pol
 - **签名**：`pub fn exitCode(self: *const EventLoop) ?u8`。
 - **作用**：读出已请求的退出码。
 - **实现**：返回 `exit_code`。
-- **所有权 / 错误 / 调用**：无：`*const` 只读访问器，返回一个 `?u8` 标量，不分配、不建根、无 error。CLI 的 `exitIfRequested`（`src/cli/zjs.zig:529`）直接调这个方法；此外还经 `vtable.exitCode`（表项在 :585，`*anyopaque` 适配器在 :610）暴露给 `core.context.HostEventLoop`。
+- **所有权 / 错误 / 调用**：无：`*const` 只读访问器，返回一个 `?u8` 标量，不分配、不建根、无 error。CLI 的 `exitIfRequested`（`src/cli/zjs.zig:570`）直接调这个方法；此外还经 `vtable.exitCode`（表项在 :585，`*anyopaque` 适配器在 :610）暴露给 `core.context.HostEventLoop`。
 
 ### `EventLoop.traceRoots` (`src/event_loop.zig:140`)
 
