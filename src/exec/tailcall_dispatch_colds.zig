@@ -14,30 +14,30 @@
 const std = @import("std");
 const bytecode = @import("../bytecode.zig");
 const dispatch = @import("tailcall_dispatch.zig");
-const HostError = @import("exceptions.zig").HostError;
+const HostError = @import("exception_ops.zig").HostError;
 
 const Vm = dispatch.Vm;
 const Handler = dispatch.Handler;
 const coldStd = dispatch.coldStd;
 const op = bytecode.opcode.op;
 
-const vm_value = @import("vm_value.zig");
-const vm_arith = @import("vm_arith.zig");
-const vm_control = @import("vm_control.zig");
-const vm_call = @import("vm_call.zig");
+const vm_value = @import("vm_opcodes.zig");
+const vm_arith = @import("vm_opcodes.zig");
+const vm_control = @import("vm_opcodes.zig");
+const vm_call = @import("vm_opcodes.zig");
 const object_ops = @import("object_ops.zig");
 const exception_ops = @import("exception_ops.zig");
-const vm_literal = @import("vm_literal.zig");
+const vm_literal = @import("vm_opcodes.zig");
 const iterator_ops = @import("iterator_ops.zig");
-const vm_regexp = @import("vm_regexp.zig");
-const vm_eval_module = @import("vm_eval_module.zig");
-const slot_ops = @import("slot_ops.zig");
-const vm_property_locals = @import("vm_property_locals.zig");
-const vm_property_ref = @import("vm_property_ref.zig");
-const vm_property_globals = @import("vm_property_globals.zig");
-const vm_property_field = @import("vm_property_field.zig");
-const vm_property_private = @import("vm_property_private.zig");
-const using_ops = @import("using_ops.zig");
+const vm_regexp = @import("vm_opcodes.zig");
+const vm_eval_module = @import("vm_opcodes.zig");
+const slot_ops = @import("property_ops.zig");
+const vm_property_locals = @import("vm_property.zig");
+const vm_property_ref = @import("vm_property.zig");
+const vm_property_globals = @import("vm_property.zig");
+const vm_property_field = @import("vm_property.zig");
+const vm_property_private = @import("vm_property.zig");
+const using_ops = @import("vm_opcodes.zig");
 
 // ---- Shared handlers (op groups sharing helper+args) ----
 pub const h_varref = coldStd(struct {
@@ -57,7 +57,7 @@ pub const h_loc = coldStd(struct {
 }.b);
 pub const h_arg = coldStd(struct {
     fn b(vm: *Vm, pc: [*]const u8) HostError!void {
-        try vm_property_locals.arg(vm.ctx, vm.function, vm.frame, vm.stack, pc[0]);
+        try vm_property_locals.getArg(vm.ctx, vm.function, vm.frame, vm.stack, pc[0]);
     }
 }.b);
 pub const h_get_arg_short = coldStd(struct {
@@ -455,7 +455,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     // --- literals / class ---
     t[op.object] = h(struct {
         fn b(vm: *Vm) HostError!void {
-            try vm_literal.object(vm.ctx, vm.stack, vm.global);
+            try vm_literal.objectLiteral(vm.ctx, vm.stack, vm.global);
         }
     }.b);
     t[op.object_slots2] = h(struct {

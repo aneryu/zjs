@@ -13,7 +13,7 @@
 
 `NativeEntry`（`src/core/native_entry.zig`）是不可变 48 字节记录：`target` + `kind` + `flags` + `sig` + `arity`。内建表是 comptime rodata；宿主 / 插件条目活在 runtime arena。对象 payload 上的 `c_function` 只缓存 `*const NativeEntry`，不区分来源。
 
-JS → native 的 VM 入口是 `vm_native.dispatch`（`src/exec/vm_native.zig:32`）：
+JS → native 的 VM 入口是 `vm_native.dispatch`（`src/exec/vm_opcodes.zig:32`）：
 
 1. `op.call*` 窗口 `[callee, args...]`（`Shape.plain`）；`op.call_method` 窗口 `[receiver, callee, args...]`（`Shape.method`）。
 2. `vm_call.resolvedNativeCallTargetAssumeCFunction` 一次走完 payload，取出 entry 与 callee realm。
@@ -56,12 +56,12 @@ JS → native 的 VM 入口是 `vm_native.dispatch`（`src/exec/vm_native.zig:32
 ```sh
 python3 docs/code-walkthrough/_check_coverage.py \
   --docs 'docs/code-walkthrough/12-*.md' \
-  src/exec/vm_arith.zig src/exec/vm_call.zig src/exec/vm_control.zig \
-  src/exec/vm_eval_module.zig src/exec/vm_gen_async.zig src/exec/vm_literal.zig \
-  src/exec/vm_native.zig src/exec/vm_property.zig src/exec/vm_property_field.zig \
-  src/exec/vm_property_globals.zig src/exec/vm_property_locals.zig \
-  src/exec/vm_property_private.zig src/exec/vm_property_ref.zig \
-  src/exec/vm_regexp.zig src/exec/vm_value.zig
+  src/exec/vm_opcodes.zig src/exec/vm_opcodes.zig src/exec/vm_opcodes.zig \
+  src/exec/vm_opcodes.zig src/exec/vm_opcodes.zig src/exec/vm_opcodes.zig \
+  src/exec/vm_opcodes.zig src/exec/vm_property.zig src/exec/vm_property.zig \
+  src/exec/vm_property.zig src/exec/vm_property.zig \
+  src/exec/vm_property.zig src/exec/vm_property.zig \
+  src/exec/vm_opcodes.zig src/exec/vm_opcodes.zig
 ```
 
 - 未覆盖: 无（以该命令 `missing 0` 为准）

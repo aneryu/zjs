@@ -413,7 +413,7 @@ parser 的 Phase 1 状态：作用域、变量、标签、临时字节码、子�
 - **签名**：`pub inline fn scriptOrModule(self: *const BytecodeImpl) atom.Atom`。
 - **作用**：读出稳定的 ScriptOrModule 身份 atom，宿主按它解析 import 的 referrer。
 - **实现**：单字段直读。它与 `filename` 分开存正是因为 eval 的 `filename` 固定为 `<eval>`，而 referrer 必须仍指向真正的宿主脚本/模块。
-- **所有权 / 错误 / 调用**：借用 atom，不改引用计数，无 error set。`FunctionBytecode.scriptOrModule` 的 legacy 臂读同一字段（`src/bytecode.zig:4322`）；运行期消费者包括模块查找 `src/exec/object_ops.zig:1949`、动态 import 的 referrer 路径 `src/exec/vm_eval_module.zig:124`、GC 的 atom 访问 `src/core/gc_trace_stw.zig:170`。
+- **所有权 / 错误 / 调用**：借用 atom，不改引用计数，无 error set。`FunctionBytecode.scriptOrModule` 的 legacy 臂读同一字段（`src/bytecode.zig:4322`）；运行期消费者包括模块查找 `src/exec/object_ops.zig:1949`、动态 import 的 referrer 路径 `src/exec/vm_opcodes.zig:124`、GC 的 atom 访问 `src/core/gc_trace_stw.zig:170`。
 
 
 ### `Bytecode.realmContext` (`src/bytecode/carrier.zig:275`)
@@ -637,7 +637,7 @@ parser 的 Phase 1 状态：作用域、变量、标签、临时字节码、子�
 - **签名**：`pub fn setCode(self: *BytecodeImpl, bytes: []const u8) !void`。
 - **作用**：用拷贝替换 Bytecode.code。
 - **实现**：先 `freeGrowableSlice` 释放旧 backing；空输入直接返回（code 留空）；否则 alloc+memcpy，capacity 记为精确长度。 内部 `try` 传播错误。
-- **所有权 / 错误 / 调用**：先无条件释放旧 backing 再精确分配一块新的并拷入（不是几何增长，`code_capacity == bytes.len`）；空输入把 `code` 留成空切片。error set 只有 `error.OutOfMemory`，但注意释放在分配之前——失败后 `Bytecode` 的旧码已经没了。生产树内无调用方：pipeline 走 `installCodeWithCapacity`，本名只被夹具与测试用（`src/tests/helpers.zig:53`/`:58`、`src/tests/bytecode.zig:112`、`src/exec/vm_value.zig:586` 等 test 块）。
+- **所有权 / 错误 / 调用**：先无条件释放旧 backing 再精确分配一块新的并拷入（不是几何增长，`code_capacity == bytes.len`）；空输入把 `code` 留成空切片。error set 只有 `error.OutOfMemory`，但注意释放在分配之前——失败后 `Bytecode` 的旧码已经没了。生产树内无调用方：pipeline 走 `installCodeWithCapacity`，本名只被夹具与测试用（`src/tests/helpers.zig:53`/`:58`、`src/tests/bytecode.zig:112`、`src/exec/vm_opcodes.zig:586` 等 test 块）。
 
 
 ### `Bytecode.appendCode` (`src/bytecode/carrier.zig:376`)

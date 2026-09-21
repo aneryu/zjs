@@ -763,7 +763,7 @@ fn dumpGcPanels(writer: *std.Io.Writer, runtime: *zjs.Runtime, runtime_options: 
 /// empty are the ones listed here. In a profiling build the tail-call
 /// dispatcher only calls `OpcodeProfile.noteDispatch` -- counts, never timings,
 /// because a scope cannot span an `always_tail` chain (see
-/// `src/exec/vm_profile.zig`) -- and nothing increments the value-dup,
+/// `src/exec/tailcall_dispatch.zig`) -- and nothing increments the value-dup,
 /// call-frame or global-lookup counters on that path. `--profile-opcodes` is
 /// the only way to reach these dumps for real and it requires a profiling
 /// build, so the `false` arm is exercised only by the unit tests at the bottom

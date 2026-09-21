@@ -5,24 +5,24 @@
 //! it in exec; callers only need the installer interface below.
 
 const core = @import("../core/root.zig");
-const array_builtin = @import("array_builtin_ops.zig");
+const array_builtin = @import("array_ops.zig");
 const buffer_ops = @import("buffer_ops.zig");
 const collection_builtin = @import("collection_ops.zig");
 const date_builtin = @import("date_ops.zig");
-const error_builtin = @import("error_ops.zig");
-const iterator_builtin = @import("iterator_builtin_ops.zig");
-const object_builtin = @import("object_builtin_ops.zig");
+const error_builtin = @import("exception_ops.zig");
+const iterator_builtin = @import("iterator_ops.zig");
+const object_builtin = @import("object_ops.zig");
 const regexp_builtin = @import("regexp_ops.zig");
-const string_builtin = @import("string_builtin_ops.zig");
+const string_builtin = @import("string_ops.zig");
 const atomics_builtin = @import("atomics_ops.zig");
-const reflect_builtin = @import("reflect_proxy_ops.zig");
+const reflect_builtin = @import("reflect_ops.zig");
 const typed_array_names = core.typed_array_names;
 const internal_builtins = @import("internal_builtins.zig");
 const function_ops = @import("function_ops.zig");
 const json_builtin = @import("json_ops.zig");
 const math_builtin = @import("math_ops.zig");
 const number_builtin = @import("number_ops.zig");
-const primitive_builtin = @import("primitive_ops.zig");
+const primitive_builtin = @import("value_ops.zig");
 const promise_method_ids = core.host_function.builtin_method_ids.promise.PrototypeMethod;
 const promise_ops = @import("promise_ops.zig");
 const uri_builtin = @import("uri_ops.zig");
@@ -470,7 +470,7 @@ fn preparedMethods(comptime source: anytype, comptime table_kind: MethodTableKin
         }
         // NATIVE-RECORD GATE. A standard method whose id does not resolve to a
         // callable record in `internal_builtins.table` cannot take
-        // `vm_call.nativeMethodFastDispatch` (src/exec/vm_call.zig:614) and
+        // `vm_call.nativeMethodFastDispatch` (src/exec/vm_opcodes.zig:614) and
         // falls into `call_runtime.callNativeCallableByName`'s linear cascade.
         // That is the WeakRef.deref / BigInt.asIntN / %TypedArray% bug class:
         // silent at compile time, silent at run time, only visible under a

@@ -967,7 +967,7 @@ pub const FunctionRarePayload = struct {
     /// Action discriminator for `.async_generator_resolve` trampolines (zjs
     /// adaptation of the js_async_generator_resolve_function magic,
     /// quickjs.c; extra actions carry the awaits qjs compiles into the
-    /// body bytecode — see exec/async_generator.zig ResolveAction).
+    /// body bytecode — see exec/promise_ops.zig ResolveAction).
     async_generator_action: u8 = 0,
 
     pub const gc_edges: gc_visit.Edges = .{

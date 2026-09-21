@@ -5,7 +5,7 @@ This note describes the current object/shape contract. The source of truth is:
 - `src/core/object.zig`
 - `src/core/shape.zig`
 - `src/core/property.zig`
-- `src/exec/property_direct.zig`
+- `src/exec/property_ops.zig`
 - `src/exec/vm_property*.zig`
 
 The dated zjs / QuickJS subsystem baseline
@@ -93,7 +93,7 @@ The former shape-keyed per-bytecode-site inline cache has been removed:
 - no FunctionBytecode IC slots;
 - no `zjs_enable_ic` build option.
 
-`src/exec/property_direct.zig` (renamed from the historical
+`src/exec/property_ops.zig` (renamed from the historical
 `property_ic.zig` on 2026-08-19; the always-false `cachedSet*` zombie was
 deleted at the same time) owns the non-cached helpers:
 

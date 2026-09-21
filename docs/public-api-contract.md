@@ -352,7 +352,7 @@ on every call.
 - `EventLoop.init` / `install` / `drain` / `deinit` for a long-lived loop;
 - `EventLoop.runUntilIdle(ctx, .{})` for the one-shot helper.
 
-Module file graphs (`src/exec/module_graph.zig`), Atomics waiter
+Module file graphs (`src/exec/module.zig`), Atomics waiter
 wake/cleanup (`src/exec/atomics_ops.zig`), and ArrayBuffer detach
 (`src/exec/buffer_ops.zig`) are not part of this type. It must not become an
 `Engine` facade. There is no in-tree dynamic plugin loader; host functions

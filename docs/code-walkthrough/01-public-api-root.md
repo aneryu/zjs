@@ -42,4 +42,4 @@
 
 ## 不再从本文件导出
 
-值构造用 `Value.int32` 等；句柄用 `Runtime.enterHandleScope` / `createPersistentValue`；字节存储用 `Value.Bytes.Store`；模块图与 job 排空分别走 `exec/module_graph.zig` 与 `Context.runJobs`。`run-test262` 通过同一模块上的 `core` / `exec` / `parser` 使用这些层，`$262` 走独立的 `test262_host` 模块，不经过已删包装。
+值构造用 `Value.int32` 等；句柄用 `Runtime.enterHandleScope` / `createPersistentValue`；字节存储用 `Value.Bytes.Store`；模块图与 job 排空分别走 `exec/module.zig` 与 `Context.runJobs`。`run-test262` 通过同一模块上的 `core` / `exec` / `parser` 使用这些层，`$262` 走独立的 `test262_host` 模块，不经过已删包装。

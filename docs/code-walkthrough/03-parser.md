@@ -418,7 +418,7 @@ break/continue/finally/using 的解析期栈。`LabelFrame` 带 `LabelId`（不�
 - **作用**：清掉一次编译结果里仍由 Result 拥有的两样东西：语法错误诊断与模块记录。
 - **实现**：
 `Result.deinit`：释放 `syntax_error`；若 artifact 是 module 则 `ModuleArtifact.deinit`（记录侧）。function_bytecode 臂不在这里 free（所有权在调用方 / GC）。最后把 artifact 置 `.none`。
-- **所有权 / 错误 / 调用**：释放 `Result` 自己拥有的两样东西：`syntax_error`（`diagnostics.SyntaxError.deinit` 释放那段堆上的消息字节，`SyntaxError.create` 在 `rt.memory` 上分配）与 `.module` 臂的 `ModuleArtifact`（即 `record`）；`.function_bytecode` 臂**什么都不做**——FB 归 GC。收尾把 `artifact` 置 `.none`，所以与 `takeFunctionBytecodeValue`/`takeModuleArtifact` 的移走语义天然不冲突（谁先谁后都只释放一次）。无 error set。生产调用方全是 `defer`，共 8 处：`exec/eval_entry.zig:117`、`exec/eval_ops.zig:435`、`exec/function_ops.zig:494`、`exec/module.zig:117`/`:1020`、`exec/module_graph.zig:2203`、`exec/call.zig:2490`、`exec/call_runtime.zig:3365`。
+- **所有权 / 错误 / 调用**：释放 `Result` 自己拥有的两样东西：`syntax_error`（`diagnostics.SyntaxError.deinit` 释放那段堆上的消息字节，`SyntaxError.create` 在 `rt.memory` 上分配）与 `.module` 臂的 `ModuleArtifact`（即 `record`）；`.function_bytecode` 臂**什么都不做**——FB 归 GC。收尾把 `artifact` 置 `.none`，所以与 `takeFunctionBytecodeValue`/`takeModuleArtifact` 的移走语义天然不冲突（谁先谁后都只释放一次）。无 error set。生产调用方全是 `defer`，共 8 处：`exec/eval_entry.zig:117`、`exec/eval_entry.zig:435`、`exec/function_ops.zig:494`、`exec/module.zig:117`/`:1020`、`exec/module.zig:2203`、`exec/call.zig:2490`、`exec/call_runtime.zig:3365`。
 
 ### `Result.functionBytecode` (`src/parser.zig:175`)
 
@@ -426,14 +426,14 @@ break/continue/finally/using 的解析期栈。`LabelFrame` 带 `LabelId`（不�
 - **作用**：借用式读取根 `FunctionBytecode`（不转移所有权）。
 - **实现**：
 对 `artifact` 三臂取值：`function_bytecode` 直接返回；`module` 返回 `artifact.function_bytecode`（模块与普通根共用同一个 canonical FB）；`none` 返回 `null`。下面一串 `byteCode` / `constants` / `closureVars` / `varDefs` / `openVarRefCount` / `filenameAtom` / `scriptOrModuleAtom` / `entryContract` / `isStrict` / `isDirectOrIndirectEval` 都建立在它之上。
-- **所有权 / 错误 / 调用**：返回**借用**的 `*const FunctionBytecode`（两种 artifact 臂都指向同一个规范根），`Result` 仍然持有它：调用方不得释放，也不得在 `deinit`/`take*` 之后继续用。不分配、无 error set。生产调用方五处，都是先借看再 `take` 走：`exec/eval_entry.zig:168`、`exec/eval_ops.zig:443`、`exec/function_ops.zig:502`、`exec/call.zig:2499`、`exec/call_runtime.zig:3374`。
+- **所有权 / 错误 / 调用**：返回**借用**的 `*const FunctionBytecode`（两种 artifact 臂都指向同一个规范根），`Result` 仍然持有它：调用方不得释放，也不得在 `deinit`/`take*` 之后继续用。不分配、无 error set。生产调用方五处，都是先借看再 `take` 走：`exec/eval_entry.zig:168`、`exec/eval_entry.zig:443`、`exec/function_ops.zig:502`、`exec/call.zig:2499`、`exec/call_runtime.zig:3374`。
 
 ### `Result.takeFunctionBytecodeValue` (`src/parser.zig:189`)
 
 - **签名**：`pub fn takeFunctionBytecodeValue(self: *ResultImpl) ?JSValue`。
 - **作用**：把普通根的 FunctionBytecode 以 `JSValue` 形式移交给调用方，Result 随即清空。
 - **实现**：artifact 不是 `function_bytecode` 臂就返回 `null`（module 走 `takeModuleArtifact`）。取出 FB 指针后**先**把 `artifact` 置 `.none` 再包成 `JSValue.functionBytecode(&fb.header)` 返回，于是随后的 `Result.deinit` 不可能再释放第二次；借用式查看仍走 `functionBytecode`。
-- **所有权 / 错误 / 调用**：**所有权转移**：只在 `.function_bytecode` 臂上成立，把 artifact 置 `.none` 后返回一个 `JSValue.functionBytecode(&fb.header)`，从此这个引用归调用方（交给 root `js_closure2` 或自行管理），`Result.deinit` 不会再碰它。不分配、无 error set；`.module`/`.none` 臂返回 `null`。生产调用方 5 处：`exec/eval_entry.zig:181`、`exec/eval_ops.zig:456`、`exec/function_ops.zig:503`、`exec/call.zig:2500`、`exec/call_runtime.zig:3375`。
+- **所有权 / 错误 / 调用**：**所有权转移**：只在 `.function_bytecode` 臂上成立，把 artifact 置 `.none` 后返回一个 `JSValue.functionBytecode(&fb.header)`，从此这个引用归调用方（交给 root `js_closure2` 或自行管理），`Result.deinit` 不会再碰它。不分配、无 error set；`.module`/`.none` 臂返回 `null`。生产调用方 5 处：`exec/eval_entry.zig:181`、`exec/eval_entry.zig:456`、`exec/function_ops.zig:503`、`exec/call.zig:2500`、`exec/call_runtime.zig:3375`。
 
 ### `Result.byteCode` (`src/parser.zig:198`)
 
@@ -525,7 +525,7 @@ break/continue/finally/using 的解析期栈。`LabelFrame` 带 `LabelId`（不�
 - **签名**：`pub fn moduleArtifact(self: *const ResultImpl) ?*const ModuleArtifactImpl`。
 - **作用**：借用式读取 module 臂的产物（非 module 返回 null）。
 - **实现**：`artifact` 是 `.module` 臂时返回 `&self.artifact.module`，其它臂返回 `null`。返回的是指进 Result 内部的借用指针，随 `takeModuleArtifact` / `deinit` 失效。
-- **所有权 / 错误 / 调用**：返回**借用**的 `*const ModuleArtifact`（指向 `Result` 内联的 union 载荷），`Result` 仍持有它：调用方只读、不得释放，且不能跨过 `takeModuleArtifact`/`deinit` 使用。不分配、无 error set。生产调用方一处：`exec/module_graph.zig:2215`（先借看再 `:2257` 取走）。
+- **所有权 / 错误 / 调用**：返回**借用**的 `*const ModuleArtifact`（指向 `Result` 内联的 union 载荷），`Result` 仍持有它：调用方只读、不得释放，且不能跨过 `takeModuleArtifact`/`deinit` 使用。不分配、无 error set。生产调用方一处：`exec/module.zig:2215`（先借看再 `:2257` 取走）。
 
 ### `Result.moduleRecord` (`src/parser.zig:274`)
 
@@ -539,7 +539,7 @@ break/continue/finally/using 的解析期栈。`LabelFrame` 带 `LabelId`（不�
 - **签名**：`pub fn takeModuleArtifact(self: *ResultImpl) ?ModuleArtifactImpl`。
 - **作用**：把 FB 与模块记录两半一起移交给调用方，Result 随即清空。
 - **实现**：非 `.module` 臂返回 `null`。把整个 `ModuleArtifactImpl`（canonical FB 指针 + `module.Record`）按值取出，**先**把 `artifact` 置 `.none` 再返回，于是 FB 与 record 这两个独立所有者各自只会被释放一次。
-- **所有权 / 错误 / 调用**：**所有权转移**：把整个 `ModuleArtifact`（FB 指针 + `module.Record`）按值移出并将 `artifact` 置 `.none`，此后 `Result.deinit` 不会再释放 record，责任归调用方（生产上交给 `installParsedModuleArtifact` 装进模块记录）。不分配、无 error set；非 `.module` 臂返回 `null`。生产调用方三处：`exec/eval_entry.zig:135`、`exec/module.zig:1039`、`exec/module_graph.zig:2257`。
+- **所有权 / 错误 / 调用**：**所有权转移**：把整个 `ModuleArtifact`（FB 指针 + `module.Record`）按值移出并将 `artifact` 置 `.none`，此后 `Result.deinit` 不会再释放 record，责任归调用方（生产上交给 `installParsedModuleArtifact` 装进模块记录）。不分配、无 error set；非 `.module` 臂返回 `null`。生产调用方三处：`exec/eval_entry.zig:135`、`exec/module.zig:1039`、`exec/module.zig:2257`。
 
 ### `Result.hasFeature` (`src/parser.zig:291`)
 
@@ -597,7 +597,7 @@ break/continue/finally/using 的解析期栈。`LabelFrame` 带 `LabelId`（不�
 4. `.tsx` / `.jsx` 文件名直接以 `syntax_error_guard` 返回（不支持 JSX），不进解析。
 5. `compileQjsProgram`：成功得到 canonical `FunctionBytecode`。`OutOfMemory` 上抛；`StackOverflow` 与其它语法错误收成 `Result.syntax_error`；`ParserInvariant` 等走 ICE 文案。
 6. module 把 `module_record` 挪进 `ModuleArtifact`；script/eval 只持有 FB。然后 `function.deinit` + `arena.deinit`（FB 已在 artifact allocator 上）。
-- **所有权 / 错误 / 调用**：两个布尔守着两件必须恰好释放一次的东西：`arena_owned`（`errdefer arena.deinit()`）与 `function_owned`（`errdefer function.deinit(rt)`）——**每一条 `return` 之前都手工 `deinit` 并清标志**，所以正常返回与错误返回都不会重复释放。`rt.memory.allocator` 被临时改指 arena，用 `defer` 还原；`CompileAtomScope` 在第一次 intern 之前 `activate`、`defer deinit`，覆盖从文件名 atom 到发布 FB 的整条链。产物 FB 建在 `compile_context.artifactAllocator()` 上（由 `compileQjsProgram` 切换），所以 arena 释放不影响它；module 还会把 `function.module_record` **移**进 `ModuleArtifact`（移走后把源字段置 `null`）。错误分三类：`OutOfMemory` 原样上抛（唯一会让调用方看到 Zig error 的一类）、`StackOverflow` 与一般解析错误折成 `Result.syntax_error`、`isInternalCompilerError` 命中的走 ICE 文案；三条都仍然返回一个**成功的** `ResultImpl`。`pub` 出口，生产调用方在 `exec/eval_entry.zig`、`exec/eval_ops.zig`、`exec/function_ops.zig`、`exec/module*.zig`、`exec/call*.zig` 共 8 处。
+- **所有权 / 错误 / 调用**：两个布尔守着两件必须恰好释放一次的东西：`arena_owned`（`errdefer arena.deinit()`）与 `function_owned`（`errdefer function.deinit(rt)`）——**每一条 `return` 之前都手工 `deinit` 并清标志**，所以正常返回与错误返回都不会重复释放。`rt.memory.allocator` 被临时改指 arena，用 `defer` 还原；`CompileAtomScope` 在第一次 intern 之前 `activate`、`defer deinit`，覆盖从文件名 atom 到发布 FB 的整条链。产物 FB 建在 `compile_context.artifactAllocator()` 上（由 `compileQjsProgram` 切换），所以 arena 释放不影响它；module 还会把 `function.module_record` **移**进 `ModuleArtifact`（移走后把源字段置 `null`）。错误分三类：`OutOfMemory` 原样上抛（唯一会让调用方看到 Zig error 的一类）、`StackOverflow` 与一般解析错误折成 `Result.syntax_error`、`isInternalCompilerError` 命中的走 ICE 文案；三条都仍然返回一个**成功的** `ResultImpl`。`pub` 出口，生产调用方在 `exec/eval_entry.zig`、`exec/eval_entry.zig`、`exec/function_ops.zig`、`exec/module*.zig`、`exec/call*.zig` 共 8 处。
 
 ### `compile_entry.compileQjsProgram` (`src/parser.zig:518`)
 

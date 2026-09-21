@@ -4271,67 +4271,67 @@ src/event_loop.zig	597	priv		nowMs
 src/event_loop.zig	601	priv		hostTimerIo
 src/event_loop.zig	812	priv		visitValue
 src/event_loop.zig	819	priv		visitObject
-src/exec/active_invocation_trace.zig	26	pub		traceRoots
-src/exec/active_invocation_trace.zig	34	priv		traceMachine
-src/exec/active_invocation_trace.zig	64	priv		traceFrame
-src/exec/active_invocation_trace.zig	98	priv		traceStack
-src/exec/active_invocation_trace.zig	114	priv		traceEntryExtras
-src/exec/array_builtin_ops.zig	29	priv		init
-src/exec/array_builtin_ops.zig	43	priv		deinit
-src/exec/array_builtin_ops.zig	53	pub		staticMethodId
-src/exec/array_builtin_ops.zig	61	pub		prototypeMethodId
-src/exec/array_builtin_ops.zig	192	priv		arrayEntry
-src/exec/array_builtin_ops.zig	196	priv		arrayPushEntry
-src/exec/array_builtin_ops.zig	205	priv		arrayPopEntry
-src/exec/array_builtin_ops.zig	209	priv		arraySpliceEntry
-src/exec/array_builtin_ops.zig	215	priv		arrayEntryWithHandler
-src/exec/array_builtin_ops.zig	269	priv		arrayConstructorEntry
-src/exec/array_builtin_ops.zig	284	priv		arrayPrototypeFromGlobal
-src/exec/array_builtin_ops.zig	302	priv		arrayCall
-src/exec/array_builtin_ops.zig	363	priv		arrayPushCall
-src/exec/array_builtin_ops.zig	383	priv		arrayPushDirect
-src/exec/array_builtin_ops.zig	415	priv		arrayPushDirectHost
-src/exec/array_builtin_ops.zig	435	priv		arraySpliceCall
-src/exec/array_builtin_ops.zig	453	priv		arraySpliceDirect
-src/exec/array_builtin_ops.zig	478	priv		arraySpliceDirectHost
-src/exec/array_builtin_ops.zig	498	priv		arrayPopCall
-src/exec/array_builtin_ops.zig	525	pub		construct
-src/exec/array_builtin_ops.zig	529	pub		constructConstructorWithPrototype
-src/exec/array_builtin_ops.zig	546	pub		constructWithPrototype
-src/exec/array_builtin_ops.zig	574	priv		arrayLengthFromNumber
-src/exec/array_builtin_ops.zig	591	pub		methodCall
-src/exec/array_builtin_ops.zig	599	pub		methodCallInRealm
-src/exec/array_builtin_ops.zig	603	priv		methodCallWithRealm
-src/exec/array_builtin_ops.zig	678	priv		arrayIterator
-src/exec/array_builtin_ops.zig	713	priv		arrayIteratorNext
-src/exec/array_builtin_ops.zig	731	priv		arrayIteratorValue
-src/exec/array_builtin_ops.zig	749	priv		iteratorResult
-src/exec/array_builtin_ops.zig	880	priv		filterEven
-src/exec/array_builtin_ops.zig	898	priv		reduceSum
-src/exec/array_builtin_ops.zig	909	priv		someEven
-src/exec/array_builtin_ops.zig	920	priv		everyPositive
-src/exec/array_builtin_ops.zig	937	priv		indexSearch
-src/exec/array_builtin_ops.zig	979	priv		stringSearchValue
-src/exec/array_builtin_ops.zig	993	priv		at
-src/exec/array_builtin_ops.zig	1001	priv		slice
-src/exec/array_builtin_ops.zig	1018	priv		splice
-src/exec/array_builtin_ops.zig	1042	priv		push
-src/exec/array_builtin_ops.zig	1050	priv		pop
-src/exec/array_builtin_ops.zig	1061	priv		rewriteReversedPair
-src/exec/array_builtin_ops.zig	1081	priv		reverse
-src/exec/array_builtin_ops.zig	1120	priv		sort
-src/exec/array_builtin_ops.zig	1155	priv		lessThan
-src/exec/array_builtin_ops.zig	1172	priv		rewriteSortedArray
-src/exec/array_builtin_ops.zig	1182	priv		rewriteSortedArrayRooted
-src/exec/array_builtin_ops.zig	1201	priv		concat
-src/exec/array_builtin_ops.zig	1227	priv		concatAppend
-src/exec/array_builtin_ops.zig	1255	priv		expectArrayIteratorTarget
-src/exec/array_builtin_ops.zig	1261	priv		arrayIteratorTargetLength
-src/exec/array_builtin_ops.zig	1268	priv		valuesEqual
-src/exec/array_builtin_ops.zig	1286	priv		compareBigIntValues
-src/exec/array_builtin_ops.zig	1299	priv		bigIntParts
-src/exec/array_builtin_ops.zig	1322	priv		compareStringValues
-src/exec/array_builtin_ops.zig	1327	priv		appendValueString
+src/exec/inline_calls.zig	26	pub		traceRoots
+src/exec/inline_calls.zig	34	priv		traceMachine
+src/exec/inline_calls.zig	64	priv		traceFrame
+src/exec/inline_calls.zig	98	priv		traceStack
+src/exec/inline_calls.zig	114	priv		traceEntryExtras
+src/exec/array_ops.zig	29	priv		init
+src/exec/array_ops.zig	43	priv		deinit
+src/exec/array_ops.zig	53	pub		staticMethodId
+src/exec/array_ops.zig	61	pub		prototypeMethodId
+src/exec/array_ops.zig	192	priv		arrayEntry
+src/exec/array_ops.zig	196	priv		arrayPushEntry
+src/exec/array_ops.zig	205	priv		arrayPopEntry
+src/exec/array_ops.zig	209	priv		arraySpliceEntry
+src/exec/array_ops.zig	215	priv		arrayEntryWithHandler
+src/exec/array_ops.zig	269	priv		arrayConstructorEntry
+src/exec/array_ops.zig	284	priv		arrayPrototypeFromGlobal
+src/exec/array_ops.zig	302	priv		arrayCall
+src/exec/array_ops.zig	363	priv		arrayPushCall
+src/exec/array_ops.zig	383	priv		arrayPushDirect
+src/exec/array_ops.zig	415	priv		arrayPushDirectHost
+src/exec/array_ops.zig	435	priv		arraySpliceCall
+src/exec/array_ops.zig	453	priv		arraySpliceDirect
+src/exec/array_ops.zig	478	priv		arraySpliceDirectHost
+src/exec/array_ops.zig	498	priv		arrayPopCall
+src/exec/array_ops.zig	525	pub		construct
+src/exec/array_ops.zig	529	pub		constructConstructorWithPrototype
+src/exec/array_ops.zig	546	pub		constructWithPrototype
+src/exec/array_ops.zig	574	priv		arrayLengthFromNumber
+src/exec/array_ops.zig	591	pub		methodCall
+src/exec/array_ops.zig	599	pub		methodCallInRealm
+src/exec/array_ops.zig	603	priv		methodCallWithRealm
+src/exec/array_ops.zig	678	priv		arrayIterator
+src/exec/array_ops.zig	713	priv		arrayIteratorNext
+src/exec/array_ops.zig	731	priv		arrayIteratorValue
+src/exec/array_ops.zig	749	priv		iteratorResult
+src/exec/array_ops.zig	880	priv		filterEven
+src/exec/array_ops.zig	898	priv		reduceSum
+src/exec/array_ops.zig	909	priv		someEven
+src/exec/array_ops.zig	920	priv		everyPositive
+src/exec/array_ops.zig	937	priv		indexSearch
+src/exec/array_ops.zig	979	priv		stringSearchValue
+src/exec/array_ops.zig	993	priv		at
+src/exec/array_ops.zig	1001	priv		slice
+src/exec/array_ops.zig	1018	priv		splice
+src/exec/array_ops.zig	1042	priv		push
+src/exec/array_ops.zig	1050	priv		pop
+src/exec/array_ops.zig	1061	priv		rewriteReversedPair
+src/exec/array_ops.zig	1081	priv		reverse
+src/exec/array_ops.zig	1120	priv		sort
+src/exec/array_ops.zig	1155	priv		lessThan
+src/exec/array_ops.zig	1172	priv		rewriteSortedArray
+src/exec/array_ops.zig	1182	priv		rewriteSortedArrayRooted
+src/exec/array_ops.zig	1201	priv		concat
+src/exec/array_ops.zig	1227	priv		concatAppend
+src/exec/array_ops.zig	1255	priv		expectArrayIteratorTarget
+src/exec/array_ops.zig	1261	priv		arrayIteratorTargetLength
+src/exec/array_ops.zig	1268	priv		valuesEqual
+src/exec/array_ops.zig	1286	priv		compareBigIntValues
+src/exec/array_ops.zig	1299	priv		bigIntParts
+src/exec/array_ops.zig	1322	priv		compareStringValues
+src/exec/array_ops.zig	1327	priv		appendValueString
 src/exec/array_ops.zig	94	priv		setValuePropertyOrThrow
 src/exec/array_ops.zig	116	pub		popCatchMarker
 src/exec/array_ops.zig	131	pub		arrayPrototypeFromGlobal
@@ -4563,26 +4563,26 @@ src/exec/array_ops.zig	7089	pub		encodeBase64Bytes
 src/exec/array_ops.zig	7115	pub		base64Value
 src/exec/array_ops.zig	7133	pub		lengthIndexValue
 src/exec/array_ops.zig	7152	pub		deinit
-src/exec/async_completion.zig	24	pub		begin
-src/exec/async_completion.zig	45	pub		at
-src/exec/async_completion.zig	53	pub		release
-src/exec/async_completion.zig	58	pub		trace
-src/exec/async_completion.zig	66	pub		deinit
-src/exec/async_generator.zig	56	priv		state
-src/exec/async_generator.zig	60	priv		setState
-src/exec/async_generator.zig	68	priv		pushRequest
-src/exec/async_generator.zig	82	priv		takeHeadRequest
-src/exec/async_generator.zig	93	priv		settleHead
-src/exec/async_generator.zig	121	priv		resolveHead
-src/exec/async_generator.zig	138	priv		complete
-src/exec/async_generator.zig	150	priv		resolveFunction
-src/exec/async_generator.zig	166	priv		asyncGeneratorAwait
-src/exec/async_generator.zig	185	priv		completedReturn
-src/exec/async_generator.zig	230	priv		resumeBodyValue
-src/exec/async_generator.zig	265	priv		execBody
-src/exec/async_generator.zig	361	pub		resumeNext
-src/exec/async_generator.zig	441	pub		asyncGeneratorEnqueue
-src/exec/async_generator.zig	476	pub		asyncGeneratorResolveFunctionCall
+src/exec/inline_calls.zig	24	pub		begin
+src/exec/inline_calls.zig	45	pub		at
+src/exec/inline_calls.zig	53	pub		release
+src/exec/inline_calls.zig	58	pub		trace
+src/exec/inline_calls.zig	66	pub		deinit
+src/exec/promise_ops.zig	56	priv		state
+src/exec/promise_ops.zig	60	priv		setState
+src/exec/promise_ops.zig	68	priv		pushRequest
+src/exec/promise_ops.zig	82	priv		takeHeadRequest
+src/exec/promise_ops.zig	93	priv		settleHead
+src/exec/promise_ops.zig	121	priv		resolveHead
+src/exec/promise_ops.zig	138	priv		complete
+src/exec/promise_ops.zig	150	priv		resolveFunction
+src/exec/promise_ops.zig	166	priv		asyncGeneratorAwait
+src/exec/promise_ops.zig	185	priv		completedReturn
+src/exec/promise_ops.zig	230	priv		resumeBodyValue
+src/exec/promise_ops.zig	265	priv		execBody
+src/exec/promise_ops.zig	361	pub		resumeNext
+src/exec/promise_ops.zig	441	pub		asyncGeneratorEnqueue
+src/exec/promise_ops.zig	476	pub		asyncGeneratorResolveFunctionCall
 src/exec/atomics_ops.zig	35	pub		methodId
 src/exec/atomics_ops.zig	73	priv		atomicsEntry
 src/exec/atomics_ops.zig	89	priv		atomicsCall
@@ -5061,41 +5061,41 @@ src/exec/call_site.zig	405	priv	inline	runOnInvocation
 src/exec/call_site.zig	429	priv	inline	runOnHostInvocation
 src/exec/call_site.zig	457	priv	noinline	acquireForRoute
 src/exec/call_site.zig	474	priv	inline	resolveRoute
-src/exec/class_init_ops.zig	59	pub		constructBuiltinSuperConstructor
-src/exec/class_init_ops.zig	187	priv		constructPromiseBuiltinSuperNativeVm
-src/exec/class_init_ops.zig	208	priv		constructPromiseBuiltinSuperInScope
-src/exec/closure.zig	32	pub		create
-src/exec/closure.zig	40	pub		call
-src/exec/closure.zig	44	pub		callWithThis
-src/exec/closure.zig	73	priv		expectClosure
-src/exec/closure.zig	81	priv		defineIntProperty
-src/exec/closure.zig	86	priv		getIntProperty
-src/exec/closure.zig	92	priv		setGlobalMapString
-src/exec/closure.zig	110	priv		setGlobalWeakMapString
-src/exec/closure.zig	121	priv		getGlobalObjectProperty
-src/exec/closure.zig	127	priv		getGlobalThisObject
-src/exec/closure.zig	134	priv		appendUnindexedCollectionEntryAndDefineSize
-src/exec/closure.zig	148	priv		rollbackLastUnindexedCollectionEntry
-src/exec/coercion_ops.zig	26	pub	inline	toPrimitiveForAdditionFree
-src/exec/coercion_ops.zig	42	priv		toPrimitiveForAdditionObject
-src/exec/coercion_ops.zig	66	pub		toPrimitiveForNumber
-src/exec/coercion_ops.zig	91	pub		toOrdinaryPrimitive
-src/exec/coercion_ops.zig	103	pub		toOrdinaryPrimitiveNumber
-src/exec/coercion_ops.zig	115	pub		valueTruthy
-src/exec/coercion_ops.zig	119	pub		toUint16CodeUnit
-src/exec/coercion_ops.zig	126	pub		toLengthIndex
-src/exec/coercion_ops.zig	135	priv	noinline	toLengthIndexInto
-src/exec/coercion_ops.zig	149	pub		toLengthIndexSlow
-src/exec/coercion_ops.zig	155	pub		toLengthNumber
-src/exec/coercion_ops.zig	170	pub		fastToLengthIndex
-src/exec/coercion_ops.zig	185	pub		toUint32Number
-src/exec/coercion_ops.zig	192	pub		uint32NumberValue
-src/exec/coercion_ops.zig	197	pub		coerceOptionalNumberMethodArgument
-src/exec/coercion_ops.zig	218	pub		primitiveWrapperStoredValue
-src/exec/coercion_ops.zig	232	pub		toNumberForDateMethod
-src/exec/collection_adapter.zig	18	pub		host
-src/exec/collection_adapter.zig	26	priv		callWithThis
-src/exec/collection_adapter.zig	37	priv		narrowCallbackError
+src/exec/function_ops.zig	59	pub		constructBuiltinSuperConstructor
+src/exec/function_ops.zig	187	priv		constructPromiseBuiltinSuperNativeVm
+src/exec/function_ops.zig	208	priv		constructPromiseBuiltinSuperInScope
+src/exec/call.zig	32	pub		create
+src/exec/call.zig	40	pub		call
+src/exec/call.zig	44	pub		callWithThis
+src/exec/call.zig	73	priv		expectClosure
+src/exec/call.zig	81	priv		defineIntProperty
+src/exec/call.zig	86	priv		getIntProperty
+src/exec/call.zig	92	priv		setGlobalMapString
+src/exec/call.zig	110	priv		setGlobalWeakMapString
+src/exec/call.zig	121	priv		getGlobalObjectProperty
+src/exec/call.zig	127	priv		getGlobalThisObject
+src/exec/call.zig	134	priv		appendUnindexedCollectionEntryAndDefineSize
+src/exec/call.zig	148	priv		rollbackLastUnindexedCollectionEntry
+src/exec/value_ops.zig	26	pub	inline	toPrimitiveForAdditionFree
+src/exec/value_ops.zig	42	priv		toPrimitiveForAdditionObject
+src/exec/value_ops.zig	66	pub		toPrimitiveForNumber
+src/exec/value_ops.zig	91	pub		toOrdinaryPrimitive
+src/exec/value_ops.zig	103	pub		toOrdinaryPrimitiveNumber
+src/exec/value_ops.zig	115	pub		valueTruthy
+src/exec/value_ops.zig	119	pub		toUint16CodeUnit
+src/exec/value_ops.zig	126	pub		toLengthIndex
+src/exec/value_ops.zig	135	priv	noinline	toLengthIndexInto
+src/exec/value_ops.zig	149	pub		toLengthIndexSlow
+src/exec/value_ops.zig	155	pub		toLengthNumber
+src/exec/value_ops.zig	170	pub		fastToLengthIndex
+src/exec/value_ops.zig	185	pub		toUint32Number
+src/exec/value_ops.zig	192	pub		uint32NumberValue
+src/exec/value_ops.zig	197	pub		coerceOptionalNumberMethodArgument
+src/exec/value_ops.zig	218	pub		primitiveWrapperStoredValue
+src/exec/value_ops.zig	232	pub		toNumberForDateMethod
+src/exec/collection_ops.zig	18	pub		host
+src/exec/collection_ops.zig	26	priv		callWithThis
+src/exec/collection_ops.zig	37	priv		narrowCallbackError
 src/exec/collection_ops.zig	65	priv		constructorKindFromId
 src/exec/collection_ops.zig	75	pub		staticMethodId
 src/exec/collection_ops.zig	140	priv		collectionEntry
@@ -5362,26 +5362,26 @@ src/exec/disposable_ops.zig	653	pub		asyncDisposableStackRecordError
 src/exec/disposable_ops.zig	671	pub		asyncDisposableStackResolveStored
 src/exec/disposable_ops.zig	685	pub		asyncDisposableStackRejectStored
 src/exec/disposable_ops.zig	699	pub		asyncIteratorAsyncDispose
-src/exec/error_ops.zig	41	priv		errorEntry
-src/exec/error_ops.zig	52	priv		errorCall
-src/exec/error_stack_ops.zig	27	pub		captureErrorStack
-src/exec/error_stack_ops.zig	37	pub		attachStackToErrorValue
-src/exec/error_stack_ops.zig	42	pub		buildErrorStackValue
-src/exec/error_stack_ops.zig	62	pub		formatCapturedErrorStackValue
-src/exec/error_stack_ops.zig	97	pub		throwParseSyntaxError
-src/exec/error_stack_ops.zig	119	priv		defineParseErrorSurface
-src/exec/error_stack_ops.zig	143	priv		errorPrepareStackTrace
-src/exec/error_stack_ops.zig	155	pub		backtraceFunctionNameEql
-src/exec/error_stack_ops.zig	167	pub		callSiteFunctionName
-src/exec/error_stack_ops.zig	175	pub		callSiteFunctionNameValue
-src/exec/error_stack_ops.zig	183	pub		errorStackTraceLimit
-src/exec/error_stack_ops.zig	196	pub		appendBacktraceFunctionName
-src/exec/error_stack_ops.zig	214	pub		appendCallSiteFunctionName
-src/exec/error_stack_ops.zig	226	pub		appendCallSiteFileName
-src/exec/error_stack_ops.zig	238	pub		errorStackGetter
-src/exec/error_stack_ops.zig	255	pub		errorStackSetter
-src/exec/error_stack_ops.zig	321	priv		isErrorStackSetterValue
-src/exec/error_stack_ops.zig	327	pub		errorCaptureStackTrace
+src/exec/exception_ops.zig	41	priv		errorEntry
+src/exec/exception_ops.zig	52	priv		errorCall
+src/exec/exception_ops.zig	27	pub		captureErrorStack
+src/exec/exception_ops.zig	37	pub		attachStackToErrorValue
+src/exec/exception_ops.zig	42	pub		buildErrorStackValue
+src/exec/exception_ops.zig	62	pub		formatCapturedErrorStackValue
+src/exec/exception_ops.zig	97	pub		throwParseSyntaxError
+src/exec/exception_ops.zig	119	priv		defineParseErrorSurface
+src/exec/exception_ops.zig	143	priv		errorPrepareStackTrace
+src/exec/exception_ops.zig	155	pub		backtraceFunctionNameEql
+src/exec/exception_ops.zig	167	pub		callSiteFunctionName
+src/exec/exception_ops.zig	175	pub		callSiteFunctionNameValue
+src/exec/exception_ops.zig	183	pub		errorStackTraceLimit
+src/exec/exception_ops.zig	196	pub		appendBacktraceFunctionName
+src/exec/exception_ops.zig	214	pub		appendCallSiteFunctionName
+src/exec/exception_ops.zig	226	pub		appendCallSiteFileName
+src/exec/exception_ops.zig	238	pub		errorStackGetter
+src/exec/exception_ops.zig	255	pub		errorStackSetter
+src/exec/exception_ops.zig	321	priv		isErrorStackSetterValue
+src/exec/exception_ops.zig	327	pub		errorCaptureStackTrace
 src/exec/eval_entry.zig	28	pub		evalScriptSource
 src/exec/eval_entry.zig	33	pub		evalScriptValue
 src/exec/eval_entry.zig	47	priv	noinline	resolveModuleName
@@ -5392,21 +5392,21 @@ src/exec/eval_entry.zig	358	priv		runEvalModule
 src/exec/eval_entry.zig	407	priv		waitForModuleAwaitReaction
 src/exec/eval_entry.zig	459	priv		runOneModuleAwaitHostEvent
 src/exec/eval_entry.zig	470	priv		parserMode
-src/exec/eval_ops.zig	37	priv		appendEvalClosureSeed
-src/exec/eval_ops.zig	61	priv		directEvalVarIsInParameterScope
-src/exec/eval_ops.zig	75	priv		createDirectEvalClosureSeed
-src/exec/eval_ops.zig	161	priv		directEvalOuterVarRefView
-src/exec/eval_ops.zig	172	priv		ownedCellFromValue
-src/exec/eval_ops.zig	178	priv		directEvalSeedFrameVarRef
-src/exec/eval_ops.zig	228	priv		resolveDirectEvalClosureCell
-src/exec/eval_ops.zig	260	pub		execDirectEval
-src/exec/eval_ops.zig	334	pub		isContextIntrinsicEval
-src/exec/eval_ops.zig	338	pub		execApplyEval
-src/exec/eval_ops.zig	385	pub		directEval
-src/exec/eval_ops.zig	495	pub		directEvalThisValue
-src/exec/eval_ops.zig	515	priv		capturedSpecialValue
-src/exec/eval_ops.zig	529	priv		directEvalNewTargetValue
-src/exec/eval_ops.zig	537	pub		directEvalVisibleLocalNameCount
+src/exec/eval_entry.zig	37	priv		appendEvalClosureSeed
+src/exec/eval_entry.zig	61	priv		directEvalVarIsInParameterScope
+src/exec/eval_entry.zig	75	priv		createDirectEvalClosureSeed
+src/exec/eval_entry.zig	161	priv		directEvalOuterVarRefView
+src/exec/eval_entry.zig	172	priv		ownedCellFromValue
+src/exec/eval_entry.zig	178	priv		directEvalSeedFrameVarRef
+src/exec/eval_entry.zig	228	priv		resolveDirectEvalClosureCell
+src/exec/eval_entry.zig	260	pub		execDirectEval
+src/exec/eval_entry.zig	334	pub		isContextIntrinsicEval
+src/exec/eval_entry.zig	338	pub		execApplyEval
+src/exec/eval_entry.zig	385	pub		directEval
+src/exec/eval_entry.zig	495	pub		directEvalThisValue
+src/exec/eval_entry.zig	515	priv		capturedSpecialValue
+src/exec/eval_entry.zig	529	priv		directEvalNewTargetValue
+src/exec/eval_entry.zig	537	pub		directEvalVisibleLocalNameCount
 src/exec/exception_ops.zig	31	pub		createNamedError
 src/exec/exception_ops.zig	71	pub		createSentinelError
 src/exec/exception_ops.zig	86	pub		createNamedErrorWithPrototype
@@ -5449,28 +5449,28 @@ src/exec/exception_ops.zig	733	priv		errorNameForRuntimeError
 src/exec/exception_ops.zig	753	priv		sourceLocationFromPc2Line
 src/exec/exception_ops.zig	766	priv		defineNonEnumValueProperty
 src/exec/exception_ops.zig	774	priv		throwReferenceErrorSentinel
-src/exec/forof_ops.zig	45	pub		forInIsArraySlot
-src/exec/forof_ops.zig	50	pub		forInInProtoChainSlot
-src/exec/forof_ops.zig	58	pub		createForInIterator
-src/exec/forof_ops.zig	111	priv		forInFastArrayCount
-src/exec/forof_ops.zig	142	pub		forInSnapshotOwnStringKeys
-src/exec/forof_ops.zig	180	priv		forInOwnKeyIsEnumerable
-src/exec/forof_ops.zig	204	pub		forInDefineVisited
-src/exec/forof_ops.zig	217	pub		forInHasEnumerableStringKey
-src/exec/forof_ops.zig	261	pub		iteratorCatchMarker
-src/exec/forof_ops.zig	271	pub		iteratorCatchMarkerPreviousTarget
-src/exec/forof_ops.zig	278	pub		asyncIteratorCatchMarker
-src/exec/forof_ops.zig	282	pub		isAsyncIteratorCatchMarker
-src/exec/forof_ops.zig	286	pub		isIteratorCatchMarker
-src/exec/forof_ops.zig	306	pub		closeStackTopForOfIteratorForPendingError
-src/exec/forof_ops.zig	346	pub		closeIteratorForAbruptCompletion
-src/exec/forof_ops.zig	363	priv		findTopClosableForOfRecordIndexBefore
-src/exec/forof_ops.zig	377	pub		isForOfRecordAt
-src/exec/forof_ops.zig	386	pub		abandonForOfIteratorAtIndex
-src/exec/forof_ops.zig	395	pub		abandonForOfIteratorAtDepth
-src/exec/forof_ops.zig	403	pub		hasCatchMarkerAboveForOfRecord
-src/exec/forof_ops.zig	414	pub		closeIteratorFromVm
-src/exec/forof_ops.zig	423	pub		closeIteratorFromVmImpl
+src/exec/iterator_ops.zig	45	pub		forInIsArraySlot
+src/exec/iterator_ops.zig	50	pub		forInInProtoChainSlot
+src/exec/iterator_ops.zig	58	pub		createForInIterator
+src/exec/iterator_ops.zig	111	priv		forInFastArrayCount
+src/exec/iterator_ops.zig	142	pub		forInSnapshotOwnStringKeys
+src/exec/iterator_ops.zig	180	priv		forInOwnKeyIsEnumerable
+src/exec/iterator_ops.zig	204	pub		forInDefineVisited
+src/exec/iterator_ops.zig	217	pub		forInHasEnumerableStringKey
+src/exec/iterator_ops.zig	261	pub		iteratorCatchMarker
+src/exec/iterator_ops.zig	271	pub		iteratorCatchMarkerPreviousTarget
+src/exec/iterator_ops.zig	278	pub		asyncIteratorCatchMarker
+src/exec/iterator_ops.zig	282	pub		isAsyncIteratorCatchMarker
+src/exec/iterator_ops.zig	286	pub		isIteratorCatchMarker
+src/exec/iterator_ops.zig	306	pub		closeStackTopForOfIteratorForPendingError
+src/exec/iterator_ops.zig	346	pub		closeIteratorForAbruptCompletion
+src/exec/iterator_ops.zig	363	priv		findTopClosableForOfRecordIndexBefore
+src/exec/iterator_ops.zig	377	pub		isForOfRecordAt
+src/exec/iterator_ops.zig	386	pub		abandonForOfIteratorAtIndex
+src/exec/iterator_ops.zig	395	pub		abandonForOfIteratorAtDepth
+src/exec/iterator_ops.zig	403	pub		hasCatchMarkerAboveForOfRecord
+src/exec/iterator_ops.zig	414	pub		closeIteratorFromVm
+src/exec/iterator_ops.zig	423	pub		closeIteratorFromVmImpl
 src/exec/frame.zig	38	pub		partition
 src/exec/frame.zig	81	pub		carve
 src/exec/frame.zig	87	pub		allocHeap
@@ -5531,17 +5531,17 @@ src/exec/function_ops.zig	346	priv		functionCallRecord
 src/exec/function_ops.zig	366	pub		constructFunctionFromSource
 src/exec/function_ops.zig	378	pub		constructGeneratorFunctionFromSource
 src/exec/function_ops.zig	397	pub		constructDynamicFunctionFromSource
-src/exec/host_invocation.zig	86	pub		create
-src/exec/host_invocation.zig	121	pub		destroy
-src/exec/host_invocation.zig	132	pub	inline	acquire
-src/exec/host_invocation.zig	145	priv	noinline	acquireSlow
-src/exec/host_invocation.zig	154	pub	inline	leanFrameFor
-src/exec/host_invocation.zig	165	priv	noinline	leanFrameInit
-src/exec/host_invocation.zig	183	pub	inline	oneShotRoute
-src/exec/host_invocation.zig	207	priv	noinline	oneShotRouteResolve
-src/exec/host_invocation.zig	231	priv		retire
-src/exec/host_invocation.zig	238	pub	inline	publish
-src/exec/host_invocation.zig	257	pub	inline	unpublish
+src/exec/call_site.zig	86	pub		create
+src/exec/call_site.zig	121	pub		destroy
+src/exec/call_site.zig	132	pub	inline	acquire
+src/exec/call_site.zig	145	priv	noinline	acquireSlow
+src/exec/call_site.zig	154	pub	inline	leanFrameFor
+src/exec/call_site.zig	165	priv	noinline	leanFrameInit
+src/exec/call_site.zig	183	pub	inline	oneShotRoute
+src/exec/call_site.zig	207	priv	noinline	oneShotRouteResolve
+src/exec/call_site.zig	231	priv		retire
+src/exec/call_site.zig	238	pub	inline	publish
+src/exec/call_site.zig	257	pub	inline	unpublish
 src/exec/inline_calls.zig	43	pub		resetMachineTestMetrics
 src/exec/inline_calls.zig	48	pub		machineTestMetrics
 src/exec/inline_calls.zig	53	pub	inline	recordSameMachineSyncCall
@@ -5729,10 +5729,10 @@ src/exec/inline_calls.zig	5208	pub		unwindForError
 src/exec/internal_builtins.zig	52	priv		checkedRecord
 src/exec/internal_builtins.zig	56	priv		recordTable
 src/exec/internal_builtins.zig	185	priv		assertIdEnumHasRecord
-src/exec/iterator_builtin_ops.zig	21	pub		staticMethodId
-src/exec/iterator_builtin_ops.zig	29	pub		prototypeMethodId
-src/exec/iterator_builtin_ops.zig	83	priv		iteratorEntry
-src/exec/iterator_builtin_ops.zig	100	priv		iteratorCall
+src/exec/iterator_ops.zig	21	pub		staticMethodId
+src/exec/iterator_ops.zig	29	pub		prototypeMethodId
+src/exec/iterator_ops.zig	83	priv		iteratorEntry
+src/exec/iterator_ops.zig	100	priv		iteratorCall
 src/exec/iterator_ops.zig	40	pub		forOfStart
 src/exec/iterator_ops.zig	92	pub	noinline	forOfStartVm
 src/exec/iterator_ops.zig	109	priv		catchTargetMarkerValue
@@ -5847,18 +5847,18 @@ src/exec/iterator_ops.zig	3262	pub	inline	iteratorWrapNext
 src/exec/iterator_ops.zig	3274	pub	inline	iteratorWrapReturn
 src/exec/iterator_ops.zig	3295	pub	noinline	createIteratorResult
 src/exec/iterator_ops.zig	3322	pub		closeIteratorForFromEntriesAbrupt
-src/exec/iterator_slots.zig	64	pub		arrayIteratorKind
-src/exec/iterator_slots.zig	68	pub		setArrayIteratorKind
-src/exec/iterator_slots.zig	72	pub		collectionIteratorKind
-src/exec/iterator_slots.zig	76	pub		setCollectionIteratorKind
-src/exec/iterator_slots.zig	80	pub		helperKind
-src/exec/iterator_slots.zig	84	pub		setHelperKind
-src/exec/iterator_slots.zig	88	pub		zipMode
-src/exec/iterator_slots.zig	92	pub		setZipMode
-src/exec/iterator_slots.zig	96	pub		zipState
-src/exec/iterator_slots.zig	100	pub		setZipState
-src/exec/iterator_slots.zig	104	pub		regExpStringIteratorFlags
-src/exec/iterator_slots.zig	108	pub		setRegExpStringIteratorFlags
+src/exec/iterator_ops.zig	64	pub		arrayIteratorKind
+src/exec/iterator_ops.zig	68	pub		setArrayIteratorKind
+src/exec/iterator_ops.zig	72	pub		collectionIteratorKind
+src/exec/iterator_ops.zig	76	pub		setCollectionIteratorKind
+src/exec/iterator_ops.zig	80	pub		helperKind
+src/exec/iterator_ops.zig	84	pub		setHelperKind
+src/exec/iterator_ops.zig	88	pub		zipMode
+src/exec/iterator_ops.zig	92	pub		setZipMode
+src/exec/iterator_ops.zig	96	pub		zipState
+src/exec/iterator_ops.zig	100	pub		setZipState
+src/exec/iterator_ops.zig	104	pub		regExpStringIteratorFlags
+src/exec/iterator_ops.zig	108	pub		setRegExpStringIteratorFlags
 src/exec/json_ops.zig	65	priv		jsonEntry
 src/exec/json_ops.zig	80	priv		jsonIsRawJsonCall
 src/exec/json_ops.zig	90	priv		jsonRawJsonCall
@@ -6059,102 +6059,102 @@ src/exec/module.zig	1305	priv		syntheticBytesModuleValue
 src/exec/module.zig	1317	priv		markImmutableArrayBuffer
 src/exec/module.zig	1321	priv		resolvedRequestAtom
 src/exec/module.zig	1345	pub		importMetaUrlValue
-src/exec/module_graph.zig	63	priv		traceRoots
-src/exec/module_graph.zig	72	priv		provider
-src/exec/module_graph.zig	76	priv	inline	activate
-src/exec/module_graph.zig	82	priv		deactivate
-src/exec/module_graph.zig	97	priv		traceRoots
-src/exec/module_graph.zig	106	priv		provider
-src/exec/module_graph.zig	110	priv	inline	activate
-src/exec/module_graph.zig	116	priv		deactivate
-src/exec/module_graph.zig	139	priv		replaceAwaited
-src/exec/module_graph.zig	150	priv		deinit
-src/exec/module_graph.zig	166	priv		importLoaderTypeFromAttributes
-src/exec/module_graph.zig	206	priv		continuationList
-src/exec/module_graph.zig	210	priv		waiterList
-src/exec/module_graph.zig	217	pub		runJobs
-src/exec/module_graph.zig	235	priv		activateRoots
-src/exec/module_graph.zig	246	priv		deactivateRoots
-src/exec/module_graph.zig	256	pub		deinit
-src/exec/module_graph.zig	262	priv		load
-src/exec/module_graph.zig	289	priv		activeDynamicImportState
-src/exec/module_graph.zig	296	priv		createModuleEvaluationWaiter
-src/exec/module_graph.zig	327	priv		settleModuleEvaluationWaiters
-src/exec/module_graph.zig	372	priv		takeRecordedModuleEvaluationRejection
-src/exec/module_graph.zig	389	priv		moduleDependencyRejection
-src/exec/module_graph.zig	410	priv		recordDependencyRejection
-src/exec/module_graph.zig	435	priv		recordModuleEvaluationRejection
-src/exec/module_graph.zig	451	pub		createModuleAwaitReactionPromise
-src/exec/module_graph.zig	498	priv		load
-src/exec/module_graph.zig	535	pub		evaluateImportCall
-src/exec/module_graph.zig	579	priv		buildImportAttributes
-src/exec/module_graph.zig	626	priv		rejectedImportTypeError
-src/exec/module_graph.zig	639	priv		rejectedImportRuntimeError
-src/exec/module_graph.zig	658	pub		enqueueDynamicImportJob
-src/exec/module_graph.zig	668	priv		enqueueDynamicImportJobWithAttributes
-src/exec/module_graph.zig	707	priv		dynamicImportJobRun
-src/exec/module_graph.zig	790	priv		dynamicImportRejectionValue
-src/exec/module_graph.zig	828	pub		deinit
-src/exec/module_graph.zig	834	pub		installDynamicImport
-src/exec/module_graph.zig	842	priv		runJobs
-src/exec/module_graph.zig	851	pub		evalFileModuleGraphWithOutput
-src/exec/module_graph.zig	942	priv		preloadedModuleNeedsEvaluation
-src/exec/module_graph.zig	953	pub		evalFileModuleGraphWithHostHooks
-src/exec/module_graph.zig	1037	priv		initializeSyntheticFileModules
-src/exec/module_graph.zig	1069	priv		evalPreloadedFileModuleStep
-src/exec/module_graph.zig	1136	priv		startPreloadedFileModuleStep
-src/exec/module_graph.zig	1155	priv		appendModuleEvalStepRetainingOnError
-src/exec/module_graph.zig	1198	priv		enqueueDeferredModuleStart
-src/exec/module_graph.zig	1228	priv		drainModuleContinuations
-src/exec/module_graph.zig	1257	priv		drainModuleContinuationsForDependencies
-src/exec/module_graph.zig	1285	priv		drainModuleJobLoop
-src/exec/module_graph.zig	1306	priv		drainOneModuleQueuedOrHostJob
-src/exec/module_graph.zig	1321	priv		drainOneModuleHostEvent
-src/exec/module_graph.zig	1335	priv		prepareModuleContinuationAwait
-src/exec/module_graph.zig	1370	priv		nextReadyModuleContinuation
-src/exec/module_graph.zig	1378	priv		drainOneScheduledModuleWork
-src/exec/module_graph.zig	1414	priv		reinsertRemovedModuleStep
-src/exec/module_graph.zig	1451	priv		retainRemovedModuleStep
-src/exec/module_graph.zig	1501	priv		drainOneModuleContinuation
-src/exec/module_graph.zig	1625	priv		hasActiveAsyncDependency
-src/exec/module_graph.zig	1646	priv		recordHasActiveAsyncDependency
-src/exec/module_graph.zig	1671	priv		freeModuleContinuations
-src/exec/module_graph.zig	1683	priv		freeModuleEvaluationWaiters
-src/exec/module_graph.zig	1692	pub		moduleResolutionError
-src/exec/module_graph.zig	1699	priv		evalDynamicImportModule
-src/exec/module_graph.zig	1876	priv		throwCachedModuleEvalException
-src/exec/module_graph.zig	1890	pub		throwModuleLinkError
-src/exec/module_graph.zig	1918	priv		evalDynamicImportModuleWithHostHooks
-src/exec/module_graph.zig	2002	priv		moduleNeedsEvaluation
-src/exec/module_graph.zig	2009	priv		dynamicImportHostError
-src/exec/module_graph.zig	2024	priv		appendPendingModuleEvalPostorder
-src/exec/module_graph.zig	2051	priv		rebuildPendingModuleEvalPostorder
-src/exec/module_graph.zig	2075	priv		preloadFileModuleGraphWithHostHooks
-src/exec/module_graph.zig	2101	priv		trackedPathContains
-src/exec/module_graph.zig	2108	priv		validateHostResolvedRecord
-src/exec/module_graph.zig	2122	priv		validateHostRequestDependency
-src/exec/module_graph.zig	2136	priv		preloadFileModuleGraphWithHostHooksInner
-src/exec/module_graph.zig	2303	priv		wrapSourceByKind
-src/exec/native_legacy.zig	70	priv	inline	args
-src/exec/native_legacy.zig	75	priv		managedGeneric
-src/exec/native_legacy.zig	77	priv		thunk
-src/exec/native_legacy.zig	85	priv		managedGenericMagic
-src/exec/native_legacy.zig	87	priv		thunk
-src/exec/native_legacy.zig	94	priv		getterThunk
-src/exec/native_legacy.zig	96	priv		thunk
-src/exec/native_legacy.zig	103	priv		getterMagicThunk
-src/exec/native_legacy.zig	105	priv		thunk
-src/exec/native_legacy.zig	111	priv		setterThunk
-src/exec/native_legacy.zig	113	priv		thunk
-src/exec/native_legacy.zig	120	priv		setterMagicThunk
-src/exec/native_legacy.zig	122	priv		thunk
-src/exec/native_legacy.zig	128	priv		leafF64
-src/exec/native_legacy.zig	130	priv		thunk
-src/exec/native_legacy.zig	136	priv		leafF64F64
-src/exec/native_legacy.zig	138	priv		thunk
-src/exec/native_legacy.zig	147	pub		entryFromInternal
-src/exec/native_legacy.zig	233	priv		primLeafOrManaged
-src/exec/native_legacy.zig	255	pub		genericEntry
+src/exec/module.zig	63	priv		traceRoots
+src/exec/module.zig	72	priv		provider
+src/exec/module.zig	76	priv	inline	activate
+src/exec/module.zig	82	priv		deactivate
+src/exec/module.zig	97	priv		traceRoots
+src/exec/module.zig	106	priv		provider
+src/exec/module.zig	110	priv	inline	activate
+src/exec/module.zig	116	priv		deactivate
+src/exec/module.zig	139	priv		replaceAwaited
+src/exec/module.zig	150	priv		deinit
+src/exec/module.zig	166	priv		importLoaderTypeFromAttributes
+src/exec/module.zig	206	priv		continuationList
+src/exec/module.zig	210	priv		waiterList
+src/exec/module.zig	217	pub		runJobs
+src/exec/module.zig	235	priv		activateRoots
+src/exec/module.zig	246	priv		deactivateRoots
+src/exec/module.zig	256	pub		deinit
+src/exec/module.zig	262	priv		load
+src/exec/module.zig	289	priv		activeDynamicImportState
+src/exec/module.zig	296	priv		createModuleEvaluationWaiter
+src/exec/module.zig	327	priv		settleModuleEvaluationWaiters
+src/exec/module.zig	372	priv		takeRecordedModuleEvaluationRejection
+src/exec/module.zig	389	priv		moduleDependencyRejection
+src/exec/module.zig	410	priv		recordDependencyRejection
+src/exec/module.zig	435	priv		recordModuleEvaluationRejection
+src/exec/module.zig	451	pub		createModuleAwaitReactionPromise
+src/exec/module.zig	498	priv		load
+src/exec/module.zig	535	pub		evaluateImportCall
+src/exec/module.zig	579	priv		buildImportAttributes
+src/exec/module.zig	626	priv		rejectedImportTypeError
+src/exec/module.zig	639	priv		rejectedImportRuntimeError
+src/exec/module.zig	658	pub		enqueueDynamicImportJob
+src/exec/module.zig	668	priv		enqueueDynamicImportJobWithAttributes
+src/exec/module.zig	707	priv		dynamicImportJobRun
+src/exec/module.zig	790	priv		dynamicImportRejectionValue
+src/exec/module.zig	828	pub		deinit
+src/exec/module.zig	834	pub		installDynamicImport
+src/exec/module.zig	842	priv		runJobs
+src/exec/module.zig	851	pub		evalFileModuleGraphWithOutput
+src/exec/module.zig	942	priv		preloadedModuleNeedsEvaluation
+src/exec/module.zig	953	pub		evalFileModuleGraphWithHostHooks
+src/exec/module.zig	1037	priv		initializeSyntheticFileModules
+src/exec/module.zig	1069	priv		evalPreloadedFileModuleStep
+src/exec/module.zig	1136	priv		startPreloadedFileModuleStep
+src/exec/module.zig	1155	priv		appendModuleEvalStepRetainingOnError
+src/exec/module.zig	1198	priv		enqueueDeferredModuleStart
+src/exec/module.zig	1228	priv		drainModuleContinuations
+src/exec/module.zig	1257	priv		drainModuleContinuationsForDependencies
+src/exec/module.zig	1285	priv		drainModuleJobLoop
+src/exec/module.zig	1306	priv		drainOneModuleQueuedOrHostJob
+src/exec/module.zig	1321	priv		drainOneModuleHostEvent
+src/exec/module.zig	1335	priv		prepareModuleContinuationAwait
+src/exec/module.zig	1370	priv		nextReadyModuleContinuation
+src/exec/module.zig	1378	priv		drainOneScheduledModuleWork
+src/exec/module.zig	1414	priv		reinsertRemovedModuleStep
+src/exec/module.zig	1451	priv		retainRemovedModuleStep
+src/exec/module.zig	1501	priv		drainOneModuleContinuation
+src/exec/module.zig	1625	priv		hasActiveAsyncDependency
+src/exec/module.zig	1646	priv		recordHasActiveAsyncDependency
+src/exec/module.zig	1671	priv		freeModuleContinuations
+src/exec/module.zig	1683	priv		freeModuleEvaluationWaiters
+src/exec/module.zig	1692	pub		moduleResolutionError
+src/exec/module.zig	1699	priv		evalDynamicImportModule
+src/exec/module.zig	1876	priv		throwCachedModuleEvalException
+src/exec/module.zig	1890	pub		throwModuleLinkError
+src/exec/module.zig	1918	priv		evalDynamicImportModuleWithHostHooks
+src/exec/module.zig	2002	priv		moduleNeedsEvaluation
+src/exec/module.zig	2009	priv		dynamicImportHostError
+src/exec/module.zig	2024	priv		appendPendingModuleEvalPostorder
+src/exec/module.zig	2051	priv		rebuildPendingModuleEvalPostorder
+src/exec/module.zig	2075	priv		preloadFileModuleGraphWithHostHooks
+src/exec/module.zig	2101	priv		trackedPathContains
+src/exec/module.zig	2108	priv		validateHostResolvedRecord
+src/exec/module.zig	2122	priv		validateHostRequestDependency
+src/exec/module.zig	2136	priv		preloadFileModuleGraphWithHostHooksInner
+src/exec/module.zig	2303	priv		wrapSourceByKind
+src/exec/builtin_dispatch.zig	70	priv	inline	args
+src/exec/builtin_dispatch.zig	75	priv		managedGeneric
+src/exec/builtin_dispatch.zig	77	priv		thunk
+src/exec/builtin_dispatch.zig	85	priv		managedGenericMagic
+src/exec/builtin_dispatch.zig	87	priv		thunk
+src/exec/builtin_dispatch.zig	94	priv		getterThunk
+src/exec/builtin_dispatch.zig	96	priv		thunk
+src/exec/builtin_dispatch.zig	103	priv		getterMagicThunk
+src/exec/builtin_dispatch.zig	105	priv		thunk
+src/exec/builtin_dispatch.zig	111	priv		setterThunk
+src/exec/builtin_dispatch.zig	113	priv		thunk
+src/exec/builtin_dispatch.zig	120	priv		setterMagicThunk
+src/exec/builtin_dispatch.zig	122	priv		thunk
+src/exec/builtin_dispatch.zig	128	priv		leafF64
+src/exec/builtin_dispatch.zig	130	priv		thunk
+src/exec/builtin_dispatch.zig	136	priv		leafF64F64
+src/exec/builtin_dispatch.zig	138	priv		thunk
+src/exec/builtin_dispatch.zig	147	pub		entryFromInternal
+src/exec/builtin_dispatch.zig	233	priv		primLeafOrManaged
+src/exec/builtin_dispatch.zig	255	pub		genericEntry
 src/exec/number_ops.zig	33	pub		staticMethodId
 src/exec/number_ops.zig	43	pub		prototypeMethodId
 src/exec/number_ops.zig	74	priv		numberEntry
@@ -6169,47 +6169,47 @@ src/exec/number_ops.zig	240	pub		toStringMethod
 src/exec/number_ops.zig	273	priv		numberStringValue
 src/exec/number_ops.zig	280	priv		dtoaStringValue
 src/exec/number_ops.zig	287	priv		integerDigitsArgument
-src/exec/object_builtin_ops.zig	69	priv		init
-src/exec/object_builtin_ops.zig	83	priv		deinit
-src/exec/object_builtin_ops.zig	105	pub		staticMethodId
-src/exec/object_builtin_ops.zig	132	pub		prototypeMethodId
-src/exec/object_builtin_ops.zig	146	pub		prototypeMethodOrdinal
-src/exec/object_builtin_ops.zig	162	priv		staticEntry
-src/exec/object_builtin_ops.zig	166	priv		prototypeEntry
-src/exec/object_builtin_ops.zig	170	priv		prototypeExecDirectEntry
-src/exec/object_builtin_ops.zig	181	priv		objectEntry
-src/exec/object_builtin_ops.zig	192	priv		constructorEntry
-src/exec/object_builtin_ops.zig	247	priv		objectConstructorCall
-src/exec/object_builtin_ops.zig	265	priv		objectCall
-src/exec/object_builtin_ops.zig	307	priv		objectCallForNativeRecord
-src/exec/object_builtin_ops.zig	361	pub		literal
-src/exec/object_builtin_ops.zig	426	pub		objectIsPrototypeOf
-src/exec/object_builtin_ops.zig	445	pub		objectValueOfCall
-src/exec/object_builtin_ops.zig	451	pub		objectCreateCall
-src/exec/object_builtin_ops.zig	472	pub		objectAssignCall
-src/exec/object_builtin_ops.zig	520	priv		assignSourceIsOrdinary
-src/exec/object_builtin_ops.zig	543	priv		objectAssignEnumOnly
-src/exec/object_builtin_ops.zig	570	pub		objectAssignKeys
-src/exec/object_builtin_ops.zig	594	pub		objectHasOwnCall
-src/exec/object_builtin_ops.zig	624	priv		objectHasOwnPropertyDirect
-src/exec/object_builtin_ops.zig	660	priv		objectHasOwnPropertyHost
-src/exec/object_builtin_ops.zig	693	pub		objectPrototypeOwnPropertyCall
-src/exec/object_builtin_ops.zig	724	pub		objectPrototypeDefineAccessorCall
-src/exec/object_builtin_ops.zig	773	pub		objectPrototypeLookupAccessorCall
-src/exec/object_builtin_ops.zig	800	pub		objectFromEntriesCall
-src/exec/object_builtin_ops.zig	842	pub		objectGroupByCall
-src/exec/object_builtin_ops.zig	896	priv		objectAddEntriesStepValue
-src/exec/object_builtin_ops.zig	928	pub		objectSetIntegrityCall
-src/exec/object_builtin_ops.zig	979	pub		objectTestIntegrityCall
-src/exec/object_builtin_ops.zig	1002	pub		objectIsExtensibleForIntegrity
-src/exec/object_builtin_ops.zig	1022	pub		appendObjectGroupByValue
-src/exec/object_builtin_ops.zig	1075	pub		objectPreventExtensionsCall
-src/exec/object_builtin_ops.zig	1093	pub		getOwnPropertyDescriptorCall
-src/exec/object_builtin_ops.zig	1113	pub		objectGetPrototypeOfCall
-src/exec/object_builtin_ops.zig	1129	pub		objectPrototypeMethodFunctionPrototype
-src/exec/object_builtin_ops.zig	1139	pub		isObjectPrototypeNativeRecord
-src/exec/object_builtin_ops.zig	1144	pub		getOwnPropertyDescriptorsCall
-src/exec/object_builtin_ops.zig	1180	pub	inline	objectOwnPropertyKeysCall
+src/exec/object_ops.zig	69	priv		init
+src/exec/object_ops.zig	83	priv		deinit
+src/exec/object_ops.zig	105	pub		staticMethodId
+src/exec/object_ops.zig	132	pub		prototypeMethodId
+src/exec/object_ops.zig	146	pub		prototypeMethodOrdinal
+src/exec/object_ops.zig	162	priv		staticEntry
+src/exec/object_ops.zig	166	priv		prototypeEntry
+src/exec/object_ops.zig	170	priv		prototypeExecDirectEntry
+src/exec/object_ops.zig	181	priv		objectEntry
+src/exec/object_ops.zig	192	priv		constructorEntry
+src/exec/object_ops.zig	247	priv		objectConstructorCall
+src/exec/object_ops.zig	265	priv		objectCall
+src/exec/object_ops.zig	307	priv		objectCallForNativeRecord
+src/exec/object_ops.zig	361	pub		literal
+src/exec/object_ops.zig	426	pub		objectIsPrototypeOf
+src/exec/object_ops.zig	445	pub		objectValueOfCall
+src/exec/object_ops.zig	451	pub		objectCreateCall
+src/exec/object_ops.zig	472	pub		objectAssignCall
+src/exec/object_ops.zig	520	priv		assignSourceIsOrdinary
+src/exec/object_ops.zig	543	priv		objectAssignEnumOnly
+src/exec/object_ops.zig	570	pub		objectAssignKeys
+src/exec/object_ops.zig	594	pub		objectHasOwnCall
+src/exec/object_ops.zig	624	priv		objectHasOwnPropertyDirect
+src/exec/object_ops.zig	660	priv		objectHasOwnPropertyHost
+src/exec/object_ops.zig	693	pub		objectPrototypeOwnPropertyCall
+src/exec/object_ops.zig	724	pub		objectPrototypeDefineAccessorCall
+src/exec/object_ops.zig	773	pub		objectPrototypeLookupAccessorCall
+src/exec/object_ops.zig	800	pub		objectFromEntriesCall
+src/exec/object_ops.zig	842	pub		objectGroupByCall
+src/exec/object_ops.zig	896	priv		objectAddEntriesStepValue
+src/exec/object_ops.zig	928	pub		objectSetIntegrityCall
+src/exec/object_ops.zig	979	pub		objectTestIntegrityCall
+src/exec/object_ops.zig	1002	pub		objectIsExtensibleForIntegrity
+src/exec/object_ops.zig	1022	pub		appendObjectGroupByValue
+src/exec/object_ops.zig	1075	pub		objectPreventExtensionsCall
+src/exec/object_ops.zig	1093	pub		getOwnPropertyDescriptorCall
+src/exec/object_ops.zig	1113	pub		objectGetPrototypeOfCall
+src/exec/object_ops.zig	1129	pub		objectPrototypeMethodFunctionPrototype
+src/exec/object_ops.zig	1139	pub		isObjectPrototypeNativeRecord
+src/exec/object_ops.zig	1144	pub		getOwnPropertyDescriptorsCall
+src/exec/object_ops.zig	1180	pub	inline	objectOwnPropertyKeysCall
 src/exec/object_ops.zig	120	pub		objectPrototypeFromGlobal
 src/exec/object_ops.zig	140	pub		constructorPrototypeFromGlobal
 src/exec/object_ops.zig	145	pub		constructorPrototypeFromGlobalAtom
@@ -6403,51 +6403,51 @@ src/exec/object_ops.zig	5031	pub		proxyTargetIsCallableObject
 src/exec/object_ops.zig	5038	pub		proxyDefineOwnProperty
 src/exec/object_ops.zig	5087	pub		validateProxyHasResult
 src/exec/object_ops.zig	5110	pub		proxyTrapKeyValue
-src/exec/open_bindings.zig	16	pub		close
-src/exec/open_bindings.zig	24	pub		closeAll
-src/exec/open_bindings.zig	32	pub		hasOpen
-src/exec/performance_ops.zig	25	priv		performanceNowCall
-src/exec/performance_ops.zig	36	priv		performanceNowMs
-src/exec/primitive_ops.zig	20	pub		toString
-src/exec/primitive_ops.zig	40	priv		primitiveId
-src/exec/primitive_ops.zig	110	priv		primitiveEntry
-src/exec/primitive_ops.zig	124	pub		primitiveCall
-src/exec/primitive_ops.zig	147	priv		primitiveStaticEntry
-src/exec/primitive_ops.zig	163	priv		primitiveStaticCall
-src/exec/print_inspector.zig	44	priv		puts
-src/exec/print_inspector.zig	48	priv		putc
-src/exec/print_inspector.zig	52	priv		printf
-src/exec/print_inspector.zig	56	priv		putUnicodeEscape
-src/exec/print_inspector.zig	63	priv		makeState
-src/exec/print_inspector.zig	69	pub		printHostArgument
-src/exec/print_inspector.zig	77	priv		printFloat64
-src/exec/print_inspector.zig	92	priv		len
-src/exec/print_inspector.zig	99	priv		at
-src/exec/print_inspector.zig	109	priv		printUnits
-src/exec/print_inspector.zig	162	priv		unitsOfString
-src/exec/print_inspector.zig	171	priv		printString
-src/exec/print_inspector.zig	186	priv		printRawString
-src/exec/print_inspector.zig	210	priv		isAsciiIdent
-src/exec/print_inspector.zig	223	priv		printAtom
-src/exec/print_inspector.zig	230	priv		printNameBytes
-src/exec/print_inspector.zig	249	priv		printClassName
-src/exec/print_inspector.zig	282	priv		printComma
-src/exec/print_inspector.zig	292	priv		printMoreItems
-src/exec/print_inspector.zig	299	priv		ownOrProtoDataString
-src/exec/print_inspector.zig	326	priv		printRegExp
-src/exec/print_inspector.zig	399	priv		putUnitRaw
-src/exec/print_inspector.zig	408	priv		printError
-src/exec/print_inspector.zig	451	priv		isTypedArrayClass
-src/exec/print_inspector.zig	457	priv		isCallableClass
-src/exec/print_inspector.zig	477	priv		printObject
-src/exec/print_inspector.zig	625	priv		dateIsoText
-src/exec/print_inspector.zig	632	priv		printStackIndex
-src/exec/print_inspector.zig	640	priv		printValueRec
-src/exec/promise_builtin_ops.zig	41	priv		promiseStaticEntry
-src/exec/promise_builtin_ops.zig	57	priv		promisePrototypeEntry
-src/exec/promise_builtin_ops.zig	81	priv		promisePrototypeCall
-src/exec/promise_builtin_ops.zig	110	priv		promiseResolveCall
-src/exec/promise_builtin_ops.zig	130	priv		promiseStaticCall
+src/exec/frame.zig	16	pub		close
+src/exec/frame.zig	24	pub		closeAll
+src/exec/frame.zig	32	pub		hasOpen
+src/exec/builtin_glue.zig	25	priv		performanceNowCall
+src/exec/builtin_glue.zig	36	priv		performanceNowMs
+src/exec/value_ops.zig	20	pub		toString
+src/exec/value_ops.zig	40	priv		primitiveId
+src/exec/value_ops.zig	110	priv		primitiveEntry
+src/exec/value_ops.zig	124	pub		primitiveCall
+src/exec/value_ops.zig	147	priv		primitiveStaticEntry
+src/exec/value_ops.zig	163	priv		primitiveStaticCall
+src/exec/call.zig	44	priv		puts
+src/exec/call.zig	48	priv		putc
+src/exec/call.zig	52	priv		printf
+src/exec/call.zig	56	priv		putUnicodeEscape
+src/exec/call.zig	63	priv		makeState
+src/exec/call.zig	69	pub		printHostArgument
+src/exec/call.zig	77	priv		printFloat64
+src/exec/call.zig	92	priv		len
+src/exec/call.zig	99	priv		at
+src/exec/call.zig	109	priv		printUnits
+src/exec/call.zig	162	priv		unitsOfString
+src/exec/call.zig	171	priv		printString
+src/exec/call.zig	186	priv		printRawString
+src/exec/call.zig	210	priv		isAsciiIdent
+src/exec/call.zig	223	priv		printAtom
+src/exec/call.zig	230	priv		printNameBytes
+src/exec/call.zig	249	priv		printClassName
+src/exec/call.zig	282	priv		printComma
+src/exec/call.zig	292	priv		printMoreItems
+src/exec/call.zig	299	priv		ownOrProtoDataString
+src/exec/call.zig	326	priv		printRegExp
+src/exec/call.zig	399	priv		putUnitRaw
+src/exec/call.zig	408	priv		printError
+src/exec/call.zig	451	priv		isTypedArrayClass
+src/exec/call.zig	457	priv		isCallableClass
+src/exec/call.zig	477	priv		printObject
+src/exec/call.zig	625	priv		dateIsoText
+src/exec/call.zig	632	priv		printStackIndex
+src/exec/call.zig	640	priv		printValueRec
+src/exec/promise_ops.zig	41	priv		promiseStaticEntry
+src/exec/promise_ops.zig	57	priv		promisePrototypeEntry
+src/exec/promise_ops.zig	81	priv		promisePrototypeCall
+src/exec/promise_ops.zig	110	priv		promiseResolveCall
+src/exec/promise_ops.zig	130	priv		promiseStaticCall
 src/exec/promise_ops.zig	30	pub		legacyStaticMethodId
 src/exec/promise_ops.zig	127	pub		promisePrototypeFromGlobal
 src/exec/promise_ops.zig	134	pub		asyncFunctionPrototypeFromGlobal
@@ -6557,36 +6557,36 @@ src/exec/promise_ops.zig	4093	pub		awaitThenableValue
 src/exec/promise_ops.zig	4134	pub		finishAwaitedPromise
 src/exec/promise_ops.zig	4143	pub		rejectModuleNamespaceSuperSet
 src/exec/promise_ops.zig	4156	priv		countPromiseJob
-src/exec/property_direct.zig	61	pub	inline	dataPropertyValueForFastPath
-src/exec/property_direct.zig	82	pub		functionOwnDataPropertyValueForFastPath
-src/exec/property_direct.zig	87	priv		functionOwnDataPropertyObject
-src/exec/property_direct.zig	94	priv		isFunctionLikeClassId
-src/exec/property_direct.zig	116	priv	inline	cacheableNamedDataObject
-src/exec/property_direct.zig	131	priv		fastImmediatePrototypeDataPropertyLookupForObject
-src/exec/property_direct.zig	145	priv		fastOwnOrdinaryDataPropertyLookupForObject
-src/exec/property_direct.zig	153	priv		writableOwnDataPropertyLookup
-src/exec/property_direct.zig	158	priv		setOwnDataPropertyLookup
-src/exec/property_direct.zig	162	priv		setOwnDataPropertyAt
-src/exec/property_direct.zig	172	pub		ordinaryDataPropertyLookup
-src/exec/property_direct.zig	196	pub		ordinaryDataPropertyValueOrUndefinedForFastPath
-src/exec/property_direct.zig	204	priv		declaredGlobalVarDataBorrowedLookup
-src/exec/property_direct.zig	212	priv		globalOwnDataPropertyBorrowedLookup
-src/exec/property_direct.zig	224	pub		globalOwnDataPropertyValue
-src/exec/property_direct.zig	229	priv		globalOwnDataPropertyBorrowedAt
-src/exec/property_direct.zig	234	priv		globalOwnWritableDataPropertyLookup
-src/exec/property_direct.zig	239	priv		globalDataPropertyLookupForFastPath
-src/exec/property_direct.zig	249	pub		globalDataPropertyValueForFastPath
-src/exec/property_direct.zig	265	pub		globalDataPropertyValueForFastPathNoProfile
-src/exec/property_direct.zig	276	priv		globalWritableDataStoreIndexForFastPath
-src/exec/property_direct.zig	288	priv		globalWritableDataStoreLookupForFastPath
-src/exec/property_direct.zig	308	pub		setGlobalWritableDataStoreForFastPathOwned
-src/exec/property_direct.zig	321	priv		setGlobalWritableDataStoreLookupOwned
-src/exec/property_direct.zig	331	priv		setGlobalDataPropertyLookup
-src/exec/property_direct.zig	341	priv		installableGlobalDataPropertyLookup
-src/exec/property_direct.zig	356	priv		setGlobalOwnWritableDataPropertyAt
-src/exec/property_direct.zig	370	priv		writableDataSlotAt
-src/exec/property_direct.zig	376	priv		globalWritableDataPropertyLookupAt
-src/exec/property_direct.zig	381	priv		dataSlotAt
+src/exec/property_ops.zig	61	pub	inline	dataPropertyValueForFastPath
+src/exec/property_ops.zig	82	pub		functionOwnDataPropertyValueForFastPath
+src/exec/property_ops.zig	87	priv		functionOwnDataPropertyObject
+src/exec/property_ops.zig	94	priv		isFunctionLikeClassId
+src/exec/property_ops.zig	116	priv	inline	cacheableNamedDataObject
+src/exec/property_ops.zig	131	priv		fastImmediatePrototypeDataPropertyLookupForObject
+src/exec/property_ops.zig	145	priv		fastOwnOrdinaryDataPropertyLookupForObject
+src/exec/property_ops.zig	153	priv		writableOwnDataPropertyLookup
+src/exec/property_ops.zig	158	priv		setOwnDataPropertyLookup
+src/exec/property_ops.zig	162	priv		setOwnDataPropertyAt
+src/exec/property_ops.zig	172	pub		ordinaryDataPropertyLookup
+src/exec/property_ops.zig	196	pub		ordinaryDataPropertyValueOrUndefinedForFastPath
+src/exec/property_ops.zig	204	priv		declaredGlobalVarDataBorrowedLookup
+src/exec/property_ops.zig	212	priv		globalOwnDataPropertyBorrowedLookup
+src/exec/property_ops.zig	224	pub		globalOwnDataPropertyValue
+src/exec/property_ops.zig	229	priv		globalOwnDataPropertyBorrowedAt
+src/exec/property_ops.zig	234	priv		globalOwnWritableDataPropertyLookup
+src/exec/property_ops.zig	239	priv		globalDataPropertyLookupForFastPath
+src/exec/property_ops.zig	249	pub		globalDataPropertyValueForFastPath
+src/exec/property_ops.zig	265	pub		globalDataPropertyValueForFastPathNoProfile
+src/exec/property_ops.zig	276	priv		globalWritableDataStoreIndexForFastPath
+src/exec/property_ops.zig	288	priv		globalWritableDataStoreLookupForFastPath
+src/exec/property_ops.zig	308	pub		setGlobalWritableDataStoreForFastPathOwned
+src/exec/property_ops.zig	321	priv		setGlobalWritableDataStoreLookupOwned
+src/exec/property_ops.zig	331	priv		setGlobalDataPropertyLookup
+src/exec/property_ops.zig	341	priv		installableGlobalDataPropertyLookup
+src/exec/property_ops.zig	356	priv		setGlobalOwnWritableDataPropertyAt
+src/exec/property_ops.zig	370	priv		writableDataSlotAt
+src/exec/property_ops.zig	376	priv		globalWritableDataPropertyLookupAt
+src/exec/property_ops.zig	381	priv		dataSlotAt
 src/exec/property_ops.zig	14	pub		getProperty
 src/exec/property_ops.zig	19	pub		setProperty
 src/exec/property_ops.zig	23	pub		defineDataProperty
@@ -6616,49 +6616,49 @@ src/exec/reflect_ops.zig	498	pub		reflectHasCall
 src/exec/reflect_ops.zig	516	pub		reflectApplyCall
 src/exec/reflect_ops.zig	554	pub		reflectGetCall
 src/exec/reflect_ops.zig	569	pub		reflectOwnKeysCall
-src/exec/reflect_proxy_ops.zig	18	pub		methodId
-src/exec/reflect_proxy_ops.zig	69	priv		reflectEntry
-src/exec/reflect_proxy_ops.zig	86	priv		reflectCall
-src/exec/regexp_adapter.zig	21	pub		compile
-src/exec/regexp_adapter.zig	25	pub		compileWithRuntime
-src/exec/regexp_adapter.zig	35	pub		execCaptureSlotsOnResolvedStringFromIndex
-src/exec/regexp_adapter.zig	49	pub		captureSlotValue
-src/exec/regexp_adapter.zig	53	pub		groupName
-src/exec/regexp_adapter.zig	57	pub		testOnStringFromIndex
-src/exec/regexp_adapter.zig	67	priv		execOptions
-src/exec/regexp_adapter.zig	71	pub		flagsFromBytecode
-src/exec/regexp_adapter.zig	77	pub		appendCanonicalFlags
-src/exec/regexp_adapter.zig	94	pub		flagsStringValueFromBytecode
-src/exec/regexp_fastpath.zig	32	priv		constructRegExpRecordInNativeScope
-src/exec/regexp_fastpath.zig	82	pub		regExpFunctionCall
-src/exec/regexp_fastpath.zig	159	pub		regExpConstructCall
-src/exec/regexp_fastpath.zig	180	priv		regExpConstructCallInNativeScope
-src/exec/regexp_fastpath.zig	276	pub		regExpExecMethod
-src/exec/regexp_fastpath.zig	301	pub		regExpTestMethod
-src/exec/regexp_fastpath.zig	333	pub		regExpTestFastNoResult
-src/exec/regexp_fastpath.zig	354	pub		regExpLastIndexCanSkipCoercion
-src/exec/regexp_fastpath.zig	360	pub		regExpCompile
-src/exec/regexp_fastpath.zig	441	pub		regExpSpeciesConstructor
-src/exec/regexp_fastpath.zig	470	pub		regExpFlagsAreFullUnicode
-src/exec/regexp_fastpath.zig	475	pub		setRegExpLastIndexZero
-src/exec/regexp_fastpath.zig	482	pub		appendNamedCaptureSubstitution
-src/exec/regexp_fastpath.zig	514	pub		regExpExecGeneric
-src/exec/regexp_fastpath.zig	553	pub		regExpLegacyAccessor
-src/exec/regexp_fastpath.zig	594	pub		regExpConstructorFromGlobal
-src/exec/regexp_fastpath.zig	607	pub		regExpLegacySlotValue
-src/exec/regexp_fastpath.zig	612	pub		materializeRegExpLegacyNoCaptureSlots
-src/exec/regexp_fastpath.zig	648	pub		regExpLegacyCaptureSliceValue
-src/exec/regexp_fastpath.zig	656	pub		clearRegExpLegacySlot
-src/exec/regexp_fastpath.zig	660	pub		getRegExpLastIndexLength
-src/exec/regexp_fastpath.zig	678	pub		setRegExpLastIndexStrict
-src/exec/regexp_fastpath.zig	698	pub		regExpExecResult
-src/exec/regexp_fastpath.zig	734	pub		regExpExecCompiledResult
-src/exec/regexp_fastpath.zig	813	pub		isRegExpValue
-src/exec/regexp_fastpath.zig	818	pub		isRegExpObservable
-src/exec/regexp_fastpath.zig	833	pub		regexpLastIndex
-src/exec/regexp_fastpath.zig	844	pub		createRegExpIndexPair
-src/exec/regexp_fastpath.zig	852	pub		appendDecodedRegExpGroupName
-src/exec/regexp_fastpath.zig	879	pub		readRegExpGroupNameEscape
+src/exec/reflect_ops.zig	18	pub		methodId
+src/exec/reflect_ops.zig	69	priv		reflectEntry
+src/exec/reflect_ops.zig	86	priv		reflectCall
+src/exec/regexp_ops.zig	21	pub		compile
+src/exec/regexp_ops.zig	25	pub		compileWithRuntime
+src/exec/regexp_ops.zig	35	pub		execCaptureSlotsOnResolvedStringFromIndex
+src/exec/regexp_ops.zig	49	pub		captureSlotValue
+src/exec/regexp_ops.zig	53	pub		groupName
+src/exec/regexp_ops.zig	57	pub		testOnStringFromIndex
+src/exec/regexp_ops.zig	67	priv		execOptions
+src/exec/regexp_ops.zig	71	pub		flagsFromBytecode
+src/exec/regexp_ops.zig	77	pub		appendCanonicalFlags
+src/exec/regexp_ops.zig	94	pub		flagsStringValueFromBytecode
+src/exec/regexp_ops.zig	32	priv		constructRegExpRecordInNativeScope
+src/exec/regexp_ops.zig	82	pub		regExpFunctionCall
+src/exec/regexp_ops.zig	159	pub		regExpConstructCall
+src/exec/regexp_ops.zig	180	priv		regExpConstructCallInNativeScope
+src/exec/regexp_ops.zig	276	pub		regExpExecMethod
+src/exec/regexp_ops.zig	301	pub		regExpTestMethod
+src/exec/regexp_ops.zig	333	pub		regExpTestFastNoResult
+src/exec/regexp_ops.zig	354	pub		regExpLastIndexCanSkipCoercion
+src/exec/regexp_ops.zig	360	pub		regExpCompile
+src/exec/regexp_ops.zig	441	pub		regExpSpeciesConstructor
+src/exec/regexp_ops.zig	470	pub		regExpFlagsAreFullUnicode
+src/exec/regexp_ops.zig	475	pub		setRegExpLastIndexZero
+src/exec/regexp_ops.zig	482	pub		appendNamedCaptureSubstitution
+src/exec/regexp_ops.zig	514	pub		regExpExecGeneric
+src/exec/regexp_ops.zig	553	pub		regExpLegacyAccessor
+src/exec/regexp_ops.zig	594	pub		regExpConstructorFromGlobal
+src/exec/regexp_ops.zig	607	pub		regExpLegacySlotValue
+src/exec/regexp_ops.zig	612	pub		materializeRegExpLegacyNoCaptureSlots
+src/exec/regexp_ops.zig	648	pub		regExpLegacyCaptureSliceValue
+src/exec/regexp_ops.zig	656	pub		clearRegExpLegacySlot
+src/exec/regexp_ops.zig	660	pub		getRegExpLastIndexLength
+src/exec/regexp_ops.zig	678	pub		setRegExpLastIndexStrict
+src/exec/regexp_ops.zig	698	pub		regExpExecResult
+src/exec/regexp_ops.zig	734	pub		regExpExecCompiledResult
+src/exec/regexp_ops.zig	813	pub		isRegExpValue
+src/exec/regexp_ops.zig	818	pub		isRegExpObservable
+src/exec/regexp_ops.zig	833	pub		regexpLastIndex
+src/exec/regexp_ops.zig	844	pub		createRegExpIndexPair
+src/exec/regexp_ops.zig	852	pub		appendDecodedRegExpGroupName
+src/exec/regexp_ops.zig	879	pub		readRegExpGroupNameEscape
 src/exec/regexp_ops.zig	44	pub		prototypeMethodId
 src/exec/regexp_ops.zig	57	pub		decodePrototypeMethodId
 src/exec/regexp_ops.zig	147	priv		regexpEntry
@@ -6708,27 +6708,27 @@ src/exec/root.zig	81	pub		init
 src/exec/root.zig	88	pub		initWithOutput
 src/exec/root.zig	96	pub		deinit
 src/exec/root.zig	107	pub		run
-src/exec/slot_ops.zig	26	pub		execGetLoc
-src/exec/slot_ops.zig	45	pub	noinline	execPutLoc
-src/exec/slot_ops.zig	59	pub		execSetLoc
-src/exec/slot_ops.zig	75	pub		execGetArg
-src/exec/slot_ops.zig	93	pub		execPutArg
-src/exec/slot_ops.zig	107	pub		execSetArg
-src/exec/slot_ops.zig	122	pub		execGetVarRefMaybeTdz
-src/exec/slot_ops.zig	192	pub		execPutVarRef
-src/exec/slot_ops.zig	242	pub		isVarRefInitOpcode
-src/exec/slot_ops.zig	251	pub		constVarRefWriteAllowed
-src/exec/slot_ops.zig	256	pub		execSetVarRef
-src/exec/slot_ops.zig	271	pub		adapterValueBorrow
-src/exec/slot_ops.zig	284	pub		adapterValueIsUninitialized
-src/exec/slot_ops.zig	292	pub		adapterIsDeletedEvalBinding
-src/exec/slot_ops.zig	301	pub	inline	replaceAdapterOwned
-src/exec/slot_ops.zig	309	priv	noinline	replaceAdapterRefCounted
-src/exec/slot_ops.zig	321	pub		varRefCellFromValue
-src/exec/slot_ops.zig	336	pub	inline	varRefSlotCell
-src/exec/slot_ops.zig	342	pub	inline	varRefSlot
-src/exec/slot_ops.zig	352	pub	inline	storeVarRefSlot
-src/exec/slot_ops.zig	360	pub	inline	replaceVarRefValueOwned
+src/exec/property_ops.zig	26	pub		execGetLoc
+src/exec/property_ops.zig	45	pub	noinline	execPutLoc
+src/exec/property_ops.zig	59	pub		execSetLoc
+src/exec/property_ops.zig	75	pub		execGetArg
+src/exec/property_ops.zig	93	pub		execPutArg
+src/exec/property_ops.zig	107	pub		execSetArg
+src/exec/property_ops.zig	122	pub		execGetVarRefMaybeTdz
+src/exec/property_ops.zig	192	pub		execPutVarRef
+src/exec/property_ops.zig	242	pub		isVarRefInitOpcode
+src/exec/property_ops.zig	251	pub		constVarRefWriteAllowed
+src/exec/property_ops.zig	256	pub		execSetVarRef
+src/exec/property_ops.zig	271	pub		adapterValueBorrow
+src/exec/property_ops.zig	284	pub		adapterValueIsUninitialized
+src/exec/property_ops.zig	292	pub		adapterIsDeletedEvalBinding
+src/exec/property_ops.zig	301	pub	inline	replaceAdapterOwned
+src/exec/property_ops.zig	309	priv	noinline	replaceAdapterRefCounted
+src/exec/property_ops.zig	321	pub		varRefCellFromValue
+src/exec/property_ops.zig	336	pub	inline	varRefSlotCell
+src/exec/property_ops.zig	342	pub	inline	varRefSlot
+src/exec/property_ops.zig	352	pub	inline	storeVarRefSlot
+src/exec/property_ops.zig	360	pub	inline	replaceVarRefValueOwned
 src/exec/small_inline.zig	38	pub		printProbe
 src/exec/small_inline.zig	137	priv		decodeCallerState
 src/exec/small_inline.zig	143	pub		callerState
@@ -6943,107 +6943,107 @@ src/exec/standard_globals.zig	3430	priv		expectNativeAliasForTest
 src/exec/standard_globals.zig	3448	priv		getConstructorPrototypeForTest
 src/exec/standard_globals.zig	3457	priv		expectNativeFunctionForTest
 src/exec/standard_globals.zig	3470	priv		expectAutoInitOwnPropertyForTest
-src/exec/string_builtin_ops.zig	119	priv		stringEntry
-src/exec/string_builtin_ops.zig	123	priv		stringDirectEntry
-src/exec/string_builtin_ops.zig	135	priv		stringExecDirectEntry
-src/exec/string_builtin_ops.zig	151	priv		stringPrimLeafEntry
-src/exec/string_builtin_ops.zig	166	priv		stringEntryWithHandler
-src/exec/string_builtin_ops.zig	195	priv		testStringDeclById
-src/exec/string_builtin_ops.zig	266	priv		stringConstructorEntry
-src/exec/string_builtin_ops.zig	290	priv	inline	stringPrimitiveIndexRead
-src/exec/string_builtin_ops.zig	342	priv	inline	stringPrimitiveInt32Sat
-src/exec/string_builtin_ops.zig	371	priv	inline	stringPrimitiveConcat
-src/exec/string_builtin_ops.zig	406	priv		stringConcatCall
-src/exec/string_builtin_ops.zig	417	priv		stringFromCharCodeDirect
-src/exec/string_builtin_ops.zig	440	priv		stringFromCharCodeCall
-src/exec/string_builtin_ops.zig	464	priv		stringCharCodeAtLeaf
-src/exec/string_builtin_ops.zig	469	priv		stringCharAtLeaf
-src/exec/string_builtin_ops.zig	474	priv		stringAtLeaf
-src/exec/string_builtin_ops.zig	481	priv		stringCodePointAtLeaf
-src/exec/string_builtin_ops.zig	493	priv		stringCharCodeAtDirect
-src/exec/string_builtin_ops.zig	518	priv	inline	stringCharCodeAtDirectHost
-src/exec/string_builtin_ops.zig	576	priv		stringCharCodeAtCall
-src/exec/string_builtin_ops.zig	587	priv		stringAtCall
-src/exec/string_builtin_ops.zig	598	priv		stringCodePointAtCall
-src/exec/string_builtin_ops.zig	609	priv		stringCaseCall
-src/exec/string_builtin_ops.zig	643	priv		stringCall
-src/exec/string_builtin_ops.zig	716	priv		thisObject
-src/exec/string_builtin_ops.zig	722	pub		constructWithPrototype
-src/exec/string_builtin_ops.zig	775	pub		stringIteratorNext
-src/exec/string_builtin_ops.zig	819	pub		charAtValue
-src/exec/string_builtin_ops.zig	837	pub		methodCall
-src/exec/string_builtin_ops.zig	880	priv		substring
-src/exec/string_builtin_ops.zig	885	priv		substringReceiver
-src/exec/string_builtin_ops.zig	898	priv		trimReceiver
-src/exec/string_builtin_ops.zig	913	priv		trimStringValue
-src/exec/string_builtin_ops.zig	932	priv		coercedReceiverStringValue
-src/exec/string_builtin_ops.zig	939	priv		isWellFormedReceiver
-src/exec/string_builtin_ops.zig	951	priv		toWellFormedReceiver
-src/exec/string_builtin_ops.zig	965	priv		isWellFormedString
-src/exec/string_builtin_ops.zig	980	priv		toWellFormedString
-src/exec/string_builtin_ops.zig	1005	priv		isHighSurrogateUnit
-src/exec/string_builtin_ops.zig	1009	priv		isLowSurrogateUnit
-src/exec/string_builtin_ops.zig	1016	priv		split
-src/exec/string_builtin_ops.zig	1078	priv		splitReceiver
-src/exec/string_builtin_ops.zig	1148	priv		search
-src/exec/string_builtin_ops.zig	1157	priv		match
-src/exec/string_builtin_ops.zig	1193	priv		replaceAll
-src/exec/string_builtin_ops.zig	1225	priv		defineStringElement
-src/exec/string_builtin_ops.zig	1240	priv		defineStringSliceElement
-src/exec/string_builtin_ops.zig	1250	priv		defineValueElement
-src/exec/string_builtin_ops.zig	1260	priv		defineStringIndexUnitProperty
-src/exec/string_builtin_ops.zig	1272	priv		trimStartAscii
-src/exec/string_builtin_ops.zig	1278	priv		trimEndAscii
-src/exec/string_builtin_ops.zig	1284	priv		isAsciiTrim
-src/exec/string_builtin_ops.zig	1288	priv		codePointAtResolved
-src/exec/string_builtin_ops.zig	1307	priv		unicodeCaseReceiver
-src/exec/string_builtin_ops.zig	1312	priv		unicodeCaseOwnedString
-src/exec/string_builtin_ops.zig	1372	priv		toStringValueForMethod
-src/exec/string_builtin_ops.zig	1392	priv		singleCaseMapping
-src/exec/string_builtin_ops.zig	1404	priv		codePointAtStringIndex
-src/exec/string_builtin_ops.zig	1416	priv		codePointBeforeStringIndex
-src/exec/string_builtin_ops.zig	1430	priv		appendUtf16CodePoint
-src/exec/string_builtin_ops.zig	1434	priv		isFinalSigma
-src/exec/string_builtin_ops.zig	1454	priv		indexOf
-src/exec/string_builtin_ops.zig	1464	priv		indexOfReceiver
-src/exec/string_builtin_ops.zig	1479	priv		lastIndexOf
-src/exec/string_builtin_ops.zig	1503	priv		lastIndexOfReceiver
-src/exec/string_builtin_ops.zig	1532	priv		charCodeAtReceiver
-src/exec/string_builtin_ops.zig	1539	priv		codePointAtReceiver
-src/exec/string_builtin_ops.zig	1554	priv		at
-src/exec/string_builtin_ops.zig	1562	priv		atReceiver
-src/exec/string_builtin_ops.zig	1577	priv		slice
-src/exec/string_builtin_ops.zig	1587	priv		sliceReceiver
-src/exec/string_builtin_ops.zig	1605	priv		stringSubstringRange
-src/exec/string_builtin_ops.zig	1614	priv		stringSliceRange
-src/exec/string_builtin_ops.zig	1633	priv		repeatReceiver
-src/exec/string_builtin_ops.zig	1670	priv		repeat
-src/exec/string_builtin_ops.zig	1687	priv		pad
-src/exec/string_builtin_ops.zig	1718	priv		localeCompare
-src/exec/string_builtin_ops.zig	1731	priv		normalize
-src/exec/string_builtin_ops.zig	1746	priv		contains
-src/exec/string_builtin_ops.zig	1764	priv		containsReceiver
-src/exec/string_builtin_ops.zig	1787	priv		appendStringReceiverBytes
-src/exec/string_builtin_ops.zig	1808	priv		stringValueFromSearchArgument
-src/exec/string_builtin_ops.zig	1816	priv		stringMatchesAtResolved
-src/exec/string_builtin_ops.zig	1834	priv		stringMatchesAtUnits
-src/exec/string_builtin_ops.zig	1838	priv	inline	resolvedUnitAt
-src/exec/string_builtin_ops.zig	1845	priv		stringIndexOfUnits
-src/exec/string_builtin_ops.zig	1870	priv		stringLastIndexOfUnits
-src/exec/string_builtin_ops.zig	1893	priv		codeUnitStringValue
-src/exec/string_builtin_ops.zig	1898	priv		createLatin1SliceValue
-src/exec/string_builtin_ops.zig	1903	priv		stringPrimitiveValue
-src/exec/string_builtin_ops.zig	1910	pub		stringValueFromReceiver
-src/exec/string_builtin_ops.zig	1915	priv		stringValueFromReceiverRaw
-src/exec/string_builtin_ops.zig	1928	priv		iteratorResult
-src/exec/string_builtin_ops.zig	2003	priv		defineIntProperty
-src/exec/string_builtin_ops.zig	2012	priv		defineReadonlyIntProperty
-src/exec/string_builtin_ops.zig	2021	priv		stringSearchStart
-src/exec/string_builtin_ops.zig	2030	priv		stringLastSearchStart
-src/exec/string_builtin_ops.zig	2040	priv		toUint32Limit
-src/exec/string_builtin_ops.zig	2049	priv		stringInteger
-src/exec/string_builtin_ops.zig	2059	priv		isTrimCodeUnit
-src/exec/string_builtin_ops.zig	2064	priv		appendValueString
+src/exec/string_ops.zig	119	priv		stringEntry
+src/exec/string_ops.zig	123	priv		stringDirectEntry
+src/exec/string_ops.zig	135	priv		stringExecDirectEntry
+src/exec/string_ops.zig	151	priv		stringPrimLeafEntry
+src/exec/string_ops.zig	166	priv		stringEntryWithHandler
+src/exec/string_ops.zig	195	priv		testStringDeclById
+src/exec/string_ops.zig	266	priv		stringConstructorEntry
+src/exec/string_ops.zig	290	priv	inline	stringPrimitiveIndexRead
+src/exec/string_ops.zig	342	priv	inline	stringPrimitiveInt32Sat
+src/exec/string_ops.zig	371	priv	inline	stringPrimitiveConcat
+src/exec/string_ops.zig	406	priv		stringConcatCall
+src/exec/string_ops.zig	417	priv		stringFromCharCodeDirect
+src/exec/string_ops.zig	440	priv		stringFromCharCodeCall
+src/exec/string_ops.zig	464	priv		stringCharCodeAtLeaf
+src/exec/string_ops.zig	469	priv		stringCharAtLeaf
+src/exec/string_ops.zig	474	priv		stringAtLeaf
+src/exec/string_ops.zig	481	priv		stringCodePointAtLeaf
+src/exec/string_ops.zig	493	priv		stringCharCodeAtDirect
+src/exec/string_ops.zig	518	priv	inline	stringCharCodeAtDirectHost
+src/exec/string_ops.zig	576	priv		stringCharCodeAtCall
+src/exec/string_ops.zig	587	priv		stringAtCall
+src/exec/string_ops.zig	598	priv		stringCodePointAtCall
+src/exec/string_ops.zig	609	priv		stringCaseCall
+src/exec/string_ops.zig	643	priv		stringCall
+src/exec/string_ops.zig	716	priv		thisObject
+src/exec/string_ops.zig	722	pub		constructWithPrototype
+src/exec/string_ops.zig	775	pub		stringIteratorNext
+src/exec/string_ops.zig	819	pub		charAtValue
+src/exec/string_ops.zig	837	pub		methodCall
+src/exec/string_ops.zig	880	priv		substring
+src/exec/string_ops.zig	885	priv		substringReceiver
+src/exec/string_ops.zig	898	priv		trimReceiver
+src/exec/string_ops.zig	913	priv		trimStringValue
+src/exec/string_ops.zig	932	priv		coercedReceiverStringValue
+src/exec/string_ops.zig	939	priv		isWellFormedReceiver
+src/exec/string_ops.zig	951	priv		toWellFormedReceiver
+src/exec/string_ops.zig	965	priv		isWellFormedString
+src/exec/string_ops.zig	980	priv		toWellFormedString
+src/exec/string_ops.zig	1005	priv		isHighSurrogateUnit
+src/exec/string_ops.zig	1009	priv		isLowSurrogateUnit
+src/exec/string_ops.zig	1016	priv		split
+src/exec/string_ops.zig	1078	priv		splitReceiver
+src/exec/string_ops.zig	1148	priv		search
+src/exec/string_ops.zig	1157	priv		match
+src/exec/string_ops.zig	1193	priv		replaceAll
+src/exec/string_ops.zig	1225	priv		defineStringElement
+src/exec/string_ops.zig	1240	priv		defineStringSliceElement
+src/exec/string_ops.zig	1250	priv		defineValueElement
+src/exec/string_ops.zig	1260	priv		defineStringIndexUnitProperty
+src/exec/string_ops.zig	1272	priv		trimStartAscii
+src/exec/string_ops.zig	1278	priv		trimEndAscii
+src/exec/string_ops.zig	1284	priv		isAsciiTrim
+src/exec/string_ops.zig	1288	priv		codePointAtResolved
+src/exec/string_ops.zig	1307	priv		unicodeCaseReceiver
+src/exec/string_ops.zig	1312	priv		unicodeCaseOwnedString
+src/exec/string_ops.zig	1372	priv		toStringValueForMethod
+src/exec/string_ops.zig	1392	priv		singleCaseMapping
+src/exec/string_ops.zig	1404	priv		codePointAtStringIndex
+src/exec/string_ops.zig	1416	priv		codePointBeforeStringIndex
+src/exec/string_ops.zig	1430	priv		appendUtf16CodePoint
+src/exec/string_ops.zig	1434	priv		isFinalSigma
+src/exec/string_ops.zig	1454	priv		indexOf
+src/exec/string_ops.zig	1464	priv		indexOfReceiver
+src/exec/string_ops.zig	1479	priv		lastIndexOf
+src/exec/string_ops.zig	1503	priv		lastIndexOfReceiver
+src/exec/string_ops.zig	1532	priv		charCodeAtReceiver
+src/exec/string_ops.zig	1539	priv		codePointAtReceiver
+src/exec/string_ops.zig	1554	priv		at
+src/exec/string_ops.zig	1562	priv		atReceiver
+src/exec/string_ops.zig	1577	priv		slice
+src/exec/string_ops.zig	1587	priv		sliceReceiver
+src/exec/string_ops.zig	1605	priv		stringSubstringRange
+src/exec/string_ops.zig	1614	priv		stringSliceRange
+src/exec/string_ops.zig	1633	priv		repeatReceiver
+src/exec/string_ops.zig	1670	priv		repeat
+src/exec/string_ops.zig	1687	priv		pad
+src/exec/string_ops.zig	1718	priv		localeCompare
+src/exec/string_ops.zig	1731	priv		normalize
+src/exec/string_ops.zig	1746	priv		contains
+src/exec/string_ops.zig	1764	priv		containsReceiver
+src/exec/string_ops.zig	1787	priv		appendStringReceiverBytes
+src/exec/string_ops.zig	1808	priv		stringValueFromSearchArgument
+src/exec/string_ops.zig	1816	priv		stringMatchesAtResolved
+src/exec/string_ops.zig	1834	priv		stringMatchesAtUnits
+src/exec/string_ops.zig	1838	priv	inline	resolvedUnitAt
+src/exec/string_ops.zig	1845	priv		stringIndexOfUnits
+src/exec/string_ops.zig	1870	priv		stringLastIndexOfUnits
+src/exec/string_ops.zig	1893	priv		codeUnitStringValue
+src/exec/string_ops.zig	1898	priv		createLatin1SliceValue
+src/exec/string_ops.zig	1903	priv		stringPrimitiveValue
+src/exec/string_ops.zig	1910	pub		stringValueFromReceiver
+src/exec/string_ops.zig	1915	priv		stringValueFromReceiverRaw
+src/exec/string_ops.zig	1928	priv		iteratorResult
+src/exec/string_ops.zig	2003	priv		defineIntProperty
+src/exec/string_ops.zig	2012	priv		defineReadonlyIntProperty
+src/exec/string_ops.zig	2021	priv		stringSearchStart
+src/exec/string_ops.zig	2030	priv		stringLastSearchStart
+src/exec/string_ops.zig	2040	priv		toUint32Limit
+src/exec/string_ops.zig	2049	priv		stringInteger
+src/exec/string_ops.zig	2059	priv		isTrimCodeUnit
+src/exec/string_ops.zig	2064	priv		appendValueString
 src/exec/string_ops.zig	109	pub		toStringForAnnexB
 src/exec/string_ops.zig	138	pub		toStringCheckObject
 src/exec/string_ops.zig	151	pub		toPrimitiveForString
@@ -7673,9 +7673,9 @@ tests/exec.zig	23554	priv		escapedEvalImportLoad
 tests/exec.zig	24914	priv		symmetricDifferenceMutatingKeysHost
 tests/exec.zig	24941	priv		symmetricDifferenceMutatingKeysImpl
 tests/exec.zig	26147	priv		fillOwnPropertyStorageForFailure
-src/exec/typed_array_construct.zig	19	pub		arrayBufferConstructArgs
-src/exec/typed_array_construct.zig	23	pub		sharedArrayBufferConstructArgs
-src/exec/typed_array_construct.zig	31	priv	noinline	bufferConstructArgs
+src/exec/buffer_ops.zig	19	pub		arrayBufferConstructArgs
+src/exec/buffer_ops.zig	23	pub		sharedArrayBufferConstructArgs
+src/exec/buffer_ops.zig	31	priv	noinline	bufferConstructArgs
 src/exec/uri_ops.zig	36	priv		throwUriErrorMessage
 src/exec/uri_ops.zig	59	priv		uriEntry
 src/exec/uri_ops.zig	63	priv		uriNamedEntry
@@ -7714,13 +7714,13 @@ src/exec/uri_ops.zig	755	priv		hexCodeUnitValue
 src/exec/uri_ops.zig	759	priv		isUnescaped
 src/exec/uri_ops.zig	763	priv		isReserved
 src/exec/uri_ops.zig	768	priv		appendValueString
-src/exec/using_ops.zig	33	priv		popOwnedOperands
-src/exec/using_ops.zig	40	priv		routeRuntimeError
-src/exec/using_ops.zig	55	pub	noinline	createStackVm
-src/exec/using_ops.zig	71	pub	noinline	execVm
-src/exec/using_ops.zig	178	priv		addResourceWithHint
-src/exec/using_ops.zig	207	priv		disposeStack
-src/exec/using_ops.zig	232	pub	noinline	disposeStackVm
+src/exec/vm_opcodes.zig	33	priv		popOwnedOperands
+src/exec/vm_opcodes.zig	40	priv		routeRuntimeError
+src/exec/vm_opcodes.zig	55	pub	noinline	createStackVm
+src/exec/vm_opcodes.zig	71	pub	noinline	execVm
+src/exec/vm_opcodes.zig	178	priv		addResourceWithHint
+src/exec/vm_opcodes.zig	207	priv		disposeStack
+src/exec/vm_opcodes.zig	232	pub	noinline	disposeStackVm
 src/exec/value_ops.zig	20	pub		binary
 src/exec/value_ops.zig	57	pub		compare
 src/exec/value_ops.zig	92	priv		compareBigIntRelational
@@ -7788,147 +7788,147 @@ src/exec/value_ops.zig	1149	priv		jsMathPow
 src/exec/value_ops.zig	1156	pub		valuesStrictEqual
 src/exec/value_ops.zig	1183	pub		cloneBigIntValue
 src/exec/value_ops.zig	1188	pub		appendValueString
-src/exec/vm_arith.zig	23	pub		binary
-src/exec/vm_arith.zig	73	pub	noinline	binaryVm
-src/exec/vm_arith.zig	89	pub		compare
-src/exec/vm_arith.zig	140	pub	noinline	compareVm
-src/exec/vm_arith.zig	172	pub		compareAt
-src/exec/vm_arith.zig	235	pub		unary
-src/exec/vm_arith.zig	267	pub	noinline	unaryVm
-src/exec/vm_arith.zig	283	pub		bitNot
-src/exec/vm_arith.zig	295	pub	noinline	bitNotVm
-src/exec/vm_arith.zig	310	pub		postUpdate
-src/exec/vm_arith.zig	343	pub	noinline	postUpdateVm
-src/exec/vm_arith.zig	359	pub		updateLocal
-src/exec/vm_arith.zig	404	pub	noinline	updateLocalVm
-src/exec/vm_arith.zig	428	pub		updateLocalAt
-src/exec/vm_arith.zig	486	pub		addLocal
-src/exec/vm_arith.zig	570	priv	noinline	addLocalString
-src/exec/vm_arith.zig	594	pub	noinline	addLocalVm
-src/exec/vm_arith.zig	627	pub		addLocalAt
-src/exec/vm_arith.zig	676	priv	noinline	addLocalStringAt
-src/exec/vm_arith.zig	698	pub		fastBinaryInt32
-src/exec/vm_arith.zig	715	pub		fastInt32Add
-src/exec/vm_arith.zig	725	pub		fastInt32Sub
-src/exec/vm_arith.zig	732	priv		fastInt32Mul
-src/exec/vm_arith.zig	739	priv		fastInt32Mod
-src/exec/vm_arith.zig	747	priv		fastCompareShortBigInt
-src/exec/vm_arith.zig	759	priv		isBitwiseBinaryOp
-src/exec/vm_arith.zig	764	priv		isNumericBinaryOp
-src/exec/vm_arith.zig	769	priv		looseEqualOp
-src/exec/vm_arith.zig	831	priv		sameLooseEqualityType
-src/exec/vm_arith.zig	842	priv		isLoosePrimitiveForObject
-src/exec/vm_arith.zig	846	priv		looseEqualSameNumberTypes
-src/exec/vm_call.zig	46	pub		deinit
-src/exec/vm_call.zig	55	pub		enterCallDepth
-src/exec/vm_call.zig	79	pub		bytecodeFrameAllocaSize
-src/exec/vm_call.zig	101	pub	inline	bytecodeLeafFrameAllocaSize
-src/exec/vm_call.zig	109	priv	inline	bytecodeStackBudgetWouldOverflow
-src/exec/vm_call.zig	122	priv	inline	admissionCeilingsReject
-src/exec/vm_call.zig	140	pub	inline	canEnterInlineCallDepthBytes
-src/exec/vm_call.zig	149	pub	inline	commitInlineCallDepthBytes
-src/exec/vm_call.zig	169	pub	inline	tryCommitInlineCallDepthBytesRt
-src/exec/vm_call.zig	191	pub	noinline	retreatInlineCallDepthBytesMiss
-src/exec/vm_call.zig	200	pub	inline	enterInlineCallDepthBytes
-src/exec/vm_call.zig	211	pub	inline	leaveInlineCallDepthBytes
-src/exec/vm_call.zig	221	pub	inline	leaveInlineCallDepthBytesRt
-src/exec/vm_call.zig	236	pub		checkTailCallChainStackBudget
-src/exec/vm_call.zig	254	priv	noinline	inlineCallDepthOverflow
-src/exec/vm_call.zig	259	pub	inline	initFrameLocals
-src/exec/vm_call.zig	286	pub	inline	initFrameVarRefs
-src/exec/vm_call.zig	320	priv		allocFrameVarRefWindow
-src/exec/vm_call.zig	327	pub	noinline	closure
-src/exec/vm_call.zig	352	pub		call
-src/exec/vm_call.zig	385	pub	inline	resolvedNativeCallTargetAssumeCFunction
-src/exec/vm_call.zig	399	pub	inline	resolvedNativeMethodRecord
-src/exec/vm_call.zig	408	pub	inline	resolvedNativeMethodRecordAssumeCFunction
-src/exec/vm_call.zig	424	pub	inline	callResolvedNativeMethod
-src/exec/vm_call.zig	449	pub	noinline	callMethod
-src/exec/vm_call.zig	531	pub		dropUnusedCallResult
-src/exec/vm_call.zig	542	priv	inline	fastNativeMethodCall
-src/exec/vm_call.zig	594	pub	noinline	apply
-src/exec/vm_call.zig	735	pub	noinline	constructor
-src/exec/vm_call.zig	774	priv		throwCtorTypeError
-src/exec/vm_call.zig	779	pub		checkCtor
-src/exec/vm_call.zig	785	pub	noinline	checkCtorVm
-src/exec/vm_call.zig	800	pub		checkCtorReturn
-src/exec/vm_call.zig	815	pub	noinline	checkCtorReturnVm
-src/exec/vm_call.zig	830	pub		initCtor
-src/exec/vm_call.zig	859	pub	noinline	initCtorVm
-src/exec/vm_call.zig	875	priv		maxNativeJsCallDepth
-src/exec/vm_call.zig	879	priv		maxLogicalJsCallDepth
-src/exec/vm_call.zig	883	priv		readInt
-src/exec/vm_control.zig	25	pub	inline	returnTop
-src/exec/vm_control.zig	41	pub	inline	returnUndefined
-src/exec/vm_control.zig	48	pub	inline	finishFunctionReturn
-src/exec/vm_control.zig	56	pub		jump32
-src/exec/vm_control.zig	62	pub		jump16
-src/exec/vm_control.zig	68	pub		jump8
-src/exec/vm_control.zig	74	pub		branch32
-src/exec/vm_control.zig	85	pub		branch8
-src/exec/vm_control.zig	96	pub	noinline	throwTop
-src/exec/vm_control.zig	123	priv		createAtomError
-src/exec/vm_control.zig	142	priv		createThrowErrorValue
-src/exec/vm_control.zig	158	priv		deliverPendingThrow
-src/exec/vm_control.zig	171	pub	noinline	throwErrorVm
-src/exec/vm_control.zig	196	pub	noinline	catchTarget
-src/exec/vm_control.zig	205	pub		gosub
-src/exec/vm_control.zig	214	pub		ret
-src/exec/vm_control.zig	223	priv		relativePc
-src/exec/vm_control.zig	227	priv		adapterValueBorrow
-src/exec/vm_control.zig	236	priv		varRefCellFromValue
-src/exec/vm_control.zig	240	priv		readInt
-src/exec/vm_eval_module.zig	29	pub	noinline	directEval
-src/exec/vm_eval_module.zig	64	pub	noinline	applyEval
-src/exec/vm_eval_module.zig	95	pub	noinline	dynamicImport
-src/exec/vm_eval_module.zig	133	priv		readInt
-src/exec/vm_gen_async.zig	45	priv	inline	reserveGeneratorExecutionStackAdditional
-src/exec/vm_gen_async.zig	58	priv		sameSlice
-src/exec/vm_gen_async.zig	62	priv		residentFrameViewsMatch
-src/exec/vm_gen_async.zig	71	priv		clearLiveExecutionViews
-src/exec/vm_gen_async.zig	92	priv		parkGeneratorExecutionState
-src/exec/vm_gen_async.zig	193	pub	noinline	saveGeneratorExecutionState
-src/exec/vm_gen_async.zig	219	pub		resumeExecutionState
-src/exec/vm_gen_async.zig	235	priv	inline	installSuspendedExecutionStorage
-src/exec/vm_gen_async.zig	259	pub		finishExecutionStateRun
-src/exec/vm_gen_async.zig	277	priv	noinline	resumeExecutionStateRaw
-src/exec/vm_gen_async.zig	382	pub		completeResumeState
-src/exec/vm_gen_async.zig	403	priv		handleAwaitError
-src/exec/vm_gen_async.zig	417	pub		stopBeforePc
-src/exec/vm_gen_async.zig	433	priv		parkGeneratorStartBoundary
-src/exec/vm_gen_async.zig	451	pub		initialYield
-src/exec/vm_gen_async.zig	469	pub	noinline	yieldValue
-src/exec/vm_gen_async.zig	493	pub	noinline	yieldStar
-src/exec/vm_gen_async.zig	512	priv		yieldStarRaw
-src/exec/vm_gen_async.zig	590	pub	noinline	awaitValue
-src/exec/vm_gen_async.zig	610	priv		awaitValueRaw
-src/exec/vm_gen_async.zig	662	priv		suspendAwaitValue
-src/exec/vm_gen_async.zig	680	priv		awaitSuspendMode
-src/exec/vm_gen_async.zig	691	priv		closeIteratorForPendingError
-src/exec/vm_literal.zig	26	pub	noinline	object
-src/exec/vm_literal.zig	36	pub	noinline	objectReserved2
-src/exec/vm_literal.zig	55	pub	inline	newPlainObjectValue
-src/exec/vm_literal.zig	60	pub	inline	newPlainObjectReserved2Value
-src/exec/vm_literal.zig	95	pub	inline	defineFieldFast
-src/exec/vm_literal.zig	112	pub	noinline	arrayFrom
-src/exec/vm_literal.zig	136	pub	noinline	defineField
-src/exec/vm_literal.zig	211	pub	noinline	setProto
-src/exec/vm_literal.zig	225	pub	noinline	defineArrayEl
-src/exec/vm_literal.zig	255	pub		appendSpreadValues
-src/exec/vm_literal.zig	276	pub	noinline	appendSpreadValuesVm
-src/exec/vm_literal.zig	292	pub	noinline	copyDataProperties
-src/exec/vm_literal.zig	421	priv		handleLiteralRuntimeError
-src/exec/vm_literal.zig	434	pub	noinline	specialObject
-src/exec/vm_literal.zig	470	pub	noinline	getLength
-src/exec/vm_literal.zig	488	pub	noinline	rest
-src/exec/vm_literal.zig	512	priv		stackValueFromTop
-src/exec/vm_literal.zig	518	priv		readInt
-src/exec/vm_native.zig	32	pub	noinline	dispatch
-src/exec/vm_native.zig	90	pub	inline	managedInlineEligible
-src/exec/vm_native.zig	97	pub	inline	getterInlineEligible
-src/exec/vm_native.zig	103	pub	inline	methodManagedInlineEligible
-src/exec/vm_native.zig	110	pub	noinline	failure
-src/exec/vm_profile.zig	17	pub	inline	noteDispatch
+src/exec/vm_opcodes.zig	23	pub		binary
+src/exec/vm_opcodes.zig	73	pub	noinline	binaryVm
+src/exec/vm_opcodes.zig	89	pub		compare
+src/exec/vm_opcodes.zig	140	pub	noinline	compareVm
+src/exec/vm_opcodes.zig	172	pub		compareAt
+src/exec/vm_opcodes.zig	235	pub		unary
+src/exec/vm_opcodes.zig	267	pub	noinline	unaryVm
+src/exec/vm_opcodes.zig	283	pub		bitNot
+src/exec/vm_opcodes.zig	295	pub	noinline	bitNotVm
+src/exec/vm_opcodes.zig	310	pub		postUpdate
+src/exec/vm_opcodes.zig	343	pub	noinline	postUpdateVm
+src/exec/vm_opcodes.zig	359	pub		updateLocal
+src/exec/vm_opcodes.zig	404	pub	noinline	updateLocalVm
+src/exec/vm_opcodes.zig	428	pub		updateLocalAt
+src/exec/vm_opcodes.zig	486	pub		addLocal
+src/exec/vm_opcodes.zig	570	priv	noinline	addLocalString
+src/exec/vm_opcodes.zig	594	pub	noinline	addLocalVm
+src/exec/vm_opcodes.zig	627	pub		addLocalAt
+src/exec/vm_opcodes.zig	676	priv	noinline	addLocalStringAt
+src/exec/vm_opcodes.zig	698	pub		fastBinaryInt32
+src/exec/vm_opcodes.zig	715	pub		fastInt32Add
+src/exec/vm_opcodes.zig	725	pub		fastInt32Sub
+src/exec/vm_opcodes.zig	732	priv		fastInt32Mul
+src/exec/vm_opcodes.zig	739	priv		fastInt32Mod
+src/exec/vm_opcodes.zig	747	priv		fastCompareShortBigInt
+src/exec/vm_opcodes.zig	759	priv		isBitwiseBinaryOp
+src/exec/vm_opcodes.zig	764	priv		isNumericBinaryOp
+src/exec/vm_opcodes.zig	769	priv		looseEqualOp
+src/exec/vm_opcodes.zig	831	priv		sameLooseEqualityType
+src/exec/vm_opcodes.zig	842	priv		isLoosePrimitiveForObject
+src/exec/vm_opcodes.zig	846	priv		looseEqualSameNumberTypes
+src/exec/vm_opcodes.zig	46	pub		deinit
+src/exec/vm_opcodes.zig	55	pub		enterCallDepth
+src/exec/vm_opcodes.zig	79	pub		bytecodeFrameAllocaSize
+src/exec/vm_opcodes.zig	101	pub	inline	bytecodeLeafFrameAllocaSize
+src/exec/vm_opcodes.zig	109	priv	inline	bytecodeStackBudgetWouldOverflow
+src/exec/vm_opcodes.zig	122	priv	inline	admissionCeilingsReject
+src/exec/vm_opcodes.zig	140	pub	inline	canEnterInlineCallDepthBytes
+src/exec/vm_opcodes.zig	149	pub	inline	commitInlineCallDepthBytes
+src/exec/vm_opcodes.zig	169	pub	inline	tryCommitInlineCallDepthBytesRt
+src/exec/vm_opcodes.zig	191	pub	noinline	retreatInlineCallDepthBytesMiss
+src/exec/vm_opcodes.zig	200	pub	inline	enterInlineCallDepthBytes
+src/exec/vm_opcodes.zig	211	pub	inline	leaveInlineCallDepthBytes
+src/exec/vm_opcodes.zig	221	pub	inline	leaveInlineCallDepthBytesRt
+src/exec/vm_opcodes.zig	236	pub		checkTailCallChainStackBudget
+src/exec/vm_opcodes.zig	254	priv	noinline	inlineCallDepthOverflow
+src/exec/vm_opcodes.zig	259	pub	inline	initFrameLocals
+src/exec/vm_opcodes.zig	286	pub	inline	initFrameVarRefs
+src/exec/vm_opcodes.zig	320	priv		allocFrameVarRefWindow
+src/exec/vm_opcodes.zig	327	pub	noinline	closure
+src/exec/vm_opcodes.zig	352	pub		call
+src/exec/vm_opcodes.zig	385	pub	inline	resolvedNativeCallTargetAssumeCFunction
+src/exec/vm_opcodes.zig	399	pub	inline	resolvedNativeMethodRecord
+src/exec/vm_opcodes.zig	408	pub	inline	resolvedNativeMethodRecordAssumeCFunction
+src/exec/vm_opcodes.zig	424	pub	inline	callResolvedNativeMethod
+src/exec/vm_opcodes.zig	449	pub	noinline	callMethod
+src/exec/vm_opcodes.zig	531	pub		dropUnusedCallResult
+src/exec/vm_opcodes.zig	542	priv	inline	fastNativeMethodCall
+src/exec/vm_opcodes.zig	594	pub	noinline	apply
+src/exec/vm_opcodes.zig	735	pub	noinline	constructor
+src/exec/vm_opcodes.zig	774	priv		throwCtorTypeError
+src/exec/vm_opcodes.zig	779	pub		checkCtor
+src/exec/vm_opcodes.zig	785	pub	noinline	checkCtorVm
+src/exec/vm_opcodes.zig	800	pub		checkCtorReturn
+src/exec/vm_opcodes.zig	815	pub	noinline	checkCtorReturnVm
+src/exec/vm_opcodes.zig	830	pub		initCtor
+src/exec/vm_opcodes.zig	859	pub	noinline	initCtorVm
+src/exec/vm_opcodes.zig	875	priv		maxNativeJsCallDepth
+src/exec/vm_opcodes.zig	879	priv		maxLogicalJsCallDepth
+src/exec/vm_opcodes.zig	883	priv		readInt
+src/exec/vm_opcodes.zig	25	pub	inline	returnTop
+src/exec/vm_opcodes.zig	41	pub	inline	returnUndefined
+src/exec/vm_opcodes.zig	48	pub	inline	finishFunctionReturn
+src/exec/vm_opcodes.zig	56	pub		jump32
+src/exec/vm_opcodes.zig	62	pub		jump16
+src/exec/vm_opcodes.zig	68	pub		jump8
+src/exec/vm_opcodes.zig	74	pub		branch32
+src/exec/vm_opcodes.zig	85	pub		branch8
+src/exec/vm_opcodes.zig	96	pub	noinline	throwTop
+src/exec/vm_opcodes.zig	123	priv		createAtomError
+src/exec/vm_opcodes.zig	142	priv		createThrowErrorValue
+src/exec/vm_opcodes.zig	158	priv		deliverPendingThrow
+src/exec/vm_opcodes.zig	171	pub	noinline	throwErrorVm
+src/exec/vm_opcodes.zig	196	pub	noinline	catchTarget
+src/exec/vm_opcodes.zig	205	pub		gosub
+src/exec/vm_opcodes.zig	214	pub		ret
+src/exec/vm_opcodes.zig	223	priv		relativePc
+src/exec/vm_opcodes.zig	227	priv		adapterValueBorrow
+src/exec/vm_opcodes.zig	236	priv		varRefCellFromValue
+src/exec/vm_opcodes.zig	240	priv		readInt
+src/exec/vm_opcodes.zig	29	pub	noinline	directEval
+src/exec/vm_opcodes.zig	64	pub	noinline	applyEval
+src/exec/vm_opcodes.zig	95	pub	noinline	dynamicImport
+src/exec/vm_opcodes.zig	133	priv		readInt
+src/exec/vm_opcodes.zig	45	priv	inline	reserveGeneratorExecutionStackAdditional
+src/exec/vm_opcodes.zig	58	priv		sameSlice
+src/exec/vm_opcodes.zig	62	priv		residentFrameViewsMatch
+src/exec/vm_opcodes.zig	71	priv		clearLiveExecutionViews
+src/exec/vm_opcodes.zig	92	priv		parkGeneratorExecutionState
+src/exec/vm_opcodes.zig	193	pub	noinline	saveGeneratorExecutionState
+src/exec/vm_opcodes.zig	219	pub		resumeExecutionState
+src/exec/vm_opcodes.zig	235	priv	inline	installSuspendedExecutionStorage
+src/exec/vm_opcodes.zig	259	pub		finishExecutionStateRun
+src/exec/vm_opcodes.zig	277	priv	noinline	resumeExecutionStateRaw
+src/exec/vm_opcodes.zig	382	pub		completeResumeState
+src/exec/vm_opcodes.zig	403	priv		handleAwaitError
+src/exec/vm_opcodes.zig	417	pub		stopBeforePc
+src/exec/vm_opcodes.zig	433	priv		parkGeneratorStartBoundary
+src/exec/vm_opcodes.zig	451	pub		initialYield
+src/exec/vm_opcodes.zig	469	pub	noinline	yieldValue
+src/exec/vm_opcodes.zig	493	pub	noinline	yieldStar
+src/exec/vm_opcodes.zig	512	priv		yieldStarRaw
+src/exec/vm_opcodes.zig	590	pub	noinline	awaitValue
+src/exec/vm_opcodes.zig	610	priv		awaitValueRaw
+src/exec/vm_opcodes.zig	662	priv		suspendAwaitValue
+src/exec/vm_opcodes.zig	680	priv		awaitSuspendMode
+src/exec/vm_opcodes.zig	691	priv		closeIteratorForPendingError
+src/exec/vm_opcodes.zig	26	pub	noinline	object
+src/exec/vm_opcodes.zig	36	pub	noinline	objectReserved2
+src/exec/vm_opcodes.zig	55	pub	inline	newPlainObjectValue
+src/exec/vm_opcodes.zig	60	pub	inline	newPlainObjectReserved2Value
+src/exec/vm_opcodes.zig	95	pub	inline	defineFieldFast
+src/exec/vm_opcodes.zig	112	pub	noinline	arrayFrom
+src/exec/vm_opcodes.zig	136	pub	noinline	defineField
+src/exec/vm_opcodes.zig	211	pub	noinline	setProto
+src/exec/vm_opcodes.zig	225	pub	noinline	defineArrayEl
+src/exec/vm_opcodes.zig	255	pub		appendSpreadValues
+src/exec/vm_opcodes.zig	276	pub	noinline	appendSpreadValuesVm
+src/exec/vm_opcodes.zig	292	pub	noinline	copyDataProperties
+src/exec/vm_opcodes.zig	421	priv		handleLiteralRuntimeError
+src/exec/vm_opcodes.zig	434	pub	noinline	specialObject
+src/exec/vm_opcodes.zig	470	pub	noinline	getLength
+src/exec/vm_opcodes.zig	488	pub	noinline	rest
+src/exec/vm_opcodes.zig	512	priv		stackValueFromTop
+src/exec/vm_opcodes.zig	518	priv		readInt
+src/exec/vm_opcodes.zig	32	pub	noinline	dispatch
+src/exec/vm_opcodes.zig	90	pub	inline	managedInlineEligible
+src/exec/vm_opcodes.zig	97	pub	inline	getterInlineEligible
+src/exec/vm_opcodes.zig	103	pub	inline	methodManagedInlineEligible
+src/exec/vm_opcodes.zig	110	pub	noinline	failure
+src/exec/tailcall_dispatch.zig	17	pub	inline	noteDispatch
 src/exec/vm_property.zig	41	pub		globalVarAtom
 src/exec/vm_property.zig	47	pub		varRefReadableBorrowed
 src/exec/vm_property.zig	59	pub		fastInstalledGlobalDataValueForAtomAtPc
@@ -7944,159 +7944,159 @@ src/exec/vm_property.zig	157	pub		fastDenseArrayElementValue
 src/exec/vm_property.zig	177	pub	noinline	fastMappedArgumentsElementValue
 src/exec/vm_property.zig	197	pub		fastArrayOwnIntElementValue
 src/exec/vm_property.zig	217	pub		fastArrayOwnIntElementSet
-src/exec/vm_property_field.zig	24	priv		PoppedWindow
-src/exec/vm_property_field.zig	30	priv	inline	activate
-src/exec/vm_property_field.zig	38	priv	inline	deactivate
-src/exec/vm_property_field.zig	59	pub		toPropKey
-src/exec/vm_property_field.zig	72	pub	noinline	toPropKeyVm
-src/exec/vm_property_field.zig	88	pub	noinline	setName
-src/exec/vm_property_field.zig	124	pub	noinline	inOrInstanceof
-src/exec/vm_property_field.zig	145	pub	noinline	field
-src/exec/vm_property_field.zig	278	pub	inline	fastArrayLengthValue
-src/exec/vm_property_field.zig	300	priv	inline	debugAssertNonPrivateFieldOperandAtom
-src/exec/vm_property_field.zig	307	priv	inline	getFieldFastSlotWithExoticOrder
-src/exec/vm_property_field.zig	440	priv	inline	namedAtomUsesOrdinaryWalkOnIndexExotic
-src/exec/vm_property_field.zig	457	pub	inline	getFieldFastSlotOrAbsent
-src/exec/vm_property_field.zig	482	pub		ordinaryAccessorGetterAfterOwnMiss
-src/exec/vm_property_field.zig	495	pub	inline	getFieldFastSlotOrAbsentAfterOwnMiss
-src/exec/vm_property_field.zig	551	priv	inline	getFieldFastSlotAfterNonAuthoritativeLink
-src/exec/vm_property_field.zig	569	pub	inline	getFieldFast
-src/exec/vm_property_field.zig	580	pub	inline	getLengthFieldFast
-src/exec/vm_property_field.zig	592	pub	inline	primitivePrototypeDataPropertyValueForFastPath
-src/exec/vm_property_field.zig	609	priv	inline	primitivePrototypeObjectForFastPath
-src/exec/vm_property_field.zig	640	priv	inline	typedArrayAccessorMethodId
-src/exec/vm_property_field.zig	648	pub	inline	isTypedArrayPayloadAtomForFastPath
-src/exec/vm_property_field.zig	652	priv	inline	typedArrayNativeAccessorIdMatches
-src/exec/vm_property_field.zig	657	priv	inline	typedArrayIntrinsicNamedValue
-src/exec/vm_property_field.zig	677	priv	inline	typedArrayShapePropertyForFastPath
-src/exec/vm_property_field.zig	701	priv	noinline	typedArrayPrototypeNamedPropertyForFastPath
-src/exec/vm_property_field.zig	726	priv	noinline	typedArrayNamedPropertyForFastPath
-src/exec/vm_property_field.zig	746	pub	inline	typedArrayReceiverForFastPath
-src/exec/vm_property_field.zig	756	pub	inline	typedArrayPropertyValueForFastPath
-src/exec/vm_property_field.zig	771	pub	inline	getLengthActionForFastPath
-src/exec/vm_property_field.zig	799	priv	inline	primitivePrototypePropertyForFastPath
-src/exec/vm_property_field.zig	826	pub	inline	atomPropertyValueForFastPath
-src/exec/vm_property_field.zig	855	pub	inline	existingPropertyKeyValueForFastPath
-src/exec/vm_property_field.zig	879	pub	inline	existingPropertyKeyAtomForFastPath
-src/exec/vm_property_field.zig	906	pub	inline	putFieldFastSlot
-src/exec/vm_property_field.zig	921	priv	inline	replaceTopBorrowed
-src/exec/vm_property_field.zig	931	priv	inline	replaceTopOwned
-src/exec/vm_property_field.zig	941	priv		setArrayLengthForPutFieldFastPath
-src/exec/vm_property_field.zig	974	pub	inline	putArrayElementAfterFastMiss
-src/exec/vm_property_field.zig	1052	pub	noinline	getArrayElement
-src/exec/vm_property_field.zig	1195	pub	noinline	readTypedArrayIndexFast
-src/exec/vm_property_field.zig	1210	pub		fastTypedArrayElementValue
-src/exec/vm_property_field.zig	1236	pub		putTypedArrayElementFast
-src/exec/vm_property_field.zig	1302	priv	inline	storeElementBytes
-src/exec/vm_property_field.zig	1318	priv	noinline	fastPrototypeMethodValue
-src/exec/vm_property_field.zig	1354	priv	inline	fastRegExpPrototypeMethodValue
-src/exec/vm_property_field.zig	1358	priv	inline	fastCollectionPrototypeMethodValue
-src/exec/vm_property_field.zig	1362	priv		fastStringIndexValue
-src/exec/vm_property_field.zig	1376	priv		stackValueFromTop
-src/exec/vm_property_field.zig	1415	pub	inline	noPropSite
-src/exec/vm_property_field.zig	1419	pub	inline	noPropSiteBase
-src/exec/vm_property_field.zig	1429	pub	inline	siteCapturable
-src/exec/vm_property_field.zig	1433	priv		retireSite
-src/exec/vm_property_field.zig	1442	priv		noteSiteMiss
-src/exec/vm_property_field.zig	1454	priv	inline	slotIndexOf
-src/exec/vm_property_field.zig	1471	priv	inline	siteCacheableReceiverClass
-src/exec/vm_property_field.zig	1501	priv		isNativeGetterValue
-src/exec/vm_property_field.zig	1520	pub	noinline	captureFieldSite
-src/exec/vm_property_field.zig	1596	pub	noinline	capturePutSite
-src/exec/vm_property_globals.zig	32	priv	inline	closureVarAt
-src/exec/vm_property_globals.zig	37	priv		throwGlobalTdzReferenceError
-src/exec/vm_property_globals.zig	55	priv		getVarFromGlobalObject
-src/exec/vm_property_globals.zig	95	pub	noinline	getVar
-src/exec/vm_property_globals.zig	204	pub	noinline	putVar
-src/exec/vm_property_globals.zig	319	priv		globalOwnRejectedNonStrictSet
-src/exec/vm_property_globals.zig	335	priv		canUseFastGlobalVarWrite
-src/exec/vm_property_globals.zig	346	priv		canUseFastGlobalUndefinedLookup
-src/exec/vm_property_globals.zig	354	priv		evalFunctionDeclaresGlobalVar
-src/exec/vm_property_globals.zig	362	priv		globalOwnAccessorWithoutSetter
-src/exec/vm_property_globals.zig	367	priv		globalDeclIsFunction
-src/exec/vm_property_globals.zig	371	priv		validateGlobalVarDeclaration
-src/exec/vm_property_globals.zig	406	pub		validateGlobalVarDeclarations
-src/exec/vm_property_globals.zig	451	pub	noinline	globalDefinition
-src/exec/vm_property_locals.zig	20	pub	noinline	loc
-src/exec/vm_property_locals.zig	66	pub	noinline	arg
-src/exec/vm_property_locals.zig	93	pub	noinline	checkedLocVm
-src/exec/vm_property_locals.zig	184	pub		varRef
-src/exec/vm_property_locals.zig	240	pub	noinline	varRefVm
-src/exec/vm_property_locals.zig	256	priv		tryFastDirectVarRefGet
-src/exec/vm_property_locals.zig	264	pub	noinline	closeLoc
-src/exec/vm_property_private.zig	16	priv		privateFieldAtom
-src/exec/vm_property_private.zig	36	pub		getPrivateField
-src/exec/vm_property_private.zig	51	pub	noinline	getPrivateFieldVm
-src/exec/vm_property_private.zig	67	pub		putPrivateField
-src/exec/vm_property_private.zig	82	pub	noinline	putPrivateFieldVm
-src/exec/vm_property_private.zig	98	pub		definePrivateField
-src/exec/vm_property_private.zig	114	pub	noinline	definePrivateFieldVm
-src/exec/vm_property_ref.zig	29	pub	noinline	dynEnvProbe
-src/exec/vm_property_ref.zig	46	priv		dynEnvProbeAccess
-src/exec/vm_property_ref.zig	149	pub	noinline	makeSlotRef
-src/exec/vm_property_ref.zig	181	pub		makeVarRef
-src/exec/vm_property_ref.zig	222	pub	noinline	makeVarRefVm
-src/exec/vm_property_ref.zig	238	pub		getRefValue
-src/exec/vm_property_ref.zig	277	pub	noinline	getRefValueVm
-src/exec/vm_property_ref.zig	293	pub		putRefValue
-src/exec/vm_property_ref.zig	342	pub	noinline	putRefValueVm
-src/exec/vm_property_ref.zig	358	priv		dynEnvProbeStore
-src/exec/vm_property_ref.zig	408	pub	noinline	deleteVar
-src/exec/vm_property_ref.zig	429	pub	noinline	deletePropertyVm
-src/exec/vm_regexp.zig	15	priv		constructCompiledLiteralInRealm
-src/exec/vm_regexp.zig	40	pub	noinline	pushLiteral
-src/exec/vm_value.zig	29	pub		pushInt32Operand
-src/exec/vm_value.zig	35	pub		pushBigIntI32Operand
-src/exec/vm_value.zig	41	pub		pushI16Operand
-src/exec/vm_value.zig	47	pub		pushI8Operand
-src/exec/vm_value.zig	60	pub		pushSmallInt
-src/exec/vm_value.zig	64	pub		pushUndefined
-src/exec/vm_value.zig	68	pub		pushNull
-src/exec/vm_value.zig	72	pub		pushBoolean
-src/exec/vm_value.zig	76	pub	noinline	pushConst
-src/exec/vm_value.zig	84	pub	noinline	pushConst8
-src/exec/vm_value.zig	92	pub		pushAtomValue
-src/exec/vm_value.zig	99	pub	noinline	pushPrivateSymbol
-src/exec/vm_value.zig	114	pub	noinline	pushEmptyString
-src/exec/vm_value.zig	119	pub		pushThis
-src/exec/vm_value.zig	125	pub	noinline	pushThisVm
-src/exec/vm_value.zig	149	pub		toObject
-src/exec/vm_value.zig	158	pub	noinline	toObjectVm
-src/exec/vm_value.zig	176	pub	noinline	typeOf
-src/exec/vm_value.zig	204	pub	noinline	typeOfIsUndefined
-src/exec/vm_value.zig	209	pub	noinline	typeOfIsFunction
-src/exec/vm_value.zig	222	pub	noinline	logicalNot
-src/exec/vm_value.zig	227	pub	noinline	drop
-src/exec/vm_value.zig	242	pub	noinline	nipCatch
-src/exec/vm_value.zig	263	pub		dup
-src/exec/vm_value.zig	270	pub		swap
-src/exec/vm_value.zig	279	pub		nip
-src/exec/vm_value.zig	286	pub		dup2
-src/exec/vm_value.zig	297	pub		dup1
-src/exec/vm_value.zig	307	pub		dup3
-src/exec/vm_value.zig	321	pub		insert2
-src/exec/vm_value.zig	331	pub		insert3
-src/exec/vm_value.zig	343	pub		insert4
-src/exec/vm_value.zig	357	pub		rot3l
-src/exec/vm_value.zig	368	pub		rot3r
-src/exec/vm_value.zig	379	pub		rot4l
-src/exec/vm_value.zig	392	pub		rot5l
-src/exec/vm_value.zig	407	pub		perm3
-src/exec/vm_value.zig	418	pub		perm4
-src/exec/vm_value.zig	431	pub		perm5
-src/exec/vm_value.zig	446	pub		swap2
-src/exec/vm_value.zig	459	pub	noinline	isUndefinedOrNull
-src/exec/vm_value.zig	464	pub	noinline	isUndefined
-src/exec/vm_value.zig	469	pub	noinline	isNull
-src/exec/vm_value.zig	474	priv		adapterValueBorrow
-src/exec/vm_value.zig	483	priv		requireStackLen
-src/exec/vm_value.zig	487	priv		expectStackInt32s
-src/exec/vm_value.zig	494	priv		varRefCellFromValue
-src/exec/vm_value.zig	498	priv		functionObjectFromValue
-src/exec/vm_value.zig	508	priv		callableObjectFromValue
-src/exec/vm_value.zig	520	priv		proxyTargetIsCallable
-src/exec/vm_value.zig	526	priv		readInt
-src/exec/vm_value.zig	530	priv		countLivePrivateAtomsNamed
+src/exec/vm_property.zig	24	priv		PoppedWindow
+src/exec/vm_property.zig	30	priv	inline	activate
+src/exec/vm_property.zig	38	priv	inline	deactivate
+src/exec/vm_property.zig	59	pub		toPropKey
+src/exec/vm_property.zig	72	pub	noinline	toPropKeyVm
+src/exec/vm_property.zig	88	pub	noinline	setName
+src/exec/vm_property.zig	124	pub	noinline	inOrInstanceof
+src/exec/vm_property.zig	145	pub	noinline	field
+src/exec/vm_property.zig	278	pub	inline	fastArrayLengthValue
+src/exec/vm_property.zig	300	priv	inline	debugAssertNonPrivateFieldOperandAtom
+src/exec/vm_property.zig	307	priv	inline	getFieldFastSlotWithExoticOrder
+src/exec/vm_property.zig	440	priv	inline	namedAtomUsesOrdinaryWalkOnIndexExotic
+src/exec/vm_property.zig	457	pub	inline	getFieldFastSlotOrAbsent
+src/exec/vm_property.zig	482	pub		ordinaryAccessorGetterAfterOwnMiss
+src/exec/vm_property.zig	495	pub	inline	getFieldFastSlotOrAbsentAfterOwnMiss
+src/exec/vm_property.zig	551	priv	inline	getFieldFastSlotAfterNonAuthoritativeLink
+src/exec/vm_property.zig	569	pub	inline	getFieldFast
+src/exec/vm_property.zig	580	pub	inline	getLengthFieldFast
+src/exec/vm_property.zig	592	pub	inline	primitivePrototypeDataPropertyValueForFastPath
+src/exec/vm_property.zig	609	priv	inline	primitivePrototypeObjectForFastPath
+src/exec/vm_property.zig	640	priv	inline	typedArrayAccessorMethodId
+src/exec/vm_property.zig	648	pub	inline	isTypedArrayPayloadAtomForFastPath
+src/exec/vm_property.zig	652	priv	inline	typedArrayNativeAccessorIdMatches
+src/exec/vm_property.zig	657	priv	inline	typedArrayIntrinsicNamedValue
+src/exec/vm_property.zig	677	priv	inline	typedArrayShapePropertyForFastPath
+src/exec/vm_property.zig	701	priv	noinline	typedArrayPrototypeNamedPropertyForFastPath
+src/exec/vm_property.zig	726	priv	noinline	typedArrayNamedPropertyForFastPath
+src/exec/vm_property.zig	746	pub	inline	typedArrayReceiverForFastPath
+src/exec/vm_property.zig	756	pub	inline	typedArrayPropertyValueForFastPath
+src/exec/vm_property.zig	771	pub	inline	getLengthActionForFastPath
+src/exec/vm_property.zig	799	priv	inline	primitivePrototypePropertyForFastPath
+src/exec/vm_property.zig	826	pub	inline	atomPropertyValueForFastPath
+src/exec/vm_property.zig	855	pub	inline	existingPropertyKeyValueForFastPath
+src/exec/vm_property.zig	879	pub	inline	existingPropertyKeyAtomForFastPath
+src/exec/vm_property.zig	906	pub	inline	putFieldFastSlot
+src/exec/vm_property.zig	921	priv	inline	replaceTopBorrowed
+src/exec/vm_property.zig	931	priv	inline	replaceTopOwned
+src/exec/vm_property.zig	941	priv		setArrayLengthForPutFieldFastPath
+src/exec/vm_property.zig	974	pub	inline	putArrayElementAfterFastMiss
+src/exec/vm_property.zig	1052	pub	noinline	getArrayElement
+src/exec/vm_property.zig	1195	pub	noinline	readTypedArrayIndexFast
+src/exec/vm_property.zig	1210	pub		fastTypedArrayElementValue
+src/exec/vm_property.zig	1236	pub		putTypedArrayElementFast
+src/exec/vm_property.zig	1302	priv	inline	storeElementBytes
+src/exec/vm_property.zig	1318	priv	noinline	fastPrototypeMethodValue
+src/exec/vm_property.zig	1354	priv	inline	fastRegExpPrototypeMethodValue
+src/exec/vm_property.zig	1358	priv	inline	fastCollectionPrototypeMethodValue
+src/exec/vm_property.zig	1362	priv		fastStringIndexValue
+src/exec/vm_property.zig	1376	priv		stackValueFromTop
+src/exec/vm_property.zig	1415	pub	inline	noPropSite
+src/exec/vm_property.zig	1419	pub	inline	noPropSiteBase
+src/exec/vm_property.zig	1429	pub	inline	siteCapturable
+src/exec/vm_property.zig	1433	priv		retireSite
+src/exec/vm_property.zig	1442	priv		noteSiteMiss
+src/exec/vm_property.zig	1454	priv	inline	slotIndexOf
+src/exec/vm_property.zig	1471	priv	inline	siteCacheableReceiverClass
+src/exec/vm_property.zig	1501	priv		isNativeGetterValue
+src/exec/vm_property.zig	1520	pub	noinline	captureFieldSite
+src/exec/vm_property.zig	1596	pub	noinline	capturePutSite
+src/exec/vm_property.zig	32	priv	inline	closureVarAt
+src/exec/vm_property.zig	37	priv		throwGlobalTdzReferenceError
+src/exec/vm_property.zig	55	priv		getVarFromGlobalObject
+src/exec/vm_property.zig	95	pub	noinline	getVar
+src/exec/vm_property.zig	204	pub	noinline	putVar
+src/exec/vm_property.zig	319	priv		globalOwnRejectedNonStrictSet
+src/exec/vm_property.zig	335	priv		canUseFastGlobalVarWrite
+src/exec/vm_property.zig	346	priv		canUseFastGlobalUndefinedLookup
+src/exec/vm_property.zig	354	priv		evalFunctionDeclaresGlobalVar
+src/exec/vm_property.zig	362	priv		globalOwnAccessorWithoutSetter
+src/exec/vm_property.zig	367	priv		globalDeclIsFunction
+src/exec/vm_property.zig	371	priv		validateGlobalVarDeclaration
+src/exec/vm_property.zig	406	pub		validateGlobalVarDeclarations
+src/exec/vm_property.zig	451	pub	noinline	globalDefinition
+src/exec/vm_property.zig	20	pub	noinline	loc
+src/exec/vm_property.zig	66	pub	noinline	arg
+src/exec/vm_property.zig	93	pub	noinline	checkedLocVm
+src/exec/vm_property.zig	184	pub		varRef
+src/exec/vm_property.zig	240	pub	noinline	varRefVm
+src/exec/vm_property.zig	256	priv		tryFastDirectVarRefGet
+src/exec/vm_property.zig	264	pub	noinline	closeLoc
+src/exec/vm_property.zig	16	priv		privateFieldAtom
+src/exec/vm_property.zig	36	pub		getPrivateField
+src/exec/vm_property.zig	51	pub	noinline	getPrivateFieldVm
+src/exec/vm_property.zig	67	pub		putPrivateField
+src/exec/vm_property.zig	82	pub	noinline	putPrivateFieldVm
+src/exec/vm_property.zig	98	pub		definePrivateField
+src/exec/vm_property.zig	114	pub	noinline	definePrivateFieldVm
+src/exec/vm_property.zig	29	pub	noinline	dynEnvProbe
+src/exec/vm_property.zig	46	priv		dynEnvProbeAccess
+src/exec/vm_property.zig	149	pub	noinline	makeSlotRef
+src/exec/vm_property.zig	181	pub		makeVarRef
+src/exec/vm_property.zig	222	pub	noinline	makeVarRefVm
+src/exec/vm_property.zig	238	pub		getRefValue
+src/exec/vm_property.zig	277	pub	noinline	getRefValueVm
+src/exec/vm_property.zig	293	pub		putRefValue
+src/exec/vm_property.zig	342	pub	noinline	putRefValueVm
+src/exec/vm_property.zig	358	priv		dynEnvProbeStore
+src/exec/vm_property.zig	408	pub	noinline	deleteVar
+src/exec/vm_property.zig	429	pub	noinline	deletePropertyVm
+src/exec/vm_opcodes.zig	15	priv		constructCompiledLiteralInRealm
+src/exec/vm_opcodes.zig	40	pub	noinline	pushLiteral
+src/exec/vm_opcodes.zig	29	pub		pushInt32Operand
+src/exec/vm_opcodes.zig	35	pub		pushBigIntI32Operand
+src/exec/vm_opcodes.zig	41	pub		pushI16Operand
+src/exec/vm_opcodes.zig	47	pub		pushI8Operand
+src/exec/vm_opcodes.zig	60	pub		pushSmallInt
+src/exec/vm_opcodes.zig	64	pub		pushUndefined
+src/exec/vm_opcodes.zig	68	pub		pushNull
+src/exec/vm_opcodes.zig	72	pub		pushBoolean
+src/exec/vm_opcodes.zig	76	pub	noinline	pushConst
+src/exec/vm_opcodes.zig	84	pub	noinline	pushConst8
+src/exec/vm_opcodes.zig	92	pub		pushAtomValue
+src/exec/vm_opcodes.zig	99	pub	noinline	pushPrivateSymbol
+src/exec/vm_opcodes.zig	114	pub	noinline	pushEmptyString
+src/exec/vm_opcodes.zig	119	pub		pushThis
+src/exec/vm_opcodes.zig	125	pub	noinline	pushThisVm
+src/exec/vm_opcodes.zig	149	pub		toObject
+src/exec/vm_opcodes.zig	158	pub	noinline	toObjectVm
+src/exec/vm_opcodes.zig	176	pub	noinline	typeOf
+src/exec/vm_opcodes.zig	204	pub	noinline	typeOfIsUndefined
+src/exec/vm_opcodes.zig	209	pub	noinline	typeOfIsFunction
+src/exec/vm_opcodes.zig	222	pub	noinline	logicalNot
+src/exec/vm_opcodes.zig	227	pub	noinline	drop
+src/exec/vm_opcodes.zig	242	pub	noinline	nipCatch
+src/exec/vm_opcodes.zig	263	pub		dup
+src/exec/vm_opcodes.zig	270	pub		swap
+src/exec/vm_opcodes.zig	279	pub		nip
+src/exec/vm_opcodes.zig	286	pub		dup2
+src/exec/vm_opcodes.zig	297	pub		dup1
+src/exec/vm_opcodes.zig	307	pub		dup3
+src/exec/vm_opcodes.zig	321	pub		insert2
+src/exec/vm_opcodes.zig	331	pub		insert3
+src/exec/vm_opcodes.zig	343	pub		insert4
+src/exec/vm_opcodes.zig	357	pub		rot3l
+src/exec/vm_opcodes.zig	368	pub		rot3r
+src/exec/vm_opcodes.zig	379	pub		rot4l
+src/exec/vm_opcodes.zig	392	pub		rot5l
+src/exec/vm_opcodes.zig	407	pub		perm3
+src/exec/vm_opcodes.zig	418	pub		perm4
+src/exec/vm_opcodes.zig	431	pub		perm5
+src/exec/vm_opcodes.zig	446	pub		swap2
+src/exec/vm_opcodes.zig	459	pub	noinline	isUndefinedOrNull
+src/exec/vm_opcodes.zig	464	pub	noinline	isUndefined
+src/exec/vm_opcodes.zig	469	pub	noinline	isNull
+src/exec/vm_opcodes.zig	474	priv		adapterValueBorrow
+src/exec/vm_opcodes.zig	483	priv		requireStackLen
+src/exec/vm_opcodes.zig	487	priv		expectStackInt32s
+src/exec/vm_opcodes.zig	494	priv		varRefCellFromValue
+src/exec/vm_opcodes.zig	498	priv		functionObjectFromValue
+src/exec/vm_opcodes.zig	508	priv		callableObjectFromValue
+src/exec/vm_opcodes.zig	520	priv		proxyTargetIsCallable
+src/exec/vm_opcodes.zig	526	priv		readInt
+src/exec/vm_opcodes.zig	530	priv		countLivePrivateAtomsNamed
 src/exec/zjs_vm.zig	37	pub		run
 src/exec/zjs_vm.zig	45	pub		runWithOutput
 src/exec/zjs_vm.zig	110	pub	inline	contextGlobalFast

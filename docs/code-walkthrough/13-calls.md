@@ -93,9 +93,9 @@ constructValueOrBytecodeWithNewTarget
 python3 docs/code-walkthrough/_check_coverage.py \
   --docs 'docs/code-walkthrough/13-*.md' \
   src/exec/call.zig src/exec/call_runtime.zig src/exec/construct.zig \
-  src/exec/call_site.zig src/exec/host_invocation.zig \
-  src/exec/eval_entry.zig src/exec/eval_ops.zig \
-  src/exec/closure.zig src/exec/native_legacy.zig
+  src/exec/call_site.zig src/exec/call_site.zig \
+  src/exec/eval_entry.zig src/exec/eval_entry.zig \
+  src/exec/call.zig src/exec/builtin_dispatch.zig
 ```
 
 - 未覆盖: 无（以该命令 `missing 0` 为准）

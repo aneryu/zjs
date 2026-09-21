@@ -1265,7 +1265,7 @@ CALL_NATIVE_I32_I32_TO_I32
 
 ### 9.3 引用计数：收益与成本两侧都漏了（停议材料）
 
-读实现（`src/exec/value_slot.zig:10`、`src/exec/slot_ops.zig:51`）：
+读实现（`src/exec/value_slot.zig:10`、`src/exec/property_ops.zig:51`）：
 
 ```zig
 pub inline fn loadOwned(slot: *const core.JSValue) core.JSValue {
@@ -3333,7 +3333,7 @@ carrier 线一条未迁——没有 alias 或迁移窗口欠账（R0 只在账�
 | post-final bytecode writer | `src/exec/small_inline.zig` `rewriteBody` / `emitByte` / `emitSlice` |
 | handler operand/site-pc 假设 | `tailcall_dispatch.Vm.publish`；`vm_property_globals.getVar` 的 `frame.pc - 1` |
 | runtime final-stream lookahead | `vm_property.zig`、`vm_property_globals.zig`、`vm_gen_async.zig`、`eval_ops.zig`、`vm_call.zig`、`builtin_dispatch.zig` |
-| 现有物理 id profiler | `src/exec/vm_profile.zig` `noteDispatch`；`src/core/profile.zig` 256 项 `count` |
+| 现有物理 id profiler | `src/exec/tailcall_dispatch.zig` `noteDispatch`；`src/core/profile.zig` 256 项 `count` |
 | 尺寸预言机路径 | `rules.loweredPrivateFieldSize` / `rules.writeLoweredPrivateField` |
 | 字节偏移 pin | `compiler.s2g4` 测试 |
 | Reference 族触发条件 | `src/parser.zig` `needs_reference`；`src/bytecode.zig` `loweredScopeMakeRefSize` / `writeLoweredScopeMakeRef` |
@@ -3390,7 +3390,7 @@ carrier 线一条未迁——没有 alias 或迁移窗口欠账（R0 只在账�
 | 数字 | 出处 |
 |---|---|
 | 419 亿次执行、逐 opcode 频次 | 附录数据表（15 zoo 基准，`ZJS_PROFILE_ALL=1`；⚠️ 占比口径依赖，见附录 C） |
-| 每次槽位读做一次 incref | `src/exec/value_slot.zig:10` `loadOwned` = `slot.*.dup()`；`src/exec/slot_ops.zig:51` |
+| 每次槽位读做一次 incref | `src/exec/value_slot.zig:10` `loadOwned` = `slot.*.dup()`；`src/exec/property_ops.zig:51` |
 | 每个 opcode 是独立函数符号（E1 的前提） | `src/exec/tailcall_dispatch.zig:5,314,364`（`callconv(.c)` + `align(16/64)` + `linksection(op_handler_section)`）；冷壳共享体见 `tailcall_dispatch_colds.zig:8-10` |
 | K4 门：字节码架构重估的三条准入条件 | `docs/architecture.md` §8「Stack Bytecode VM Status」末段；保留条款出处 `qjs_alignment_charter_transition.md` K4 |
 | qjs 对齐宪章 R1-R3 退役、K1-K5 保留 | `docs/qjs_alignment_charter_transition.md`（RATIFIED，owner 2026-08-24） |

@@ -10,11 +10,11 @@
 
 const core = @import("../core/root.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
-const closure_mod = @import("closure.zig");
+const closure_mod = @import("call.zig");
 const globals_mod = core.global_slots;
 const value_ops = @import("value_ops.zig");
-const coercion_ops = @import("coercion_ops.zig");
-const typed_array_construct = @import("typed_array_construct.zig");
+const coercion_ops = @import("value_ops.zig");
+const typed_array_construct = @import("buffer_ops.zig");
 const std = @import("std");
 
 // `new Object(stringPrimitive)` builds a String wrapper through the String
@@ -967,7 +967,7 @@ fn getCollectionAdder(rt: *core.JSRuntime, collection: *core.Object, name: []con
         if (try object.getOwnProperty(rt, key)) |desc| {
             if (desc.kind == .accessor) {
                 if (desc.getter.is(.undefined_value)) return core.JSValue.undefinedValue();
-                return closure_mod.call(rt, desc.getter, &.{}, &.{}) catch |err| switch (err) {
+                return closure_mod.callCClosure(rt, desc.getter, &.{}, &.{}) catch |err| switch (err) {
                     else => err,
                 };
             }

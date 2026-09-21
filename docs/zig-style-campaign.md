@@ -41,7 +41,7 @@ Owner 裁决（2026-09-20）：**不再要求对齐 QuickJS；优先处理「不
 - `inline_calls` comptime bool 元组 → `comptime shape: FrameShape`。
 - `bytecode.publishExecutionFlags` 6 bool、`addScopeVar`、`scanSmallInlineEligible` → options struct。
 - `zjs_vm.runWithArgsState` 23 参 → 贯通已有 `CallEnv`。
-- `exec/closure.zig` fixture `kind: i32` → enum + tagged `Spec`。
+- `exec/call.zig` fixture `kind: i32` → enum + tagged `Spec`。
 - `frame.zig` 六 usize 参数 ×4 → `SlabLayout` + `error{Overflow}`。
 - `number_format` `pnext` 出参 → `?Parsed`；`flags: i32` → enum options；六个标量出参 → 返回 struct。
 - `regexp.zig` `total_capture_count/has_named_captures = -1` → optional；`@"opaque"+fn` 四处 → `Host`。
@@ -89,7 +89,7 @@ Owner 裁决（2026-09-20）：**不再要求对齐 QuickJS；优先处理「不
 - shape `flags: u6 → property.Flags`：object.zig:10821 与 tailcall_dispatch.zig:6703 记录了 `Flags.fromBits` 在 handler 内联时的 alloca 溢出实测；改动会碰 get_field 热臂，移入热区逐项队列，需 perf 对照。
 - iterator `kind: u8`：同一字段承载 ≥5 种 enum（array/collection/helper/for-in/regexp-string-iterator 位掩码），单纯换 enum 不成立，须按 class 拆 union（第 2 波，改布局）。
 - String/Array/RegExp 域的 decoded id 层：HTML 包装与 `substr` 只有 exec 侧 id、无记录表行，先要决定 Annex B 名字级联的归宿再统一；单独立项。
-- `exec/closure.zig` fixture 的 42 个数字 kind：测试夹具，收益低，后置。
+- `exec/call.zig` fixture 的 42 个数字 kind：测试夹具，收益低，后置。
 
 - `c092968a` GC pins 账本 → 单个 AutoArrayHashMap；external tokens → ArrayListUnmanaged。
 - `e3473788` GC 链表方法化、`?Request`、`EnumSet` 状态掩码、`EnvSwitch`、`LiveAddressClass`；CLI 参数查表 + GC 全局延后到 `applyRuntimeOptions`（⚠️须 `refreshBarrierGate`）。
@@ -110,7 +110,7 @@ Owner 裁决（2026-09-20）：**不再要求对齐 QuickJS；优先处理「不
 - 性能复核：unicode 刀后 regexp.js 指令数 −0.08%、cycles +2.4%（同一二进制族在各提交间 ±3% 来回翻转，perf stat 证实是布局效应而非工作量），按 2026-09-03 裁决不阻塞。
 - `1e19b0af` closure fixture 7 个活 kind 枚举化（−700 行死代码）；`ff38df19` `typed_array_names.Kind` 取代 u8 魔数 1..12（DataView 的 kind==1 复用改为显式 `data_view_length_tracking`）。
 - 第 2 波末 checkpoint-gate 绿；Octane A/B 几何均值 0.9953（typescript 0.960 但 perf stat 指令数 +0.11%、cycles +1.1%，属测量噪声/布局）。
-- iterator payload 的 `kind/zip_mode/zip_state` u8 槽位：新增 `exec/iterator_slots.zig` 类型化视图（ArrayIteratorKind/CollectionIteratorKind/IteratorHelperKind/IteratorZipMode/ZipState/RegExpStringIteratorFlags），全部裸字面量站点（`= 6`、`!= 2`、位掩码 1|2、状态 0..3）改走视图；payload 布局不变。union 化仍留待第 3 波。
+- iterator payload 的 `kind/zip_mode/zip_state` u8 槽位：新增 `exec/iterator_ops.zig` 类型化视图（ArrayIteratorKind/CollectionIteratorKind/IteratorHelperKind/IteratorZipMode/ZipState/RegExpStringIteratorFlags），全部裸字面量站点（`= 6`、`!= 2`、位掩码 1|2、状态 0..3）改走视图；payload 布局不变。union 化仍留待第 3 波。
 - `52344d4e` `core/gc_visit.zig`：tracer 访问协议收敛为一处——七个 `callVisitX` 复制品（object_payloads）+ shape/string/module×2/atom 各自的本地 Helper + object.zig 转发层 + generator_state 别名，全部改为 `gc_visit.call(vis, method, arg)` 的类型化包装（value/optionalValue/object/shape/realm/atom/module/storageCell/weakCollectionEntry/finalizationCell/stringBody）；`@call` 不像方法语法那样自动解引用，`call` 显式处理值/指针两种 visitor 并有单测覆盖。tracer 符号指令数逐一相同，其余 ±1-3 insn 漂移落在无关函数（整程序布局）。
 - object_payloads GC 边契约（本刀）：每个带 `traceChildEdges` 的 payload 声明 `pub const gc_edges: gc_visit.Edges = .{ .strong, .nested, .manual, .weak }` 并 `comptime { gc_visit.assertClassified(@This()); }`；`carriesReference(T)` 递归识别 JSValue/`*Object`/`*String`/`*RealmContext`/Atom 及含它们的 optional/slice/array/struct/union，漏列或误列都是编译错误（已人为制造两种错误各验一次）。`traceDeclared` 按清单顺序走 strong+nested 边，21 个 trace 体里 14 个整段变成一行；含 storageCell/realm/entry 数组的边仍手写并列在 `manual`。裸 `// gc-slot: heap|weak|immutable` 注释在该文件删除（清单即分类），留下带 barrier 说明的四条。机器码与前一刀逐字节一致（仅 anon 符号编号变化）。
 

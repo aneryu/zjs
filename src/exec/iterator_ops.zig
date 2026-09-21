@@ -10,12 +10,12 @@
 //! with collection iterators around quickjs.c.
 
 const std = @import("std");
-const iterator_slots = @import("iterator_slots.zig");
+
 
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
-const exceptions = @import("exceptions.zig");
+const exceptions = @import("exception_ops.zig");
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
 const call_runtime = @import("call_runtime.zig");
@@ -23,11 +23,11 @@ const call_site_mod = @import("call_site.zig");
 const exception_ops = @import("exception_ops.zig");
 const array_ops = @import("array_ops.zig");
 const builtin_glue = @import("builtin_glue.zig");
-const coercion_ops = @import("coercion_ops.zig");
-const forof_ops = @import("forof_ops.zig");
+const coercion_ops = @import("value_ops.zig");
+
 const object_ops = @import("object_ops.zig");
 const promise_ops = @import("promise_ops.zig");
-const property_direct = @import("property_direct.zig");
+const property_direct = @import("property_ops.zig");
 const string_ops = @import("string_ops.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
@@ -86,7 +86,7 @@ pub fn forOfStart(
         _ = stack.pop() catch null;
         _ = stack.pop() catch null;
     }
-    try stack.pushOwned(forof_ops.iteratorCatchMarker(catchTargetMarkerValue(catch_target)));
+    try stack.pushOwned(iteratorCatchMarker(catchTargetMarkerValue(catch_target)));
 }
 
 pub noinline fn forOfStartVm(
@@ -139,7 +139,7 @@ fn pushForAwaitRecord(
         _ = stack.pop() catch null;
         _ = stack.pop() catch null;
     }
-    try stack.pushOwned(forof_ops.asyncIteratorCatchMarker());
+    try stack.pushOwned(asyncIteratorCatchMarker());
 }
 
 pub fn createAsyncFromSyncIterator(
@@ -271,7 +271,7 @@ pub fn forInStart(
 ) !void {
     try stack.reserveAdditional(1);
     const object_value = try stack.pop();
-    const iterator = try forof_ops.createForInIterator(ctx, output, global, object_value);
+    const iterator = try createForInIterator(ctx, output, global, object_value);
     try stack.pushOwned(iterator);
 }
 
@@ -407,7 +407,7 @@ pub fn iteratorGetValueDone(
     const value = try object_ops.getValueProperty(ctx, output, global, object_value, value_key, function, frame);
 
     const marker_index = stack.len() - 1;
-    stack.values[marker_index] = forof_ops.asyncIteratorCatchMarker();
+    stack.values[marker_index] = asyncIteratorCatchMarker();
 
     stack.pushOwnedAssumeCapacity(value);
     stack.pushOwnedAssumeCapacity(core.JSValue.boolean(done_bool));
@@ -490,7 +490,7 @@ pub fn forOfIteratorIndex(stack: *const stack_mod.Stack, depth: u8) !usize {
     const iterator_index = stack.len() - required;
     const iterator = stack.values[iterator_index];
     const catch_marker = stack.values[iterator_index + 2];
-    if (!forof_ops.isIteratorCatchMarker(catch_marker)) return error.InvalidBytecode;
+    if (!isIteratorCatchMarker(catch_marker)) return error.InvalidBytecode;
     if (!iterator.is(.undefined_value) and !iterator.is(.object)) return error.InvalidBytecode;
     return iterator_index;
 }
@@ -507,7 +507,7 @@ pub fn forOfNext(
     const depth = function.byteCode()[frame.pc];
     frame.pc += 1;
     const iterator_index = try forOfIteratorIndex(stack, depth);
-    errdefer forof_ops.abandonForOfIteratorAtIndex(stack, iterator_index);
+    errdefer abandonForOfIteratorAtIndex(stack, iterator_index);
     if (try fastArrayForOfNext(ctx, stack, iterator_index)) return;
     if (try fastMapSetForOfNext(ctx, stack, iterator_index)) return;
     if (try fastGeneratorForOfNext(ctx, output, global, stack, iterator_index)) return;
@@ -550,7 +550,7 @@ pub fn finishForOfNextResult(
     next_result: core.JSValue,
 ) !void {
     const iterator_index = try forOfIteratorIndex(stack, depth);
-    errdefer forof_ops.abandonForOfIteratorAtIndex(stack, iterator_index);
+    errdefer abandonForOfIteratorAtIndex(stack, iterator_index);
 
     const next_object = objectFromValue(next_result) orelse return error.TypeError;
     const done_value = try iteratorResultProperty(
@@ -632,7 +632,7 @@ fn fastArrayForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_in
     const next_function = objectFromValue(stack.values[iterator_index + 1]) orelse return false;
     if (!next_function.isArrayIteratorNextFunction()) return false;
 
-    const kind = iterator_slots.arrayIteratorKind(iterator);
+    const kind = arrayIteratorKind(iterator);
     if (kind != .key and kind != .value) return false;
 
     const target_value = (iterator.iteratorTargetSlot().*) orelse {
@@ -694,7 +694,7 @@ fn fastMapSetForOfNext(ctx: *core.JSContext, stack: *stack_mod.Stack, iterator_i
     const iterator = objectFromValue(stack.values[iterator_index]) orelse return false;
     if (iterator.class_id != core.class.ids.map_iterator and iterator.class_id != core.class.ids.set_iterator) return false;
     // key / value / key_value (entries -> [k,v] pair). Anything else falls through.
-    const kind = iterator_slots.collectionIteratorKind(iterator) orelse return false;
+    const kind = collectionIteratorKind(iterator) orelse return false;
     const next_function = objectFromValue(stack.values[iterator_index + 1]) orelse return false;
     const ref = core.function.decodeNativeBuiltinId(next_function.nativeFunctionId()) orelse return false;
     if (ref.domain != .collection or ref.id != @intFromEnum(method_ids.collection.PrototypeMethod.iterator_next)) return false;
@@ -849,11 +849,11 @@ pub noinline fn forInNext(
             const obj_value = iterator.iteratorTargetSlot().* orelse return pushForInDone(stack);
             const obj = try property_ops.expectObject(obj_value);
             // "no more property in the current object: look in the prototype"
-            if (forof_ops.forInInProtoChainSlot(iterator).* == 0) {
+            if (forInInProtoChainSlot(iterator).* == 0) {
                 if (try forInPrepareProtoChainEnum(ctx, output, global, iterator, obj)) {
                     return pushForInDone(stack);
                 }
-                forof_ops.forInInProtoChainSlot(iterator).* = 1;
+                forInInProtoChainSlot(iterator).* = 1;
             }
             // it->obj = JS_GetPrototypeFree(ctx, it->obj).
             const proto_value = try object_ops.objectGetPrototypeOfValue(ctx, output, global, obj, null, null);
@@ -866,7 +866,7 @@ pub noinline fn forInNext(
             };
             try iterator.setOptionalValueSlot(rt, iterator.iteratorTargetSlot(), proto_value);
             // snapshot the prototype's own string keys.
-            const keys = try forof_ops.forInSnapshotOwnStringKeys(ctx, output, global, proto, iterator);
+            const keys = try forInSnapshotOwnStringKeys(ctx, output, global, proto, iterator);
             core.atom.freeAtomList(rt, iterator.iteratorAtomKeysSlot().*);
             // TGC S3 §2.3: the key snapshot moves into a published payload.
             for (keys) |key| rt.atoms.shadeAtomIfMarking(key);
@@ -878,7 +878,7 @@ pub noinline fn forInNext(
 
         const obj_value = iterator.iteratorTargetSlot().* orelse return pushForInDone(stack);
         const obj = try property_ops.expectObject(obj_value);
-        if (forof_ops.forInIsArraySlot(iterator).* != 0) {
+        if (forInIsArraySlot(iterator).* != 0) {
             // prop = __JS_AtomFromUInt32(it->idx).
             const key = core.Atom.taggedInt(@intCast(index));
             iterator.iteratorIndexSlot().* = index + 1;
@@ -889,12 +889,12 @@ pub noinline fn forInNext(
 
         const key = iterator.iteratorAtomKeys()[index];
         iterator.iteratorIndexSlot().* = index + 1;
-        if (forof_ops.forInInProtoChainSlot(iterator).* != 0) {
+        if (forInInProtoChainSlot(iterator).* != 0) {
             // "slow case: we are in the prototype chain" -- visited-key dedup
             // via an own-prop probe on the enum object itself, then add to
             // the visited list.
             if (try iterator.existsOwnProperty(rt, key)) continue; // already visited
-            try forof_ops.forInDefineVisited(rt, iterator, key);
+            try forInDefineVisited(rt, iterator, key);
         }
         // qjs's `if (!is_enumerable) continue` is folded
         // into the snapshot: atom_keys holds only the enumerable tab entries.
@@ -938,7 +938,7 @@ fn forInPrepareProtoChainEnum(
     var has_enumerable = false;
     while (!obj1_val.is(.null_value)) {
         const obj1 = try property_ops.expectObject(obj1_val);
-        if (try forof_ops.forInHasEnumerableStringKey(ctx, output, global, obj1)) {
+        if (try forInHasEnumerableStringKey(ctx, output, global, obj1)) {
             has_enumerable = true;
             break; // goto slow_path
         }
@@ -949,20 +949,20 @@ fn forInPrepareProtoChainEnum(
 
     // slow_path: "add the visited properties, even if they are not
     // enumerable".
-    if (forof_ops.forInIsArraySlot(iterator).* != 0) {
+    if (forInIsArraySlot(iterator).* != 0) {
         // convert the fast-array count snapshot into a real key tab
         //. qjs stores the converted tab in
         // it->tab_atom, but the caller immediately steps it->obj to the
         // prototype and replaces the tab; it is only
         // ever read by the visited defines, so it stays local here.
-        const keys = try forof_ops.forInSnapshotOwnStringKeys(ctx, output, global, root, iterator);
+        const keys = try forInSnapshotOwnStringKeys(ctx, output, global, root, iterator);
         defer core.atom.freeAtomList(rt, keys);
-        forof_ops.forInIsArraySlot(iterator).* = 0;
-        for (keys) |key| try forof_ops.forInDefineVisited(rt, iterator, key);
+        forInIsArraySlot(iterator).* = 0;
+        for (keys) |key| try forInDefineVisited(rt, iterator, key);
     } else {
         // the snapshot's non-enumerable entries were folded into the visited
         // set when the tab was built; define the enumerable remainder.
-        for (iterator.iteratorAtomKeys()) |key| try forof_ops.forInDefineVisited(rt, iterator, key);
+        for (iterator.iteratorAtomKeys()) |key| try forInDefineVisited(rt, iterator, key);
     }
     return false;
 }
@@ -999,15 +999,15 @@ pub fn iteratorClose(
     // a record from the iterator/next value shapes: proxies and host callables
     // make those shapes neither unique nor stable.
     const marker = try stack.pop();
-    if (!forof_ops.isIteratorCatchMarker(marker) and !marker.is(.undefined_value)) return error.InvalidBytecode;
-    const is_for_await_record = forof_ops.isAsyncIteratorCatchMarker(marker);
+    if (!isIteratorCatchMarker(marker) and !marker.is(.undefined_value)) return error.InvalidBytecode;
+    const is_for_await_record = isAsyncIteratorCatchMarker(marker);
     _ = try stack.pop();
     const it = try stack.pop();
     if (it.is(.undefined_value)) return;
     if (is_for_await_record) {
         try promise_ops.closeForAwaitIteratorFromVm(ctx, output, global, it);
     } else {
-        try forof_ops.closeIteratorFromVm(ctx, output, global, it);
+        try closeIteratorFromVm(ctx, output, global, it);
     }
 }
 
@@ -1074,7 +1074,7 @@ pub fn arrayIteratorMethod(
     receiver: core.JSValue,
     function_object: *core.Object,
 ) !?core.JSValue {
-    const kind = std.enums.fromInt(iterator_slots.ArrayIteratorKind, function_object.arrayIteratorKind()) orelse return null;
+    const kind = std.enums.fromInt(ArrayIteratorKind, function_object.arrayIteratorKind()) orelse return null;
     if (receiver.is(.null_value) or receiver.is(.undefined_value)) return error.TypeError;
     var rooted_object = if (receiver.is(.object)) receiver else try object_ops.primitiveObjectForAccess(ctx.runtime, global, receiver);
 
@@ -1094,7 +1094,7 @@ pub fn arrayIteratorMethod(
     try iterator.setOptionalValueSlot(ctx.runtime, iterator.iteratorTargetSlot(), rooted_object);
     rooted_object = core.JSValue.undefinedValue();
     iterator.iteratorIndexSlot().* = 0;
-    iterator_slots.setArrayIteratorKind(iterator, kind);
+    setArrayIteratorKind(iterator, kind);
     return iterator.value();
 }
 
@@ -1123,7 +1123,7 @@ pub fn arrayIteratorNext(
     }
     const index: u32 = @intCast((iterator.iteratorIndexSlot().*));
     iterator.iteratorIndexSlot().* += 1;
-    const value = try arrayIteratorValue(ctx, output, global, target, index, iterator_slots.arrayIteratorKind(iterator), object_ops.getValueProperty);
+    const value = try arrayIteratorValue(ctx, output, global, target, index, arrayIteratorKind(iterator), object_ops.getValueProperty);
     return try createIteratorResult(ctx.runtime, global, value, false);
 }
 
@@ -1133,7 +1133,7 @@ pub fn arrayIteratorValue(
     global: *core.Object,
     target: *core.Object,
     index: u32,
-    kind: iterator_slots.ArrayIteratorKind,
+    kind: ArrayIteratorKind,
     comptime getValueProperty: anytype,
 ) !core.JSValue {
     return switch (kind) {
@@ -1419,7 +1419,7 @@ pub fn iteratorConcatCall(
     errdefer core.Object.destroyFromHeader(ctx.runtime, helper.gcHeader());
     try helper.setOptionalValueSlot(ctx.runtime, helper.iteratorTargetSlot(), rooted_records);
     rooted_records = core.JSValue.undefinedValue();
-    iterator_slots.setHelperKind(helper, .concat);
+    setHelperKind(helper, .concat);
     helper.iteratorIndexSlot().* = 0;
     return helper.value();
 }
@@ -1496,7 +1496,7 @@ test "iteratorConcatCall roots direct function bytecode iterator method while cr
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
-pub const IteratorZipMode = iterator_slots.IteratorZipMode;
+
 
 pub const IteratorZipRecord = struct {
     iterator: core.JSValue,
@@ -1892,10 +1892,10 @@ pub fn iteratorZipCreateHelper(
     const helper = try core.Object.create(rt, core.class.ids.iterator_helper, prototype);
     errdefer core.Object.destroyFromHeader(rt, helper.gcHeader());
     helper_value = helper.value();
-    iterator_slots.setHelperKind(helper, if (keyed) .zip_keyed else .zip);
+    setHelperKind(helper, if (keyed) .zip_keyed else .zip);
     helper.iteratorIndexSlot().* = count;
-    iterator_slots.setZipMode(helper, mode);
-    iterator_slots.setZipState(helper, .fresh);
+    setZipMode(helper, mode);
+    setZipState(helper, .fresh);
     helper.iteratorZipAliveSlot().* = count;
     try installIteratorHelperMethod(rt, global, helper, core.atom.ids.next, 1);
     try installIteratorHelperMethod(rt, global, helper, core.atom.ids.return_, 2);
@@ -2089,7 +2089,7 @@ const IteratorPredicateKind = enum {
     some,
 };
 
-pub const IteratorHelperKind = iterator_slots.IteratorHelperKind;
+
 
 pub fn iteratorCloseWithCompletionAndPropagate(
     ctx: *core.JSContext,
@@ -2500,7 +2500,7 @@ fn iteratorCreateHelper(
     const helper = try core.Object.create(ctx.runtime, core.class.ids.iterator_helper, prototype);
     errdefer core.Object.destroyFromHeader(ctx.runtime, helper.gcHeader());
     try helper.setOptionalValueSlot(ctx.runtime, helper.iteratorTargetSlot(), rooted_receiver);
-    iterator_slots.setHelperKind(helper, kind);
+    setHelperKind(helper, kind);
     helper.iteratorIndexSlot().* = limit orelse 0;
     try helper.setOptionalValueSlot(ctx.runtime, helper.iteratorNextSlot(), rooted_next_method);
     if (!rooted_callback.is(.undefined_value)) try helper.setOptionalValueSlot(ctx.runtime, helper.iteratorCallbackSlot(), rooted_callback);
@@ -2598,7 +2598,7 @@ fn iteratorZipCompleteAbrupt(
         return close_err;
     };
     try iteratorHelperClear(ctx.runtime, helper);
-    iterator_slots.setZipState(helper, .done);
+    setZipState(helper, .done);
     completion.restore(ctx);
     return completion.err orelse err;
 }
@@ -2611,8 +2611,8 @@ fn iteratorZipHelperNext(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    switch (iterator_slots.zipState(helper)) {
-        .fresh, .yielded => iterator_slots.setZipState(helper, .running),
+    switch (zipState(helper)) {
+        .fresh, .yielded => setZipState(helper, .running),
         .running => return error.TypeError,
         .done => return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true),
     }
@@ -2623,11 +2623,11 @@ fn iteratorZipHelperNext(
     const nexts = objectFromValue(nexts_value) orelse return error.TypeError;
     const pads_value = helper.iteratorZipPads() orelse return error.TypeError;
     const pads = objectFromValue(pads_value) orelse return error.TypeError;
-    const keys = if (iterator_slots.helperKind(helper) == .zip_keyed) blk: {
+    const keys = if (helperKind(helper) == .zip_keyed) blk: {
         const keys_value = helper.iteratorZipKeys() orelse return error.TypeError;
         break :blk objectFromValue(keys_value) orelse return error.TypeError;
     } else null;
-    const mode = iterator_slots.zipMode(helper);
+    const mode = zipMode(helper);
     var alive: usize = helper.iteratorZipAliveSlot().*;
     const count = (helper.iteratorIndexSlot().*);
 
@@ -2683,7 +2683,7 @@ fn iteratorZipHelperNext(
                 defer completion.deinit(ctx.runtime);
                 try iteratorZipCloseAllWithCompletion(ctx, output, global, &completion, iters, count, caller_function, caller_frame);
                 try iteratorHelperClear(ctx.runtime, helper);
-                iterator_slots.setZipState(helper, .done);
+                setZipState(helper, .done);
                 if (completion.err) |err| {
                     completion.restore(ctx);
                     return err;
@@ -2693,7 +2693,7 @@ fn iteratorZipHelperNext(
             .longest => {
                 if (alive < 1) {
                     try iteratorHelperClear(ctx.runtime, helper);
-                    iterator_slots.setZipState(helper, .done);
+                    setZipState(helper, .done);
                     return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
                 }
                 const pad = iteratorZipGetIndex(pads, index);
@@ -2709,12 +2709,12 @@ fn iteratorZipHelperNext(
 
     if (values == 0) {
         try iteratorHelperClear(ctx.runtime, helper);
-        iterator_slots.setZipState(helper, .done);
+        setZipState(helper, .done);
         return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
     }
 
     if (keys == null) results.setArrayLength(@intCast(count));
-    iterator_slots.setZipState(helper, .yielded);
+    setZipState(helper, .yielded);
     return try createIteratorResult(ctx.runtime, global, results_value, false);
 }
 
@@ -2726,9 +2726,9 @@ fn iteratorZipHelperReturn(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    switch (iterator_slots.zipState(helper)) {
-        .fresh => iterator_slots.setZipState(helper, .done),
-        .yielded => iterator_slots.setZipState(helper, .running),
+    switch (zipState(helper)) {
+        .fresh => setZipState(helper, .done),
+        .yielded => setZipState(helper, .running),
         .running => return error.TypeError,
         .done => return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true),
     }
@@ -2739,7 +2739,7 @@ fn iteratorZipHelperReturn(
         defer completion.deinit(ctx.runtime);
         try iteratorZipCloseAllWithCompletion(ctx, output, global, &completion, iters, (helper.iteratorIndexSlot().*), caller_function, caller_frame);
         try iteratorHelperClear(ctx.runtime, helper);
-        iterator_slots.setZipState(helper, .done);
+        setZipState(helper, .done);
         if (completion.err) |err| {
             completion.restore(ctx);
             return err;
@@ -2747,7 +2747,7 @@ fn iteratorZipHelperReturn(
         return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
     }
     try iteratorHelperClear(ctx.runtime, helper);
-    iterator_slots.setZipState(helper, .done);
+    setZipState(helper, .done);
     return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
 }
 
@@ -2767,7 +2767,7 @@ pub fn iteratorHelperNext(
     helper.generatorExecutingSlot().* = true;
     defer helper.generatorExecutingSlot().* = false;
     const iterator = (helper.iteratorTargetSlot().*) orelse return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
-    const kind = iterator_slots.helperKind(helper);
+    const kind = helperKind(helper);
 
     switch (kind) {
         .zip, .zip_keyed => return try iteratorZipHelperNext(ctx, output, global, helper, caller_function, caller_frame),
@@ -2930,7 +2930,7 @@ pub fn iteratorHelperReturn(
     if (function_object.iteratorHelperMethod() != 2) return null;
     const helper = objectFromValue(receiver) orelse return error.TypeError;
     if (helper.class_id != core.class.ids.iterator_helper) return error.TypeError;
-    if (iterator_slots.helperKind(helper) == .zip or iterator_slots.helperKind(helper) == .zip_keyed) {
+    if (helperKind(helper) == .zip or helperKind(helper) == .zip_keyed) {
         return try iteratorZipHelperReturn(ctx, output, global, helper, caller_function, caller_frame);
     }
     if (helper.generatorExecuting()) return error.TypeError;
@@ -2949,7 +2949,7 @@ fn iteratorHelperClose(
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     try iteratorHelperCloseInner(ctx, output, global, helper, caller_function, caller_frame);
-    if (iterator_slots.helperKind(helper) == .concat) {
+    if (helperKind(helper) == .concat) {
         try iteratorHelperClear(ctx.runtime, helper);
         return;
     }
@@ -3127,12 +3127,12 @@ pub fn iteratorCallForNativeRecord(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    const IntrinsicMethod = method_ids.iterator.IntrinsicMethod;
+    const IteratorIntrinsic = method_ids.iterator.IntrinsicMethod;
     switch (id) {
-        @intFromEnum(IntrinsicMethod.array_iterator_next) => return try arrayIteratorNext(ctx, output, global, receiver),
-        @intFromEnum(IntrinsicMethod.generator_next) => return (try call_runtime.generatorNext(ctx, output, global, receiver, args)) orelse error.TypeError,
-        @intFromEnum(IntrinsicMethod.generator_return) => return (try call_runtime.generatorReturn(ctx, output, global, receiver, args)) orelse error.TypeError,
-        @intFromEnum(IntrinsicMethod.generator_throw) => return (try call_runtime.generatorThrow(ctx, output, global, receiver, args)) orelse error.TypeError,
+        @intFromEnum(IteratorIntrinsic.array_iterator_next) => return try arrayIteratorNext(ctx, output, global, receiver),
+        @intFromEnum(IteratorIntrinsic.generator_next) => return (try call_runtime.generatorNext(ctx, output, global, receiver, args)) orelse error.TypeError,
+        @intFromEnum(IteratorIntrinsic.generator_return) => return (try call_runtime.generatorReturn(ctx, output, global, receiver, args)) orelse error.TypeError,
+        @intFromEnum(IteratorIntrinsic.generator_throw) => return (try call_runtime.generatorThrow(ctx, output, global, receiver, args)) orelse error.TypeError,
         else => {},
     }
     switch (id) {
@@ -3357,4 +3357,627 @@ test "createIteratorResult roots direct function bytecode value while creating r
 
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
+}
+
+
+// ----- merged from iterator_slots.zig -----
+// Typed views over the three small integer slots of an iterator payload
+// (`kind`, `zip_mode`, `zip_state`). The payload stores bare bytes because
+// every iterator class shares one payload struct; what a byte means depends
+// on the class, and these accessors are the only place that knowledge lives.
+const Object = core.Object;
+pub const ArrayIteratorKind = enum(u8) {
+    key = 1,
+    value = 2,
+    key_value = 3,
+};
+pub const CollectionIteratorKind = enum(u8) {
+    key = 1,
+    value = 2,
+    key_value = 3,
+};
+pub const IteratorHelperKind = enum(u8) {
+    map = 1,
+    filter = 2,
+    take = 3,
+    drop = 4,
+    flatMap = 5,
+    concat = 6,
+    zip = 7,
+    zip_keyed = 8,
+};
+pub const IteratorZipMode = enum(u8) {
+    shortest = 0,
+    longest = 1,
+    strict = 2,
+};
+pub const ZipState = enum(u8) {
+    /// Created, no `next` yet.
+    fresh = 0,
+    /// Last `next` produced a result.
+    yielded = 1,
+    /// A `next`/`return` is executing (re-entry is a TypeError).
+    running = 2,
+    /// Closed, every further `next` reports done.
+    done = 3,
+};
+pub const RegExpStringIteratorFlags = packed struct(u8) {
+    global: bool = false,
+    unicode: bool = false,
+    _reserved: u6 = 0,
+};
+pub fn arrayIteratorKind(iterator: *const Object) ArrayIteratorKind {
+    return @enumFromInt(iterator.iteratorKind());
+}
+
+pub fn setArrayIteratorKind(iterator: *Object, kind: ArrayIteratorKind) void {
+    iterator.iteratorKindSlot().* = @intFromEnum(kind);
+}
+
+pub fn collectionIteratorKind(iterator: *const Object) ?CollectionIteratorKind {
+    return std.enums.fromInt(CollectionIteratorKind, iterator.iteratorKind());
+}
+
+pub fn setCollectionIteratorKind(iterator: *Object, kind: CollectionIteratorKind) void {
+    iterator.iteratorKindSlot().* = @intFromEnum(kind);
+}
+
+pub fn helperKind(helper: *const Object) IteratorHelperKind {
+    return @enumFromInt(helper.iteratorKind());
+}
+
+pub fn setHelperKind(helper: *Object, kind: IteratorHelperKind) void {
+    helper.iteratorKindSlot().* = @intFromEnum(kind);
+}
+
+pub fn zipMode(helper: *const Object) IteratorZipMode {
+    return @enumFromInt(helper.iteratorZipMode());
+}
+
+pub fn setZipMode(helper: *Object, mode: IteratorZipMode) void {
+    helper.iteratorZipModeSlot().* = @intFromEnum(mode);
+}
+
+pub fn zipState(helper: *const Object) ZipState {
+    return @enumFromInt(helper.iteratorZipState());
+}
+
+pub fn setZipState(helper: *Object, state: ZipState) void {
+    helper.iteratorZipStateSlot().* = @intFromEnum(state);
+}
+
+pub fn regExpStringIteratorFlags(iterator: *const Object) RegExpStringIteratorFlags {
+    return @bitCast(iterator.iteratorKind());
+}
+
+pub fn setRegExpStringIteratorFlags(iterator: *Object, flags: RegExpStringIteratorFlags) void {
+    iterator.iteratorKindSlot().* = @bitCast(flags);
+}
+
+
+// ----- merged from iterator_builtin_ops.zig -----
+// Iterator builtin declaration table and native-record dispatch seam.
+//
+// Domain-local ids cover Iterator statics, helpers, accessors, disposal, and
+// intrinsic iterator/generator methods. Algorithms and iterator-close
+// ownership live in this file with the registry identity, which forwards the
+// active realm/caller context.
+const builtin_dispatch = @import("builtin_dispatch.zig");
+const HostError = exceptions.HostError;
+pub const AccessorMethod = core.host_function.builtin_method_ids.iterator.AccessorMethod;
+pub const StaticMethod = core.host_function.builtin_method_ids.iterator.StaticMethod;
+pub const PrototypeMethod = core.host_function.builtin_method_ids.iterator.PrototypeMethod;
+pub const IntrinsicMethod = core.host_function.builtin_method_ids.iterator.IntrinsicMethod;
+pub fn staticMethodId(name: []const u8) ?u32 {
+    if (std.mem.eql(u8, name, "from")) return @intFromEnum(StaticMethod.from);
+    if (std.mem.eql(u8, name, "concat")) return @intFromEnum(StaticMethod.concat);
+    if (std.mem.eql(u8, name, "zip")) return @intFromEnum(StaticMethod.zip);
+    if (std.mem.eql(u8, name, "zipKeyed")) return @intFromEnum(StaticMethod.zip_keyed);
+    return null;
+}
+
+pub fn prototypeMethodId(name: []const u8) ?u32 {
+    if (std.mem.eql(u8, name, "toArray")) return @intFromEnum(PrototypeMethod.to_array);
+    if (std.mem.eql(u8, name, "every")) return @intFromEnum(PrototypeMethod.every);
+    if (std.mem.eql(u8, name, "find")) return @intFromEnum(PrototypeMethod.find);
+    if (std.mem.eql(u8, name, "forEach")) return @intFromEnum(PrototypeMethod.for_each);
+    if (std.mem.eql(u8, name, "reduce")) return @intFromEnum(PrototypeMethod.reduce);
+    if (std.mem.eql(u8, name, "some")) return @intFromEnum(PrototypeMethod.some);
+    if (std.mem.eql(u8, name, "map")) return @intFromEnum(PrototypeMethod.map);
+    if (std.mem.eql(u8, name, "filter")) return @intFromEnum(PrototypeMethod.filter);
+    if (std.mem.eql(u8, name, "take")) return @intFromEnum(PrototypeMethod.take);
+    if (std.mem.eql(u8, name, "drop")) return @intFromEnum(PrototypeMethod.drop);
+    if (std.mem.eql(u8, name, "flatMap")) return @intFromEnum(PrototypeMethod.flat_map);
+    return null;
+}
+
+/// Declaration + dispatch table for the `.iterator` native-builtin domain
+/// (QuickJS js_iterator_proto_funcs / js_iterator_funcs analogue). One shared
+/// record handler `iteratorCallNative` switches on the per-record `magic`
+/// (== domain-local id) and forwards to the iterator-helper VM ops, which stay
+/// in exec because they interleave with the iterator protocol (next/close) and
+/// the static helpers reach the for-of machinery. Standard-global bootstrap
+/// resolves names through its iterator static/prototype method lists plus the
+/// accessor/dispose enum ids; this table is consumed by the record-dispatch
+/// path (`rt.internal_builtins`).
+pub const internal_entries = iteratorEntries: {
+    const Entry = core.host_function.InternalEntry;
+    break :iteratorEntries [_]Entry{
+        iteratorEntry("get constructor", 0, @intFromEnum(AccessorMethod.constructor_getter)),
+        iteratorEntry("set constructor", 1, @intFromEnum(AccessorMethod.constructor_setter)),
+        iteratorEntry("get [Symbol.toStringTag]", 0, @intFromEnum(AccessorMethod.to_string_tag_getter)),
+        iteratorEntry("set [Symbol.toStringTag]", 1, @intFromEnum(AccessorMethod.to_string_tag_setter)),
+        iteratorEntry("from", 1, @intFromEnum(StaticMethod.from)),
+        iteratorEntry("concat", 0, @intFromEnum(StaticMethod.concat)),
+        iteratorEntry("zip", 1, @intFromEnum(StaticMethod.zip)),
+        iteratorEntry("zipKeyed", 1, @intFromEnum(StaticMethod.zip_keyed)),
+        iteratorEntry("toArray", 0, @intFromEnum(PrototypeMethod.to_array)),
+        iteratorEntry("every", 1, @intFromEnum(PrototypeMethod.every)),
+        iteratorEntry("find", 1, @intFromEnum(PrototypeMethod.find)),
+        iteratorEntry("forEach", 1, @intFromEnum(PrototypeMethod.for_each)),
+        iteratorEntry("reduce", 1, @intFromEnum(PrototypeMethod.reduce)),
+        iteratorEntry("some", 1, @intFromEnum(PrototypeMethod.some)),
+        iteratorEntry("map", 1, @intFromEnum(PrototypeMethod.map)),
+        iteratorEntry("filter", 1, @intFromEnum(PrototypeMethod.filter)),
+        iteratorEntry("take", 1, @intFromEnum(PrototypeMethod.take)),
+        iteratorEntry("drop", 1, @intFromEnum(PrototypeMethod.drop)),
+        iteratorEntry("flatMap", 1, @intFromEnum(PrototypeMethod.flat_map)),
+        iteratorEntry("[Symbol.dispose]", 0, @intFromEnum(PrototypeMethod.dispose)),
+        iteratorEntry("Array Iterator.next", 0, @intFromEnum(IntrinsicMethod.array_iterator_next)),
+        iteratorEntry("Generator.next", 1, @intFromEnum(IntrinsicMethod.generator_next)),
+        iteratorEntry("Generator.return", 1, @intFromEnum(IntrinsicMethod.generator_return)),
+        iteratorEntry("Generator.throw", 1, @intFromEnum(IntrinsicMethod.generator_throw)),
+    };
+};
+fn iteratorEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
+    return .{
+        .name = name,
+        .length = length,
+        .id = id,
+        .magic = @intCast(id),
+        .cproto = .generic_magic,
+        .native_function = builtin_dispatch.genericMagicFunction(&iteratorCallNative),
+    };
+}
+
+/// Shared record handler for the `.iterator` domain. Mirrors the retired
+/// `call.zig` `callIteratorNativeFunctionRecord`: it resolves the active realm
+/// global and forwards to `iteratorCallForNativeRecord`, which
+/// dispatches the accessors, static helpers, and prototype helper methods. A
+/// null result means the id resolved to no handler, which only happens for a
+/// corrupt id, so it surfaces as a TypeError.
+fn iteratorCallNative(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    const ctx = realm.realm;
+    const id: u32 = host_call.magic;
+    const caller_function = builtin_dispatch.callerBytecode(host_call);
+    const caller_frame = builtin_dispatch.callerFrame(host_call);
+    if (try iteratorCallForNativeRecord(ctx, host_call.output, realm.global, host_call.this_value, id, host_call.args, caller_function, caller_frame)) |value| return value;
+    return error.TypeError;
+}
+
+test "intrinsic iterator next methods have dedicated native records" {
+    const testing = std.testing;
+    const expected_ids = [_]u32{
+        @intFromEnum(IntrinsicMethod.array_iterator_next),
+        @intFromEnum(IntrinsicMethod.generator_next),
+        @intFromEnum(IntrinsicMethod.generator_return),
+        @intFromEnum(IntrinsicMethod.generator_throw),
+    };
+    for (expected_ids) |expected_id| {
+        var handler: ?core.host_function.NativeFunctionPtr = null;
+        for (internal_entries) |entry| {
+            if (entry.id == expected_id) handler = entry.native_function;
+        }
+        try testing.expect(handler != null);
+        const native = handler.?;
+        try testing.expectEqual(core.host_function.NativeCProto.generic_magic, std.meta.activeTag(native));
+        try testing.expect(native.generic_magic == &iteratorCallNative);
+    }
+}
+
+
+// ----- merged from forof_ops.zig -----
+// for-in/for-of iterator records, pending-error iterator close paths and VM iterator helpers.
+const appendAtom = core.atom.appendAtom;
+const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
+const freeAtomList = core.atom.freeAtomList;
+const objectRestOwnKeys = object_ops.objectRestOwnKeys;
+const primitiveObjectForAccess = object_ops.primitiveObjectForAccess;
+const proxyAwareOwnPropertyDescriptor = object_ops.proxyAwareOwnPropertyDescriptor;
+pub fn forInIsArraySlot(iterator: *core.Object) *u8 {
+    return iterator.iteratorZipModeSlot();
+}
+
+/// qjs `it->in_prototype_chain` (JSForInIterator).
+pub fn forInInProtoChainSlot(iterator: *core.Object) *u8 {
+    return iterator.iteratorZipStateSlot();
+}
+
+/// Mirrors qjs build_for_in_iterator: snapshot ONLY the root
+/// object's own string keys (JS_GPN_STRING_MASK | JS_GPN_SET_ENUM); the
+/// prototype chain is walked LAZILY by forInNext (js_for_in_next
+/// quickjs.c), one prototype at a time.
+pub fn createForInIterator(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    object_value: core.JSValue,
+) !core.JSValue {
+    const rt = ctx.runtime;
+
+    var iterator_val = core.JSValue.undefinedValue();
+    var source_val = core.JSValue.undefinedValue();
+    var root_frame = core.runtime.rootValues(.{ &iterator_val, &source_val });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
+
+    const iterator = try core.Object.create(rt, core.class.ids.for_in_iterator, null);
+    errdefer core.Object.destroyFromHeader(rt, iterator.gcHeader());
+    iterator_val = iterator.value();
+
+    // it->is_array = FALSE; it->obj = obj; it->idx = 0; it->tab_atom = NULL;
+    // it->atom_count = 0; it->in_prototype_chain = FALSE
+    iterator.iteratorKindSlot().* = for_in_iterator_kind;
+    iterator.iteratorIndexSlot().* = 0;
+    iterator.setIteratorLength(0);
+    forInIsArraySlot(iterator).* = 0;
+    forInInProtoChainSlot(iterator).* = 0;
+
+    // null/undefined: it->obj stays null and the first next() reports done
+    if (object_value.is(.null_value) or object_value.is(.undefined_value)) return iterator.value();
+
+    // JS_ToObjectFree for primitives.
+    source_val = if (object_value.is(.object)) object_value else try primitiveObjectForAccess(rt, global, object_value);
+    const source = try property_ops.expectObject(source_val);
+    try iterator.setOptionalValueSlot(rt, iterator.iteratorTargetSlot(), source_val);
+
+    if (forInFastArrayCount(rt, source)) |count| {
+        // "for fast arrays, we only store the number of elements"
+        //; index keys are generated on the fly.
+        forInIsArraySlot(iterator).* = 1;
+        iterator.setIteratorLength(count);
+    } else {
+        // normal_case.
+        const keys = try forInSnapshotOwnStringKeys(ctx, output, global, source, iterator);
+        // TGC S3 §2.3: the key snapshot moves into a published iterator payload.
+        for (keys) |key| rt.atoms.shadeAtomIfMarking(key);
+        iterator.iteratorAtomKeysSlot().* = keys;
+        iterator.setIteratorLength(std.math.cast(u32, keys.len) orelse return error.OutOfMemory);
+    }
+    return iterator.value();
+}
+
+/// The `p->fast_array` branch of build_for_in_iterator:
+/// a fast array (zjs dense array / typed array) with no enumerable shape
+/// props stores only the element count. Returns null for the normal case.
+fn forInFastArrayCount(rt: *core.JSRuntime, source: *core.Object) ?u32 {
+    if (core.object.isTypedArrayObject(source)) {
+        // "check that there are no enumerable normal fields".
+        for (source.shapeProps()) |prop| {
+            const prop_flags = core.property.Flags.fromBits(prop.flags);
+            if (!prop_flags.deleted and prop_flags.enumerable) return null;
+        }
+        return core.object.typedArrayLength(rt, source) catch 0;
+    }
+    if (!source.isArray() or !source.flags.fast_array) return null;
+    if (source.isProxy() or source.hasExoticMethods()) return null;
+    for (source.shapeProps()) |prop| {
+        const prop_flags = core.property.Flags.fromBits(prop.flags);
+        if (prop_flags.deleted) continue;
+        if (prop_flags.enumerable) return null;
+        // qjs fast arrays never carry shape-resident index props; if zjs has
+        // any (sparse remnants) the normal snapshot must merge them.
+        if (core.array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) != null) return null;
+    }
+    return std.math.cast(u32, source.arrayElements().len) orelse null;
+}
+
+/// Mirrors JS_GetOwnPropertyNamesInternal(ctx, &tab, &n, obj,
+/// JS_GPN_STRING_MASK | JS_GPN_SET_ENUM) as consumed by the for-in machinery
+/// (build_for_in_iterator quickjs.c, the js_for_in_next prototype step
+/// quickjs.c and the is_array conversion quickjs.c). Returns the
+/// enumerable own string keys in tab order (owned atoms). qjs keeps the
+/// non-enumerable tab entries only to feed the visited-key set on the enum
+/// object (quickjs.c, always behind a dedup
+/// check); we record those straight onto the iterator's visited set here
+/// instead of carrying a parallel is_enumerable array.
+pub fn forInSnapshotOwnStringKeys(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    object: *core.Object,
+    iterator: *core.Object,
+) ![]core.Atom {
+    const rt = ctx.runtime;
+    const all = try objectRestOwnKeys(ctx, output, global, object);
+    defer core.Object.freeKeys(rt, all);
+    var out: []core.Atom = &.{};
+    errdefer freeAtomList(rt, out);
+    // TGC S3 §4 class B: `out` and the `all` snapshot are native []Atom
+    // arrays held across a per-key [[GetOwnProperty]] that can reach a proxy
+    // trap.
+    var key_roots = core.runtime.rootAtomSlots(.{
+        core.runtime.AtomRootSlot{ .list = &out },
+        core.runtime.AtomRootSlot{ .list = &all },
+    });
+    key_roots.activate(rt);
+    defer key_roots.deactivate(rt);
+    for (all) |key| {
+        // JS_GPN_STRING_MASK: array-index atoms are string kind (JS_AtomGetKind).
+        if (rt.atoms.kind(key) != .string) continue;
+        if (try forInOwnKeyIsEnumerable(ctx, output, global, object, key)) {
+            try appendAtom(rt, &out, key);
+        } else {
+            try forInDefineVisited(rt, iterator, key);
+        }
+    }
+    return out;
+}
+
+/// Per-key is_enumerable of the SET_ENUM walk. Ordinary objects read the
+/// shape flag; proxies/exotics run the full
+/// [[GetOwnProperty]] (quickjs.c "set the is_enumerable field if
+/// necessary"), so the gopd trap order/count matches qjs. A key whose
+/// descriptor probe reports absence counts as non-enumerable.
+fn forInOwnKeyIsEnumerable(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    object: *core.Object,
+    key: core.Atom,
+) !bool {
+    if (object.proxyTarget() == null) {
+        switch (object.ownPropertyEnumerableKind(ctx.runtime, key)) {
+            .enumerable => return true,
+            .not_enumerable => return false,
+            .descriptor => {},
+        }
+    }
+    const desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, object, key, null, null) orelse return false;
+    const is_enumerable = desc.enumerable orelse false;
+    return is_enumerable;
+}
+
+/// JS_DefinePropertyValue(ctx, enum_obj, prop, JS_NULL, JS_PROP_ENUMERABLE):
+/// the visited-key set lives as JS_NULL-valued props on the iterator object
+/// itself (js_for_in_next quickjs.c, prepare slow_path quickjs.c).
+/// qjs only ever defines a visited key after a dedup miss; the exists guard
+/// keeps redefinition of the non-configurable marker impossible.
+pub fn forInDefineVisited(rt: *core.JSRuntime, iterator: *core.Object, key: core.Atom) !void {
+    if (try iterator.existsOwnProperty(rt, key)) return;
+    try iterator.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.nullValue(), .{ .enumerable = true }));
+}
+
+/// The JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY probe of
+/// js_for_in_prepare_prototype_chain_enum: does this
+/// prototype own at least one enumerable string-keyed property? Ordinary
+/// objects reduce to a shape/dense scan (the same walk qjs's
+/// JS_GetOwnPropertyNamesInternal does off the shape, quickjs.c);
+/// proxies/exotics run the full filtered-tab construction so ownKeys + the
+/// per-key gopd probes fire exactly as in qjs (the tab is discarded,
+/// quickjs.c).
+pub fn forInHasEnumerableStringKey(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    object: *core.Object,
+) !bool {
+    const rt = ctx.runtime;
+    if (core.object.isTypedArrayObject(object)) {
+        // fast_array branch: every element is an
+        // enumerable index key.
+        if ((core.object.typedArrayLength(rt, object) catch 0) != 0) return true;
+    } else if (object.proxyTarget() != null or object.hasExoticMethods() or
+        object.class_id == core.class.ids.module_ns)
+    {
+        // Exotic own-keys behavior: build-and-discard the filtered tab like
+        // qjs. No early exit -- qjs probes every string key's descriptor.
+        const all = try objectRestOwnKeys(ctx, output, global, object);
+        defer core.Object.freeKeys(rt, all);
+        var found = false;
+        for (all) |key| {
+            if (rt.atoms.kind(key) != .string) continue;
+            if (try forInOwnKeyIsEnumerable(ctx, output, global, object, key)) found = true;
+        }
+        return found;
+    } else if (object.arrayElements().len != 0) {
+        // dense array elements are enumerable index keys.
+        return true;
+    }
+    for (object.shapeProps()) |prop| {
+        const prop_flags = core.property.Flags.fromBits(prop.flags);
+        if (prop_flags.deleted or !prop_flags.enumerable) continue;
+        if (rt.atoms.kind(prop.atom_id) != .string) continue;
+        return true;
+    }
+    return false;
+}
+
+/// Iterator records share JSValue's internal catch-offset tag with ordinary
+/// catch markers, but use the otherwise-invalid payload range below -1. This
+/// preserves the saved outer catch target while giving unwind code an exact
+/// record discriminator instead of guessing from adjacent object/callable
+/// shapes. -2 identifies an async iterator; sync records use minInt...-3.
+const async_iterator_catch_offset: i32 = -2;
+pub fn iteratorCatchMarker(previous_target: i32) core.JSValue {
+    std.debug.assert(previous_target >= -1);
+    std.debug.assert(previous_target <= std.math.maxInt(i32) - 3);
+    const encoded: i32 = if (previous_target == -1)
+        std.math.minInt(i32)
+    else
+        @intCast(@as(i64, std.math.minInt(i32)) + @as(i64, previous_target) + 1);
+    return core.JSValue.catchOffset(encoded);
+}
+
+pub fn iteratorCatchMarkerPreviousTarget(value: core.JSValue) ?i32 {
+    const encoded = value.as(.catch_offset) orelse return null;
+    if (encoded >= async_iterator_catch_offset) return null;
+    if (encoded == std.math.minInt(i32)) return -1;
+    return @intCast(@as(i64, encoded) - @as(i64, std.math.minInt(i32)) - 1);
+}
+
+pub fn asyncIteratorCatchMarker() core.JSValue {
+    return core.JSValue.catchOffset(async_iterator_catch_offset);
+}
+
+pub fn isAsyncIteratorCatchMarker(value: core.JSValue) bool {
+    return (value.as(.catch_offset) orelse return false) == async_iterator_catch_offset;
+}
+
+pub fn isIteratorCatchMarker(value: core.JSValue) bool {
+    return isAsyncIteratorCatchMarker(value) or iteratorCatchMarkerPreviousTarget(value) != null;
+}
+
+test "iterator catch markers are distinct from ordinary catch offsets" {
+    for ([_]i32{ -1, 0, 42 }) |ordinary| {
+        try std.testing.expect(!isIteratorCatchMarker(core.JSValue.catchOffset(ordinary)));
+    }
+    for ([_]i32{ -1, 0, 42 }) |previous| {
+        const marker = iteratorCatchMarker(previous);
+        try std.testing.expect(isIteratorCatchMarker(marker));
+        try std.testing.expect(!isAsyncIteratorCatchMarker(marker));
+        try std.testing.expectEqual(previous, iteratorCatchMarkerPreviousTarget(marker).?);
+    }
+    const async_marker = asyncIteratorCatchMarker();
+    try std.testing.expect(isIteratorCatchMarker(async_marker));
+    try std.testing.expect(isAsyncIteratorCatchMarker(async_marker));
+    try std.testing.expect(iteratorCatchMarkerPreviousTarget(async_marker) == null);
+}
+
+pub fn closeStackTopForOfIteratorForPendingError(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    stack: *stack_mod.Stack,
+) !void {
+    // QuickJS uncatchable interruptions skip the catch-offset/iterator-close
+    // stack scan entirely. In particular, do not take/rethrow the pending
+    // InternalError here: that would clear its uncatchable execution flag and
+    // allow an outer catch/finally to consume it.
+    if (ctx.exceptionIsUncatchable()) return;
+    // The pending exception is taken and re-thrown unchanged below, so its
+    // category has to survive the round trip: `takeException` and `throwValue`
+    // both reset the exception flags. Uncatchability dodges this by returning
+    // above; out-of-memory cannot (the iterators still have to be closed), so
+    // read the flag here and restore it with the value. Without this an
+    // uncaught OOM inside a for-of body reaches the embedder as a plain
+    // `error.JSException`.
+    const pending_out_of_memory = ctx.exceptionIsOutOfMemory();
+    const pending_exception = if (ctx.hasException()) ctx.takeException() else null;
+    var before = stack.len();
+    while (findTopClosableForOfRecordIndexBefore(stack, before)) |record_index| {
+        // Transfer the record's iterator ownership out before invoking user
+        // code. Besides matching IteratorClose's one-shot semantics, this
+        // prevents a later catch/unwind/deinit seam from calling return()
+        // again for the same abrupt completion.
+        const iterator_value = stack.values[record_index];
+        stack.values[record_index] = core.JSValue.undefinedValue();
+        closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
+        if (ctx.hasException()) ctx.clearException();
+        before = record_index;
+    }
+    if (pending_exception) |value| {
+        _ = ctx.throwValue(value);
+        if (pending_out_of_memory) ctx.markExceptionOutOfMemory();
+    }
+}
+
+/// Run IteratorClose for an abrupt completion without letting a close failure
+/// replace the exception that was already pending on the context.
+pub fn closeIteratorForAbruptCompletion(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    iterator_value: core.JSValue,
+) void {
+    if (ctx.exceptionIsUncatchable()) return;
+    const pending_out_of_memory = ctx.exceptionIsOutOfMemory();
+    const pending_exception = if (ctx.hasException()) ctx.takeException() else null;
+    closeIteratorFromVm(ctx, output, global, iterator_value) catch {};
+    if (ctx.hasException()) ctx.clearException();
+    if (pending_exception) |value| {
+        _ = ctx.throwValue(value);
+        if (pending_out_of_memory) ctx.markExceptionOutOfMemory();
+    }
+}
+
+fn findTopClosableForOfRecordIndexBefore(stack: *const stack_mod.Stack, before: usize) ?usize {
+    const end = @min(before, stack.len());
+    if (end < 3) return null;
+    var index = end - 3;
+    while (true) {
+        if (isForOfRecordAt(stack, index) and !hasCatchMarkerAboveForOfRecord(stack, index)) {
+            return index;
+        }
+        if (index == 0) break;
+        index -= 1;
+    }
+    return null;
+}
+
+pub fn isForOfRecordAt(stack: *const stack_mod.Stack, index: usize) bool {
+    if (index + 2 >= stack.len()) return false;
+    return isIteratorCatchMarker(stack.values[index + 2]);
+}
+
+/// QuickJS `js_for_of_next` replaces the current iterator with undefined on
+/// every IteratorNext abrupt completion. That prevents IteratorClose from
+/// calling `return()` on the iterator whose `next`/result access just failed,
+/// while leaving any enclosing iterator records available for normal unwind.
+pub fn abandonForOfIteratorAtIndex(stack: *stack_mod.Stack, index: usize) void {
+    std.debug.assert(isForOfRecordAt(stack, index));
+    stack.values[index] = core.JSValue.undefinedValue();
+}
+
+/// The `*JSRuntime` is unused (abandoning is a pure stack-slot overwrite under
+/// tracing GC); it stays in the signature so the VM unwind call sites in
+/// `tailcall_dispatch` / `inline_calls` keep their uniform `(vm.ctx.runtime,
+/// stack, depth)` shape.
+pub fn abandonForOfIteratorAtDepth(_: *core.JSRuntime, stack: *stack_mod.Stack, depth: u8) !void {
+    const required = @as(usize, depth) + 3;
+    if (stack.len() < required) return error.InvalidBytecode;
+    const index = stack.len() - required;
+    if (!isForOfRecordAt(stack, index)) return error.InvalidBytecode;
+    abandonForOfIteratorAtIndex(stack, index);
+}
+
+pub fn hasCatchMarkerAboveForOfRecord(stack: *const stack_mod.Stack, record_index: usize) bool {
+    var index = record_index + 3;
+    while (index < stack.len()) : (index += 1) {
+        if (!stack.values[index].is(.catch_offset)) continue;
+        // Nested iterator markers are cleanup records, not catch boundaries.
+        if (isIteratorCatchMarker(stack.values[index])) continue;
+        return true;
+    }
+    return false;
+}
+
+pub fn closeIteratorFromVm(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    iterator_value: core.JSValue,
+) !void {
+    try closeIteratorFromVmImpl(ctx, output, global, iterator_value);
+}
+
+pub fn closeIteratorFromVmImpl(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    iterator_value: core.JSValue,
+) !void {
+    const return_key = core.atom.ids.return_;
+    const return_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, return_key, null, null);
+    if (return_method.is(.undefined_value) or return_method.is(.null_value)) return;
+    if (!call_runtime.isCallableValue(return_method)) return error.TypeError;
+    const out = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, return_method, &.{}, null, null);
+    if (!out.is(.object)) return error.TypeError;
 }

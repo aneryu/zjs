@@ -958,7 +958,7 @@ typed 桥：exec 的 native 调用点 ↔ `rt.internal_builtins`。QuickJS 对�
 - **签名**：`pub inline fn nativeFromBits(b: NativeBits) NativeValue`。
 - **作用**：整数覆盖按位转回 `NativeValue`。
 - **实现**：`@bitCast`。
-- **所有权 / 错误 / 调用**：无：`nativeToBits` 的逆向 `@bitCast`，不分配、无 error set。调用方跨文件：`src/exec/vm_native.zig:65` 收 `callRecordFromVmInRealm` 的返回（另有 `tests/exec.zig:18705` 一处测试），其余 8 处都在本文件：`hostResultToValue`（117）、`hostErrorToValue`（122）、`embedderErrorToValue`（135/140/143）、`throwTypeErrorSentinel`（892/895）、`callNativeAccessorTarget`（1078）。
+- **所有权 / 错误 / 调用**：无：`nativeToBits` 的逆向 `@bitCast`，不分配、无 error set。调用方跨文件：`src/exec/vm_opcodes.zig:65` 收 `callRecordFromVmInRealm` 的返回（另有 `tests/exec.zig:18705` 一处测试），其余 8 处都在本文件：`hostResultToValue`（117）、`hostErrorToValue`（122）、`embedderErrorToValue`（135/140/143）、`throwTypeErrorSentinel`（892/895）、`callNativeAccessorTarget`（1078）。
 
 ### `nativeExc` (`src/exec/builtin_dispatch.zig:40`)
 
@@ -972,7 +972,7 @@ typed 桥：exec 的 native 调用点 ↔ `rt.internal_builtins`。QuickJS 对�
 - **签名**：`pub inline fn nativeIsExc(ctx: *core.JSContext, v: NativeValue) bool`。
 - **作用**：判断 native 返回值是否是异常 sentinel。
 - **实现**：取 `v.is(.exception)`，并在 Debug/ReleaseSafe 下断言它与 `ctx.hasException()` 一致。
-- **所有权 / 错误 / 调用**：无：读哨兵 tag，不分配、无 error set。副作用是一条 `std.debug.assert(exc == ctx.hasException())`——Debug/ReleaseSafe 下强制「哨兵 ⟺ 有 pending exception」这条不变量（源码 469 行的注释就是靠它）。两个调用方：`src/exec/vm_native.zig:77` 与本文件 `callNativeAccessorTarget`（1079）。注意 `sentinelToHost`（108）**故意不用它**，因为 rooted host 调用允许带着无关的 pending exception 进入。
+- **所有权 / 错误 / 调用**：无：读哨兵 tag，不分配、无 error set。副作用是一条 `std.debug.assert(exc == ctx.hasException())`——Debug/ReleaseSafe 下强制「哨兵 ⟺ 有 pending exception」这条不变量（源码 469 行的注释就是靠它）。两个调用方：`src/exec/vm_opcodes.zig:77` 与本文件 `callNativeAccessorTarget`（1079）。注意 `sentinelToHost`（108）**故意不用它**，因为 rooted host 调用允许带着无关的 pending exception 进入。
 
 ### `nativeFromHostError` (`src/exec/builtin_dispatch.zig:54`)
 
@@ -993,7 +993,7 @@ typed 桥：exec 的 native 调用点 ↔ `rt.internal_builtins`。QuickJS 对�
 - **签名**：`pub inline fn nativeHostError(ctx: *core.JSContext) HostError`。
 - **作用**：哨兵接收端：native 链回来的 exception sentinel 变成对应的 Zig `HostError`。
 - **实现**：`ctx.exceptionIsUncatchable()` 为真给 `error.Interrupted`，否则一律 `error.JSException`；只读标志位，不动 pending exception。
-- **所有权 / 错误 / 调用**：无：读两个标志位，不分配、不改 pending exception。返回值只有两种：`ctx.exceptionIsUncatchable()` 时 `error.Interrupted`（保住 VM 预建的不可捕获 InternalError），否则一律 `error.JSException`——**包括 OOM**。函数注释详细论证了为什么不给 OOM 单独的错误类别：一旦到了这道缝，OOM 已经是普通可捕获 JS 异常，扩宽类别会让 `pendingExceptionMatchesError` 不再匹配（重建 Error、丢栈）、promise job 重新入队、module / async-generator 把它当硬错误而不是 rejection；`current_exception_out_of_memory` 这个标志只在嵌入边界（`binding.JSContext.restoreUncaughtOutOfMemory`）读一次。5 个调用方：本文件 `sentinelToHost`（109）、`callNativeAccessorTarget`（1079），以及 `src/exec/vm_native.zig:78`、`src/exec/tailcall_dispatch.zig:579`/4142。
+- **所有权 / 错误 / 调用**：无：读两个标志位，不分配、不改 pending exception。返回值只有两种：`ctx.exceptionIsUncatchable()` 时 `error.Interrupted`（保住 VM 预建的不可捕获 InternalError），否则一律 `error.JSException`——**包括 OOM**。函数注释详细论证了为什么不给 OOM 单独的错误类别：一旦到了这道缝，OOM 已经是普通可捕获 JS 异常，扩宽类别会让 `pendingExceptionMatchesError` 不再匹配（重建 Error、丢栈）、promise job 重新入队、module / async-generator 把它当硬错误而不是 rejection；`current_exception_out_of_memory` 这个标志只在嵌入边界（`binding.JSContext.restoreUncaughtOutOfMemory`）读一次。5 个调用方：本文件 `sentinelToHost`（109）、`callNativeAccessorTarget`（1079），以及 `src/exec/vm_opcodes.zig:78`、`src/exec/tailcall_dispatch.zig:579`/4142。
 
 ### `sentinelToHost` (`src/exec/builtin_dispatch.zig:108`)
 
@@ -1007,14 +1007,14 @@ typed 桥：exec 的 native 调用点 ↔ `rt.internal_builtins`。QuickJS 对�
 - **签名**：`pub inline fn hostResultToValue(ctx: *core.JSContext, result: HostError!core.JSValue) core.JSValue`。
 - **作用**：宿主错误到 JS 值的转换。
 - **实现**：`result catch |err| nativeFromHostError(ctx, ctx.global, err)`；thunk 点的 `ctx` 就是被调方 realm，所以它的 global 是 Error 构造器的权威来源。
-- **所有权 / 错误 / 调用**：`sentinelToHost` 的反向 thunk。成功路径直接透传值；失败路径把 `HostError` 交给 `nativeFromHostError`，那边**会真建一个 Error 对象并 `ctx.throwValue` 装成 pending exception**（建不出来就退到 realm 预分配的 OOM 值），然后返回哨兵。注释点明 `ctx` 在每个 thunk 站点都是被调方 realm，所以 `ctx.global` 就是 Error 构造器的权威来源。调用方分布在各 `*_ops.zig` 的 NB2 thunk：`src/exec/native_legacy.zig:89`/98/107/115/124/132、`src/exec/function_ops.zig:109`/129/149、`src/exec/array_builtin_ops.zig:404`/469、`src/exec/object_builtin_ops.zig:703`、`src/exec/string_builtin_ops.zig:507`、`src/exec/math_ops.zig:106`，共 6 个文件 14 处。
+- **所有权 / 错误 / 调用**：`sentinelToHost` 的反向 thunk。成功路径直接透传值；失败路径把 `HostError` 交给 `nativeFromHostError`，那边**会真建一个 Error 对象并 `ctx.throwValue` 装成 pending exception**（建不出来就退到 realm 预分配的 OOM 值），然后返回哨兵。注释点明 `ctx` 在每个 thunk 站点都是被调方 realm，所以 `ctx.global` 就是 Error 构造器的权威来源。调用方分布在各 `*_ops.zig` 的 NB2 thunk：`src/exec/builtin_dispatch.zig:89`/98/107/115/124/132、`src/exec/function_ops.zig:109`/129/149、`src/exec/array_ops.zig:404`/469、`src/exec/object_ops.zig:703`、`src/exec/string_ops.zig:507`、`src/exec/math_ops.zig:106`，共 6 个文件 14 处。
 
 ### `hostErrorToValue` (`src/exec/builtin_dispatch.zig:121`)
 
 - **签名**：`pub inline fn hostErrorToValue(ctx: *core.JSContext, global: ?*core.Object, err: anyerror) core.JSValue`。
 - **作用**：宿主错误到 JS 值的转换。
 - **实现**：直接转 `nativeFromHostError(ctx, global, err)` 再 `nativeFromBits`。
-- **所有权 / 错误 / 调用**：与 `hostResultToValue` 的失败半边等价，但把 `global` 显式传进来——调用点全是「`ctx.global` 为 null，拿不到 Error 构造器」那种情形（`ctx.global orelse return hostErrorToValue(ctx, null, error.InvalidBuiltinRegistry)`）。同样会建 Error 对象并装 pending exception，返回哨兵值，自身无 error set。调用方 16 处跨 7 个引擎文件：`src/exec/object_builtin_ops.zig:687`/698、`src/exec/function_ops.zig:104`/124/144、`src/exec/array_builtin_ops.zig:392`/402/462、`src/exec/string_builtin_ops.zig:426`/435/502、`src/exec/promise_ops.zig:1043`/1087、`src/exec/call.zig:118`/120、`src/exec/math_ops.zig:105`（另有 `src/tests/helpers.zig:901` 一处测试）。
+- **所有权 / 错误 / 调用**：与 `hostResultToValue` 的失败半边等价，但把 `global` 显式传进来——调用点全是「`ctx.global` 为 null，拿不到 Error 构造器」那种情形（`ctx.global orelse return hostErrorToValue(ctx, null, error.InvalidBuiltinRegistry)`）。同样会建 Error 对象并装 pending exception，返回哨兵值，自身无 error set。调用方 16 处跨 7 个引擎文件：`src/exec/object_ops.zig:687`/698、`src/exec/function_ops.zig:104`/124/144、`src/exec/array_ops.zig:392`/402/462、`src/exec/string_ops.zig:426`/435/502、`src/exec/promise_ops.zig:1043`/1087、`src/exec/call.zig:118`/120、`src/exec/math_ops.zig:105`（另有 `src/tests/helpers.zig:901` 一处测试）。
 
 ### `embedderErrorToValue` (`src/exec/builtin_dispatch.zig:132`)
 
@@ -1035,7 +1035,7 @@ typed 桥：exec 的 native 调用点 ↔ `rt.internal_builtins`。QuickJS 对�
 - **签名**：`pub inline fn vmCallerView(ctx: *core.JSContext) VmCallerView`。
 - **作用**：不建 per-call 环境地取回 VM 调用方视图：host output writer 与调用方 bytecode/frame。
 - **实现**：有 active invocation 就从 `machine.currentLevel()` 读（native 自己不压 level）；否则读已发布的 `NativeCallEnvironment`；都没有则三个字段全 null。
-- **所有权 / 错误 / 调用**：返回的三个字段全是借用指针（`*std.Io.Writer` / `*const Bytecode` / `*Frame`），生命周期绑在当前 invocation 或已发布的 `NativeCallEnvironment` 上——**不可跨调用保存**。不分配、无 error set；查不到来源时三个字段全给 null（rooted host 调用的正常情形）。三路来源的优先级就是函数体的顺序：活跃 invocation → 已发布的 native environment → 空。调用方 12 处跨 8 个文件：`src/exec/function_ops.zig:105`/125/145、`src/exec/array_builtin_ops.zig:393`/463、`src/exec/string_builtin_ops.zig:427`/503、`src/exec/object_builtin_ops.zig:688`、`src/exec/call.zig:119`、`src/exec/math_ops.zig:106`、`src/native.zig:70`、`src/tests/helpers.zig:904`。
+- **所有权 / 错误 / 调用**：返回的三个字段全是借用指针（`*std.Io.Writer` / `*const Bytecode` / `*Frame`），生命周期绑在当前 invocation 或已发布的 `NativeCallEnvironment` 上——**不可跨调用保存**。不分配、无 error set；查不到来源时三个字段全给 null（rooted host 调用的正常情形）。三路来源的优先级就是函数体的顺序：活跃 invocation → 已发布的 native environment → 空。调用方 12 处跨 8 个文件：`src/exec/function_ops.zig:105`/125/145、`src/exec/array_ops.zig:393`/463、`src/exec/string_ops.zig:427`/503、`src/exec/object_ops.zig:688`、`src/exec/call.zig:119`、`src/exec/math_ops.zig:106`、`src/native.zig:70`、`src/tests/helpers.zig:904`。
 
 ### `CallRealmView.caller` (`src/exec/builtin_dispatch.zig:207`)
 
@@ -1084,7 +1084,7 @@ typed 桥：exec 的 native 调用点 ↔ `rt.internal_builtins`。QuickJS 对�
 - **签名**：`pub inline fn callableRealm(call: NativeCall) HostError!CallRealmView`。
 - **作用**：取一次可观察调用的原子权威；合成的算法式记录复用没有载体，调用前应先判 `callable_realm == null`。
 - **实现**：`call.callable_realm orelse error.InvalidBuiltinRegistry`。
-- **所有权 / 错误 / 调用**：无：`call.callable_realm orelse error.InvalidBuiltinRegistry` 一行，不分配。返回的 `CallRealmView` 里 realm 与 global 都是借用别名。注释点明使用契约——带独立算法/裸 runtime 入口的 native 实现应当**先自己判 `callable_realm == null`** 再调它，不要靠这里的 error 当分支。调用方散在各 `*_ops.zig` 的记录 handler 里（`src/exec/array_builtin_ops.zig:313`/370/442/505、`src/exec/object_builtin_ops.zig:281` 等）；`src/tests/builtins.zig:39` 还有一条源码级断言，要求这些 handler 的源文本里出现 `callableRealm(host_call)`。
+- **所有权 / 错误 / 调用**：无：`call.callable_realm orelse error.InvalidBuiltinRegistry` 一行，不分配。返回的 `CallRealmView` 里 realm 与 global 都是借用别名。注释点明使用契约——带独立算法/裸 runtime 入口的 native 实现应当**先自己判 `callable_realm == null`** 再调它，不要靠这里的 error 当分支。调用方散在各 `*_ops.zig` 的记录 handler 里（`src/exec/array_ops.zig:313`/370/442/505、`src/exec/object_ops.zig:281` 等）；`src/tests/builtins.zig:39` 还有一条源码级断言，要求这些 handler 的源文本里出现 `callableRealm(host_call)`。
 
 ### `genericMagicFunction` (`src/exec/builtin_dispatch.zig:331`)
 
@@ -1140,7 +1140,7 @@ typed 桥：exec 的 native 调用点 ↔ `rt.internal_builtins`。QuickJS 对�
 - **签名**：`pub inline fn preflightCFunctionCall( caller_ctx: *core.JSContext, caller_global: ?*core.Object, func_obj: ?*core.Object, formal_length: usize, ) HostError!void`。
 - **作用**：在进入 native 体之前做 C_FUNCTION 栈预检（对照 qjs `js_check_stack_overflow`）。
 - **实现**：`func_obj` 为空或 `class_id != c_function` 直接返回（C_FUNCTION_DATA 与合成复用不过这道闸），否则转 `preflightCFunctionCallAssumeCFunction`。
-- **所有权 / 错误 / 调用**：不分配、不建根。作用是在链接 native 帧、切 realm 之前检查原生栈余量；`func_obj` 为 null 或 class 不是 `c_function` 就静默放行（注释：C_FUNCTION_DATA 与合成记录复用故意不走这道门）。错误只有一种——栈不够时 `throwCFunctionStackOverflow` **先装 pending InternalError（"stack overflow"）再返回 `error.StackOverflow`**，所以这是本文件少数在 preflight 阶段就产生 JS 异常的地方；拿不到 global 时退成 `error.InvalidBuiltinRegistry`。8 个调用方跨 4 个文件：本文件 440/533/1330、`src/exec/call_runtime.zig:304`/958/1860、`src/exec/call.zig:290`、`src/exec/class_init_ops.zig:198`。
+- **所有权 / 错误 / 调用**：不分配、不建根。作用是在链接 native 帧、切 realm 之前检查原生栈余量；`func_obj` 为 null 或 class 不是 `c_function` 就静默放行（注释：C_FUNCTION_DATA 与合成记录复用故意不走这道门）。错误只有一种——栈不够时 `throwCFunctionStackOverflow` **先装 pending InternalError（"stack overflow"）再返回 `error.StackOverflow`**，所以这是本文件少数在 preflight 阶段就产生 JS 异常的地方；拿不到 global 时退成 `error.InvalidBuiltinRegistry`。8 个调用方跨 4 个文件：本文件 440/533/1330、`src/exec/call_runtime.zig:304`/958/1860、`src/exec/call.zig:290`、`src/exec/function_ops.zig:198`。
 
 ### `preflightCFunctionCallAssumeCFunction` (`src/exec/builtin_dispatch.zig:411`)
 
@@ -1154,7 +1154,7 @@ typed 桥：exec 的 native 调用点 ↔ `rt.internal_builtins`。QuickJS 对�
 - **签名**：`pub inline fn preflightInternalRecordCFunction( caller_ctx: *core.JSContext, caller_global: ?*core.Object, func_obj: ?*core.Object, native_ref: core.function.NativeBuiltinRef, ) HostError!void`。
 - **作用**：在进入 native 体之前做 C_FUNCTION 栈预检（对照 qjs `js_check_stack_overflow`）。
 - **实现**：先 `internalBuiltinRecord` 探表，缺记录属于终端自己的普通 dispatch miss，直接返回；命中则按 `record.arity` 走 `preflightCFunctionCall`。
-- **所有权 / 错误 / 调用**：先按 `(domain, id)` 探 `rt.internalBuiltinRecord`，**探不到就静默 return**（注释：缺记录仍归 terminal 的普通 dispatch miss 处理），探到就用 `record.arity` 当形参数量转 `preflightCFunctionCall`。不分配、不持有 record（静态表元素的借用指针）。错误同 `preflightCFunctionCall`。3 个调用方：`src/exec/call_runtime.zig:1790`/1832 与 `src/exec/regexp_fastpath.zig:169`，都是「外层 dispatcher 要先建 native 帧再做参数强制转换」的场合。
+- **所有权 / 错误 / 调用**：先按 `(domain, id)` 探 `rt.internalBuiltinRecord`，**探不到就静默 return**（注释：缺记录仍归 terminal 的普通 dispatch miss 处理），探到就用 `record.arity` 当形参数量转 `preflightCFunctionCall`。不分配、不持有 record（静态表元素的借用指针）。错误同 `preflightCFunctionCall`。3 个调用方：`src/exec/call_runtime.zig:1790`/1832 与 `src/exec/regexp_ops.zig:169`，都是「外层 dispatcher 要先建 native 帧再做参数强制转换」的场合。
 
 ### `throwCFunctionStackOverflow` (`src/exec/builtin_dispatch.zig:443`)
 
@@ -1182,7 +1182,7 @@ typed 桥：exec 的 native 调用点 ↔ `rt.internal_builtins`。QuickJS 对�
 - **签名**：`pub inline fn callInternalRecordDirect( ctx: *core.JSContext, output: ?*std.Io.Writer, global: ?*core.Object, globals: []core.global_slots.Slot, func_obj: ?*core.Object, this_value: core.JSValue, record: *const core.NativeEntry, args: []const core.JSValue, caller_function: ?*const Bytecode, caller_frame: ?*Frame, ) HostError!core.JSValue`。
 - **作用**：跳过表探测、直接调用已解析的记录（快路径 memo 里只会存通过过探测的记录）。
 - **实现**：`preflightCFunctionCall(record.arity)` → `finalCallEnvironment` 选 realm → `callInternalRecordDirectWithEnvironment`。
-- **所有权 / 错误 / 调用**：不建 GC 根（rooted 路径的根在更内层的 `callTypedInternalRecordDirect` 里建）；`record` 是静态表元素的借用指针，`globals` 切片借用。三步：`preflightCFunctionCall` → `finalCallEnvironment` 解析被调 realm → `callInternalRecordDirectWithEnvironment`。错误：preflight 的 `error.StackOverflow`、环境解析的 `error.InvalidBuiltinRegistry`，以及 native 体经 `sentinelToHost` 折叠出的 `error.JSException` / `error.Interrupted`——后者意味着 pending exception 已经装好了，调用方只需把 error 上抛。5 个调用方跨 4 个文件：`src/exec/vm_call.zig:523`、`src/exec/call.zig:836`、`src/exec/call_runtime.zig:308`/2421、本文件 512。
+- **所有权 / 错误 / 调用**：不建 GC 根（rooted 路径的根在更内层的 `callTypedInternalRecordDirect` 里建）；`record` 是静态表元素的借用指针，`globals` 切片借用。三步：`preflightCFunctionCall` → `finalCallEnvironment` 解析被调 realm → `callInternalRecordDirectWithEnvironment`。错误：preflight 的 `error.StackOverflow`、环境解析的 `error.InvalidBuiltinRegistry`，以及 native 体经 `sentinelToHost` 折叠出的 `error.JSException` / `error.Interrupted`——后者意味着 pending exception 已经装好了，调用方只需把 error 上抛。5 个调用方跨 4 个文件：`src/exec/vm_opcodes.zig:523`、`src/exec/call.zig:836`、`src/exec/call_runtime.zig:308`/2421、本文件 512。
 
 ### `callInternalRecordDirectInRealm` (`src/exec/builtin_dispatch.zig:541`)
 
@@ -1371,7 +1371,7 @@ typed 桥：exec 的 native 调用点 ↔ `rt.internal_builtins`。QuickJS 对�
 - **签名**：`pub inline fn invokeLeafFastEntry(entry: *const core.NativeEntry, args: []const core.JSValue) ?core.JSValue`。
 - **作用**：VM 侧的 K1 leaf 入口（`vm_native.dispatch` 与 tailcall 内联臂）。
 - **实现**：直接转 `invokeLeafFast`。
-- **所有权 / 错误 / 调用**：无：单行转发 `invokeLeafFast`，不分配、无 error set，null 即 miss（调用方回退到带环境的慢路径）。存在的意义是给 VM 侧一个 `pub` 入口而不暴露内部的 `invokeLeafFast`。3 个调用方：`src/exec/vm_native.zig:55` 与 `src/exec/tailcall_dispatch.zig:2123`/2425（两处内联叶臂）。
+- **所有权 / 错误 / 调用**：无：单行转发 `invokeLeafFast`，不分配、无 error set，null 即 miss（调用方回退到带环境的慢路径）。存在的意义是给 VM 侧一个 `pub` 入口而不暴露内部的 `invokeLeafFast`。3 个调用方：`src/exec/vm_opcodes.zig:55` 与 `src/exec/tailcall_dispatch.zig:2123`/2425（两处内联叶臂）。
 
 ### `invokeMethodLeafFastEntry` (`src/exec/builtin_dispatch.zig:1098`)
 
@@ -1441,14 +1441,14 @@ typed 桥：exec 的 native 调用点 ↔ `rt.internal_builtins`。QuickJS 对�
 - **签名**：`pub fn callConstructRecord( ctx: *core.JSContext, output: ?*std.Io.Writer, global: ?*core.Object, globals: []core.global_slots.Slot, func_obj: ?*core.Object, native_ref: core.function.NativeBuiltinRef, prototype: ?*core.Object, args: []const core.JSValue, caller_function: ?*const Bytecode, caller_frame: ?*Frame, ) HostError!?core.JSValue`。
 - **作用**：construct（`new X()`）路径的记录调用：环境标 `is_constructor`，把解析好的实例原型当 `new_target` 发布；id 不走表则返回 null 让调用方回退到名字 / class 级联。
 - **实现**：转 `callConstructRecordImpl(true, ...)`，即自己做预检并推 native 帧。
-- **所有权 / 错误 / 调用**：`push_native_frame = true` 的转发：会自己 preflight 并压一层 `NativeBacktraceScope`。返回值外层 null 表示 miss（id 无记录，或记录不是 construct-capable——注释点明这是为了不让 wrapper-primitive 的 call 记录被误当构造器跑），调用方回退到构造级联。`prototype` 作为 `new_target` 解析出的实例 `[[Prototype]]` 借用地穿进环境。错误在 `callConstructRecordImpl` 末尾**先 `materializeRuntimeError` 建好 Error 并装 pending，再把 err 原样返回**，所以调用方拿到 error 时异常已经在位。调用方：`src/exec/string_ops.zig:232`/999、`src/exec/class_init_ops.zig:124` 等。
+- **所有权 / 错误 / 调用**：`push_native_frame = true` 的转发：会自己 preflight 并压一层 `NativeBacktraceScope`。返回值外层 null 表示 miss（id 无记录，或记录不是 construct-capable——注释点明这是为了不让 wrapper-primitive 的 call 记录被误当构造器跑），调用方回退到构造级联。`prototype` 作为 `new_target` 解析出的实例 `[[Prototype]]` 借用地穿进环境。错误在 `callConstructRecordImpl` 末尾**先 `materializeRuntimeError` 建好 Error 并装 pending，再把 err 原样返回**，所以调用方拿到 error 时异常已经在位。调用方：`src/exec/string_ops.zig:232`/999、`src/exec/function_ops.zig:124` 等。
 
 ### `callConstructRecordInNativeScope` (`src/exec/builtin_dispatch.zig:1314`)
 
 - **签名**：`pub fn callConstructRecordInNativeScope( ctx: *core.JSContext, output: ?*std.Io.Writer, global: ?*core.Object, globals: []core.global_slots.Slot, func_obj: ?*core.Object, native_ref: core.function.NativeBuiltinRef, prototype: ?*core.Object, args: []const core.JSValue, caller_function: ?*const Bytecode, caller_frame: ?*Frame, ) HostError!?core.JSValue`。
 - **作用**：同 `callConstructRecord`，但调用方已持有覆盖参数强制转换的 `NativeBacktraceScope`。
 - **实现**：转 `callConstructRecordImpl(false, ...)`，不再推第二个 native 帧，也不重复预检。
-- **所有权 / 错误 / 调用**：`push_native_frame = false` 的转发：**不 preflight、不压 backtrace 帧**，因为调用方已经持有一个覆盖其可观察参数强制转换的 `NativeBacktraceScope`，重复压会造出两层 native 帧。其余语义（miss 的 null、`prototype` 借用、错误先 materialize 再上抛）与 `callConstructRecord` 一致。3 个调用方：`src/exec/regexp_fastpath.zig:44`、`src/exec/call_runtime.zig:1818`（String 构造）与 1916（Date 构造）。
+- **所有权 / 错误 / 调用**：`push_native_frame = false` 的转发：**不 preflight、不压 backtrace 帧**，因为调用方已经持有一个覆盖其可观察参数强制转换的 `NativeBacktraceScope`，重复压会造出两层 native 帧。其余语义（miss 的 null、`prototype` 借用、错误先 materialize 再上抛）与 `callConstructRecord` 一致。3 个调用方：`src/exec/regexp_ops.zig:44`、`src/exec/call_runtime.zig:1818`（String 构造）与 1916（Date 构造）。
 
 ### `callConstructRecordImpl` (`src/exec/builtin_dispatch.zig:1329`)
 
@@ -1469,14 +1469,14 @@ typed 桥：exec 的 native 调用点 ↔ `rt.internal_builtins`。QuickJS 对�
 - **签名**：`pub fn callerBytecode(call: NativeCall) ?*const Bytecode`。
 - **作用**：从 `NativeCall` 取回 VM 调用方的字节码函数。
 - **实现**：返回 `call.caller_function`。
-- **所有权 / 错误 / 调用**：无：读 `call.caller_function` 字段，不分配、无 error set。返回的是**借用**的 `*const Bytecode`，只在本次 native 调用期间有效。30 个调用点分布在 18 个 `*_ops.zig`：`src/exec/object_builtin_ops.zig:277`、`src/exec/string_builtin_ops.zig:629`/674、`src/exec/date_ops.zig:485`、`src/exec/number_ops.zig:108`、`src/exec/primitive_ops.zig:142`/180/190/199、`src/exec/promise_builtin_ops.zig:102`/125/158 等，取来都是为了往下传给需要 caller 上下文的 VM 调用。
+- **所有权 / 错误 / 调用**：无：读 `call.caller_function` 字段，不分配、无 error set。返回的是**借用**的 `*const Bytecode`，只在本次 native 调用期间有效。30 个调用点分布在 18 个 `*_ops.zig`：`src/exec/object_ops.zig:277`、`src/exec/string_ops.zig:629`/674、`src/exec/date_ops.zig:485`、`src/exec/number_ops.zig:108`、`src/exec/value_ops.zig:142`/180/190/199、`src/exec/promise_ops.zig:102`/125/158 等，取来都是为了往下传给需要 caller 上下文的 VM 调用。
 
 ### `callerFrame` (`src/exec/builtin_dispatch.zig:1394`)
 
 - **签名**：`pub fn callerFrame(call: NativeCall) ?*Frame`。
 - **作用**：从 `NativeCall` 取回 VM 调用方的帧。
 - **实现**：返回 `call.caller_frame`。
-- **所有权 / 错误 / 调用**：无：读 `call.caller_frame` 字段，不分配、无 error set；返回借用的 `*Frame`，同样只在本次调用期间有效（帧在 VM 栈上）。同样 30 个调用点、18 个文件，与 `callerBytecode` 逐处成对出现：`src/exec/function_ops.zig:173`/342/362、`src/exec/array_builtin_ops.zig:354`/379/513、`src/exec/buffer_ops.zig:270`、`src/exec/object_builtin_ops.zig:278` 等。
+- **所有权 / 错误 / 调用**：无：读 `call.caller_frame` 字段，不分配、无 error set；返回借用的 `*Frame`，同样只在本次调用期间有效（帧在 VM 栈上）。同样 30 个调用点、18 个文件，与 `callerBytecode` 逐处成对出现：`src/exec/function_ops.zig:173`/342/362、`src/exec/array_ops.zig:354`/379/513、`src/exec/buffer_ops.zig:270`、`src/exec/object_ops.zig:278` 等。
 
 ### `callerResultIsDropped` (`src/exec/builtin_dispatch.zig:1403`)
 
@@ -1512,7 +1512,7 @@ Number/BigInt 作函数调用、parseInt/parseFloat、DataView 参数、WeakRef/
 - **签名**：`pub fn bigIntAsN( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, unsigned: bool, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !core.JSValue`。
 - **作用**：`BigInt.asIntN` / `asUintN` 的共用体，`unsigned` 选其一。
 - **实现**：第一个参数经 ToPrimitive→ToNumber 取 bits：NaN 当 0，非有限 / 负数 / 超过 2^53-1 抛 RangeError，BigInt 或 Symbol 抛 TypeError；第二个参数经 `toBigIntFromPrimitive` 后交给 `value_ops.asN`。`caller_function` / `caller_frame` 未用。
-- **所有权 / 错误 / 调用**：`caller_function` / `caller_frame` 两个形参被 `_ =` 丢弃，只为与域内其它记录签名对齐。不分配持久对象、不建根。错误集较宽：`error.TypeError`（bits 参数是 BigInt 或 Symbol）、`error.RangeError`（bits 非有限 / 为负 / 超过 2^53-1）、`toPrimitiveForNumber` 冒上来的 `error.JSException`；NaN 按 0 处理而不是报错。错误一路 `try` 上抛到 VM 的 native 终端（`builtin_dispatch.nativeFromHostError` → `materializeRuntimeError`）才建 Error 对象、装 pending exception 并换成哨兵，本函数自己不碰 pending。 两个调用方都在 `src/exec/primitive_ops.zig`（174 `BigInt.asIntN`、184 `BigInt.asUintN`，靠 `unsigned` 参数区分）。
+- **所有权 / 错误 / 调用**：`caller_function` / `caller_frame` 两个形参被 `_ =` 丢弃，只为与域内其它记录签名对齐。不分配持久对象、不建根。错误集较宽：`error.TypeError`（bits 参数是 BigInt 或 Symbol）、`error.RangeError`（bits 非有限 / 为负 / 超过 2^53-1）、`toPrimitiveForNumber` 冒上来的 `error.JSException`；NaN 按 0 处理而不是报错。错误一路 `try` 上抛到 VM 的 native 终端（`builtin_dispatch.nativeFromHostError` → `materializeRuntimeError`）才建 Error 对象、装 pending exception 并换成哨兵，本函数自己不碰 pending。 两个调用方都在 `src/exec/value_ops.zig`（174 `BigInt.asIntN`、184 `BigInt.asUintN`，靠 `unsigned` 参数区分）。
 
 ### `toBigIntFromPrimitive` (`src/exec/builtin_glue.zig:125`)
 
@@ -1533,7 +1533,7 @@ Number/BigInt 作函数调用、parseInt/parseFloat、DataView 参数、WeakRef/
 - **签名**：`pub fn toNumberLikeArgument( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue, ) !core.JSValue`。
 - **作用**：把一个参数按 `ToNumber` 归一成 Number 值（BigInt 抛 TypeError），供 `String.prototype` 里那批带数值参数的方法（`string_ops.stringNumericArgsMethod` 统一分发的 `charAt` / `slice` / `substring` / `substr` / `repeat` …，以及 `charCodeAt` 的下标）在整数快路径不命中时做那次可观察的强制转换。
 - **实现**：三步：`toPrimitiveForNumber(ctx, output, global, value)` 先走 `ToPrimitive`（hint number，可能回调用户的 `valueOf` / `@@toPrimitive`）；结果是 BigInt 就 `error.TypeError`（注意与 `globalIsNaN` 那条路径不同，这里**不**拒绝 Symbol，Symbol 会在 `toNumberValue` 里报错）；最后 `value_ops.toNumberValue` 后经 `numberValue` / `numberToValue` 归一成规范的 Number 表示，取不到数值时落 NaN。
-- **所有权 / 错误 / 调用**：不分配、不建根；非数字结果一律归一成 NaN（`numberValue(...) orelse nan`）。错误：`error.TypeError`（原始值是 BigInt）+ `toPrimitiveForNumber` 跑用户 `valueOf` 时冒出的 `error.JSException`。错误一路 `try` 上抛到 VM 的 native 终端（`builtin_dispatch.nativeFromHostError` → `materializeRuntimeError`）才建 Error 对象、装 pending exception 并换成哨兵，本函数自己不碰 pending。 3 个调用方跨两个文件：`src/exec/string_builtin_ops.zig:568`（用 `catch |err| return @errorCast(err)` 收窄错误集）、`src/exec/string_ops.zig:3826`，以及 `string_ops.zig:100` 的 `const` 别名。
+- **所有权 / 错误 / 调用**：不分配、不建根；非数字结果一律归一成 NaN（`numberValue(...) orelse nan`）。错误：`error.TypeError`（原始值是 BigInt）+ `toPrimitiveForNumber` 跑用户 `valueOf` 时冒出的 `error.JSException`。错误一路 `try` 上抛到 VM 的 native 终端（`builtin_dispatch.nativeFromHostError` → `materializeRuntimeError`）才建 Error 对象、装 pending exception 并换成哨兵，本函数自己不碰 pending。 3 个调用方跨两个文件：`src/exec/string_ops.zig:568`（用 `catch |err| return @errorCast(err)` 收窄错误集）、`src/exec/string_ops.zig:3826`，以及 `string_ops.zig:100` 的 `const` 别名。
 
 ### `globalParseInt` (`src/exec/builtin_glue.zig:172`)
 
@@ -1554,7 +1554,7 @@ Number/BigInt 作函数调用、parseInt/parseFloat、DataView 参数、WeakRef/
 - **签名**：`pub fn arrayNativeRecord( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, function_object: ?*core.Object, id: u32, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !?core.JSValue`。
 - **作用**：`.array` domain 的记录分发胶水：Array 的静态方法在此，其余转给 `array_ops` 的原型方法枢纽。
 - **实现**：按 `id` 分支：`isArray` 就地判定；`from` / `fromAsync` / `of` 需要已物化的函数对象（为 null 则 TypeError）；其余转 `array_ops.arrayPrototypeNativeRecord`。push/pop/splice 有各自的记录函数，不走这里。调用方的 bytecode/frame 一路转发，保住内联缓存提示。
-- **所有权 / 错误 / 调用**：纯转发 hub，自身不分配、不建根；`caller_function` / `caller_frame` 原样往下传（注释：让表路径保住内联缓存提示）。返回 `!?core.JSValue` 的 null 表示 id 不归本域，调用方继续它的兜底。错误：三个 Array 静态方法在 `function_object == null` 时 `error.TypeError`（注释称之为「corrupt null 到达 hub 的 TypeError」），其余全来自被转发的 `array_ops.*`。错误一路 `try` 上抛到 VM 的 native 终端（`builtin_dispatch.nativeFromHostError` → `materializeRuntimeError`）才建 Error 对象、装 pending exception 并换成哨兵，本函数自己不碰 pending。 唯一调用方 `src/exec/array_builtin_ops.zig:345`。注意 push/pop 已经有专用记录函数，**不走这条 hub**。
+- **所有权 / 错误 / 调用**：纯转发 hub，自身不分配、不建根；`caller_function` / `caller_frame` 原样往下传（注释：让表路径保住内联缓存提示）。返回 `!?core.JSValue` 的 null 表示 id 不归本域，调用方继续它的兜底。错误：三个 Array 静态方法在 `function_object == null` 时 `error.TypeError`（注释称之为「corrupt null 到达 hub 的 TypeError」），其余全来自被转发的 `array_ops.*`。错误一路 `try` 上抛到 VM 的 native 终端（`builtin_dispatch.nativeFromHostError` → `materializeRuntimeError`）才建 Error 对象、装 pending exception 并换成哨兵，本函数自己不碰 pending。 唯一调用方 `src/exec/array_ops.zig:345`。注意 push/pop 已经有专用记录函数，**不走这条 hub**。
 
 ### `bufferNativeRecord` (`src/exec/builtin_glue.zig:243`)
 
@@ -1568,7 +1568,7 @@ Number/BigInt 作函数调用、parseInt/parseFloat、DataView 参数、WeakRef/
 - **签名**：`pub fn dataViewConstructorArgs( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, ) !DataViewConstructorArgs`。
 - **作用**：解析并校验 `new DataView(buffer, byteOffset, length)` 的参数。
 - **实现**：四步：`args.len < 1` 即 `error.TypeError`；`core.typed_array.dataViewRequireArrayBuffer(args[0])` 要求第一参是 ArrayBuffer（含 SharedArrayBuffer）；`byte_offset` 有第二参就 `typedArrayConstructToIndex` 做 ToIndex（会跑用户 `valueOf`），否则 0；`view_length` 只在有第三参**且不是 undefined** 时才 ToIndex，否则 null 表示「跟随 buffer 长度」。最后 `dataViewValidateConstructorRange` 一次性校验 offset/length 落在 buffer 内。返回的结构体额外带一个 `has_offset`（`args.len >= 2`），调用方用它区分「显式传了 0」与「没传」。
-- **所有权 / 错误 / 调用**：返回的是纯值结构体（两个整数加一个 bool），不分配、不建根。错误：`error.TypeError`（缺参 / 非 ArrayBuffer）、`error.RangeError`（范围校验失败）、ToIndex 跑用户代码冒出的 `error.JSException`。错误一路 `try` 上抛到 VM 的 native 终端（`builtin_dispatch.nativeFromHostError` → `materializeRuntimeError`）才建 Error 对象、装 pending exception 并换成哨兵，本函数自己不碰 pending。 两个调用方：`src/exec/call_runtime.zig:2331` 与 `src/exec/class_init_ops.zig:100`（后者经 47 行的 `const` 别名）。
+- **所有权 / 错误 / 调用**：返回的是纯值结构体（两个整数加一个 bool），不分配、不建根。错误：`error.TypeError`（缺参 / 非 ArrayBuffer）、`error.RangeError`（范围校验失败）、ToIndex 跑用户代码冒出的 `error.JSException`。错误一路 `try` 上抛到 VM 的 native 终端（`builtin_dispatch.nativeFromHostError` → `materializeRuntimeError`）才建 Error 对象、装 pending exception 并换成哨兵，本函数自己不碰 pending。 两个调用方：`src/exec/call_runtime.zig:2331` 与 `src/exec/function_ops.zig:100`（后者经 47 行的 `const` 别名）。
 
 ### `dataViewAccessor` (`src/exec/builtin_glue.zig:328`)
 
@@ -1652,21 +1652,21 @@ Number/BigInt 作函数调用、parseInt/parseFloat、DataView 参数、WeakRef/
 - **签名**：`pub fn symbolFor( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !core.JSValue`。
 - **作用**：`Symbol.for(key)`：把参数字符串化后到 runtime 的全局 symbol 注册表里查/建对应 symbol（`keyFor` 是隔壁的 `symbolKeyFor`，well-known symbol 的安装在 `standard_globals.defineWellKnownSymbol`）。
 - **实现**：有参数就 `toStringBytesForSymbol` 取字节，无参数则 dup 出 "undefined"；`defer` 释放该缓冲后走 `ctx.runtime.globalSymbolValue(key)`。
-- **所有权 / 错误 / 调用**：⚠️ **本册里唯一一个真有堆上局部缓冲的函数**：`key` 要么来自 `toStringBytesForSymbol`（被调方分配），要么是 `allocator.dupe(u8, "undefined")`，两条路都由本函数 `defer ctx.runtime.memory.allocator.free(key)` 释放。返回的 symbol 值来自 `rt.globalSymbolValue(key)`——全局 symbol 注册表持有它，不是新所有权。错误：`toStringBytesForSymbol` 跑用户 `toString` 时的 `error.JSException`、Symbol 入参的 `error.TypeError`，加分配失败。错误一路 `try` 上抛到 VM 的 native 终端（`builtin_dispatch.nativeFromHostError` → `materializeRuntimeError`）才建 Error 对象、装 pending exception 并换成哨兵，本函数自己不碰 pending。 唯一调用方 `src/exec/primitive_ops.zig:194`（`Symbol.for`）。
+- **所有权 / 错误 / 调用**：⚠️ **本册里唯一一个真有堆上局部缓冲的函数**：`key` 要么来自 `toStringBytesForSymbol`（被调方分配），要么是 `allocator.dupe(u8, "undefined")`，两条路都由本函数 `defer ctx.runtime.memory.allocator.free(key)` 释放。返回的 symbol 值来自 `rt.globalSymbolValue(key)`——全局 symbol 注册表持有它，不是新所有权。错误：`toStringBytesForSymbol` 跑用户 `toString` 时的 `error.JSException`、Symbol 入参的 `error.TypeError`，加分配失败。错误一路 `try` 上抛到 VM 的 native 终端（`builtin_dispatch.nativeFromHostError` → `materializeRuntimeError`）才建 Error 对象、装 pending exception 并换成哨兵，本函数自己不碰 pending。 唯一调用方 `src/exec/value_ops.zig:194`（`Symbol.for`）。
 
 ### `symbolKeyFor` (`src/exec/builtin_glue.zig:514`)
 
 - **签名**：`pub fn symbolKeyFor(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue`。
 - **作用**：`Symbol.keyFor(sym)`：反向查询——参数必须是 Symbol，若它是 `Symbol.for` 登记进全局注册表的那种就返回它的键字符串，否则返回 undefined（正向的 `Symbol.for` 是上面的 `symbolFor`）。
 - **实现**：缺参用 undefined；参数必须是 Symbol（`asSymbolAtom` 失败即 TypeError）；注册表里查不到返回 undefined，否则把键字符串造成 JS 字符串。
-- **所有权 / 错误 / 调用**：`registryKey` 返回的是 atom 表里的**借用**字节切片，`createStringValue` 拷成新字符串值再返回；不建根。错误只有 `error.TypeError`（参数不是 Symbol；缺参数时是 undefined，同样 TypeError）与建字符串的分配失败——**不在注册表里不是错误**，返回 undefined。错误一路 `try` 上抛到 VM 的 native 终端（`builtin_dispatch.nativeFromHostError` → `materializeRuntimeError`）才建 Error 对象、装 pending exception 并换成哨兵，本函数自己不碰 pending。 唯一调用方 `src/exec/primitive_ops.zig:203`（`Symbol.keyFor`）。
+- **所有权 / 错误 / 调用**：`registryKey` 返回的是 atom 表里的**借用**字节切片，`createStringValue` 拷成新字符串值再返回；不建根。错误只有 `error.TypeError`（参数不是 Symbol；缺参数时是 undefined，同样 TypeError）与建字符串的分配失败——**不在注册表里不是错误**，返回 undefined。错误一路 `try` 上抛到 VM 的 native 终端（`builtin_dispatch.nativeFromHostError` → `materializeRuntimeError`）才建 Error 对象、装 pending exception 并换成哨兵，本函数自己不碰 pending。 唯一调用方 `src/exec/value_ops.zig:203`（`Symbol.keyFor`）。
 
 ### `createDataFunction` (`src/exec/builtin_glue.zig:523`)
 
 - **签名**：`pub fn createDataFunction(rt: *core.JSRuntime, global: *core.Object, name: []const u8, length: i32) !core.JSValue`。
 - **作用**：C_FUNCTION_DATA 的类比物：造一个语义上使用调用方 realm（而非载体构造 realm）的内部回调函数。
 - **实现**：从 global 取 Function.prototype（缺则 `error.InvalidBuiltinRegistry`），再 `core.function.nativeDataFunctionWithPrototype`。
-- **所有权 / 错误 / 调用**：返回**新建**的 data-function 值，所有权交给调用方（各调用点都立刻把它塞进 promise reaction / disposable 回调槽里）。`function_proto` 是从 global 借出的。错误：`functionPrototypeFromGlobal` 拿不到即 `error.InvalidBuiltinRegistry`，加分配失败。语义要点写在注释里——C_FUNCTION_DATA 类比，这类回调**用调用方 realm 而不是载体建立时的 realm**。错误一路 `try` 上抛到 VM 的 native 终端（`builtin_dispatch.nativeFromHostError` → `materializeRuntimeError`）才建 Error 对象、装 pending exception 并换成哨兵，本函数自己不碰 pending。 8 个调用方跨 4 个文件：`src/exec/promise_ops.zig:1849`/2049/3291/3444/3490、`src/exec/array_ops.zig:3999`、`src/exec/disposable_ops.zig:539`、`src/exec/async_generator.zig:180`。
+- **所有权 / 错误 / 调用**：返回**新建**的 data-function 值，所有权交给调用方（各调用点都立刻把它塞进 promise reaction / disposable 回调槽里）。`function_proto` 是从 global 借出的。错误：`functionPrototypeFromGlobal` 拿不到即 `error.InvalidBuiltinRegistry`，加分配失败。语义要点写在注释里——C_FUNCTION_DATA 类比，这类回调**用调用方 realm 而不是载体建立时的 realm**。错误一路 `try` 上抛到 VM 的 native 终端（`builtin_dispatch.nativeFromHostError` → `materializeRuntimeError`）才建 Error 对象、装 pending exception 并换成哨兵，本函数自己不碰 pending。 8 个调用方跨 4 个文件：`src/exec/promise_ops.zig:1849`/2049/3291/3444/3490、`src/exec/array_ops.zig:3999`、`src/exec/disposable_ops.zig:539`、`src/exec/promise_ops.zig:180`。
 
 ### `constructCollectionFromVm` (`src/exec/builtin_glue.zig:528`)
 
@@ -1768,7 +1768,7 @@ dense 前缀 + sparse 尾：空洞不占 `NativeEntry`。另有枚举→记录�
 - **所有权 / 错误 / 调用**：与 `recordTable` 的 entries→records 方向相反；两者一起构成连通性门。
 
 
-## `src/exec/open_bindings.zig` — 开绑定表
+## `src/exec/frame.zig` — 开绑定表
 
 帧局部/参数的开 `VarRef` 表，按下标记录每个捕获绑定当前唯一的活 cell。`close` 从帧存储摘下 cell（身份不变）。
 
@@ -1779,21 +1779,21 @@ dense 前缀 + sparse 尾：空洞不占 `NativeEntry`。另有枚举→记录�
 - `Table.cells`：`[]?*VarRef`，按下标与帧槽对应。（原 `Flags` 只服务 `acquire`，一并删除。）
 
 
-### `Table.close` (`src/exec/open_bindings.zig:16`)
+### `Table.close` (`src/exec/frame.zig:16`)
 
 - **签名**：`pub fn close(self: *Table, rt: anytype, binding_index: u16) !void`。
 - **作用**：关闭一个下标上的开绑定：从表摘下并 `cell.close`。
 - **实现**：越界 InvalidBytecode；空槽直接返回。
 - **所有权 / 错误 / 调用**：表侧引用释放；cell 身份仍可被闭包持有。
 
-### `Table.closeAll` (`src/exec/open_bindings.zig:24`)
+### `Table.closeAll` (`src/exec/frame.zig:24`)
 
 - **签名**：`pub fn closeAll(self: *Table, rt: anytype) void`。
 - **作用**：关闭表中全部开 cell。
 - **实现**：遍历 `cells`，非空则置 null 并 `close`。
 - **所有权 / 错误 / 调用**：帧销毁路径。无 error。
 
-### `Table.hasOpen` (`src/exec/open_bindings.zig:32`)
+### `Table.hasOpen` (`src/exec/frame.zig:32`)
 
 - **签名**：`pub fn hasOpen(self: *const Table) bool`。
 - **作用**：是否还有未关闭的开绑定。
@@ -1802,6 +1802,6 @@ dense 前缀 + sparse 尾：空洞不占 `NativeEntry`。另有枚举→记录�
 
 ## 覆盖核对
 
-- 清单函数数: 244（`src/exec/builtin_dispatch.zig` 77 + `src/exec/builtin_glue.zig` 35 + `src/exec/internal_builtins.zig` 3 + `src/exec/open_bindings.zig` 3 + `src/exec/standard_globals.zig` 126）
+- 清单函数数: 244（`src/exec/builtin_dispatch.zig` 77 + `src/exec/builtin_glue.zig` 35 + `src/exec/internal_builtins.zig` 3 + `src/exec/frame.zig` 3 + `src/exec/standard_globals.zig` 126）
 - 本文标题覆盖: 244
 - 未覆盖: 无

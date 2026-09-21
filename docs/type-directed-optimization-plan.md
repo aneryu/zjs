@@ -141,7 +141,7 @@ JSC-jitless 5096，main 上见 2026-08-25 合并 commit；原始快照 commit
    DeltaBlue 43.6% / Typescript 36.5% 的采样时间。annotate 显示
    23.3% 周期烧在 shape 哈希桶装载后的 load-use stall——每次执行
    重付探测，own-hit 全路径 47 指令（`src/exec/tailcall_dispatch.zig:3415`
-   → `src/exec/vm_property_field.zig:346-468`）。
+   → `src/exec/vm_property.zig:346-468`）。
 2. **调用/帧第二**（10-38%），超量清单已逐条对账（Entry/arena/预算
    记账/Vm 6 标量重发布，`src/exec/inline_calls.zig:1967-2098`）。
 3. **纯解释模式的机制上界已被三家实证**：JSC LLInt（structureID 单

@@ -711,7 +711,7 @@
 - **签名**：`pub fn materializeMappedArgumentsDescriptorValueForVm( rt: *core.JSRuntime, object: *core.Object, key: core.Atom, desc: *core.Descriptor, ) !void`。
 - **作用**：VM 包装，永不失败。
 - **实现**：调上一函数。
-- **所有权 / 错误 / 调用**：就地改调用方栈上的 `desc`：把 mapped arguments 的 VarRef cell 当前值填进 `desc.value` 并置 `value_present`，值是借用（不 retain、不建根）。包装的 `!void` 只为统一 VM 侧调用形状，内层 `materializeMappedArgumentsDescriptorValue` 实际不会失败。调用方 4 处：`src/js_context.zig:553`、`src/exec/object_builtin_ops.zig:1162`/`1217`、`src/exec/object_ops.zig:3352`。
+- **所有权 / 错误 / 调用**：就地改调用方栈上的 `desc`：把 mapped arguments 的 VarRef cell 当前值填进 `desc.value` 并置 `value_present`，值是借用（不 retain、不建根）。包装的 `!void` 只为统一 VM 侧调用形状，内层 `materializeMappedArgumentsDescriptorValue` 实际不会失败。调用方 4 处：`src/js_context.zig:553`、`src/exec/object_ops.zig:1162`/`1217`、`src/exec/object_ops.zig:3352`。
 
 ### `descriptorFromObjectBare` (`src/exec/call.zig:2272`)
 

@@ -162,7 +162,7 @@ ECMAScript 正则编译器 + QuickJS `libregexp.c` 风格回溯执行器。上�
 - **签名**：`pub fn groupName(bytecode: []const u8, one_based_capture_index: usize) ?[]const u8`。
 - **作用**：公开包装。
 - **实现**：转私有。
-- **所有权 / 错误 / 调用**：`regexp_adapter.groupName`（`src/exec/regexp_adapter.zig:63`）转发；`Compiled.groupName` 是并列的方法版，直接走私有函数。
+- **所有权 / 错误 / 调用**：`regexp_adapter.groupName`（`src/exec/regexp_ops.zig:63`）转发；`Compiled.groupName` 是并列的方法版，直接走私有函数。
 
 ## `Compiled` 与执行入口
 
@@ -178,14 +178,14 @@ ECMAScript 正则编译器 + QuickJS `libregexp.c` 风格回溯执行器。上�
 - **签名**：`pub fn captureCount(self: Compiled) usize`。
 - **作用**：方法版。
 - **实现**：`captureCountFromBytecode(self.bytecode)`。
-- **所有权 / 错误 / 调用**：按值接收 `Compiled`，只复制切片头、不取 `bytecode` 的所有权（仍由调用方持有的 `Compiled.deinit` 释放）；只读字节码头部，不分配、无 error。唯一的捕获数入口：调用方 `src/exec/regexp_fastpath.zig:797`、`src/exec/string_ops.zig:1491`（并列的裸切片版 `captureCount` 已删）。
+- **所有权 / 错误 / 调用**：按值接收 `Compiled`，只复制切片头、不取 `bytecode` 的所有权（仍由调用方持有的 `Compiled.deinit` 释放）；只读字节码头部，不分配、无 error。唯一的捕获数入口：调用方 `src/exec/regexp_ops.zig:797`、`src/exec/string_ops.zig:1491`（并列的裸切片版 `captureCount` 已删）。
 
 ### `Compiled.allocCount` (`src/libs/regexp.zig:416`)
 
 - **签名**：`pub fn allocCount(self: Compiled) usize`。
 - **作用**：方法版 slot 数。
 - **实现**：转私有。
-- **所有权 / 错误 / 调用**：同 `captureCount`：借用字节码、不分配、无 error。唯一的 slot 数入口：调用方 `src/exec/regexp_fastpath.zig:769`、`src/exec/string_ops.zig:1490`。
+- **所有权 / 错误 / 调用**：同 `captureCount`：借用字节码、不分配、无 error。唯一的 slot 数入口：调用方 `src/exec/regexp_ops.zig:769`、`src/exec/string_ops.zig:1490`。
 
 ### `Compiled.groupName` (`src/libs/regexp.zig:420`)
 
@@ -252,7 +252,7 @@ ECMAScript 正则编译器 + QuickJS `libregexp.c` 风格回溯执行器。上�
 - **签名**：`pub fn testMatchTrustedWithOptions(allocator: std.mem.Allocator, bytecode: []const u8, input: Input, start_index: usize, options: ExecOptions) !bool`。
 - **作用**：只要是否匹配。
 - **实现**：trusted 执行，`== .match`。
-- **所有权 / 错误 / 调用**：经 `regexp_adapter.testOnStringFromIndex` 服务 `RegExp.prototype.test` 快路径（`src/exec/regexp_fastpath.zig:345`）。
+- **所有权 / 错误 / 调用**：经 `regexp_adapter.testOnStringFromIndex` 服务 `RegExp.prototype.test` 快路径（`src/exec/regexp_ops.zig:345`）。
 
 ## `ExecState`：PC、回溯、读字符
 

@@ -10,14 +10,14 @@
 //! concatenation at quickjs.c and replacement at quickjs.c.
 
 const std = @import("std");
-const iterator_slots = @import("iterator_slots.zig");
+const iterator_slots = @import("iterator_ops.zig");
 
 const bytecode = @import("../bytecode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
 const string_id_lookup = core.host_function.builtin_method_id_lookup.string;
-const regexp_adapter = @import("regexp_adapter.zig");
+const regexp_adapter = @import("regexp_ops.zig");
 const unicode_lib = @import("../libs/unicode.zig");
 const call_mod = @import("call.zig");
 const exception_ops = @import("exception_ops.zig");
@@ -37,10 +37,10 @@ const call_runtime = @import("call_runtime.zig");
 const call_site_mod = @import("call_site.zig");
 const array_ops = @import("array_ops.zig");
 const builtin_glue = @import("builtin_glue.zig");
-const coercion_ops = @import("coercion_ops.zig");
-const error_stack_ops = @import("error_stack_ops.zig");
+const coercion_ops = @import("value_ops.zig");
+const error_stack_ops = @import("exception_ops.zig");
 const object_ops = @import("object_ops.zig");
-const regexp_fastpath = @import("regexp_fastpath.zig");
+const regexp_fastpath = @import("regexp_ops.zig");
 const RegExpCapture = call_runtime.RegExpCapture;
 const ValueSliceRoot = array_ops.ValueSliceRoot;
 const appendBacktraceFunctionName = error_stack_ops.appendBacktraceFunctionName;
@@ -3962,4 +3962,1998 @@ fn stringCreateHtml(
     try appendAsciiUnits(ctx.runtime, &out, tag);
     try appendAsciiUnits(ctx.runtime, &out, ">");
     return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
+}
+
+
+// ----- merged from string_builtin_ops.zig -----
+// String constructor/prototype records and their direct builtin bodies.
+//
+// Receiver and argument values are borrowed for ordinary calls; returned
+// JSValues are owned. Helpers explicitly named `Owned` consume their inputs,
+// and temporary flattened strings or buffers are released locally. Realm- and
+// VM-aware string/RegExp integration stays in `string_ops.zig`; the record/id
+// seam here lets direct leaf handlers avoid that wider dependency. QuickJS
+// coordinates include `js_string_concat` at quickjs.c, split at
+// quickjs.c, and repeat at quickjs.c.
+const number_format = @import("../libs/number_format.zig");
+const native_legacy = @import("builtin_dispatch.zig");
+const exceptions = @import("exception_ops.zig");
+const HostError = exceptions.HostError;
+const NativeCall = builtin_dispatch.NativeCall;
+const AppendStringError = core.value_string.AppendStringError;
+const TrimMode = enum { start, end, both };
+pub const StaticMethod = core.host_function.builtin_method_ids.string.StaticMethod;
+pub const ConstructorMethod = core.host_function.builtin_method_ids.string.ConstructorMethod;
+pub const PrototypeMethod = core.host_function.builtin_method_ids.string.PrototypeMethod;
+pub const legacy_split_method_id = string_id_lookup.legacy_split_method_id;
+pub const legacy_normalize_method_id = string_id_lookup.legacy_normalize_method_id;
+pub const legacy_search_method_id = string_id_lookup.legacy_search_method_id;
+pub const legacy_match_method_id = string_id_lookup.legacy_match_method_id;
+pub const legacy_replace_all_method_id = string_id_lookup.legacy_replace_all_method_id;
+pub const legacy_match_all_method_id = string_id_lookup.legacy_match_all_method_id;
+pub const staticMethodId = string_id_lookup.staticMethodId;
+pub const prototypeMethodId = string_id_lookup.prototypeMethodId;
+pub const decodePrototypeMethodId = string_id_lookup.decodePrototypeMethodId;
+pub const encodePrototypeMethodId = string_id_lookup.encodePrototypeMethodId;
+pub const internal_entries = stringEntries: {
+    const Entry = core.host_function.InternalEntry;
+    break :stringEntries [_]Entry{
+        // Constructor + statics. The `String` record serves both `String(...)`
+        // (call path) and `new String(...)` (construct path), so it is marked
+        // construct-capable; `stringCall` branches on `is_constructor`.
+        stringConstructorEntry("String", 1, @intFromEnum(ConstructorMethod.call)),
+        stringExecDirectEntry("fromCharCode", 1, @intFromEnum(StaticMethod.from_char_code), &stringFromCharCodeCall, &stringFromCharCodeDirect),
+        stringEntry("fromCodePoint", 1, @intFromEnum(StaticMethod.from_code_point)),
+        stringEntry("raw", 1, @intFromEnum(StaticMethod.raw)),
+        // Prototype methods that carry a `(.string, id)` native record id
+        // (the subset `prototypeMethodId` maps and `decodePrototypeMethodId`
+        // decodes). The remaining String.prototype methods (toString, valueOf,
+        // the AnnexB html helpers, …) are installed as plain name-dispatched
+        // native functions and never reach record dispatch.
+        stringPrimLeafEntry("charAt", 1, @intFromEnum(PrototypeMethod.char_at), &stringCall, null, .string_i32_to_string, &stringCharAtLeaf),
+        stringEntry("substring", 2, @intFromEnum(PrototypeMethod.substring)),
+        stringDirectEntry("toUpperCase", 0, @intFromEnum(PrototypeMethod.to_upper_case), &stringCaseCall),
+        stringDirectEntry("toLowerCase", 0, @intFromEnum(PrototypeMethod.to_lower_case), &stringCaseCall),
+        stringEntry("indexOf", 1, @intFromEnum(PrototypeMethod.index_of)),
+        stringEntry("includes", 1, @intFromEnum(PrototypeMethod.includes)),
+        stringEntry("startsWith", 1, @intFromEnum(PrototypeMethod.starts_with)),
+        stringEntry("endsWith", 1, @intFromEnum(PrototypeMethod.ends_with)),
+        stringEntry("trim", 0, @intFromEnum(PrototypeMethod.trim)),
+        stringDirectEntry("concat", 1, @intFromEnum(PrototypeMethod.concat), &stringConcatCall),
+        stringEntry("trimStart", 0, @intFromEnum(PrototypeMethod.trim_start)),
+        stringEntry("trimEnd", 0, @intFromEnum(PrototypeMethod.trim_end)),
+        stringEntry("split", 2, @intFromEnum(PrototypeMethod.split)),
+        stringEntry("lastIndexOf", 1, @intFromEnum(PrototypeMethod.last_index_of)),
+        stringPrimLeafEntry("charCodeAt", 1, @intFromEnum(PrototypeMethod.char_code_at), &stringCharCodeAtCall, &stringCharCodeAtDirect, .string_i32_to_i32, &stringCharCodeAtLeaf),
+        stringPrimLeafEntry("at", 1, @intFromEnum(PrototypeMethod.at), &stringAtCall, null, .string_i32_to_string, &stringAtLeaf),
+        stringPrimLeafEntry("codePointAt", 1, @intFromEnum(PrototypeMethod.code_point_at), &stringCodePointAtCall, null, .string_i32_to_i32, &stringCodePointAtLeaf),
+        stringEntry("slice", 2, @intFromEnum(PrototypeMethod.slice)),
+        stringEntry("repeat", 1, @intFromEnum(PrototypeMethod.repeat)),
+        stringEntry("padStart", 1, @intFromEnum(PrototypeMethod.pad_start)),
+        stringEntry("padEnd", 1, @intFromEnum(PrototypeMethod.pad_end)),
+        stringEntry("localeCompare", 1, @intFromEnum(PrototypeMethod.locale_compare)),
+        stringEntry("normalize", 0, @intFromEnum(PrototypeMethod.normalize)),
+        stringEntry("isWellFormed", 0, @intFromEnum(PrototypeMethod.is_well_formed)),
+        stringEntry("toWellFormed", 0, @intFromEnum(PrototypeMethod.to_well_formed)),
+        stringEntry("search", 1, @intFromEnum(PrototypeMethod.search)),
+        stringEntry("match", 1, @intFromEnum(PrototypeMethod.match)),
+        stringEntry("replace", 2, @intFromEnum(PrototypeMethod.replace)),
+        stringEntry("replaceAll", 2, @intFromEnum(PrototypeMethod.replace_all)),
+        stringEntry("matchAll", 1, @intFromEnum(PrototypeMethod.match_all)),
+        // The String Iterator's `next` method.
+        stringEntry("next", 0, @intFromEnum(PrototypeMethod.iterator_next)),
+    };
+};
+fn stringEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
+    return stringEntryWithHandler(name, length, id, &stringCall);
+}
+
+fn stringDirectEntry(
+    comptime name: []const u8,
+    comptime length: u8,
+    comptime id: u32,
+    comptime handler: anytype,
+) core.host_function.InternalEntry {
+    return stringEntryWithHandler(name, length, id, handler);
+}
+
+/// K3: dedicated handler plus `exec_direct` so the hot NMFD path skips TLS /
+/// typed-cproto / `stringCall` magic mux (charCodeAt's dedicated-handler
+/// shape plus Function.apply's exec_direct ABI).
+fn stringExecDirectEntry(
+    comptime name: []const u8,
+    comptime length: u8,
+    comptime id: u32,
+    comptime handler: anytype,
+    comptime direct: core.native_entry.ManagedFn,
+) core.host_function.InternalEntry {
+    var entry = stringEntryWithHandler(name, length, id, handler);
+    entry.managed = direct;
+    return entry;
+}
+
+/// Lane K (design §4.3 `prim_self`): a `method_leaf` entry whose hot arm is
+/// the typed `leaf` target over a flat string receiver and an int32 index;
+/// the declared handler (plus optional exec_direct body) is the tag-miss
+/// fallback, so coercing receivers / indices keep the legacy semantics.
+fn stringPrimLeafEntry(
+    comptime name: []const u8,
+    comptime length: u8,
+    comptime id: u32,
+    comptime handler: anytype,
+    comptime direct: ?core.native_entry.ManagedFn,
+    comptime sig: core.LeafSig,
+    comptime leaf: native_legacy.LeafStringI32ToI32,
+) core.host_function.InternalEntry {
+    var entry = stringEntryWithHandler(name, length, id, handler);
+    entry.managed = direct;
+    entry.prim_leaf = .{ .sig = sig, .target = core.NativeEntry.code(leaf) };
+    return entry;
+}
+
+fn stringEntryWithHandler(
+    comptime name: []const u8,
+    comptime length: u8,
+    comptime id: u32,
+    comptime handler: anytype,
+) core.host_function.InternalEntry {
+    return .{
+        .name = name,
+        .length = length,
+        .id = id,
+        .magic = @intCast(id),
+        .cproto = .generic_magic,
+        .native_function = builtin_dispatch.genericMagicFunction(handler),
+    };
+}
+
+test "String.charCodeAt uses exec_direct and a dedicated handler" {
+    var found = false;
+    for (internal_entries) |entry| {
+        if (entry.id != @intFromEnum(PrototypeMethod.char_code_at)) continue;
+        found = true;
+        try std.testing.expect(core.host_function.genericMagicHandler(entry).? == &stringCharCodeAtCall);
+        try std.testing.expect(entry.managed != null);
+        try std.testing.expect(entry.managed.? == &stringCharCodeAtDirect);
+        try std.testing.expect(!entry.forwards_call);
+    }
+    try std.testing.expect(found);
+}
+
+fn testStringDeclById(comptime id: u32) core.host_function.InternalEntry {
+    for (internal_entries) |decl| {
+        if (decl.id == id) return decl;
+    }
+    @compileError("no String entry with that id");
+}
+
+test "String index reads are prim_self method_leaf entries with their legacy bodies as fallback" {
+    const Expect = struct { id: u32, sig: core.LeafSig, leaf: native_legacy.LeafStringI32ToI32 };
+    const expected = [_]Expect{
+        .{ .id = @intFromEnum(PrototypeMethod.char_code_at), .sig = native_legacy.sig_string_i32_to_i32, .leaf = &stringCharCodeAtLeaf },
+        .{ .id = @intFromEnum(PrototypeMethod.char_at), .sig = native_legacy.sig_string_i32_to_string, .leaf = &stringCharAtLeaf },
+        .{ .id = @intFromEnum(PrototypeMethod.at), .sig = native_legacy.sig_string_i32_to_string, .leaf = &stringAtLeaf },
+        .{ .id = @intFromEnum(PrototypeMethod.code_point_at), .sig = native_legacy.sig_string_i32_to_i32, .leaf = &stringCodePointAtLeaf },
+    };
+    inline for (expected) |want| {
+        const decl = comptime testStringDeclById(want.id);
+        const entry = comptime native_legacy.entryFromInternal(decl);
+        try std.testing.expectEqual(core.native_entry.Kind.method_leaf, entry.kind);
+        try std.testing.expectEqual(want.sig, entry.sig);
+        try std.testing.expect(entry.target == core.NativeEntry.code(want.leaf));
+        try std.testing.expect(entry.fallback != null);
+        try std.testing.expect(!entry.effect.may_throw);
+        // The exec_direct body reads the caller through vmCallerView; the
+        // generic_magic thunks still need the environment.
+        try std.testing.expectEqual(decl.managed == null, entry.flags.needs_env);
+    }
+    // The leaf targets own the index rule: negative = fallback.
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const str = try core.string.String.createLatin1(rt, "abc");
+    try std.testing.expectEqual(@as(i32, 'b'), stringCharCodeAtLeaf(str, 1));
+    try std.testing.expectEqual(@as(i32, -1), stringCharCodeAtLeaf(str, 3));
+    try std.testing.expectEqual(@as(i32, -1), stringCharCodeAtLeaf(str, -1));
+    try std.testing.expectEqual(@as(i32, 'c'), stringAtLeaf(str, -1));
+    try std.testing.expectEqual(@as(i32, -1), stringAtLeaf(str, -4));
+    const pair = try core.string.String.createUtf16(rt, &.{ 'a', 0xD83D, 0xDE00 });
+    try std.testing.expectEqual(@as(i32, 0x1F600), stringCodePointAtLeaf(pair, 1));
+    try std.testing.expectEqual(@as(i32, 0xDE00), stringCodePointAtLeaf(pair, 2));
+}
+
+test "String.fromCharCode uses exec_direct and a dedicated handler" {
+    var found = false;
+    for (internal_entries) |entry| {
+        if (entry.id != @intFromEnum(StaticMethod.from_char_code)) continue;
+        found = true;
+        try std.testing.expect(core.host_function.genericMagicHandler(entry).? == &stringFromCharCodeCall);
+        try std.testing.expect(entry.managed != null);
+        try std.testing.expect(entry.managed.? == &stringFromCharCodeDirect);
+        try std.testing.expect(!entry.forwards_call);
+    }
+    try std.testing.expect(found);
+}
+
+test "String case conversion methods have a dedicated native record handler" {
+    var upper_call: ?core.host_function.NativeGenericMagicFn = null;
+    var lower_call: ?core.host_function.NativeGenericMagicFn = null;
+    for (internal_entries) |entry| {
+        if (entry.id == @intFromEnum(PrototypeMethod.to_upper_case)) upper_call = core.host_function.genericMagicHandler(entry);
+        if (entry.id == @intFromEnum(PrototypeMethod.to_lower_case)) lower_call = core.host_function.genericMagicHandler(entry);
+    }
+    try std.testing.expect(upper_call != null);
+    try std.testing.expect(lower_call != null);
+    try std.testing.expect(upper_call.? != &stringCall);
+    try std.testing.expect(lower_call.? != &stringCall);
+    try std.testing.expect(upper_call.? == lower_call.?);
+}
+
+/// The String constructor record: construct-capable so `new String(...)`
+/// routes through the construct dispatch path into `stringCall`'s construct
+/// branch (it still serves `String(...)` as a function on the call path).
+fn stringConstructorEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
+    return .{
+        .name = name,
+        .length = length,
+        .id = id,
+        .magic = @intCast(id),
+        .cproto = .constructor_or_func_magic,
+        .native_function = builtin_dispatch.constructorOrFunctionMagic(&stringCall),
+    };
+}
+
+/// Shared record handler for the `.string` domain. Mirrors the retired
+/// `call.zig` `callStringNativeFunctionRecord`: the String Iterator `next` and
+/// the `from*`/constructor statics run their own helpers, while the prototype
+/// methods (and `String.raw`) delegate to the exec VM ops, which stay in exec
+/// because the string opcode handlers and `regexp_fastpath.zig` also call them.
+///
+/// QJS gives `at`, `charCodeAt`, `codePointAt`, and the shared
+/// `js_string_toLowerCase` case-conversion body their own function-list entries.
+/// Their zjs entries likewise land in the small functions below. The index
+/// methods keep their already-string/immediate-index path local; values requiring
+/// observable ToString/ToNumber coercion tail into this shared handler. Keeping
+/// that rare path out of the direct index functions avoids cloning the whole
+/// coercion tower into each hot native entry.
+inline fn stringPrimitiveIndexRead(host_call: NativeCall, comptime mid: u32) HostError!?core.JSValue {
+    const string_value = host_call.this_value;
+    if (!string_value.isString()) return null;
+    // qjs's js_string_charCodeAt / charAt / codePointAt / at all open with
+    // JS_ToStringCheckObject, whose JS_ToStringInternal
+    // JS_TAG_STRING_ROPE case linearizes the receiver through
+    // js_linearize_string_rope. Linearize at the
+    // same boundary: StringRope.flatten caches the flat body into the node and
+    // is O(1) once linearized, exactly like js_linearize_string_rope's
+    // already-linearized check and its node rewrite
+    //. Without this each call re-descends the rope tree
+    // in stringValueCodeUnitAtUnchecked, so scanning a content stream costs
+    // O(depth) per character instead of O(1).
+    if (string_value.ropeBody()) |node| {
+        _ = node.flatten() catch |err| return @as(HostError, @errorCast(err));
+    }
+    const args = host_call.args;
+    const idx: i64 = if (args.len == 0)
+        0
+    else if (stringPrimitiveInt32Sat(args[0])) |index|
+        index
+    else
+        return null;
+    const rt = host_call.ctx.runtime;
+    const len: i64 = @intCast(core.string.stringValueLenUnchecked(string_value));
+    switch (mid) {
+        29 => {
+            if (idx < 0 or idx >= len) return core.JSValue.float64(std.math.nan(f64));
+            return core.JSValue.int32(core.string.stringValueCodeUnitAtUnchecked(string_value, @intCast(idx)));
+        },
+        30 => {
+            const index = if (idx < 0) len + idx else idx;
+            if (index < 0 or index >= len) return core.JSValue.undefinedValue();
+            return codeUnitStringValue(rt, core.string.stringValueCodeUnitAtUnchecked(string_value, @intCast(index))) catch |err| return @as(HostError, @errorCast(err));
+        },
+        else => {
+            if (idx < 0 or idx >= len) return core.JSValue.undefinedValue();
+            const unit = core.string.stringValueCodeUnitAtUnchecked(string_value, @intCast(idx));
+            if (isHighSurrogateUnit(unit) and idx + 1 < len) {
+                const next = core.string.stringValueCodeUnitAtUnchecked(string_value, @intCast(idx + 1));
+                if (isLowSurrogateUnit(next)) return core.JSValue.int32(@intCast(unicode_lib.codePointFromSurrogatePair(unit, next)));
+            }
+            return core.JSValue.int32(unit);
+        },
+    }
+}
+
+/// QJS `JS_ToInt32SatFree`'s immediate-value leg. String index methods use a
+/// saturated i32 because strings cannot reach `INT32_MAX` code units, so every
+/// larger positive/negative index has the same out-of-range result. Returning
+/// null preserves the observable ToNumber fallback for objects, strings,
+/// Symbols and BigInts.
+inline fn stringPrimitiveInt32Sat(value: core.JSValue) ?i32 {
+    if (value.as(.int)) |integer| return integer;
+    if (value.as(.boolean)) |boolean| return @intFromBool(boolean);
+    if (value.is(.null_value) or value.is(.undefined_value)) return 0;
+    const number = value.asNumber() orelse return null;
+    if (std.math.isNan(number)) return 0;
+    if (number < @as(f64, @floatFromInt(std.math.minInt(i32)))) return std.math.minInt(i32);
+    if (number > @as(f64, @floatFromInt(std.math.maxInt(i32)))) return std.math.maxInt(i32);
+    return @intFromFloat(number);
+}
+
+/// Direct-part cap for the primitive `concat` fast body below. The template
+/// literal / `s.concat(a, b)` hot shapes carry one or two arguments; anything
+/// larger falls to the shared dispatcher (which handles up to qjs's uniform
+/// path) without observable difference.
+const concat_direct_max_args = 7;
+inline fn stringPrimitiveConcat(host_call: NativeCall) HostError!?core.JSValue {
+    const receiver = host_call.this_value;
+    if (!receiver.isString() or receiver.ropeBody() != null) return null;
+    const receiver_body = receiver.asStringBodyRaw() orelse return null;
+    const receiver_bytes = receiver_body.borrowLatin1() orelse return null;
+    const args = host_call.args;
+    if (args.len > concat_direct_max_args) return null;
+    var digit_bufs: [concat_direct_max_args][12]u8 = undefined;
+    var parts: [concat_direct_max_args + 1][]const u8 = undefined;
+    parts[0] = receiver_bytes;
+    var total: usize = receiver_bytes.len;
+    for (args, 0..) |arg, index| {
+        if (arg.as(.int)) |int_value| {
+            parts[index + 1] = number_format.formatInt32(&digit_bufs[index], int_value);
+        } else if (arg.isString() and arg.ropeBody() == null) {
+            const body = arg.asStringBodyRaw() orelse return null;
+            parts[index + 1] = body.borrowLatin1() orelse return null;
+        } else {
+            return null;
+        }
+        total += parts[index + 1].len;
+    }
+    // Overlong results fall to the shared dispatcher so the StringTooLong
+    // error shape stays on the single audited path.
+    if (total > core.string.max_length) return null;
+    const rt = host_call.ctx.runtime;
+    if (total == 0) {
+        const empty = rt.emptyString() catch |err| return @as(HostError, @errorCast(err));
+        return empty.value();
+    }
+    const created = core.string.String.createLatin1Parts(rt, parts[0 .. args.len + 1], total) catch |err|
+        return @as(HostError, @errorCast(err));
+    return created.value();
+}
+
+fn stringConcatCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
+    if (try stringPrimitiveConcat(host_call)) |value| return value;
+    return stringCall(native_ctx, native_this, native_args, native_magic);
+}
+
+fn stringFromCharCodeDirect(
+    ctx: *core.JSContext,
+    this_value: core.JSValue,
+    argv: [*]const core.JSValue,
+    argc: u32,
+    _: *const core.NativeEntry,
+    _: ?*core.Object,
+) callconv(.c) core.JSValue {
+    const args = argv[0..argc];
+    const global = ctx.global orelse return builtin_dispatch.hostErrorToValue(ctx, null, error.InvalidBuiltinRegistry);
+    const caller = builtin_dispatch.vmCallerView(ctx);
+    const output = caller.output;
+    const caller_function = caller.caller_function;
+    const caller_frame = caller.caller_frame;
+    _ = this_value;
+    _ = caller_function;
+    _ = caller_frame;
+    const result = stringFromCharCode(ctx, output, global, args) catch |err| {
+        return builtin_dispatch.hostErrorToValue(ctx, global, @as(HostError, @errorCast(err)));
+    };
+    return (result);
+}
+
+fn stringFromCharCodeCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
+    const global = if (host_call.func_obj != null) blk: {
+        const realm = try builtin_dispatch.callableRealm(host_call);
+        std.debug.assert(realm.realm == host_call.ctx);
+        break :blk realm.global;
+    } else host_call.global orelse return error.TypeError;
+    return stringFromCharCode(host_call.ctx, host_call.output, global, host_call.args) catch |err| return @as(HostError, @errorCast(err));
+}
+
+// --- Lane K prim_self leaf targets (`native_legacy.LeafStringI32ToI32`) ---
+//
+// The arm (`builtin_dispatch.invokeMethodLeafFast`) has already established
+// a flat string receiver and an int32 index; these bodies own only the
+// per-method index rule and the code-unit read (`String.codeUnitAt`, the
+// same single access `stringValueCodeUnitAtUnchecked` ends in). A negative
+// return sends the arm to the fallback, which recomputes the observable
+// out-of-range result (NaN / undefined / "").
+
+fn stringCharCodeAtLeaf(str: *const core.string.String, index: i32) callconv(.c) i32 {
+    if (index < 0 or @as(usize, @intCast(index)) >= str.len()) return -1;
+    return str.codeUnitAt(@intCast(index));
+}
+
+fn stringCharAtLeaf(str: *const core.string.String, index: i32) callconv(.c) i32 {
+    if (index < 0 or @as(usize, @intCast(index)) >= str.len()) return -1;
+    return str.codeUnitAt(@intCast(index));
+}
+
+fn stringAtLeaf(str: *const core.string.String, index: i32) callconv(.c) i32 {
+    const len: i64 = @intCast(str.len());
+    const relative: i64 = if (index < 0) len + index else index;
+    if (relative < 0 or relative >= len) return -1;
+    return str.codeUnitAt(@intCast(relative));
+}
+
+fn stringCodePointAtLeaf(str: *const core.string.String, index: i32) callconv(.c) i32 {
+    const len = str.len();
+    if (index < 0 or @as(usize, @intCast(index)) >= len) return -1;
+    const position: usize = @intCast(index);
+    const unit = str.codeUnitAt(position);
+    if (isHighSurrogateUnit(unit) and position + 1 < len) {
+        const next = str.codeUnitAt(position + 1);
+        if (isLowSurrogateUnit(next)) return @intCast(unicode_lib.codePointFromSurrogatePair(unit, next));
+    }
+    return unit;
+}
+
+fn stringCharCodeAtDirect(
+    ctx: *core.JSContext,
+    this_value: core.JSValue,
+    argv: [*]const core.JSValue,
+    argc: u32,
+    _: *const core.NativeEntry,
+    _: ?*core.Object,
+) callconv(.c) core.JSValue {
+    const args = argv[0..argc];
+    const global = ctx.global orelse return builtin_dispatch.hostErrorToValue(ctx, null, error.InvalidBuiltinRegistry);
+    const caller = builtin_dispatch.vmCallerView(ctx);
+    const output = caller.output;
+    const caller_function = caller.caller_function;
+    const caller_frame = caller.caller_frame;
+    return builtin_dispatch.hostResultToValue(ctx, stringCharCodeAtDirectHost(
+        ctx,
+        output,
+        global,
+        this_value,
+        args,
+        caller_function,
+        caller_frame,
+    ));
+}
+
+inline fn stringCharCodeAtDirectHost(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const builtin_dispatch.Bytecode,
+    caller_frame: ?*builtin_dispatch.Frame,
+) HostError!core.JSValue {
+    const host_call = NativeCall{
+        .ctx = ctx,
+        .callable_realm = null,
+        .output = output,
+        .global = global,
+        .globals = &.{},
+        .func_obj = null,
+        .this_value = this_value,
+        .args = args,
+        .magic = @intFromEnum(PrototypeMethod.char_code_at),
+        .is_constructor = false,
+        .new_target = null,
+        .caller_function = caller_function,
+        .caller_frame = caller_frame,
+    };
+    if (try stringPrimitiveIndexRead(host_call, 29)) |value| return value;
+    // Do not bounce through `stringPrototypeMethod` / `callStringBody`:
+    // that re-enters this record's exec_direct with a null func_obj and
+    // raises InvalidBuiltinRegistry. Coerce with the explicit ABI instead.
+    const string_value = toStringCheckObject(
+        ctx,
+        output,
+        global,
+        this_value,
+        caller_function,
+        caller_frame,
+    ) catch |err| return @as(HostError, @errorCast(err));
+    // `toStringCheckObject` always hands back an owned reference — its
+    // `JS_ToString` leg dups a string receiver rather than borrowing it
+    // (`toStringForAnnexB`). Releasing it only for non-string
+    // receivers leaked the dup of every string receiver that reached this
+    // coercion path (i.e. every `charCodeAt` whose index argument needs
+    // observable ToNumber).
+    if (string_value.ropeBody()) |node| {
+        _ = node.flatten() catch |err| return @as(HostError, @errorCast(err));
+    }
+    const idx: i64 = if (args.len == 0)
+        0
+    else if (stringPrimitiveInt32Sat(args[0])) |index|
+        index
+    else blk: {
+        const numeric = builtin_glue.toNumberLikeArgument(ctx, output, global, args[0]) catch |err| return @as(HostError, @errorCast(err));
+        break :blk stringPrimitiveInt32Sat(numeric) orelse return error.TypeError;
+    };
+    const len: i64 = @intCast(core.string.stringValueLenUnchecked(string_value));
+    if (idx < 0 or idx >= len) return core.JSValue.float64(std.math.nan(f64));
+    return core.JSValue.int32(core.string.stringValueCodeUnitAtUnchecked(string_value, @intCast(idx)));
+}
+
+fn stringCharCodeAtCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
+    if (try stringPrimitiveIndexRead(host_call, 29)) |value| return value;
+    return stringCall(native_ctx, native_this, native_args, native_magic);
+}
+
+fn stringAtCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
+    if (try stringPrimitiveIndexRead(host_call, 30)) |value| return value;
+    return stringCall(native_ctx, native_this, native_args, native_magic);
+}
+
+fn stringCodePointAtCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
+    if (try stringPrimitiveIndexRead(host_call, 31)) |value| return value;
+    return stringCall(native_ctx, native_this, native_args, native_magic);
+}
+
+fn stringCaseCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
+    const to_lower = host_call.magic == @intFromEnum(PrototypeMethod.to_lower_case);
+    if (host_call.func_obj == null and host_call.global == null) {
+        if (host_call.is_constructor) return error.TypeError;
+        // Explicit algorithmic reuse after the caller has already reduced the
+        // receiver to the pure Unicode case body.
+        return unicodeCaseReceiver(host_call.ctx.runtime, host_call.this_value, to_lower) catch |err| return @as(HostError, @errorCast(err));
+    }
+
+    const global = if (host_call.func_obj != null) blk: {
+        const realm = try builtin_dispatch.callableRealm(host_call);
+        std.debug.assert(realm.realm == host_call.ctx);
+        break :blk realm.global;
+    } else host_call.global orelse return error.TypeError;
+    const caller_function = builtin_dispatch.callerBytecode(host_call);
+    const caller_frame = builtin_dispatch.callerFrame(host_call);
+    const string_value = try toStringCheckObject(
+        host_call.ctx,
+        host_call.output,
+        global,
+        host_call.this_value,
+        caller_function,
+        caller_frame,
+    );
+
+    return unicodeCaseOwnedString(host_call.ctx.runtime, string_value, to_lower) catch |err| return @as(HostError, @errorCast(err));
+}
+
+fn stringCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
+    const ctx = host_call.ctx;
+    const id: u32 = host_call.magic;
+    const args = host_call.args;
+    const this_value = host_call.this_value;
+
+    if (id == @intFromEnum(PrototypeMethod.iterator_next)) {
+        const receiver = thisObject(this_value) orelse return error.TypeError;
+        if (receiver.class_id != core.class.ids.string_iterator) return error.TypeError;
+        return stringIteratorNext(ctx.runtime, ctx.globalObject() catch null, this_value) catch |err| switch (err) {
+            error.TypeError => error.TypeError,
+            else => err,
+        };
+    }
+
+    // `new String(...)` arrives through the construct record path
+    // (`exec/construct.zig`) with `is_constructor` set and the resolved
+    // wrapper prototype in `new_target`; `String(...)` called as a function
+    // falls through to `stringFunctionCall` (the `ConstructorMethod.call`
+    // case below).
+    if (host_call.is_constructor and id == @intFromEnum(ConstructorMethod.call)) {
+        return constructWithPrototype(ctx.runtime, args, host_call.new_target);
+    }
+
+    const output = host_call.output;
+    const caller_function = builtin_dispatch.callerBytecode(host_call);
+    const caller_frame = builtin_dispatch.callerFrame(host_call);
+
+    // Engine-internal dispatch arm: the exec string dispatcher and fast paths
+    // (`exec/zig`, `exec/call_runtime.zig`) have already resolved the
+    // string receiver/args and route the reused *pure body* through the table
+    // here. It is gated on `func_obj == null and global == null`, the
+    // contract those call sites use (the body needs no realm global). The
+    // Other direct callers can pass `func_obj == null` with a realm `global`
+    // and raw args, so they must fall through to the coercing dispatcher below.
+    // This deliberately bypasses the prototype dispatcher
+    // (`stringPrototypeMethod`) — routing back through it would
+    // re-enter this record (the dispatcher's own body call is one of the
+    // converted sites) and recurse.
+    if (host_call.func_obj == null and host_call.global == null and !host_call.is_constructor) {
+        const method_id = decodePrototypeMethodId(id) orelse return error.TypeError;
+        if (method_id == 0) {
+            // `String.prototype.charAt` body (its own helper; `methodCall` does
+            // not handle id 0). The exec caller forwards the index as args[0].
+            const index = if (args.len >= 1) args[0] else core.JSValue.int32(0);
+            return charAtValue(ctx.runtime, this_value, index) catch |err| return @as(HostError, @errorCast(err));
+        }
+        return methodCall(ctx.runtime, this_value, method_id, args) catch |err| return @as(HostError, @errorCast(err));
+    }
+
+    const active_global = if (host_call.func_obj != null) blk: {
+        const realm = try builtin_dispatch.callableRealm(host_call);
+        std.debug.assert(realm.realm == ctx);
+        break :blk realm.global;
+    } else host_call.global orelse return error.TypeError;
+    return switch (id) {
+        @intFromEnum(ConstructorMethod.call) => stringFunctionCall(ctx, output, active_global, args, caller_function, caller_frame),
+        @intFromEnum(StaticMethod.from_char_code) => stringFromCharCode(ctx, output, active_global, args),
+        @intFromEnum(StaticMethod.from_code_point) => stringFromCodePoint(ctx, output, active_global, args),
+        @intFromEnum(StaticMethod.raw) => stringRaw(ctx, output, active_global, args, caller_function, caller_frame),
+        else => {
+            const method_id = decodePrototypeMethodId(id) orelse return error.TypeError;
+            return stringPrototypeMethod(ctx, output, active_global, this_value, method_id, args, caller_function, caller_frame);
+        },
+    };
+}
+
+fn thisObject(value: core.JSValue) ?*core.Object {
+    if (!value.is(.object)) return null;
+    const header = value.refHeader() orelse return null;
+    return core.Object.fromHeader(header);
+}
+
+pub fn constructWithPrototype(rt: *core.JSRuntime, args: []const core.JSValue, prototype: ?*core.Object) !core.JSValue {
+    var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
+    defer rooted_args_buffer.deinit(rt);
+    const rooted_args = rooted_args_buffer.values;
+    var data_value = core.JSValue.undefinedValue();
+    var object_value = core.JSValue.undefinedValue();
+    var root_slices = [_]core.runtime.ValueRootSlice{
+        rooted_args_buffer.slice(),
+    };
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &data_value },
+        .{ .value = &object_value },
+    };
+    var root_frame = core.runtime.ValueRootFrame{
+        .slices = &root_slices,
+        .values = &root_values,
+    };
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
+
+    if (rooted_args.len >= 1 and rooted_args[0].is(.symbol)) return error.TypeError;
+    data_value = if (rooted_args.len >= 1)
+        try stringValueFromSearchArgument(rt, rooted_args[0])
+    else
+        try createStringValue(rt, "");
+    const data = stringValueFromReceiver(data_value) orelse return error.TypeError;
+
+    const object = try core.Object.create(rt, core.class.ids.string, prototype);
+    object_value = object.value();
+    errdefer {
+        object_value = core.JSValue.undefinedValue();
+    }
+
+    try object.setOptionalValueSlot(rt, object.objectDataSlot(), data_value);
+    var index: u32 = 0;
+    while (index < data.len()) : (index += 1) {
+        try defineStringIndexUnitProperty(rt, object, index, data.codeUnitAt(index));
+    }
+    try defineReadonlyIntProperty(rt, object, core.atom.ids.length, @intCast(data.len()));
+    return object_value;
+}
+
+// The String Iterator factory (`iterator`) + its private prototype/toStringTag
+// helpers relocated to engine core (`core/object.zig` `stringIterator`) in Phase
+// 6b-3 STEP 6: they are pure object/native-function constructors over core
+// string/object primitives with no exec/VM deps, and the exec iteration
+// machinery consumes them directly. Re-exported here so this module's own
+// references (and any future builtin caller) keep the original name. The
+// produced iterator's `next` still carries the `(.string, iterator_next)`
+// native id, dispatching back into `stringIteratorNext` below through the record
+// table.
+pub const stringIterator = core.object.stringIterator;
+pub fn stringIteratorNext(rt: *core.JSRuntime, global: ?*core.Object, receiver: core.JSValue) !core.JSValue {
+    const iterator_object = try expectObject(receiver);
+    if (iterator_object.class_id != core.class.ids.string_iterator) return error.TypeError;
+    const target = (iterator_object.iteratorTargetSlot().*) orelse return iteratorResult(rt, global, core.JSValue.undefinedValue(), true);
+    if (!target.isString()) return error.TypeError;
+    const target_len = core.string.stringValueLenUnchecked(target);
+    if ((iterator_object.iteratorIndexSlot().*) >= target_len) {
+        const done_result = try iteratorResult(rt, global, core.JSValue.undefinedValue(), true);
+        iterator_object.clearOptionalValueSlot(rt, iterator_object.iteratorTargetSlot());
+        return done_result;
+    }
+
+    const index: usize = @intCast((iterator_object.iteratorIndexSlot().*));
+    const first = core.string.stringValueCodeUnitAtUnchecked(target, index);
+
+    // Single code unit (`c <= 0xffff`, non-surrogate-pair): qjs routes these
+    // through js_new_string_char, which takes the latin1
+    // path for `c < 0x100`. Mirror that — a latin1 unit comes from the
+    // runtime's single-code-unit table (zero-alloc); only `>= 0x100` and
+    // surrogate pairs reach the wide createUtf16.
+    if (first < 0x100) {
+        iterator_object.iteratorIndexSlot().* += 1;
+        const cached = try rt.singleByteString(@intCast(first));
+        return iteratorResult(rt, global, cached.value(), false);
+    }
+
+    if (isHighSurrogateUnit(first) and index + 1 < target_len) {
+        const second = core.string.stringValueCodeUnitAtUnchecked(target, index + 1);
+        if (isLowSurrogateUnit(second)) {
+            iterator_object.iteratorIndexSlot().* += 2;
+            const units: [2]u16 = .{ first, second };
+            const out = try core.string.String.createUtf16(rt, &units);
+            return iteratorResult(rt, global, out.value(), false);
+        }
+    }
+
+    iterator_object.iteratorIndexSlot().* += 1;
+    const units: [1]u16 = .{first};
+    const out = try core.string.String.createUtf16(rt, &units);
+    return iteratorResult(rt, global, out.value(), false);
+}
+
+/// QuickJS source map: narrow charAt helper used by transitional
+/// `string_char_at` bytecode.
+pub fn charAtValue(rt: *core.JSRuntime, receiver: core.JSValue, index_value: core.JSValue) !core.JSValue {
+    const index = try stringInteger(rt, index_value);
+    if (stringValueFromReceiverRaw(receiver)) |string_value| {
+        if (index < 0 or index >= @as(i64, @intCast(core.string.stringValueLenUnchecked(string_value)))) return createStringValue(rt, "");
+        return codeUnitStringValue(rt, core.string.stringValueCodeUnitAtUnchecked(string_value, @intCast(index)));
+    }
+
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(rt.memory.allocator);
+    try appendStringReceiverBytes(rt, &bytes, receiver);
+    if (index < 0) return createStringValue(rt, "");
+    const char_index: usize = @intCast(index);
+    const out = if (char_index < bytes.items.len) bytes.items[char_index .. char_index + 1] else "";
+    return createStringValue(rt, out);
+}
+
+/// QuickJS source map: selected String.prototype methods currently covered by
+/// smoke fixtures and targeted String validation.
+pub fn methodCall(rt: *core.JSRuntime, receiver: core.JSValue, id: u32, args: []const core.JSValue) !core.JSValue {
+    if (id == 29) return charCodeAtReceiver(rt, receiver, args);
+    if (id == 31) return codePointAtReceiver(rt, receiver, args);
+    if (id == 8) return trimReceiver(rt, receiver, .both);
+    if (id == 21) return trimReceiver(rt, receiver, .start);
+    if (id == 22) return trimReceiver(rt, receiver, .end);
+    if (id == 2) return unicodeCaseReceiver(rt, receiver, false);
+    if (id == 3) return unicodeCaseReceiver(rt, receiver, true);
+    if (id == 1) return substringReceiver(rt, receiver, args);
+    if (id == 4) return indexOfReceiver(rt, receiver, args);
+    if (id == 5) return containsReceiver(rt, receiver, args, .contains);
+    if (id == 6) return containsReceiver(rt, receiver, args, .starts);
+    if (id == 7) return containsReceiver(rt, receiver, args, .ends);
+    if (id == 30) return atReceiver(rt, receiver, args);
+    if (id == 27) return splitReceiver(rt, receiver, args);
+    if (id == 33) return repeatReceiver(rt, receiver, args);
+    if (id == 28) return lastIndexOfReceiver(rt, receiver, args);
+    if (id == 32) return sliceReceiver(rt, receiver, args);
+    if (id == 38) return isWellFormedReceiver(rt, receiver);
+    if (id == 39) return toWellFormedReceiver(rt, receiver);
+
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(rt.memory.allocator);
+    try appendStringReceiverBytes(rt, &bytes, receiver);
+
+    // Every id handled above returns before this point, so the remaining
+    // reachable set is exactly the bodies that still live in this file. The
+    // concat / AnnexB-html / substr ids never arrive: their records dispatch
+    // to `string_ops` (`stringConcat` / `stringHtmlMethod` / `stringSubstr`),
+    // and `encodePrototypeMethodId` has no record for the html and substr ids
+    // at all, so `callStringBody` rejects them before this switch.
+    return switch (id) {
+        34 => pad(rt, bytes.items, args, .start),
+        35 => pad(rt, bytes.items, args, .end),
+        36 => localeCompare(rt, bytes.items, args),
+        legacy_normalize_method_id => normalize(rt, bytes.items, args),
+        legacy_search_method_id => search(rt, bytes.items, args),
+        legacy_match_method_id => matchString(rt, bytes.items, args),
+        legacy_replace_all_method_id => replaceAll(rt, bytes.items, args),
+        else => error.TypeError,
+    };
+}
+
+fn substring(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
+    const range = try stringSubstringRange(rt, bytes.len, args);
+    return createStringValue(rt, bytes[range.start..range.end]);
+}
+
+fn substringReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
+    if (stringValueFromReceiver(receiver)) |string_value| {
+        const range = try stringSubstringRange(rt, string_value.len(), args);
+        const res = try core.string.String.createSlice(rt, string_value, range.start, range.end - range.start);
+        return res.value();
+    }
+
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(rt.memory.allocator);
+    try appendStringReceiverBytes(rt, &bytes, receiver);
+    return substring(rt, bytes.items, args);
+}
+
+fn trimReceiver(rt: *core.JSRuntime, receiver: core.JSValue, mode: TrimMode) !core.JSValue {
+    if (stringValueFromReceiver(receiver)) |string_value| {
+        return trimStringValue(rt, string_value, mode);
+    }
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(rt.memory.allocator);
+    try appendStringReceiverBytes(rt, &bytes, receiver);
+    const trimmed = switch (mode) {
+        .start => trimStartAscii(bytes.items),
+        .end => trimEndAscii(bytes.items),
+        .both => std.mem.trim(u8, bytes.items, " \t\r\n"),
+    };
+    return createStringValue(rt, trimmed);
+}
+
+fn trimStringValue(rt: *core.JSRuntime, string_value: *core.string.String, mode: TrimMode) !core.JSValue {
+    var start: usize = 0;
+    var end = string_value.len();
+    if (mode == .start or mode == .both) {
+        while (start < end and isTrimCodeUnit(string_value.codeUnitAt(start))) : (start += 1) {}
+    }
+    if (mode == .end or mode == .both) {
+        while (end > start and isTrimCodeUnit(string_value.codeUnitAt(end - 1))) : (end -= 1) {}
+    }
+    switch (string_value.resolveData()) {
+        .latin1 => |bytes| return createLatin1SliceValue(rt, bytes[start..end]),
+        .utf16 => |units| return (try core.string.String.createUtf16(rt, units[start..end])).value(),
+    }
+}
+
+/// ToString the receiver for the non-string arms below. Reachable because
+/// `call_runtime`'s name-dispatch fallback forwards primitives (number,
+/// boolean, bigint, …) verbatim into `callStringBody`, i.e. without the
+/// `stringPrototypeMethod` coercion.
+fn coercedReceiverStringValue(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(rt.memory.allocator);
+    try appendStringReceiverBytes(rt, &bytes, receiver);
+    return createStringValue(rt, bytes.items);
+}
+
+fn isWellFormedReceiver(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
+    if (stringValueFromReceiver(receiver)) |string_value| {
+        return core.JSValue.boolean(isWellFormedString(string_value));
+    }
+    // Scan the coerced text rather than assuming ToString() is well-formed.
+    // No allocation happens between here and the scan, so the fresh string
+    // needs no root frame.
+    const coerced = try coercedReceiverStringValue(rt, receiver);
+    const string_value = stringValueFromReceiver(coerced) orelse return error.TypeError;
+    return core.JSValue.boolean(isWellFormedString(string_value));
+}
+
+fn toWellFormedReceiver(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
+    if (stringValueFromReceiver(receiver)) |string_value| {
+        return toWellFormedString(rt, string_value);
+    }
+    var coerced = try coercedReceiverStringValue(rt, receiver);
+    // `toWellFormedString` allocates, so the coerced string must stay rooted.
+    var root_values = [_]core.runtime.ValueRootValue{.{ .value = &coerced }};
+    var root_frame = core.runtime.ValueRootFrame{ .values = &root_values };
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
+    const string_value = stringValueFromReceiver(coerced) orelse return error.TypeError;
+    return toWellFormedString(rt, string_value);
+}
+
+fn isWellFormedString(string_value: *core.string.String) bool {
+    var i: usize = 0;
+    while (i < string_value.len()) {
+        const unit = string_value.codeUnitAt(i);
+        if (isHighSurrogateUnit(unit)) {
+            if (i + 1 >= string_value.len() or !isLowSurrogateUnit(string_value.codeUnitAt(i + 1))) return false;
+            i += 2;
+            continue;
+        }
+        if (isLowSurrogateUnit(unit)) return false;
+        i += 1;
+    }
+    return true;
+}
+
+fn toWellFormedString(rt: *core.JSRuntime, string_value: *core.string.String) !core.JSValue {
+    var units = std.ArrayList(u16).empty;
+    defer units.deinit(rt.memory.allocator);
+    try units.ensureTotalCapacity(rt.memory.allocator, string_value.len());
+
+    var i: usize = 0;
+    while (i < string_value.len()) {
+        const unit = string_value.codeUnitAt(i);
+        if (isHighSurrogateUnit(unit)) {
+            if (i + 1 < string_value.len() and isLowSurrogateUnit(string_value.codeUnitAt(i + 1))) {
+                units.appendAssumeCapacity(unit);
+                units.appendAssumeCapacity(string_value.codeUnitAt(i + 1));
+                i += 2;
+            } else {
+                units.appendAssumeCapacity(0xfffd);
+                i += 1;
+            }
+            continue;
+        }
+        units.appendAssumeCapacity(if (isLowSurrogateUnit(unit)) 0xfffd else unit);
+        i += 1;
+    }
+    return (try core.string.String.createUtf16(rt, units.items)).value();
+}
+
+fn split(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
+    var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
+    defer rooted_args_buffer.deinit(rt);
+    const rooted_args = rooted_args_buffer.values;
+    var out_value = core.JSValue.undefinedValue();
+    var root_slices = [_]core.runtime.ValueRootSlice{
+        rooted_args_buffer.slice(),
+    };
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &out_value },
+    };
+    var root_frame = core.runtime.ValueRootFrame{
+        .slices = &root_slices,
+        .values = &root_values,
+    };
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
+
+    const out = try core.Object.createArray(rt, null);
+    out_value = out.value();
+    errdefer {
+        out_value = core.JSValue.undefinedValue();
+    }
+
+    const limit: u32 = if (rooted_args.len >= 2 and !rooted_args[1].is(.undefined_value))
+        try toUint32Limit(rt, rooted_args[1])
+    else
+        std.math.maxInt(u32);
+    if (limit == 0) return out_value;
+
+    if (rooted_args.len == 0 or rooted_args[0].is(.undefined_value)) {
+        try defineStringElement(rt, out, 0, bytes);
+        return out_value;
+    }
+
+    var sep = std.ArrayList(u8).empty;
+    defer sep.deinit(rt.memory.allocator);
+    try appendValueString(rt, &sep, rooted_args[0]);
+
+    var out_index: u32 = 0;
+    if (sep.items.len == 0) {
+        var index: usize = 0;
+        while (index < bytes.len and out_index < limit) : (index += 1) {
+            try defineStringElement(rt, out, out_index, bytes[index .. index + 1]);
+            out_index += 1;
+        }
+        return out_value;
+    }
+
+    var start: usize = 0;
+    while (out_index < limit) {
+        const found = std.mem.indexOfPos(u8, bytes, start, sep.items) orelse break;
+        try defineStringElement(rt, out, out_index, bytes[start..found]);
+        out_index += 1;
+        start = found + sep.items.len;
+    }
+    if (out_index < limit) {
+        try defineStringElement(rt, out, out_index, bytes[start..]);
+    }
+    return out_value;
+}
+
+fn splitReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
+    var rooted_receiver = receiver;
+    var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
+    defer rooted_args_buffer.deinit(rt);
+    const rooted_args = rooted_args_buffer.values;
+    var out_value = core.JSValue.undefinedValue();
+    var sep_value = core.JSValue.undefinedValue();
+    var root_slices = [_]core.runtime.ValueRootSlice{
+        rooted_args_buffer.slice(),
+    };
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &rooted_receiver },
+        .{ .value = &out_value },
+        .{ .value = &sep_value },
+    };
+    var root_frame = core.runtime.ValueRootFrame{
+        .slices = &root_slices,
+        .values = &root_values,
+    };
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
+
+    if (stringValueFromReceiver(rooted_receiver)) |string_value| {
+        const out = try core.Object.createArray(rt, null);
+        out_value = out.value();
+
+        const limit: u32 = if (rooted_args.len >= 2 and !rooted_args[1].is(.undefined_value))
+            try toUint32Limit(rt, rooted_args[1])
+        else
+            std.math.maxInt(u32);
+        if (limit == 0) return out_value;
+
+        if (rooted_args.len == 0 or rooted_args[0].is(.undefined_value)) {
+            try defineStringSliceElement(rt, out, 0, string_value, 0, string_value.len());
+            return out_value;
+        }
+
+        sep_value = try stringValueFromSearchArgument(rt, rooted_args[0]);
+        const sep = stringValueFromReceiver(sep_value) orelse return error.TypeError;
+
+        var out_index: u32 = 0;
+        if (sep.len() == 0) {
+            var index: usize = 0;
+            while (index < string_value.len() and out_index < limit) : (index += 1) {
+                const value = try codeUnitStringValue(rt, string_value.codeUnitAt(index));
+                try defineValueElement(rt, out, out_index, value);
+                out_index += 1;
+            }
+            return out_value;
+        }
+
+        var start: usize = 0;
+        while (out_index < limit) {
+            const found = stringIndexOfUnits(string_value, sep, start) orelse break;
+            try defineStringSliceElement(rt, out, out_index, string_value, start, found - start);
+            out_index += 1;
+            start = found + sep.len();
+        }
+        if (out_index < limit) {
+            try defineStringSliceElement(rt, out, out_index, string_value, start, string_value.len() - start);
+        }
+        return out_value;
+    }
+
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(rt.memory.allocator);
+    try appendStringReceiverBytes(rt, &bytes, rooted_receiver);
+    return split(rt, bytes.items, rooted_args);
+}
+
+fn search(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
+    var needle = std.ArrayList(u8).empty;
+    defer needle.deinit(rt.memory.allocator);
+    const search_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    try appendValueString(rt, &needle, search_value);
+    const index = std.mem.indexOf(u8, bytes, needle.items);
+    return core.JSValue.int32(if (index) |value| @intCast(value) else -1);
+}
+
+fn matchString(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
+    var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
+    defer rooted_args_buffer.deinit(rt);
+    const rooted_args = rooted_args_buffer.values;
+    var out_value = core.JSValue.undefinedValue();
+    var input = core.JSValue.undefinedValue();
+    var root_slices = [_]core.runtime.ValueRootSlice{
+        rooted_args_buffer.slice(),
+    };
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &out_value },
+        .{ .value = &input },
+    };
+    var root_frame = core.runtime.ValueRootFrame{
+        .slices = &root_slices,
+        .values = &root_values,
+    };
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
+
+    var needle = std.ArrayList(u8).empty;
+    defer needle.deinit(rt.memory.allocator);
+    const search_value = if (rooted_args.len >= 1) rooted_args[0] else core.JSValue.undefinedValue();
+    try appendValueString(rt, &needle, search_value);
+    const index = std.mem.indexOf(u8, bytes, needle.items) orelse return core.JSValue.nullValue();
+
+    const out = try core.Object.createArray(rt, null);
+    out_value = out.value();
+    try defineStringElement(rt, out, 0, bytes[index .. index + needle.items.len]);
+    try defineIntProperty(rt, out, core.atom.ids.index, @intCast(index));
+    input = try createStringValue(rt, bytes);
+    const input_key = core.atom.ids.input;
+    try out.defineOwnProperty(rt, input_key, core.Descriptor.data(input, .method));
+    return out_value;
+}
+
+fn replaceAll(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
+    var search_value = std.ArrayList(u8).empty;
+    defer search_value.deinit(rt.memory.allocator);
+    const search_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    try appendValueString(rt, &search_value, search_input);
+
+    var replacement = std.ArrayList(u8).empty;
+    defer replacement.deinit(rt.memory.allocator);
+    const replacement_input = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    try appendValueString(rt, &replacement, replacement_input);
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(rt.memory.allocator);
+    if (search_value.items.len == 0) {
+        try out.appendSlice(rt.memory.allocator, replacement.items);
+        for (bytes) |byte| {
+            try out.append(rt.memory.allocator, byte);
+            try out.appendSlice(rt.memory.allocator, replacement.items);
+        }
+        return createStringValue(rt, out.items);
+    }
+
+    var start: usize = 0;
+    while (std.mem.indexOfPos(u8, bytes, start, search_value.items)) |found| {
+        try out.appendSlice(rt.memory.allocator, bytes[start..found]);
+        try out.appendSlice(rt.memory.allocator, replacement.items);
+        start = found + search_value.items.len;
+    }
+    try out.appendSlice(rt.memory.allocator, bytes[start..]);
+    return createStringValue(rt, out.items);
+}
+
+fn defineStringElement(rt: *core.JSRuntime, object: *core.Object, index: u32, bytes: []const u8) !void {
+    var object_value = object.value();
+    var root_values = [_]core.runtime.ValueRootValue{
+        .{ .value = &object_value },
+    };
+    var root_frame = core.runtime.ValueRootFrame{
+        .values = &root_values,
+    };
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
+
+    const value = try createStringValue(rt, bytes);
+    try defineValueElement(rt, object, index, value);
+}
+
+fn defineStringSliceElement(rt: *core.JSRuntime, object: *core.Object, index: u32, string_value: *core.string.String, start: usize, slice_len: usize) !void {
+    var object_value = object.value();
+    var root_frame = core.runtime.rootValues(.{&object_value});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
+
+    const value = (try core.string.String.createSlice(rt, string_value, start, slice_len)).value();
+    try defineValueElement(rt, object, index, value);
+}
+
+fn defineValueElement(rt: *core.JSRuntime, object: *core.Object, index: u32, value: core.JSValue) !void {
+    var object_value = object.value();
+    var rooted_value = value;
+    var root_frame = core.runtime.rootValues(.{ &object_value, &rooted_value });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
+
+    try object.defineOwnProperty(rt, core.Atom.taggedInt(index), core.Descriptor.data(rooted_value, .all));
+}
+
+fn defineStringIndexUnitProperty(rt: *core.JSRuntime, object: *core.Object, index: u32, unit: u16) !void {
+    var object_value = object.value();
+    var root_frame = core.runtime.rootValues(.{&object_value});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
+
+    const units: [1]u16 = .{unit};
+    const string = try core.string.String.createUtf16(rt, &units);
+    const value = string.value();
+    try object.defineOwnProperty(rt, core.Atom.taggedInt(index), core.Descriptor.data(value, .{ .enumerable = true }));
+}
+
+fn trimStartAscii(bytes: []const u8) []const u8 {
+    var start: usize = 0;
+    while (start < bytes.len and isAsciiTrim(bytes[start])) : (start += 1) {}
+    return bytes[start..];
+}
+
+fn trimEndAscii(bytes: []const u8) []const u8 {
+    var end = bytes.len;
+    while (end > 0 and isAsciiTrim(bytes[end - 1])) : (end -= 1) {}
+    return bytes[0..end];
+}
+
+fn isAsciiTrim(byte: u8) bool {
+    return byte == ' ' or byte == '\t' or byte == '\r' or byte == '\n';
+}
+
+fn codePointAtResolved(data: core.string.String.ResolvedData, len: usize, index: usize) CodePointSpan {
+    switch (data) {
+        // latin1 code units are never surrogates: each byte is one code point.
+        .latin1 => |bytes| return .{ .value = bytes[index], .start = index, .end = index + 1 },
+        .utf16 => |units| {
+            const first = units[index];
+            const next_index = index + 1;
+            if (isHighSurrogateUnit(first) and next_index < len) {
+                const second = units[next_index];
+                if (isLowSurrogateUnit(second)) {
+                    const value = 0x10000 + ((@as(u21, first) - 0xD800) << 10) + (@as(u21, second) - 0xDC00);
+                    return .{ .value = value, .start = index, .end = index + 2 };
+                }
+            }
+            return .{ .value = first, .start = index, .end = next_index };
+        },
+    }
+}
+
+fn unicodeCaseReceiver(rt: *core.JSRuntime, receiver: core.JSValue, to_lower: bool) !core.JSValue {
+    const primitive = try toStringValueForMethod(rt, receiver);
+    return unicodeCaseOwnedString(rt, primitive, to_lower);
+}
+
+fn unicodeCaseOwnedString(rt: *core.JSRuntime, primitive: core.JSValue, to_lower: bool) !core.JSValue {
+    const string_value = primitive.asStringBody() orelse {
+        return error.TypeError;
+    };
+
+    // Resolve the source to its flat code-unit slice ONCE. ASCII maps directly
+    // into the final inline narrow String, matching qjs's pre-sized StringBuffer
+    // ownership. The remaining Unicode path accumulates into a narrow latin1
+    // buffer that widens to UTF-16 only when an output unit exceeds 0xFF.
+    const data = string_value.resolveData();
+    const slen = string_value.len();
+    if (slen == 0) return primitive;
+
+    switch (data) {
+        .latin1 => |bytes| {
+            if (try core.string.String.createAsciiCaseMapped(rt, bytes, to_lower)) |mapped| return mapped.value();
+        },
+        .utf16 => {},
+    }
+
+    var latin1 = std.ArrayList(u8).empty;
+    defer latin1.deinit(rt.memory.allocator);
+    var wide = std.ArrayList(u16).empty;
+    defer wide.deinit(rt.memory.allocator);
+    var is_wide = false;
+
+    var index: usize = 0;
+    while (index < slen) {
+        const span = codePointAtResolved(data, slen, index);
+        index = span.end;
+
+        // The final-sigma test (Σ→ς) is the only branch that needs neighbour
+        // context; it is rare (lowercase Σ only) so it keeps the string_value walk.
+        const mapping = if (to_lower and span.value == 0x03a3 and isFinalSigma(string_value, span.start, span.end))
+            singleCaseMapping(0x03c2)
+        else
+            unicode_lib.caseConvert(span.value, to_lower);
+
+        for (mapping.codepoints[0..mapping.len]) |cp| {
+            if (!is_wide and cp <= 0xff) {
+                try latin1.append(rt.memory.allocator, @intCast(cp));
+            } else {
+                if (!is_wide) {
+                    is_wide = true;
+                    try wide.ensureTotalCapacity(rt.memory.allocator, latin1.items.len + 1);
+                    for (latin1.items) |byte| wide.appendAssumeCapacity(byte);
+                    latin1.clearRetainingCapacity();
+                }
+                try appendUtf16CodePoint(rt, &wide, cp);
+            }
+        }
+    }
+
+    const string = if (is_wide)
+        try core.string.String.createUtf16(rt, wide.items)
+    else
+        try core.string.String.createLatin1(rt, latin1.items);
+    return string.value();
+}
+
+fn toStringValueForMethod(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
+    if (receiver.isString()) return receiver;
+    if (receiver.is(.object)) {
+        const object = try expectObject(receiver);
+        if (object.class_id == core.class.ids.string) {
+            return (object.objectData() orelse return error.TypeError);
+        }
+        var bytes = std.ArrayList(u8).empty;
+        defer bytes.deinit(rt.memory.allocator);
+        try appendValueString(rt, &bytes, receiver);
+        return createStringValue(rt, bytes.items);
+    }
+    if (receiver.is(.null_value) or receiver.is(.undefined_value)) return error.TypeError;
+
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(rt.memory.allocator);
+    try appendValueString(rt, &bytes, receiver);
+    return createStringValue(rt, bytes.items);
+}
+
+fn singleCaseMapping(cp: u21) unicode_lib.CaseMapping {
+    var mapping: unicode_lib.CaseMapping = .{ .codepoints = undefined, .len = 1 };
+    mapping.codepoints[0] = cp;
+    return mapping;
+}
+
+const CodePointSpan = struct {
+    value: u21,
+    start: usize,
+    end: usize,
+};
+fn codePointAtStringIndex(string_value: *const core.string.String, index: usize) CodePointSpan {
+    const first = string_value.codeUnitAt(index);
+    const next_index = index + 1;
+    if (isHighSurrogateUnit(first) and next_index < string_value.len()) {
+        const second = string_value.codeUnitAt(next_index);
+        if (isLowSurrogateUnit(second)) {
+            return .{ .value = unicode_lib.codePointFromSurrogatePair(first, second), .start = index, .end = index + 2 };
+        }
+    }
+    return .{ .value = @intCast(first), .start = index, .end = next_index };
+}
+
+fn codePointBeforeStringIndex(string_value: *const core.string.String, end: usize) ?CodePointSpan {
+    if (end == 0) return null;
+    const last_index = end - 1;
+    const last = string_value.codeUnitAt(last_index);
+    if (isLowSurrogateUnit(last) and last_index > 0) {
+        const first_index = last_index - 1;
+        const first = string_value.codeUnitAt(first_index);
+        if (isHighSurrogateUnit(first)) {
+            return .{ .value = unicode_lib.codePointFromSurrogatePair(first, last), .start = first_index, .end = end };
+        }
+    }
+    return .{ .value = @intCast(last), .start = last_index, .end = end };
+}
+
+fn isFinalSigma(string_value: *const core.string.String, sigma_start: usize, after_sigma: usize) bool {
+    var before_index = sigma_start;
+    while (true) {
+        const previous = codePointBeforeStringIndex(string_value, before_index) orelse return false;
+        before_index = previous.start;
+        if (unicode_lib.isCaseIgnorable(previous.value)) continue;
+        if (!unicode_lib.isCased(previous.value)) return false;
+        break;
+    }
+
+    var next_index = after_sigma;
+    while (next_index < string_value.len()) {
+        const next = codePointAtStringIndex(string_value, next_index);
+        next_index = next.end;
+        if (unicode_lib.isCaseIgnorable(next.value)) continue;
+        return !unicode_lib.isCased(next.value);
+    }
+    return true;
+}
+
+fn indexOf(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
+    if (args.len < 1 or args.len > 2) return error.TypeError;
+    var needle = std.ArrayList(u8).empty;
+    defer needle.deinit(rt.memory.allocator);
+    try appendValueString(rt, &needle, args[0]);
+    const start = if (args.len >= 2) try stringSearchStart(rt, bytes.len, args[1]) else @as(usize, 0);
+    const index = if (start <= bytes.len) std.mem.indexOfPos(u8, bytes, start, needle.items) else null;
+    return core.JSValue.int32(if (index) |value| @intCast(value) else -1);
+}
+
+fn indexOfReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
+    if (stringValueFromReceiver(receiver)) |string_value| {
+        const needle_value = try stringValueFromSearchArgument(rt, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
+        const needle = stringValueFromReceiver(needle_value) orelse return error.TypeError;
+        const start = if (args.len >= 2) try stringSearchStart(rt, string_value.len(), args[1]) else @as(usize, 0);
+        const index = stringIndexOfUnits(string_value, needle, start);
+        return core.JSValue.int32(if (index) |value| @intCast(value) else -1);
+    }
+
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(rt.memory.allocator);
+    try appendStringReceiverBytes(rt, &bytes, receiver);
+    return indexOf(rt, bytes.items, args);
+}
+
+fn lastIndexOf(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
+    if (args.len < 1 or args.len > 2) return error.TypeError;
+    var needle = std.ArrayList(u8).empty;
+    defer needle.deinit(rt.memory.allocator);
+    try appendValueString(rt, &needle, args[0]);
+
+    const default_start = if (needle.items.len <= bytes.len) bytes.len - needle.items.len else 0;
+    const start = if (args.len >= 2 and !args[1].is(.undefined_value))
+        try stringLastSearchStart(rt, default_start, args[1])
+    else
+        default_start;
+    if (needle.items.len == 0) return core.JSValue.int32(@intCast(start));
+    if (needle.items.len > bytes.len) return core.JSValue.int32(-1);
+
+    var index = @min(start, default_start) + 1;
+    while (index > 0) {
+        index -= 1;
+        if (std.mem.eql(u8, bytes[index .. index + needle.items.len], needle.items)) {
+            return core.JSValue.int32(@intCast(index));
+        }
+    }
+    return core.JSValue.int32(-1);
+}
+
+fn lastIndexOfReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
+    if (stringValueFromReceiver(receiver)) |string_value| {
+        const needle_value = try stringValueFromSearchArgument(rt, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
+        const needle = stringValueFromReceiver(needle_value) orelse return error.TypeError;
+
+        if (needle.len() == 0) {
+            const start = if (args.len >= 2 and !args[1].is(.undefined_value))
+                try stringLastSearchStart(rt, string_value.len(), args[1])
+            else
+                string_value.len();
+            return core.JSValue.int32(@intCast(start));
+        }
+        if (needle.len() > string_value.len()) return core.JSValue.int32(-1);
+
+        const default_start = string_value.len() - needle.len();
+        const start = if (args.len >= 2 and !args[1].is(.undefined_value))
+            try stringLastSearchStart(rt, default_start, args[1])
+        else
+            default_start;
+        const index = stringLastIndexOfUnits(string_value, needle, start);
+        return core.JSValue.int32(if (index) |value| @intCast(value) else -1);
+    }
+
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(rt.memory.allocator);
+    try appendStringReceiverBytes(rt, &bytes, receiver);
+    return lastIndexOf(rt, bytes.items, args);
+}
+
+fn charCodeAtReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
+    const primitive = try stringPrimitiveValue(receiver);
+    const index = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
+    if (index < 0 or index >= @as(i64, @intCast(core.string.stringValueLenUnchecked(primitive)))) return core.JSValue.float64(std.math.nan(f64));
+    return core.JSValue.int32(core.string.stringValueCodeUnitAtUnchecked(primitive, @intCast(index)));
+}
+
+fn codePointAtReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
+    const primitive = try stringPrimitiveValue(receiver);
+    const index = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
+    const primitive_len = core.string.stringValueLenUnchecked(primitive);
+    if (index < 0 or index >= @as(i64, @intCast(primitive_len))) return core.JSValue.undefinedValue();
+    const unit = core.string.stringValueCodeUnitAtUnchecked(primitive, @intCast(index));
+    if (isHighSurrogateUnit(unit) and index + 1 < primitive_len) {
+        const next = core.string.stringValueCodeUnitAtUnchecked(primitive, @intCast(index + 1));
+        if (isLowSurrogateUnit(next)) {
+            return core.JSValue.int32(@intCast(unicode_lib.codePointFromSurrogatePair(unit, next)));
+        }
+    }
+    return core.JSValue.int32(unit);
+}
+
+fn at(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
+    const relative = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
+    const len: i64 = @intCast(bytes.len);
+    const index = if (relative < 0) len + relative else relative;
+    if (index < 0 or index >= len) return core.JSValue.undefinedValue();
+    return createStringValue(rt, bytes[@intCast(index)..@intCast(index + 1)]);
+}
+
+fn atReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
+    if (stringValueFromReceiverRaw(receiver)) |string_value| {
+        const relative = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
+        const len: i64 = @intCast(core.string.stringValueLenUnchecked(string_value));
+        const index = if (relative < 0) len + relative else relative;
+        if (index < 0 or index >= len) return core.JSValue.undefinedValue();
+        return codeUnitStringValue(rt, core.string.stringValueCodeUnitAtUnchecked(string_value, @intCast(index)));
+    }
+
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(rt.memory.allocator);
+    try appendStringReceiverBytes(rt, &bytes, receiver);
+    return at(rt, bytes.items, args);
+}
+
+fn slice(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
+    const len: i64 = @intCast(bytes.len);
+    var start = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
+    var end = if (args.len >= 2 and !args[1].is(.undefined_value)) try stringInteger(rt, args[1]) else len;
+    if (start < 0) start = @max(len + start, 0) else start = @min(start, len);
+    if (end < 0) end = @max(len + end, 0) else end = @min(end, len);
+    if (end < start) end = start;
+    return createStringValue(rt, bytes[@intCast(start)..@intCast(end)]);
+}
+
+fn sliceReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
+    if (stringValueFromReceiver(receiver)) |string_value| {
+        const range = try stringSliceRange(rt, string_value.len(), args);
+        const res = try core.string.String.createSlice(rt, string_value, range.start, range.end - range.start);
+        return res.value();
+    }
+
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(rt.memory.allocator);
+    try appendStringReceiverBytes(rt, &bytes, receiver);
+    return slice(rt, bytes.items, args);
+}
+
+const StringSliceRange = struct {
+    start: usize,
+    end: usize,
+};
+fn stringSubstringRange(rt: *core.JSRuntime, len_usize: usize, args: []const core.JSValue) !StringSliceRange {
+    const len: i64 = @intCast(len_usize);
+    const start_raw = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
+    const end_raw = if (args.len >= 2 and !args[1].is(.undefined_value)) try stringInteger(rt, args[1]) else len;
+    const start: usize = @intCast(@max(@as(i64, 0), @min(start_raw, len)));
+    const end: usize = @intCast(@max(@as(i64, 0), @min(end_raw, len)));
+    return .{ .start = @min(start, end), .end = @max(start, end) };
+}
+
+fn stringSliceRange(rt: *core.JSRuntime, len_usize: usize, args: []const core.JSValue) !StringSliceRange {
+    const len: i64 = @intCast(len_usize);
+    var start = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
+    var end = if (args.len >= 2 and !args[1].is(.undefined_value)) try stringInteger(rt, args[1]) else len;
+    if (start < 0) start = @max(len + start, 0) else start = @min(start, len);
+    if (end < 0) end = @max(len + end, 0) else end = @min(end, len);
+    if (end < start) end = start;
+    return .{ .start = @intCast(start), .end = @intCast(end) };
+}
+
+/// Resolve-once String.prototype.repeat for plain String / String-object
+/// receivers, mirroring QuickJS `js_string_repeat`: the
+/// receiver's already-flat code units are borrowed ONCE (no per-call
+/// transcode-copy of the slow `repeat(bytes)` path) and the result is built
+/// directly in a buffer pre-sized to `count * unit_len`, narrow latin1 stays
+/// narrow and only a source with >0xFF units (wide) widens to utf16 — the same
+/// lazy-widen shape as `pad` (commit 3ccd4f8). Non-String receivers fall
+/// through to the existing transcoding `repeat`. Count gate / empty-string
+/// returns / overflow guard reproduce the current `repeat` semantics exactly.
+fn repeatReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
+    const string_value = stringValueFromReceiver(receiver) orelse {
+        var bytes = std.ArrayList(u8).empty;
+        defer bytes.deinit(rt.memory.allocator);
+        try appendStringReceiverBytes(rt, &bytes, receiver);
+        return repeat(rt, bytes.items, args);
+    };
+
+    const count = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
+    // qjs js_string_repeat: count outside [0, 2^31-1] is
+    // RangeError "invalid repeat count"; a result past JS_STRING_LEN_MAX is
+    // RangeError "invalid string length". Both messages are attached by the
+    // string_ops dispatch wrapper (error.RangeError / error.InvalidLength).
+    if (count < 0 or count > 2147483647) return error.RangeError;
+    const unit_len = string_value.len();
+    if (unit_len == 0 or count == 0) return createStringValue(rt, "");
+    const repeat_count: usize = @intCast(count);
+    const total = try std.math.mul(usize, unit_len, repeat_count);
+    if (total > core.string.max_length) return error.InvalidLength;
+    switch (string_value.resolveData()) {
+        .latin1 => |src| {
+            var out = try rt.memory.allocator.alloc(u8, total);
+            defer rt.memory.allocator.free(out);
+            var index: usize = 0;
+            while (index < total) : (index += unit_len) @memcpy(out[index .. index + unit_len], src);
+            return createLatin1SliceValue(rt, out);
+        },
+        .utf16 => |src| {
+            var out = try rt.memory.allocator.alloc(u16, total);
+            defer rt.memory.allocator.free(out);
+            var index: usize = 0;
+            while (index < total) : (index += unit_len) @memcpy(out[index .. index + unit_len], src);
+            return (try core.string.String.createUtf16(rt, out)).value();
+        },
+    }
+}
+
+fn repeat(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
+    const count = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
+    // Mirror of repeatReceiver's qjs js_string_repeat checks.
+    if (count < 0 or count > 2147483647) return error.RangeError;
+    if (bytes.len == 0 or count == 0) return createStringValue(rt, "");
+    const repeat_count: usize = @intCast(count);
+    const total = try std.math.mul(usize, bytes.len, repeat_count);
+    if (total > core.string.max_length) return error.InvalidLength;
+    var out = try rt.memory.allocator.alloc(u8, total);
+    defer rt.memory.allocator.free(out);
+    var index: usize = 0;
+    while (index < total) : (index += bytes.len) @memcpy(out[index .. index + bytes.len], bytes);
+    return createStringValue(rt, out);
+}
+
+const PadSide = enum { start, end };
+fn pad(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue, side: PadSide) !core.JSValue {
+    const target_len_i = if (args.len >= 1) try stringInteger(rt, args[0]) else 0;
+    if (target_len_i <= @as(i64, @intCast(bytes.len))) return createStringValue(rt, bytes);
+    const target_len: usize = @intCast(target_len_i);
+    var fill = std.ArrayList(u8).empty;
+    defer fill.deinit(rt.memory.allocator);
+    if (args.len >= 2 and !args[1].is(.undefined_value)) {
+        try appendValueString(rt, &fill, args[1]);
+    } else {
+        try fill.append(rt.memory.allocator, ' ');
+    }
+    if (fill.items.len == 0) return createStringValue(rt, bytes);
+
+    var out = try rt.memory.allocator.alloc(u8, target_len);
+    defer rt.memory.allocator.free(out);
+    const fill_len = target_len - bytes.len;
+    switch (side) {
+        .start => {
+            var index: usize = 0;
+            while (index < fill_len) : (index += 1) out[index] = fill.items[index % fill.items.len];
+            @memcpy(out[fill_len..], bytes);
+        },
+        .end => {
+            @memcpy(out[0..bytes.len], bytes);
+            var index: usize = 0;
+            while (index < fill_len) : (index += 1) out[bytes.len + index] = fill.items[index % fill.items.len];
+        },
+    }
+    return createStringValue(rt, out);
+}
+
+fn localeCompare(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
+    var other = std.ArrayList(u8).empty;
+    defer other.deinit(rt.memory.allocator);
+    const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    try appendValueString(rt, &other, value);
+    const result: i32 = switch (std.mem.order(u8, bytes, other.items)) {
+        .lt => -1,
+        .eq => 0,
+        .gt => 1,
+    };
+    return core.JSValue.int32(result);
+}
+
+fn normalize(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
+    if (args.len >= 1 and !args[0].is(.undefined_value)) {
+        var form = std.ArrayList(u8).empty;
+        defer form.deinit(rt.memory.allocator);
+        try appendValueString(rt, &form, args[0]);
+        if (!std.mem.eql(u8, form.items, "NFC") and
+            !std.mem.eql(u8, form.items, "NFD") and
+            !std.mem.eql(u8, form.items, "NFKC") and
+            !std.mem.eql(u8, form.items, "NFKD")) return error.RangeError;
+    }
+    return createStringValue(rt, bytes);
+}
+
+const StringContainsMode = enum { contains, starts, ends };
+fn contains(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue, mode: StringContainsMode) !core.JSValue {
+    if (args.len < 1 or args.len > 2) return error.TypeError;
+    var needle = std.ArrayList(u8).empty;
+    defer needle.deinit(rt.memory.allocator);
+    try appendValueString(rt, &needle, args[0]);
+    const pos = if (args.len >= 2) try stringSearchStart(rt, bytes.len, args[1]) else 0;
+    const found = switch (mode) {
+        .contains => if (pos <= bytes.len) std.mem.indexOfPos(u8, bytes, pos, needle.items) != null else false,
+        .starts => pos <= bytes.len and std.mem.startsWith(u8, bytes[pos..], needle.items),
+        .ends => blk: {
+            const end = if (args.len >= 2 and !args[1].is(.undefined_value)) pos else bytes.len;
+            if (needle.items.len > end) break :blk false;
+            break :blk std.mem.eql(u8, bytes[end - needle.items.len .. end], needle.items);
+        },
+    };
+    return core.JSValue.boolean(found);
+}
+
+fn containsReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue, mode: StringContainsMode) !core.JSValue {
+    if (stringValueFromReceiver(receiver)) |string_value| {
+        const needle_value = try stringValueFromSearchArgument(rt, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
+        const needle = stringValueFromReceiver(needle_value) orelse return error.TypeError;
+        const pos = if (args.len >= 2) try stringSearchStart(rt, string_value.len(), args[1]) else 0;
+        const found = switch (mode) {
+            .contains => stringIndexOfUnits(string_value, needle, pos) != null,
+            .starts => stringMatchesAtUnits(string_value, needle, pos),
+            .ends => blk: {
+                const end = if (args.len >= 2 and !args[1].is(.undefined_value)) pos else string_value.len();
+                if (needle.len() > end) break :blk false;
+                break :blk stringMatchesAtUnits(string_value, needle, end - needle.len());
+            },
+        };
+        return core.JSValue.boolean(found);
+    }
+
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(rt.memory.allocator);
+    try appendStringReceiverBytes(rt, &bytes, receiver);
+    return contains(rt, bytes.items, args, mode);
+}
+
+fn appendStringReceiverBytes(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), target: core.JSValue) !void {
+    if (target.isString()) {
+        try core.string.appendValueUtf8(rt, buffer, target);
+        return;
+    }
+    if (target.is(.object)) {
+        const object = try expectObject(target);
+        if (object.class_id == core.class.ids.string) {
+            const data = object.objectData() orelse return error.TypeError;
+            try appendValueString(rt, buffer, data);
+            return;
+        }
+        try appendValueString(rt, buffer, target);
+        return;
+    }
+    if (target.is(.null_value) or target.is(.undefined_value)) return error.TypeError;
+    try appendValueString(rt, buffer, target);
+}
+
+const createStringValue = value_ops.createStringValue;
+fn stringValueFromSearchArgument(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
+    if (value.isString()) return value;
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(rt.memory.allocator);
+    try appendValueString(rt, &bytes, value);
+    return createStringValue(rt, bytes.items);
+}
+
+fn stringMatchesAtResolved(
+    haystack: core.string.String.ResolvedData,
+    needle: core.string.String.ResolvedData,
+    hlen: usize,
+    nlen: usize,
+    start: usize,
+) bool {
+    if (start > hlen or nlen > hlen - start) return false;
+    var offset: usize = 0;
+    while (offset < nlen) : (offset += 1) {
+        if (resolvedUnitAt(haystack, start + offset) != resolvedUnitAt(needle, offset)) return false;
+    }
+    return true;
+}
+
+// startsWith / endsWith call this once per op; resolve the flat slices once
+// (hoisting the slice/rope parent-chain walk out of the per-char loop) instead
+// of `codeUnitAt` per character — same resolve-once pattern as stringIndexOfUnits.
+fn stringMatchesAtUnits(haystack: *core.string.String, needle: *core.string.String, start: usize) bool {
+    return stringMatchesAtResolved(haystack.resolveData(), needle.resolveData(), haystack.len(), needle.len(), start);
+}
+
+inline fn resolvedUnitAt(data: core.string.String.ResolvedData, i: usize) u16 {
+    return switch (data) {
+        .latin1 => |bytes| bytes[i],
+        .utf16 => |units| units[i],
+    };
+}
+
+fn stringIndexOfUnits(haystack: *core.string.String, needle: *core.string.String, start: usize) ?usize {
+    const hlen = haystack.len();
+    const nlen = needle.len();
+    if (start > hlen) return null;
+    if (nlen == 0) return start;
+    if (nlen > hlen - start) return null;
+    // Resolve both operands to their flat code-unit slice ONCE (qjs string_indexof
+    // hoists is_wide_char out of the loop, quickjs.c) instead of
+    // re-walking the slice/rope parent chain via `codeUnitAt` on every character,
+    // and first-char-skip so a non-matching position is rejected in a single read.
+    // The loop runs no allocations, so the resolved slices stay valid throughout.
+    const h = haystack.resolveData();
+    const n = needle.resolveData();
+    const first = resolvedUnitAt(n, 0);
+    var index = start;
+    const limit = hlen - nlen;
+    while (index <= limit) : (index += 1) {
+        if (resolvedUnitAt(h, index) != first) continue;
+        var offset: usize = 1;
+        while (offset < nlen and resolvedUnitAt(h, index + offset) == resolvedUnitAt(n, offset)) : (offset += 1) {}
+        if (offset == nlen) return index;
+    }
+    return null;
+}
+
+fn stringLastIndexOfUnits(haystack: *core.string.String, needle: *core.string.String, start: usize) ?usize {
+    const hlen = haystack.len();
+    const nlen = needle.len();
+    if (nlen == 0) return @min(start, hlen);
+    if (nlen > hlen) return null;
+    // Resolve both flat slices ONCE outside the per-position loop (the prior
+    // code re-walked the slice/rope chain via codeUnitAt for every character of
+    // every candidate position) and first-char-skip, mirroring stringIndexOfUnits.
+    const h = haystack.resolveData();
+    const n = needle.resolveData();
+    const first = resolvedUnitAt(n, 0);
+    var index = @min(start, hlen - nlen) + 1;
+    while (index > 0) {
+        index -= 1;
+        if (resolvedUnitAt(h, index) != first) continue;
+        if (stringMatchesAtResolved(h, n, hlen, nlen, index)) return index;
+    }
+    return null;
+}
+
+/// One-code-unit result string (`charAt` / `at` / the wrapper index reads).
+/// A latin1 unit is the runtime's shared table entry, matching qjs
+/// `js_new_string_char`'s narrow arm without its allocation.
+fn codeUnitStringValue(rt: *core.JSRuntime, unit: u16) !core.JSValue {
+    if (unit < 0x100) return (try rt.singleByteString(@intCast(unit))).value();
+    return (try core.string.String.createUtf16(rt, &.{unit})).value();
+}
+
+fn createLatin1SliceValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue {
+    const str = try core.string.String.createLatin1(rt, bytes);
+    return str.value();
+}
+
+fn stringPrimitiveValue(value: core.JSValue) !core.JSValue {
+    if (value.isString()) return value;
+    const object = try expectObject(value);
+    if (object.class_id != core.class.ids.string) return error.TypeError;
+    return (object.objectData() orelse return error.TypeError);
+}
+
+pub fn stringValueFromReceiver(value: core.JSValue) ?*core.string.String {
+    const string_value = stringValueFromReceiverRaw(value) orelse return null;
+    return string_value.asStringBody();
+}
+
+fn stringValueFromReceiverRaw(value: core.JSValue) ?core.JSValue {
+    const string_value = if (value.isString())
+        value
+    else if (value.is(.object)) blk: {
+        const object = core.value_semantics.objectFromValue(value) orelse return null;
+        if (object.class_id != core.class.ids.string) return null;
+        break :blk object.objectData() orelse return null;
+    } else return null;
+    return string_value;
+}
+
+/// Owning wrapper over the single `CreateIterResultObject` owner: this file's
+/// callers hand over their reference to `value`.
+fn iteratorResult(rt: *core.JSRuntime, global: ?*core.Object, value: core.JSValue, done: bool) !core.JSValue {
+    return iterator_ops.createIteratorResult(rt, global, value, done);
+}
+
+test "string iteratorResult roots direct function bytecode value while creating result" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+
+    const symbol_atom = try rt.atoms.newValueSymbol("gc-string-iterator-result-bytecode-symbol");
+    const fb = try core.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
+
+    const result_value = core.JSValue.functionBytecode(&fb.header);
+
+    const old_threshold = rt.gcThreshold();
+    rt.setGCThreshold(0);
+    defer rt.setGCThreshold(old_threshold);
+
+    const iterator_result_value = try iteratorResult(rt, null, result_value, false);
+    const iterator_result = try expectObject(iterator_result_value);
+
+    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
+    {
+        const stored = try iterator_result.getProperty(core.atom.predefinedId("value", .string).?);
+        try std.testing.expect(stored.same(result_value));
+    }
+
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.atoms.name(symbol_atom) == null);
+}
+
+test "string wrapper iterator split and match helpers keep values under GC" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt, .{});
+    defer ctx.destroy();
+    ctx.cached_function_proto = try core.Object.create(rt, core.class.ids.object, null);
+
+    const old_threshold = rt.gcThreshold();
+    rt.setGCThreshold(0);
+    defer rt.setGCThreshold(old_threshold);
+
+    const text = try createStringValue(rt, "aba");
+
+    const wrapper_value = try constructWithPrototype(rt, &.{text}, null);
+    const wrapper = try expectObject(wrapper_value);
+    const wrapped_data = wrapper.objectData() orelse return error.TypeError;
+    const wrapped_string = stringValueFromReceiver(wrapped_data) orelse return error.TypeError;
+    try std.testing.expect(wrapped_string.eqlBytes("aba"));
+
+    const iterator_value = try stringIterator(ctx, text);
+    const iterator_object = try expectObject(iterator_value);
+    const iterator_target = iterator_object.iteratorTarget() orelse return error.TypeError;
+    const iterator_string = stringValueFromReceiver(iterator_target) orelse return error.TypeError;
+    try std.testing.expect(iterator_string.eqlBytes("aba"));
+
+    const separator = try createStringValue(rt, "b");
+    const split_value = try splitReceiver(rt, text, &.{separator});
+    const split_object = try expectObject(split_value);
+    const split_first = try split_object.getProperty(core.Atom.taggedInt(0));
+    const split_second = try split_object.getProperty(core.Atom.taggedInt(1));
+    try std.testing.expect((stringValueFromReceiver(split_first) orelse return error.TypeError).eqlBytes("a"));
+    try std.testing.expect((stringValueFromReceiver(split_second) orelse return error.TypeError).eqlBytes("a"));
+
+    const needle = try createStringValue(rt, "ba");
+    const match_value = try matchString(rt, "ababa", &.{needle});
+    const match_object = try expectObject(match_value);
+    const match_item = try match_object.getProperty(core.Atom.taggedInt(0));
+    try std.testing.expect((stringValueFromReceiver(match_item) orelse return error.TypeError).eqlBytes("ba"));
+    const input_key = try rt.internAtom("input");
+    const input_value = try match_object.getProperty(input_key);
+    try std.testing.expect((stringValueFromReceiver(input_value) orelse return error.TypeError).eqlBytes("ababa"));
+}
+
+const expectObject = core.value_semantics.expectObject;
+fn defineIntProperty(rt: *core.JSRuntime, object: *core.Object, key: core.Atom, value: i32) !void {
+    var object_value = object.value();
+    var root_frame = core.runtime.rootValues(.{&object_value});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
+
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(value), .all));
+}
+
+fn defineReadonlyIntProperty(rt: *core.JSRuntime, object: *core.Object, key: core.Atom, value: i32) !void {
+    var object_value = object.value();
+    var root_frame = core.runtime.rootValues(.{&object_value});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
+
+    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(value), .none));
+}
+
+fn stringSearchStart(rt: *core.JSRuntime, length: usize, value: core.JSValue) !usize {
+    const number = try value_ops.toIntegerOrInfinity(rt, value);
+    if (std.math.isNan(number) or number <= 0) return 0;
+    if (std.math.isPositiveInf(number)) return length;
+    const truncated = @trunc(number);
+    if (truncated >= @as(f64, @floatFromInt(length))) return length;
+    return @intFromFloat(truncated);
+}
+
+fn stringLastSearchStart(rt: *core.JSRuntime, default_start: usize, value: core.JSValue) !usize {
+    const number = try value_ops.toIntegerOrInfinity(rt, value);
+    if (std.math.isNan(number)) return default_start;
+    if (number <= 0) return 0;
+    if (std.math.isPositiveInf(number)) return default_start;
+    const truncated = @trunc(number);
+    if (truncated >= @as(f64, @floatFromInt(default_start))) return default_start;
+    return @intFromFloat(truncated);
+}
+
+fn toUint32Limit(rt: *core.JSRuntime, value: core.JSValue) !u32 {
+    if (value.isBigInt() or value.is(.symbol)) return error.TypeError;
+    const number = try value_ops.toIntegerOrInfinity(rt, value);
+    if (std.math.isNan(number) or !std.math.isFinite(number) or number == 0) return 0;
+    const integer = if (number < 0) -@floor(@abs(number)) else @floor(number);
+    const modulo = @mod(integer, 4294967296.0);
+    return @intFromFloat(modulo);
+}
+
+fn stringInteger(rt: *core.JSRuntime, value: core.JSValue) !i64 {
+    if (value.as(.int)) |int_value| return int_value;
+    const number = try value_ops.toIntegerOrInfinity(rt, value);
+    if (std.math.isNan(number)) return 0;
+    if (std.math.isPositiveInf(number)) return std.math.maxInt(i64);
+    if (std.math.isNegativeInf(number)) return std.math.minInt(i64);
+    const integer = if (number < 0) -@floor(@abs(number)) else @floor(number);
+    return @intFromFloat(integer);
+}
+
+fn isTrimCodeUnit(unit: u16) bool {
+    return unicode_lib.isEcmaWhitespaceOrLineTerminatorUnit(unit);
+}
+
+/// This file's policy for the shared bare-runtime ToString owner.
+fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) AppendStringError!void {
+    return core.value_string.appendValueString(rt, buffer, value, .{ .unwrap_wrappers = true });
 }

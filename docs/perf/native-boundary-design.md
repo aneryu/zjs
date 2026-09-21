@@ -434,7 +434,7 @@ if (func_obj.class_id == .c_function) {
 `bound_function` / `c_closure` 不进这条臂（保持慢路）。`forwards_call`
 （`Function.prototype.call/apply`）在 §5.4 处理。
 
-### 5.2 `vm_native.dispatch`（新文件 `src/exec/vm_native.zig`，取代 `vm_call.nativePlainFastDispatch` / `nativeMethodFastDispatch` / `builtin_dispatch.callRecordFromVmInRealm` / `dispatchTypedRecord`）
+### 5.2 `vm_native.dispatch`（新文件 `src/exec/vm_opcodes.zig`，取代 `vm_call.nativePlainFastDispatch` / `nativeMethodFastDispatch` / `builtin_dispatch.callRecordFromVmInRealm` / `dispatchTypedRecord`）
 
 ```zig
 /// 解释器与未来 JIT 共用的 helper：参数是执行状态（engine plan §5.3 `VmExecState` 的

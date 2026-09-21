@@ -795,35 +795,35 @@
 
 `internal_entries`：resolve 走专用 thunk；all/race/reject/allSettled/any/try/withResolvers/allKeyed/allSettledKeyed 走 `promiseStaticCall`；then/catch/finally 走 `promisePrototypeCall`。cproto 均为 `.generic_magic`。
 
-### `promiseStaticEntry` (`src/exec/promise_builtin_ops.zig:41`)
+### `promiseStaticEntry` (`src/exec/promise_ops.zig:41`)
 
 - **签名**：`fn promiseStaticEntry( comptime name: []const u8, comptime length: u8, comptime method: StaticMethod, ) core.host_function.InternalEntry`。
 - **作用**：一张静态方法的 InternalEntry，magic=id。
 - **实现**：`genericMagicFunction(&promiseStaticCall)`。
 - **所有权 / 错误 / 调用**：comptime 表。
 
-### `promisePrototypeEntry` (`src/exec/promise_builtin_ops.zig:57`)
+### `promisePrototypeEntry` (`src/exec/promise_ops.zig:57`)
 
 - **签名**：`fn promisePrototypeEntry( comptime name: []const u8, comptime length: u8, comptime method: PrototypeMethod, ) core.host_function.InternalEntry`。
 - **作用**：原型方法记录。
 - **实现**：`genericMagicFunction(&promisePrototypeCall)`。
 - **所有权 / 错误 / 调用**：then/catch/finally。
 
-### `promisePrototypeCall` (`src/exec/promise_builtin_ops.zig:81`)
+### `promisePrototypeCall` (`src/exec/promise_ops.zig:81`)
 
 - **签名**：`fn promisePrototypeCall( native_ctx: *core.JSContext, native_this: core.JSValue, native_args: []const core.JSValue, native_magic: i32, ) HostError!core.JSValue`。
 - **作用**：把 magic 译成 `"then"|"catch"|"finally"` 调 `promiseThen`。
 - **实现**：`nativeCall` 失败 → TypeError。`callableRealm`。`promiseThen` 返回 null → TypeError（名字级才会 null，这里不会）。
 - **所有权 / 错误 / 调用**：与 qjs `js_promise_proto_funcs`（`quickjs.c:54376`）同一套 JS_GetOpaque2 / Species / catch Invoke / finally thunk。
 
-### `promiseResolveCall` (`src/exec/promise_builtin_ops.zig:110`)
+### `promiseResolveCall` (`src/exec/promise_ops.zig:110`)
 
 - **签名**：`fn promiseResolveCall( native_ctx: *core.JSContext, native_this: core.JSValue, native_args: []const core.JSValue, native_magic: i32, ) HostError!core.JSValue`。
 - **作用**：`Promise.resolve` 专用，避免 combinator 帧压到热路径。
 - **实现**：assert realm==ctx；`promiseResolveStaticCall`。
 - **所有权 / 错误 / 调用**：表第一项。
 
-### `promiseStaticCall` (`src/exec/promise_builtin_ops.zig:130`)
+### `promiseStaticCall` (`src/exec/promise_ops.zig:130`)
 
 - **签名**：`fn promiseStaticCall( native_ctx: *core.JSContext, native_this: core.JSValue, native_args: []const core.JSValue, native_magic: i32, ) HostError!core.JSValue`。
 - **作用**：把 magic 译成 `PromiseStaticMode` 再进 `promise_ops.promiseStaticCall`。
@@ -842,105 +842,105 @@
 
 `ResumeArg` / `ExecOutcome`：私有，驱动 `execBody`。
 
-### `state` (`src/exec/async_generator.zig:63`)
+### `state` (`src/exec/promise_ops.zig:63`)
 
 - **签名**：`fn state(gen: *core.Object) State`。
 - **作用**：读 `asyncGeneratorStateSlot`。
 - **实现**：`@enumFromInt`。
 - **所有权 / 错误 / 调用**：全程。
 
-### `setState` (`src/exec/async_generator.zig:67`)
+### `setState` (`src/exec/promise_ops.zig:67`)
 
 - **签名**：`fn setState(gen: *core.Object, s: State) void`。
 - **作用**：写状态字节。
 - **实现**：`@intFromEnum`。
-- **所有权 / 错误 / 调用**：不分配、无 error、无需屏障：写的是 `gen` 对象内联槽里的一个整数标签，不含指针，不产生新的老→新边。调用方全在本文件的状态机转移处（`src/exec/async_generator.zig:163,297,369,421,523,549` 等）。
+- **所有权 / 错误 / 调用**：不分配、无 error、无需屏障：写的是 `gen` 对象内联槽里的一个整数标签，不含指针，不产生新的老→新边。调用方全在本文件的状态机转移处（`src/exec/promise_ops.zig:163,297,369,421,523,549` 等）。
 
-### `pushRequest` (`src/exec/async_generator.zig:75`)
+### `pushRequest` (`src/exec/promise_ops.zig:75`)
 
 - **签名**：`fn pushRequest(rt: *core.JSRuntime, gen: *core.Object, req: AsyncGeneratorRequest) !void`。
 - **作用**：请求 FIFO 追加；容量 0→4 再 *2。
 - **实现**：溢出则 alloc 新缓冲、memcpy、free 旧。四个值对 generator header 做 generationalBarrier（old-to-young：长寿命 generator 挂新 promise）。
 - **所有权 / 错误 / 调用**：OOM 上抛，enqueue 失败。
 
-### `takeHeadRequest` (`src/exec/async_generator.zig:101`)
+### `takeHeadRequest` (`src/exec/promise_ops.zig:101`)
 
 - **签名**：`fn takeHeadRequest(gen: *core.Object) ?AsyncGeneratorRequest`。
 - **作用**：弹出队头。**必须在 resolving 函数跑之前**，使重入 `next()` 看见缩短的队列（qjs `list_del`，`quickjs.c:21489`）。
 - **实现**：`copyForwards` 压缩。空 → `null`。
 - **所有权 / 错误 / 调用**：`settleHead`。
 
-### `settleHead` (`src/exec/async_generator.zig:116`)
+### `settleHead` (`src/exec/promise_ops.zig:116`)
 
 - **签名**：`fn settleHead( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, gen: *core.Object, result_value: core.JSValue, is_reject: bool, ) HostError!void`。
 - **作用**：用队头的 resolve/reject 结算该请求的 Promise。
 - **实现**：无头 return。root 住 result 与 req 四值，防 Call 内 GC。`Call(resolve|reject, [result])`。
 - **所有权 / 错误 / 调用**：`resolveHead` 与 throw 完成。
 
-### `resolveHead` (`src/exec/async_generator.zig:144`)
+### `resolveHead` (`src/exec/promise_ops.zig:144`)
 
 - **签名**：`fn resolveHead( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, gen: *core.Object, value: core.JSValue, done: bool, ) HostError!void`。
 - **作用**：`js_async_generator_resolve`：先造 `{value,done}`。
 - **实现**：`createIteratorResult` + `settleHead(..., false)`。
 - **所有权 / 错误 / 调用**：每请求一个新 IteratorResult 对象。
 
-### `complete` (`src/exec/async_generator.zig:161`)
+### `complete` (`src/exec/promise_ops.zig:161`)
 
 - **签名**：`fn complete(ctx: *core.JSContext, gen: *core.Object) void`。
 - **作用**：标 `completed` 并释放保存帧（qjs `async_func_free`）。
 - **实现**：已 completed 则 return；`completeGeneratorExecution`。
 - **所有权 / 错误 / 调用**：体结束或 start 前 return/throw。
 
-### `resolveFunction` (`src/exec/async_generator.zig:173`)
+### `resolveFunction` (`src/exec/promise_ops.zig:173`)
 
 - **签名**：`fn resolveFunction( rt: *core.JSRuntime, global: *core.Object, gen: *core.Object, action: ResolveAction, is_reject: bool, ) !core.JSValue`。
 - **作用**：await trampoline：tag `.async_generator_resolve`，记下 gen/action/rejected。
 - **实现**：data function + continuation 槽。
 - **所有权 / 错误 / 调用**：`asyncGeneratorAwait` / `completedReturn` 各一对。
 
-### `asyncGeneratorAwait` (`src/exec/async_generator.zig:189`)
+### `asyncGeneratorAwait` (`src/exec/promise_ops.zig:189`)
 
 - **签名**：`fn asyncGeneratorAwait( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, gen: *core.Object, value: core.JSValue, action: ResolveAction, ) HostError!void`。
 - **作用**：`PromiseResolve(value)` + `performPromiseThen` 接到 trampoline。
 - **实现**：故意不造 thrownawayCapability（qjs `quickjs.c:21464`）。
 - **所有权 / 错误 / 调用**：失败在 `execBody` 里变成 throw 重入。
 
-### `completedReturn` (`src/exec/async_generator.zig:208`)
+### `completedReturn` (`src/exec/promise_ops.zig:208`)
 
 - **签名**：`fn completedReturn( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, gen: *core.Object, value: core.JSValue, ) HostError!void`。
 - **作用**：completed 状态下的 `.return(value)`：仍 PromiseResolve，但 resolve 抛则变成 **rejected promise** 再 then（毒 `Promise.constructor`）。
 - **实现**：`promiseStaticCall(.resolve)` catch 非致命错误 → `rejectedWithPrototype`。action `.awaiting_return`。
 - **所有权 / 错误 / 调用**：`resumeNext` completed+return。
 
-### `resumeBodyValue` (`src/exec/async_generator.zig:253`)
+### `resumeBodyValue` (`src/exec/promise_ops.zig:253`)
 
 - **签名**：`fn resumeBodyValue( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, gen: *core.Object, resume_value: ?core.JSValue, stop_before_pc: ?usize, ) HostError!core.JSValue`。
 - **作用**：用保存的 bytecode/this/args/captures 重入函数体。
 - **实现**：`generatorExecuting=true` defer 清。`callFunctionBytecodeModeState(..., gen, resume_value, ...)`。
 - **所有权 / 错误 / 调用**：无 bytecode → TypeError。
 
-### `execBody` (`src/exec/async_generator.zig:288`)
+### `execBody` (`src/exec/promise_ops.zig:288`)
 
 - **签名**：`fn execBody( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, gen: *core.Object, arg: ResumeArg, ) HostError!ExecOutcome`。
 - **作用**：resume 一次并解释结局：park / settle / throw 重入。
 - **实现**：state=executing。按 ResumeArg 写 completion type（0 next / 1 return / 2 throw / yield* 的 completion）。`resumeBodyValue` 抛 → complete + settleHead reject。未挂起 → complete + resolveHead done=true。`await_op` → `asyncGeneratorAwait(.await_resume)`，失败 throw 重入。`yield` → await `.yield_operand`。`yield_star` → state=suspended_yield_star，resolveHead done=false（值已在字节码里 await）。`.none` assert 失败。
 - **所有权 / 错误 / 调用**：finally 里的 yield 不需要 driver 额外状态：完成值留在挂起操作数栈。
 
-### `resumeNext` (`src/exec/async_generator.zig:386`)
+### `resumeNext` (`src/exec/promise_ops.zig:386`)
 
 - **签名**：`pub fn resumeNext( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, gen: *core.Object, ) HostError!void`。
 - **作用**：FIFO drain（`js_async_generator_resume_next`，`quickjs.c:21568`）。
 - **实现**：队列空 return。`executing`/`awaiting_return` return（只让 trampoline 重入）。`suspended_start`：next 则 execBody start；return/throw 则 complete 再 continue（completed 臂处理同一请求）。`completed`：next → resolve undefined done；return → awaiting_return+completedReturn；throw → settleHead reject；**每次只处理一个请求后 return**（qjs `goto done`）。`suspended_yield` 按 completion 选 throw/return/next。`suspended_yield_star` 两槽 resume。parked → return；settled → continue。
 - **所有权 / 错误 / 调用**：enqueue 在 `state!=executing` 时调用。
 
-### `asyncGeneratorEnqueue` (`src/exec/async_generator.zig:467`)
+### `asyncGeneratorEnqueue` (`src/exec/promise_ops.zig:467`)
 
 - **签名**：`pub fn asyncGeneratorEnqueue( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, gen: *core.Object, args: []const core.JSValue, magic: i32, ) HostError!core.JSValue`。
 - **作用**：`next`/`return`/`throw`：先造 capability（then-getter 可观察），入队，必要时 resume。
 - **实现**：realm 用 generator 函数的。`constructWithPrototype` + resolving pair。`completion_type=magic`（0/1/2）。`pushRequest`。非 executing 则 `resumeNext`。返回请求 Promise。
 - **所有权 / 错误 / 调用**：qjs `js_async_generator_next`，`quickjs.c:21706`。
 
-### `asyncGeneratorResolveFunctionCall` (`src/exec/async_generator.zig:502`)
+### `asyncGeneratorResolveFunctionCall` (`src/exec/promise_ops.zig:502`)
 
 - **签名**：`pub fn asyncGeneratorResolveFunctionCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, function_object: *core.Object, args: []const core.JSValue, ) HostError!?core.JSValue`。
 - **作用**：await trampoline（`quickjs.c:21670`）。
@@ -951,35 +951,35 @@
 
 Machine 拥有的、与 callee arena 无关的 async 完成根。`Boundary` ≤96 字节：promise/value/callee。`Store`：第 0 个在 `first`，溢出每 chunk 16 个 `Boundary`。
 
-### `Store.begin` (`src/exec/async_completion.zig:24`)
+### `Store.begin` (`src/exec/inline_calls.zig:24`)
 
 - **签名**：`pub fn begin(self: *Store, rt: *core.JSRuntime, callee: Value) !u32`。
 - **作用**：在分配 Promise/帧之前预留一个已初始化根。溢出按高水位一次，不按 helper 调用次数。
 - **实现**：`count==maxInt(u32)` → OOM。id>0 沿 chunk 链，缺则 `rt.memory.create(Chunk)`。`count+=1`，`at(id).* = { .callee }`。
 - **所有权 / 错误 / 调用**：测试：后续 begin OOM 时已发布的 first 根仍在。
 
-### `Store.at` (`src/exec/async_completion.zig:45`)
+### `Store.at` (`src/exec/inline_calls.zig:45`)
 
 - **签名**：`pub fn at(self: *Store, id: u32) *Boundary`。
 - **作用**：按 id 取槽。
 - **实现**：0 → `&first`；否则走 chunk 链 `(id-1)/16`。
 - **所有权 / 错误 / 调用**：assert `id < count`。
 
-### `Store.release` (`src/exec/async_completion.zig:53`)
+### `Store.release` (`src/exec/inline_calls.zig:53`)
 
 - **签名**：`pub fn release(self: *Store, id: u32) void`。
 - **作用**：LIFO 释放最新槽，清成 undefined。
 - **实现**：assert id==count-1；`at(id).* = .{}`；count--。
 - **所有权 / 错误 / 调用**：不释放 chunk（高水位保留）。
 
-### `Store.trace` (`src/exec/async_completion.zig:58`)
+### `Store.trace` (`src/exec/inline_calls.zig:58`)
 
 - **签名**：`pub fn trace(self: *Store, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void`。
 - **作用**：让 tracer 看见每个活 Boundary 的 promise/value/callee。
 - **实现**：`0..count` 三次 `visitor.value`。
 - **所有权 / 错误 / 调用**：Machine 的 RootProvider。
 
-### `Store.deinit` (`src/exec/async_completion.zig:66`)
+### `Store.deinit` (`src/exec/inline_calls.zig:66`)
 
 - **签名**：`pub fn deinit(self: *Store, rt: *core.JSRuntime) void`。
 - **作用**：销毁 chunk 链。必须先 release 完。
@@ -988,6 +988,6 @@ Machine 拥有的、与 callee arena 无关的 async 完成根。`Boundary` ≤9
 
 ## 覆盖核对
 
-- 清单函数数: 134（`src/exec/async_completion.zig` 5 + `src/exec/async_generator.zig` 15 + `src/exec/promise_builtin_ops.zig` 5 + `src/exec/promise_ops.zig` 109）
+- 清单函数数: 134（`src/exec/inline_calls.zig` 5 + `src/exec/promise_ops.zig` 15 + `src/exec/promise_ops.zig` 5 + `src/exec/promise_ops.zig` 109）
 - 本文标题覆盖: 134
 - 未覆盖: 无

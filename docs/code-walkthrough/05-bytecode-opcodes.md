@@ -42,7 +42,7 @@
 - **签名**：`pub fn encode(self: Flags) u8`。
 - **作用**：把 `ProbeKind` 与 `is_with` 压成 `dyn_env_probe` 第 9 字节的 flags。
 - **实现**：低 3 位写 `kind`，bit3 写 `is_with`。保留高位必须为 0，否则 `decode` 拒绝。
-- **所有权 / 错误 / 调用**：纯值转换，无分配。唯一生产调用方是 `compiler/resolve_variables.zig:532`（`emitDynamicEnvProbe` 把 flags 写进 `dyn_env_probe` 的第 9 个操作数字节；parser 发的还是 `scope_*`，由这一趟下降）；读回一侧是 stack-size（`bytecode.zig:9852`）与 VM（`exec/vm_property_ref.zig:38`）。
+- **所有权 / 错误 / 调用**：纯值转换，无分配。唯一生产调用方是 `compiler/resolve_variables.zig:532`（`emitDynamicEnvProbe` 把 flags 写进 `dyn_env_probe` 的第 9 个操作数字节；parser 发的还是 `scope_*`，由这一趟下降）；读回一侧是 stack-size（`bytecode.zig:9852`）与 VM（`exec/vm_property.zig:38`）。
 
 
 ### `opcode.dyn_env.Flags.stackPop` (`src/bytecode/opcode.zig:91`)
@@ -98,7 +98,7 @@
 - **签名**：`pub fn addHint(sub: u8) u8`。
 - **作用**：从 add 子码还原 hint。
 - **实现**：`sub - add_base`，调用方须先 `isAdd`。
-- **所有权 / 错误 / 调用**：纯算术（`sub - add_base`），不分配、无 error set；调用前必须自己先过 `isAdd`，否则下溢。唯一调用方 `src/exec/using_ops.zig:85`，紧跟在 `:84` 的 `isAdd` 判定之后。
+- **所有权 / 错误 / 调用**：纯算术（`sub - add_base`），不分配、无 error set；调用前必须自己先过 `isAdd`，否则下溢。唯一调用方 `src/exec/vm_opcodes.zig:85`，紧跟在 `:84` 的 `isAdd` 判定之后。
 
 
 ### `opcode.ext0_sub.stackPop` (`src/bytecode/opcode.zig:529`)

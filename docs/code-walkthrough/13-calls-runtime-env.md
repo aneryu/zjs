@@ -89,7 +89,7 @@
 - **签名**：`pub fn existingGlobalLexicalEnv(ctx: *core.JSContext) ?*core.Object`。
 - **作用**：不创建。
 - **实现**：ctx 或 ctx.global 的 lexicals。
-- **所有权 / 错误 / 调用**：只查不建：返回借用的 `*Object`（由 `ctx.lexicals` 或全局对象持有），不分配、无 error set。调用方 `src/exec/vm_property_ref.zig:196`、本文件 `globalLexicalCell`（`2977`）与 `setGlobalLexicalValueForFastPathOwned`（`3304`）。
+- **所有权 / 错误 / 调用**：只查不建：返回借用的 `*Object`（由 `ctx.lexicals` 或全局对象持有），不分配、无 error set。调用方 `src/exec/vm_property.zig:196`、本文件 `globalLexicalCell`（`2977`）与 `setGlobalLexicalValueForFastPathOwned`（`3304`）。
 
 ### `existingGlobalLexicalEnvForGlobal` (`src/exec/call_runtime.zig:2953`)
 
@@ -166,28 +166,28 @@
 - **签名**：`pub fn defineGlobalLexicalValue(ctx: *core.JSContext, atom_id: core.Atom, value: core.JSValue, is_const: bool) !void`。
 - **作用**：无则 assuming-new 数据属性。
 - **实现**：已存在不覆盖。
-- **所有权 / 错误 / 调用**：`globalLexicalEnv` 可能新建 lexicals 环境（挂在 `ctx` 上，由 ctx 持有）；`value` 存进属性表后由环境对象持有，函数自身不建根。已存在同名绑定则整条是 no-op。error set 为分配错误。唯一调用方 `src/exec/vm_property_globals.zig:508`（给未初始化的全局词法绑定填 uninitialized 哨兵）。
+- **所有权 / 错误 / 调用**：`globalLexicalEnv` 可能新建 lexicals 环境（挂在 `ctx` 上，由 ctx 持有）；`value` 存进属性表后由环境对象持有，函数自身不建根。已存在同名绑定则整条是 no-op。error set 为分配错误。唯一调用方 `src/exec/vm_property.zig:508`（给未初始化的全局词法绑定填 uninitialized 哨兵）。
 
 ### `defineGlobalDeclLexicalCell` (`src/exec/call_runtime.zig:3225`)
 
 - **签名**：`pub fn defineGlobalDeclLexicalCell( ctx: *core.JSContext, global: *core.Object, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, ref_idx: u16, atom_id: core.Atom, is_const: bool, ) !bool`。
 - **作用**：PASS2 词法 GLOBAL_DECL：建细胞并 rebound 槽。
 - **实现**：非词法/名字不符 false。
-- **所有权 / 错误 / 调用**：`ensureGlobalLexicalCell` 交回一份 owned cell ref，紧接着 `slot_ops.storeVarRefSlot` 把它存进帧的 var_ref 槽（帧接手所有权并负责 trace）；`ensureVarRefsCapacity` 可能扩容帧的 var_refs 数组。返回 `false`（槽不是词法 GLOBAL_DECL 或名字不符）时没有任何副作用，调用方 `src/exec/vm_property_globals.zig:507` 改走非 GLOBAL_DECL 回退。error set 为分配错误。
+- **所有权 / 错误 / 调用**：`ensureGlobalLexicalCell` 交回一份 owned cell ref，紧接着 `slot_ops.storeVarRefSlot` 把它存进帧的 var_ref 槽（帧接手所有权并负责 trace）；`ensureVarRefsCapacity` 可能扩容帧的 var_refs 数组。返回 `false`（槽不是词法 GLOBAL_DECL 或名字不符）时没有任何副作用，调用方 `src/exec/vm_property.zig:507` 改走非 GLOBAL_DECL 回退。error set 为分配错误。
 
 ### `setGlobalLexicalValueForGlobal` (`src/exec/call_runtime.zig:3246`)
 
 - **签名**：`pub fn setGlobalLexicalValueForGlobal(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom, value: core.JSValue) !bool`。
 - **作用**：写词法：先 TDZ 初始化，再 writable data，再 setProperty。
 - **实现**：无绑定 false。只读 TypeError。
-- **所有权 / 错误 / 调用**：写入的 `value` 被属性槽/VarRef cell 接管（`initializeGlobalLexicalValue` 内含 generational barrier），函数不建根。`setProperty` 的 `IncompatibleDescriptor`/`NotExtensible`/`ReadOnly` 在这里统一翻成 `error.TypeError`（即 const 赋值的 TypeError），其余错误原样上抛；没有该绑定时返回 `false` 而不是报错。调用方 `src/exec/vm_property_globals.zig:310`、`545`。
+- **所有权 / 错误 / 调用**：写入的 `value` 被属性槽/VarRef cell 接管（`initializeGlobalLexicalValue` 内含 generational barrier），函数不建根。`setProperty` 的 `IncompatibleDescriptor`/`NotExtensible`/`ReadOnly` 在这里统一翻成 `error.TypeError`（即 const 赋值的 TypeError），其余错误原样上抛；没有该绑定时返回 `false` 而不是报错。调用方 `src/exec/vm_property.zig:310`、`545`。
 
 ### `setGlobalLexicalValueForFastPathOwned` (`src/exec/call_runtime.zig:3259`)
 
 - **签名**：`pub fn setGlobalLexicalValueForFastPathOwned(ctx: *core.JSContext, atom_id: core.Atom, value: core.JSValue) !bool`。
 - **作用**：快路径：按 index 拥有写。
 - **实现**：`setOwnDataPropertyAtForLexicalSyncOwned`。
-- **所有权 / 错误 / 调用**：名字里的 Owned 指调用方交出 `value` 的所有权：`setOwnDataPropertyAtForLexicalSyncOwned` 直接按 index 覆写槽并负责屏障。没有 lexicals 环境或找不到绑定时返回 `false`（调用方 `src/exec/vm_property_globals.zig:301`、`538` 退回慢路径）。error set 来自被调的槽写入。
+- **所有权 / 错误 / 调用**：名字里的 Owned 指调用方交出 `value` 的所有权：`setOwnDataPropertyAtForLexicalSyncOwned` 直接按 index 覆写槽并负责屏障。没有 lexicals 环境或找不到绑定时返回 `false`（调用方 `src/exec/vm_property.zig:301`、`538` 退回慢路径）。error set 来自被调的槽写入。
 
 ### `initializeGlobalLexicalValue` (`src/exec/call_runtime.zig:3265`)
 
@@ -320,7 +320,7 @@
 - **签名**：`pub fn setGeneratorResumeCompletionType(rt: *core.JSRuntime, object: *core.Object, value: i32) !void`。
 - **作用**：写完成类型。
 - **实现**：槽。
-- **所有权 / 错误 / 调用**：直接写生成器 payload 里的 i32 槽，`rt` 同样未用；写的是立即数，不需要屏障或建根。error set 虽为 `!void` 但实际不会失败。调用方 8 处：本文件 `resumeGeneratorYieldStarCompletion`（`call_runtime.zig:3981`）、`src/exec/async_generator.zig:302`/`306`/`310`/`314`（normal=0 / throw=2 / return=1 / yield* 转发的完成类型）、`src/exec/promise_ops.zig:2651`、`src/exec/eval_entry.zig:393`、`src/exec/module_graph.zig:1617`（await/模块恢复点标记 normal=0 或 throw=2）。
+- **所有权 / 错误 / 调用**：直接写生成器 payload 里的 i32 槽，`rt` 同样未用；写的是立即数，不需要屏障或建根。error set 虽为 `!void` 但实际不会失败。调用方 8 处：本文件 `resumeGeneratorYieldStarCompletion`（`call_runtime.zig:3981`）、`src/exec/promise_ops.zig:302`/`306`/`310`/`314`（normal=0 / throw=2 / return=1 / yield* 转发的完成类型）、`src/exec/promise_ops.zig:2651`、`src/exec/eval_entry.zig:393`、`src/exec/module.zig:1617`（await/模块恢复点标记 normal=0 或 throw=2）。
 
 ### `resumeGeneratorYieldStarCompletion` (`src/exec/call_runtime.zig:3910`)
 
@@ -495,7 +495,7 @@
 - **签名**：`pub fn definePropertiesCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !?core.JSValue`。
 - **作用**：`Object.defineProperties`。
 - **实现**：<2 参 TypeError；非 object 消息。返回 target。
-- **所有权 / 错误 / 调用**：不分配；返回的是原样借回的 `args[0]`（`Object.defineProperties` 的返回值就是 target）。`args[0]` 不是对象时不抛 Zig 错误，而是先 `throwTypeErrorMessage` 把异常写进 `ctx` 再以 `error.JSException` 形式从 `try` 返回。唯一调用方 `src/exec/object_builtin_ops.zig:321`（`null` 在那里翻成 `error.TypeError`）。
+- **所有权 / 错误 / 调用**：不分配；返回的是原样借回的 `args[0]`（`Object.defineProperties` 的返回值就是 target）。`args[0]` 不是对象时不抛 Zig 错误，而是先 `throwTypeErrorMessage` 把异常写进 `ctx` 再以 `error.JSException` 形式从 `try` 返回。唯一调用方 `src/exec/object_ops.zig:321`（`null` 在那里翻成 `error.TypeError`）。
 
 ### `PendingDescriptorRoots.traceRoots` (`src/exec/call_runtime.zig:4679`)
 
@@ -551,7 +551,7 @@
 - **签名**：`pub fn instanceofOp( ctx: *core.JSContext, stack: *stack_mod.Stack, output: ?*std.Io.Writer, global: *core.Object, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !void`。
 - **作用**：`OP_instanceof` 栈壳。
 - **实现**：弹 rhs/lhs，`instanceofValue`。
-- **所有权 / 错误 / 调用**：从 VM 栈 `pop` 两个操作数（弹出后它们只在本函数栈帧里借用），结果用 `pushOwnedAssumeCapacity` 压回——容量由 opcode 的栈效应保证，不会再分配。error set 推断自 `instanceofValue`（可重入 JS 的 `Symbol.hasInstance` 调用）。唯一调用方 `src/exec/vm_property_field.zig:137`（`OP_instanceof` 冷臂）。
+- **所有权 / 错误 / 调用**：从 VM 栈 `pop` 两个操作数（弹出后它们只在本函数栈帧里借用），结果用 `pushOwnedAssumeCapacity` 压回——容量由 opcode 的栈效应保证，不会再分配。error set 推断自 `instanceofValue`（可重入 JS 的 `Symbol.hasInstance` 调用）。唯一调用方 `src/exec/vm_property.zig:137`（`OP_instanceof` 冷臂）。
 
 ### `instanceofValue` (`src/exec/call_runtime.zig:4843`)
 
@@ -600,7 +600,7 @@
 - **签名**：`pub fn isBlockedByUnscopables( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, object_value: core.JSValue, atom_id: core.Atom, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !bool`。
 - **作用**：with 环境 `@@unscopables[key]` 真则跳过。
 - **实现**：非 object unscopables false。
-- **所有权 / 错误 / 调用**：不分配；两次 `getValueProperty` 都可能触发 proxy trap / getter 并重入 JS，错误原样上抛。缺少 `Symbol.unscopables` 预定义 id 或取到的不是对象时返回 `false`（不抛）。调用方 `src/exec/vm_property_ref.zig:71`、`381`（`with` 作用域的名字解析）。
+- **所有权 / 错误 / 调用**：不分配；两次 `getValueProperty` 都可能触发 proxy trap / getter 并重入 JS，错误原样上抛。缺少 `Symbol.unscopables` 预定义 id 或取到的不是对象时返回 `false`（不抛）。调用方 `src/exec/vm_property.zig:71`、`381`（`with` 作用域的名字解析）。
 
 ### `lookupFrameVarRef` (`src/exec/call_runtime.zig:4964`)
 
@@ -614,7 +614,7 @@
 - **签名**：`pub fn closureVarIsNonLexicalGlobalSentinel(function: *const bytecode.FunctionBytecode, idx: usize) bool`。
 - **作用**：global / global_ref / global_decl 且非词法。
 - **实现**：越界 false。
-- **所有权 / 错误 / 调用**：纯 ClosureVar 标志判定，越界返回 false，不分配、不抛。调用方 `src/exec/slot_ops.zig:156`、`src/exec/vm_property_locals.zig:257` 与本文件 `lookupFrameVarRef`（`5037`）——三处都靠它区分「真的捕获槽」与「全局占位哨兵」。
+- **所有权 / 错误 / 调用**：纯 ClosureVar 标志判定，越界返回 false，不分配、不抛。调用方 `src/exec/property_ops.zig:156`、`src/exec/vm_property.zig:257` 与本文件 `lookupFrameVarRef`（`5037`）——三处都靠它区分「真的捕获槽」与「全局占位哨兵」。
 
 ### `atomIdOrNameEql` (`src/exec/call_runtime.zig:5000`)
 
@@ -649,7 +649,7 @@
 - **签名**：`pub fn readInt(comptime T: type, bytes: []const u8) T`。
 - **作用**：小端整数，字节码立即数。
 - **实现**：`std.mem.readInt(..., .little)`。
-- **所有权 / 错误 / 调用**：纯字节解码（小端），不分配、不抛。五个 opcode 模块把它 `const readInt = call_runtime.readInt;` 别名进本地命名空间后直接读立即数：`src/exec/vm_property_ref.zig:15`、`vm_property_locals.zig:12`、`vm_property_field.zig:19`、`vm_property_globals.zig:15`、`array_ops.zig:89`；另有两份同名私有副本（`object_ops.zig:4378`、`vm_call.zig:971`）不走这一份。
+- **所有权 / 错误 / 调用**：纯字节解码（小端），不分配、不抛。五个 opcode 模块把它 `const readInt = call_runtime.readInt;` 别名进本地命名空间后直接读立即数：`src/exec/vm_property.zig:15`、`vm_property_locals.zig:12`、`vm_property_field.zig:19`、`vm_property_globals.zig:15`、`array_ops.zig:89`；另有两份同名私有副本（`object_ops.zig:4378`、`vm_call.zig:971`）不走这一份。
 
 ## 覆盖核对
 

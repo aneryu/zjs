@@ -1293,7 +1293,7 @@ pub const JSRuntime = struct {
     /// callback, so keep it adjacent to the hot execution cache line.
     active_invocation: ?*anyopaque = null,
     /// Exec-owned resident execution root for embedder -> JS calls
-    /// (`exec/host_invocation.zig`), created on first use and retired
+    /// (`exec/call_site.zig`), created on first use and retired
     /// through `host_invocation_retire` before the destroy invariants run.
     host_invocation: ?*anyopaque = null,
     host_invocation_retire: ?*const fn (*JSRuntime, *anyopaque) void = null,
@@ -1696,7 +1696,7 @@ pub const JSRuntime = struct {
     pub fn deinit(self: *JSRuntime) void {
         self.assertOwnerThread();
         self.assertIdleForTeardown();
-        // The resident host invocation (exec/host_invocation.zig) is only ever
+        // The resident host invocation (exec/call_site.zig) is only ever
         // published for the duration of a call, so an idle runtime retires it
         // here; a runtime destroyed mid-call fails the assertion above first.
         if (self.host_invocation) |host_invocation| {

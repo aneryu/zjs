@@ -214,77 +214,77 @@
 
 ## `host_invocation.zig`
 
-### `HostInvocation.create` (`src/exec/host_invocation.zig:86`)
+### `HostInvocation.create` (`src/exec/call_site.zig:86`)
 
 - **签名**：`pub fn create(rt: *core.JSRuntime, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !*HostInvocation`。
 - **作用**：分配并装配常驻 Machine（idle 帧永不执行）。
 - **实现**：`rt.memory.create`；idle_frame.function 指向从未进 registry 的 `host_idle_function`；`Machine.init`；backtrace 是无 bottom 的 segment；可选精确根 `traceRoots`。
 - **所有权 / 错误 / 调用**：由 `acquireSlow` 挂到 `rt.host_invocation`。失败不泄漏：create 失败在 allocator。
 
-### `HostInvocation.destroy` (`src/exec/host_invocation.zig:121`)
+### `HostInvocation.destroy` (`src/exec/call_site.zig:121`)
 
 - **签名**：`pub fn destroy(self: *HostInvocation, rt: *core.JSRuntime) void`。
 - **作用**：拆常驻根。
 - **实现**：断言未 published、depth==0；释放 one-shot pin；`machine.deinitStorage`；idle_stack.deinit；`memory.destroy`。
 - **所有权 / 错误 / 调用**：`retire` 在 runtime 销毁时调用。
 
-### `HostInvocation.acquire` (`src/exec/host_invocation.zig:132`)
+### `HostInvocation.acquire` (`src/exec/call_site.zig:132`)
 
 - **签名**：`pub inline fn acquire(rt: *core.JSRuntime, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !*HostInvocation`。
 - **作用**：Runtime 单例，按需 retarget。
 - **实现**：已有则断言 idle，`alreadyTargets` 否则 `retarget` 并 `retarget_epoch +%= 1`；否则 `acquireSlow`。
 - **所有权 / 错误 / 调用**：CallSite 与 `callOnceInto`。epoch bump 使旧站点重新 acquire。
 
-### `HostInvocation.acquireSlow` (`src/exec/host_invocation.zig:145`)
+### `HostInvocation.acquireSlow` (`src/exec/call_site.zig:145`)
 
 - **签名**：`noinline fn acquireSlow(rt: *core.JSRuntime, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !*HostInvocation`。
 - **作用**：首次创建并登记 retire 回调。
 - **实现**：`create`，写 `rt.host_invocation` 与 `host_invocation_retire`。
 - **所有权 / 错误 / 调用**：冷路径。
 
-### `HostInvocation.leanFrameFor` (`src/exec/host_invocation.zig:154`)
+### `HostInvocation.leanFrameFor` (`src/exec/call_site.zig:154`)
 
 - **签名**：`pub inline fn leanFrameFor(self: *HostInvocation, rt: *core.JSRuntime, target: *const inline_calls.InlineTarget) ?*inline_calls.LeanFrame`。
 - **作用**：按 callee 身份复用 lean 帧。
 - **实现**：payload/tag、FB 指针、`var_refs` 基址都匹配且 `isIntact` 则返回；否则 `leanFrameInit`。
 - **所有权 / 错误 / 调用**：只在 call 存活、嵌入者持有 callee 时读。
 
-### `HostInvocation.leanFrameInit` (`src/exec/host_invocation.zig:165`)
+### `HostInvocation.leanFrameInit` (`src/exec/call_site.zig:165`)
 
 - **签名**：`noinline fn leanFrameInit(self: *HostInvocation, rt: *core.JSRuntime, target: *const inline_calls.InlineTarget) ?*inline_calls.LeanFrame`。
 - **作用**：重建 lean 帧。
 - **实现**：清 valid；`initInPlace` 失败返回 null；记下 `lean_callee`。
 - **所有权 / 错误 / 调用**：形状不合格返回 null。
 
-### `HostInvocation.oneShotRoute` (`src/exec/host_invocation.zig:183`)
+### `HostInvocation.oneShotRoute` (`src/exec/call_site.zig:183`)
 
 - **签名**：`pub inline fn oneShotRoute( self: *HostInvocation, rt: *core.JSRuntime, global: *core.Object, callee: core.JSValue, this_value: core.JSValue, ) ?OneShotRoute`。
 - **作用**：`callFunction` 循环同一回调时只解析一次。
 - **实现**：global + callable 位相等则 `storeSlotAsIntPair` 写 this（不取调用方地址，避免 `str q`），返回 cached target/lean/simple。未命中 `oneShotRouteResolve`。
 - **所有权 / 错误 / 调用**：只从「无活动 invocation」臂读取，不会与嵌套回调竞态。
 
-### `HostInvocation.oneShotRouteResolve` (`src/exec/host_invocation.zig:207`)
+### `HostInvocation.oneShotRouteResolve` (`src/exec/call_site.zig:207`)
 
 - **签名**：`noinline fn oneShotRouteResolve( self: *HostInvocation, rt: *core.JSRuntime, global: *core.Object, callee: core.JSValue, this_value: core.JSValue, ) ?OneShotRoute`。
 - **作用**：解析并 pin 新的 one-shot callee。
 - **实现**：释放旧 pin；`resolveInlineFunction` 失败返回 null；先 pin 再发布分辨率；bind target；算 simple；`leanFrameFor`。
 - **所有权 / 错误 / 调用**：pin 失败当非资格（null），走根路径。
 
-### `HostInvocation.retire` (`src/exec/host_invocation.zig:231`)
+### `HostInvocation.retire` (`src/exec/call_site.zig:231`)
 
 - **签名**：`fn retire(rt: *core.JSRuntime, ptr: *anyopaque) void`。
 - **作用**：runtime 销毁钩子。
 - **实现**：ptrCast 后 `destroy`。
 - **所有权 / 错误 / 调用**：`rt.host_invocation_retire`。
 
-### `HostInvocation.publish` (`src/exec/host_invocation.zig:238`)
+### `HostInvocation.publish` (`src/exec/call_site.zig:238`)
 
 - **签名**：`pub inline fn publish(self: *HostInvocation, rt: *core.JSRuntime) void`。
 - **作用**：一次 call 期间成为 `active_invocation` 与 backtrace 链头。
 - **实现**：断言 idle、无活动 invocation；把 `backtrace_frame` 链进 `rt.hot`；设 `active_invocation`。Debug/ReleaseSafe 置 `published`。`rt` 由参数传入，避免再从 ctx 加载。
 - **所有权 / 错误 / 调用**：必须 `unpublish`。GC 在 idle 时看不见它。
 
-### `HostInvocation.unpublish` (`src/exec/host_invocation.zig:257`)
+### `HostInvocation.unpublish` (`src/exec/call_site.zig:257`)
 
 - **签名**：`pub inline fn unpublish(self: *HostInvocation, rt: *core.JSRuntime) void`。
 - **作用**：撤掉活动根。

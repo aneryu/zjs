@@ -452,9 +452,9 @@ RMW 用单条 `@atomicRmw` / `@cmpxchgStrong`（seq_cst），避免「读-算-�
 - **所有权 / 错误 / 调用**：`wakeAtomicsWaitersForRuntimes`。
 
 
-## `src/exec/atomics_wait.zig` — 方法枚举与 isLockFree
+## `src/exec/atomics_ops.zig` — 方法枚举与 isLockFree
 
-`StaticMethod` 是 Atomics 命名空间的 id 枚举（add=1 … xor=14）。`atomics_ops.atomicsCallForNativeRecord` 按它分支。`isLockFree` 对 1/2/4/8 字节返回 true。
+`StaticMethod` 与方法注册及等待实现位于同一文件，是 Atomics 命名空间的 id 枚举（add=1 … xor=14）。`atomics_ops.atomicsCallForNativeRecord` 按它分支。`isLockFree` 对 1/2/4/8 字节返回 true。
 
 
 ## `src/exec/buffer_ops.zig` — ArrayBuffer / DataView / TypedArray 记录
@@ -532,26 +532,26 @@ RMW 用单条 `@atomicRmw` / `@cmpxchgStrong`（seq_cst），避免「读-算-�
 - **实现**：`nativeCall` 恢复 `NativeCall`（失败 → TypeError），`callableRealm` 取 realm，再用 `switch (host_call.magic)` 把六个 id 翻回常量名字符串（未知 id → TypeError），最后带 realm、`output`、this、名字、args 和调用方 bytecode/frame 调 `array_ops.uint8ArrayCodecCall`——传 writer 与 caller frame 是因为 `check_options_object`（quickjs.c:59376）及 `alphabet` / `lastChunkHandling` / `omitPadding` 的读取会跑用户 getter。
 - **所有权 / 错误 / 调用**：this/args 借用，返回新建的 Uint8Array/字符串/结果对象（GC）。与 `bufferCall` 的差别正是它需要 realm 与 writer/caller-frame：`check_options_object` 与 `alphabet`/`lastChunkHandling`/`omitPadding` 的读取会跑用户 getter，因而会重入 JS，异常可能已挂 `ctx`。magic 不在六个 codec 之内、或 `array_ops.uint8ArrayCodecCall` 返回 `null` 时是裸 `error.TypeError`。没有直接调用方：经 `codecEntry(...)` 的 `genericMagicFunction(&uint8ArrayCodecCall)`（`src/exec/buffer_ops.zig:234`）分发。
 
-## `src/exec/typed_array_construct.zig` — 读 maxByteLength 的构造参数
+## `src/exec/buffer_ops.zig` — 读 maxByteLength 的构造参数
 
 `Get(options, "maxByteLength")` 可观察、可进用户代码，所以放在 exec 而不是 core。`bufferConstructArgs` 把 ArrayBuffer/SharedArrayBuffer 两条 98% 相同的路径收成一处。
 
 
-### `arrayBufferConstructArgs` (`src/exec/typed_array_construct.zig:19`)
+### `arrayBufferConstructArgs` (`src/exec/buffer_ops.zig:19`)
 
 - **签名**：`pub fn arrayBufferConstructArgs(rt: *core.JSRuntime, args: []const core.JSValue, prototype: ?*core.Object) !core.JSValue`。
 - **作用**：`ArrayBuffer(len, options)` 的构造参数走法（`shared = false`）。
 - **实现**：`bufferConstructArgs(rt, args, prototype, false)` 的薄包装。
 - **所有权 / 错误 / 调用**：薄转发到 `bufferConstructArgs(..., shared = false)`，自身不分配；结果 ArrayBuffer 由 `createArrayBufferWithPrototype` 新建，归 GC，`prototype` 是借用。错误全部来自被转发方：`toIndexUsize` 的裸 `error.RangeError`、`maxByteLength < byteLength` 的裸 `error.RangeError`、`options.getProperty` 的透传、OOM。2 处调用：`src/exec/construct.zig:168` 与 `src/exec/buffer_ops.zig:311` 的 re-export。
 
-### `sharedArrayBufferConstructArgs` (`src/exec/typed_array_construct.zig:23`)
+### `sharedArrayBufferConstructArgs` (`src/exec/buffer_ops.zig:23`)
 
 - **签名**：`pub fn sharedArrayBufferConstructArgs(rt: *core.JSRuntime, args: []const core.JSValue, prototype: ?*core.Object) !core.JSValue`。
 - **作用**：`SharedArrayBuffer(len, options)` 的构造参数走法（`shared = true`）。
 - **实现**：`bufferConstructArgs(rt, args, prototype, true)` 的薄包装。
 - **所有权 / 错误 / 调用**：同上，只是 `shared = true`，最终落到 `sharedArrayBufferConstructLength`（结果带跨线程共享的 `SharedBufferStore`，其引用计数由 core 侧管理，本层不 retain）。自身不分配，错误同为被转发方的裸哨兵。2 处调用：`src/exec/construct.zig:171` 与 `src/exec/buffer_ops.zig:312` 的 re-export。
 
-### `bufferConstructArgs` (`src/exec/typed_array_construct.zig:31`)
+### `bufferConstructArgs` (`src/exec/buffer_ops.zig:31`)
 
 - **签名**：`noinline fn bufferConstructArgs( rt: *core.JSRuntime, args: []const core.JSValue, prototype: ?*core.Object, shared: bool, ) !core.JSValue`。
 - **作用**：ArrayBuffer / SharedArrayBuffer 共用构造参数走法：ToIndex 长度，可选 `Get(options, "maxByteLength")`，再调对应 core 构造器。
@@ -560,6 +560,6 @@ RMW 用单条 `@atomicRmw` / `@cmpxchgStrong`（seq_cst），避免「读-算-�
 
 ## 覆盖核对
 
-- 清单函数数: 75（`src/exec/atomics_ops.zig` 62 + `src/exec/buffer_ops.zig` 10 + `src/exec/typed_array_construct.zig` 3）
+- 清单函数数: 75（`src/exec/atomics_ops.zig` 62 + `src/exec/buffer_ops.zig` 10 + `src/exec/buffer_ops.zig` 3）
 - 本文标题覆盖: 75
 - 未覆盖: 无

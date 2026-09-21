@@ -4981,8 +4981,8 @@ test "closure helper stores closure state outside the VM" {
     defer rt.destroy();
 
     const closure_value = try engine.exec.closure.create(rt, .counter);
-    const first = try engine.exec.closure.call(rt, closure_value, &.{}, &.{});
-    const second = try engine.exec.closure.call(rt, closure_value, &.{}, &.{});
+    const first = try engine.exec.closure.callCClosure(rt, closure_value, &.{}, &.{});
+    const second = try engine.exec.closure.callCClosure(rt, closure_value, &.{}, &.{});
 
     try std.testing.expectEqual(@as(?i32, 1), first.as(.int));
     try std.testing.expectEqual(@as(?i32, 2), second.as(.int));
@@ -24034,7 +24034,7 @@ test "collection callback adapter materializes errors in its explicit realm" {
 
     const callback = try engine.exec.closure.create(rt, .throws_type_error);
 
-    const callback_host = engine.exec.collection_adapter.host(callback_realm, &.{});
+    const callback_host = engine.exec.collection_adapter.callbackHost(callback_realm, &.{});
     try std.testing.expectError(
         error.JSException,
         callback_host.callWithThis(callback, core.JSValue.undefinedValue(), &.{}),
@@ -24970,7 +24970,7 @@ test "host WeakMap mutation closure rejects registered symbol keys" {
         .{ .name = key_name, .value = try rt.symbolValue(registered_atom) },
     };
 
-    if (engine.exec.closure.call(rt, closure_value, &.{}, globals[0..])) |_| {
+    if (engine.exec.closure.callCClosure(rt, closure_value, &.{}, globals[0..])) |_| {
         try std.testing.expect(false);
     } else |err| {
         try std.testing.expectEqual(error.TypeError, err);
@@ -25010,7 +25010,7 @@ test "host WeakMap mutation closure links entries into existing weak index" {
         .{ .name = key_name, .value = mutation_key.value() },
     };
 
-    try std.testing.expectError(error.JSException, engine.exec.closure.call(rt, closure_value, &.{}, globals[0..]));
+    try std.testing.expectError(error.JSException, engine.exec.closure.callCClosure(rt, closure_value, &.{}, globals[0..]));
 
     try std.testing.expectEqual(@as(usize, 9), map_object.weakCollectionEntries().len);
     const get_result = try engine.exec.collection_ops.methodCall(rt, map_value, 2, &.{mutation_key.value()});
@@ -25428,7 +25428,7 @@ test "host map closure releases appended value when entry allocation fails" {
     const old_bytes = rt.memory.allocated_bytes;
     const old_allocations = rt.memory.allocation_count;
     rt.setMemoryLimit(old_bytes + @sizeOf(core.string.String) + "mutated".len);
-    try std.testing.expectError(error.OutOfMemory, engine.exec.closure.call(rt, closure_value, &.{}, globals[0..]));
+    try std.testing.expectError(error.OutOfMemory, engine.exec.closure.callCClosure(rt, closure_value, &.{}, globals[0..]));
     rt.setMemoryLimit(null);
 
     try std.testing.expectEqual(old_bytes, rt.memory.allocated_bytes);
@@ -25465,7 +25465,7 @@ test "host map closure rolls back appended entry when size update fails" {
     const old_bytes = rt.memory.allocated_bytes;
 
     rt.setMemoryLimit(old_bytes + @sizeOf(core.string.String) + "mutated".len);
-    try std.testing.expectError(error.OutOfMemory, engine.exec.closure.call(rt, closure_value, &.{}, globals[0..]));
+    try std.testing.expectError(error.OutOfMemory, engine.exec.closure.callCClosure(rt, closure_value, &.{}, globals[0..]));
     rt.setMemoryLimit(null);
 
     const entries_slot = map_object.collectionEntriesSlot();

@@ -711,26 +711,26 @@ Map/Set 热路径校验 `collection_method_owner_class`。Reflect.construct 对�
 - **实现**：`methodCall(ctx.runtime, map_value, 2, &.{key})`（2 号 = `mapGet`）查已有组：非 `undefined` 时必须是数组（`expectObject` + `isArray`，否则 `error.TypeError`），在 `arrayLength()` 下标 `defineOwnProperty(..., Descriptor.data(value, true, true, true))` 追加后返回。否则以 `array_ops.arrayPrototypeFromGlobal` 的 realm `Array.prototype` `createArray` 建新组（errdefer 销毁），写入首元素，再 `methodCall(..., 1, &.{ key, group.value() })`（1 号 = `mapSet`）挂进 map。
 - **所有权 / 错误 / 调用**：新组数组的引用随 `mapSet` 转移给 map。
 
-## `src/exec/collection_adapter.zig` — 集合回调的 realm 适配
+## `src/exec/collection_ops.zig` — 集合回调的 realm 适配
 
 `host()` 填 `CallbackHost.call = callWithThis`。成功堆结果归调用方。普通引擎失败在这里变成 pending JS 异常；只有七个硬/控制错误穿过 core 回调缝。
 
 
-### `host` (`src/exec/collection_adapter.zig:18`)
+### `host` (`src/exec/collection_ops.zig:18`)
 
 - **签名**：`pub fn host(ctx: *core.JSContext, globals: []globals_mod.Slot) CallbackHost`。
 - **作用**：把 exec 侧的调用能力打包成 core 集合算法要用的 `CallbackHost`。
 - **实现**：返回结构字面量 `.{ .ctx = ctx, .globals = globals, .call = callWithThis }`，没有别的逻辑。
 - **所有权 / 错误 / 调用**：`ctx` 与 `globals` 都是借用；调用方是 `collection_ops.collectionCall` 的无 global 分支（`src/exec/collection_ops.zig:225`）、`collectionGroupByRecord`（:259）与 `groupBy`（:493），每次进入集合算法时现场构造一个。
 
-### `callWithThis` (`src/exec/collection_adapter.zig:26`)
+### `callWithThis` (`src/exec/collection_ops.zig:26`)
 
 - **签名**：`fn callWithThis( ctx: *core.JSContext, callback: core.JSValue, this_value: core.JSValue, args: []const core.JSValue, globals: []globals_mod.Slot, ) CallbackError!core.JSValue`。
 - **作用**：`CallbackHost.call` 的实体：替集合算法回调一个 JS 可调用值。
 - **实现**：转发 `closure_mod.callWithThis(ctx.runtime, callback, this_value, args, globals)`；`catch` 到的错误交给 `narrowCallbackError` 收窄。
 - **所有权 / 错误 / 调用**：callback / receiver / 实参都是借用，返回的堆结果归调用方；错误集被收窄成 `CallbackError`。
 
-### `narrowCallbackError` (`src/exec/collection_adapter.zig:37`)
+### `narrowCallbackError` (`src/exec/collection_ops.zig:37`)
 
 - **签名**：`fn narrowCallbackError(ctx: *core.JSContext, err: anytype) CallbackError`。
 - **作用**：把闭包调用可能抛出的任意引擎错误压缩成能穿过 core 回调缝的七个结果。
@@ -883,34 +883,34 @@ Map/Set 热路径校验 `collection_method_owner_class`。Reflect.construct 对�
 - **实现**：无实参 → `error.TypeError`；`property_ops.expectObject(args[0])` 失败也转 `error.TypeError`；`object_ops.objectRestOwnKeys` 取 atom 列表（defer `core.Object.freeKeys`）；`core.Object.createArray` 以 `array_ops.arrayPrototypeFromGlobal` 为原型建结果数组（errdefer 销毁）；逐个 `object_ops.proxyTrapKeyValue` 把 atom 转成字符串 / symbol 值，再 `defineOwnProperty` 到当前 `out.arrayLength()` 下标，描述符为 `Descriptor.data(key_value, true, true, true)`（writable / enumerable / configurable 全开）。
 - **所有权 / 错误 / 调用**：keys 列表与结果数组的失败路径都有 defer / errdefer 兜底；结果数组归调用方；调用方是 `reflectCallForNativeRecord` 的 `own_keys` 臂。
 
-## `src/exec/reflect_proxy_ops.zig` — Reflect 记录表
+## `src/exec/reflect_ops.zig` — Reflect 记录表
 
 `.reflect` domain：13 个 Reflect.* + Proxy.revocable + revoke。`reflectCall` 要求可观察调用的 `callableRealm`。（原先还有一个 src 内无使用方的 `ownKeys` 转发与遗留占位类型 `RevocableProxy`（只翻一个 `revoked` 布尔，与真正生效的 `reflect_ops.revokeProxy` 无关联），已删除。）
 
 
-### `methodId` (`src/exec/reflect_proxy_ops.zig:18`)
+### `methodId` (`src/exec/reflect_ops.zig:18`)
 
 - **签名**：`pub fn methodId(name: []const u8) ?u32`。
 - **作用**：把安装期看到的 JS 方法名映射到 `.reflect` domain 的记录 id。
 - **实现**：一串 `std.mem.eql` 覆盖 13 个 `Reflect.*` 名字（`defineProperty` / `getOwnPropertyDescriptor` / `deleteProperty` / `get` / `getPrototypeOf` / `set` / `setPrototypeOf` / `isExtensible` / `preventExtensions` / `has` / `ownKeys` / `construct` / `apply`），返回对应的 `StaticMethod` 值；全不匹配返回 null。注意它**不**认 `proxy_revocable` / `proxy_revoke`——前者由 `standard_globals`（`src/exec/standard_globals.zig:370`）直接按 id 绑定，后者的 id 由 `reflect_ops.proxyRevocable` 在造 revoke data function 时写进 `nativeFunctionIdSlot`。
 - **所有权 / 错误 / 调用**：纯映射；`standard_globals` 的 Reflect 安装路径用它解析名字与 id。
 
-### `reflectEntry` (`src/exec/reflect_proxy_ops.zig:69`)
+### `reflectEntry` (`src/exec/reflect_ops.zig:69`)
 
 - **签名**：`fn reflectEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry`。
 - **作用**：构造一条 `InternalEntry`：名字、length、id/magic、cproto 与 native 函数指针。
 - **实现**：`.magic = @intCast(id)`（id 兼作 magic，记录不再带别的选择子），`.cproto = .generic_magic`，`.native_function = builtin_dispatch.genericMagicFunction(&reflectCall)`——15 条记录共享同一个处理函数。
 - **所有权 / 错误 / 调用**：comptime 求值，无运行期所有权。
 
-### `reflectCall` (`src/exec/reflect_proxy_ops.zig:86`)
+### `reflectCall` (`src/exec/reflect_ops.zig:86`)
 
 - **签名**：`fn reflectCall( native_ctx: *core.JSContext, native_this: core.JSValue, native_args: []const core.JSValue, native_magic: i32, ) HostError!core.JSValue`。
 - **作用**：该 domain 的 NativeEntry 处理函数：从 `nativeCall` 恢复执行环境后按 magic/id 转发到实现。
 - **实现**：先 `nativeCall` 恢复 `NativeCall`；失败则 `error.TypeError`。随后**无条件**取 `callableRealm`（该 domain 的 15 条记录全是可观察 callable，没有 func-object-free 的算法复用），断言 `realm.realm == ctx`。 随后按 magic 三分：`proxy_revoke` 取 `host_call.func_obj`（缺失则 `error.TypeError`）调 `reflect_ops.revokeProxy(ctx.runtime, function_object)`；`proxy_revocable` 调 `reflect_ops.proxyRevocable(ctx.runtime, global, args)`，按 qjs `js_proxy_revocable`（quickjs.c:51502）的 `JS_CFUNC_DEF` 语义完全不读 this_val，所以解绑调用也合法；其余 13 个 `Reflect.*` 统一转发 `reflect_ops.reflectCallForNativeRecord(ctx, output, global, id, args, caller_function, caller_frame)`。
-- **所有权 / 错误 / 调用**：本层不分配、不建根：`args`/`this` 借用调用帧，返回值由被转发的 `reflect_ops.*` 产生并留在 managed 帧里。`HostError` 就是 `core.errors.RuntimeError`（`src/core/errors.zig:88`）：`nativeCall` 恢复失败或 `func_obj` 缺失时直接 `error.TypeError`，由边界的 `materializeRuntimeError` 变成 JS TypeError；被转发实现自己抛异常时返回 `error.JSException`，此时 pending exception 已挂好，边界只做传递。本函数不被直接调用，而是以 `builtin_dispatch.genericMagicFunction(&reflectCall)` 登记为 `.reflect` domain 的 NativeEntry（`src/exec/reflect_proxy_ops.zig:76`）。
+- **所有权 / 错误 / 调用**：本层不分配、不建根：`args`/`this` 借用调用帧，返回值由被转发的 `reflect_ops.*` 产生并留在 managed 帧里。`HostError` 就是 `core.errors.RuntimeError`（`src/core/errors.zig:88`）：`nativeCall` 恢复失败或 `func_obj` 缺失时直接 `error.TypeError`，由边界的 `materializeRuntimeError` 变成 JS TypeError；被转发实现自己抛异常时返回 `error.JSException`，此时 pending exception 已挂好，边界只做传递。本函数不被直接调用，而是以 `builtin_dispatch.genericMagicFunction(&reflectCall)` 登记为 `.reflect` domain 的 NativeEntry（`src/exec/reflect_ops.zig:76`）。
 
 ## 覆盖核对
 
-- 清单函数数: 126（`src/exec/collection_adapter.zig` 3 + `src/exec/collection_ops.zig` 100 + `src/exec/reflect_ops.zig` 20 + `src/exec/reflect_proxy_ops.zig` 3）
+- 清单函数数: 126（`src/exec/collection_ops.zig` 3 + `src/exec/collection_ops.zig` 100 + `src/exec/reflect_ops.zig` 20 + `src/exec/reflect_ops.zig` 3）
 - 本文标题覆盖: 126
 - 未覆盖: 无

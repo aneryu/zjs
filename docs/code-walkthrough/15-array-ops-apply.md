@@ -91,7 +91,7 @@
 - **签名**：`pub noinline fn putDenseArrayElementFast(rt: *core.JSRuntime, object_value: core.JSValue, key: core.JSValue, value: core.JSValue) callconv(.c) DenseArrayElementFastResult`。
 - **作用**：`OP_put_array_el` 的 dense 覆盖/追加快窗口：下标已在 count 内则 dup 写入，正好追加则 `appendDenseArrayIndex`。
 - **实现**：非 Array → `.miss`。key 先 `asInt32`，失败再 `numberValue`（NaN / 非有限 / 非整数 / 越界 → miss）。先 `setFastArrayElementDup`；失败且 `index ≤ max_int_atom` 才 `appendDenseArrayIndex`，OOM 返回 `.out_of_memory`。往空洞或稀疏尾巴写会 miss，回到通用 `[[Set]]`。C ABI 把三态放进寄存器，避免 Zig error-union sret。窗口内唯一会分配的是 dense-buffer 增长。
-- **所有权 / 错误 / 调用**：`callconv(.c)` 的三态返回（`.miss` / `.handled` / `.out_of_memory`），**不返回 Zig error**——唯一会失败的是 dense 缓冲扩容，它被翻成 `.out_of_memory` 由调用方处理。`value` 按借用传入：`setFastArrayElementDup` 与 `appendDenseArrayIndex` 各自内部做 dup/写屏障，所以 `.handled` 之后调用方栈上的那份仍然归调用方。调用方 `exec/vm_property_field.zig:1007`、`:1042`（`OP_put_array_el` 的两个入口），miss 时回落通用属性写。
+- **所有权 / 错误 / 调用**：`callconv(.c)` 的三态返回（`.miss` / `.handled` / `.out_of_memory`），**不返回 Zig error**——唯一会失败的是 dense 缓冲扩容，它被翻成 `.out_of_memory` 由调用方处理。`value` 按借用传入：`setFastArrayElementDup` 与 `appendDenseArrayIndex` 各自内部做 dup/写屏障，所以 `.handled` 之后调用方栈上的那份仍然归调用方。调用方 `exec/vm_property.zig:1007`、`:1042`（`OP_put_array_el` 的两个入口），miss 时回落通用属性写。
 
 ### `putDenseArrayElementOverwriteOwnedFast` (`src/exec/array_ops.zig:5953`)
 
@@ -119,7 +119,7 @@
 - **签名**：`pub fn init(self: *ValueSliceRoot, rt: *core.JSRuntime, values: *[]core.JSValue) void`。
 - **作用**：把一个**正在生长**的 `[]JSValue`（通过指针，`.mutable` 切片）登记成精确根，调用方每填一个元素就可以扩展该切片。
 - **实现**：记下 rt、填 `slices[0] = .{ .mutable = values }`、建帧并 `activate`。
-- **所有权 / 错误 / 调用**：把调用方的 `*[]core.JSValue` 以 `.mutable` 形式登记进 `ValueRootFrame` 并激活——**登记的是切片变量本身**，所以调用方在填充过程中扩展 `rooted_args = values[0..initialized]` 就能让 tracer 立刻看到新元素，这正是「只把已初始化部分暴露给 GC」的实现方式。不分配、无 error set；`self` 必须活到 `deinit`（都是调用方栈上的局部）。调用方 16 处，跨七个文件：本文件 `argsFromArray`（`:6011`）、`materializeArgsFromArrayLike`（`:6276`）、`typedArraySetCall`（`:1193`），以及 `exec/reflect_ops.zig`、`exec/string_ops.zig`、`exec/call.zig`、`exec/call_runtime.zig`、`exec/vm_call.zig`、`exec/eval_ops.zig`（多为经文件顶部别名）。
+- **所有权 / 错误 / 调用**：把调用方的 `*[]core.JSValue` 以 `.mutable` 形式登记进 `ValueRootFrame` 并激活——**登记的是切片变量本身**，所以调用方在填充过程中扩展 `rooted_args = values[0..initialized]` 就能让 tracer 立刻看到新元素，这正是「只把已初始化部分暴露给 GC」的实现方式。不分配、无 error set；`self` 必须活到 `deinit`（都是调用方栈上的局部）。调用方 16 处，跨七个文件：本文件 `argsFromArray`（`:6011`）、`materializeArgsFromArrayLike`（`:6276`）、`typedArraySetCall`（`:1193`），以及 `exec/reflect_ops.zig`、`exec/string_ops.zig`、`exec/call.zig`、`exec/call_runtime.zig`、`exec/vm_opcodes.zig`、`exec/eval_entry.zig`（多为经文件顶部别名）。
 
 ### `ValueSliceRoot.deinit` (`src/exec/array_ops.zig:6040`)
 
@@ -343,7 +343,7 @@
 - **签名**：`pub fn typedArrayCanonicalDelete(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) !?bool`。
 - **作用**：TypedArray 的 `[[Delete]]` exotic 臂：`null` = 不归它管（走普通删除），`.invalid` 与越界下标返回 true（delete 视为成功），界内下标返回 false（不能删）。
 - **实现**：长度读取失败时按 true 处理（`catch return true`）。关键调用：`object.isTypedArrayObject`、`object.typedArrayCanonicalNumericIndex`、`object.typedArrayLength`。
-- **所有权 / 错误 / 调用**：返回 `?bool`；null = 不是 TypedArray 或 `.none`（走普通 delete）。语义：`.invalid` 键返回 true（删除「成功」），canonical 索引越界返回 true、在界内返回 false（不可删）；`typedArrayLength` 失败被 `catch return true`。不分配，只有 canonical 判定可能上抛。唯一调用方 `exec/vm_property_ref.zig:466`。
+- **所有权 / 错误 / 调用**：返回 `?bool`；null = 不是 TypedArray 或 `.none`（走普通 delete）。语义：`.invalid` 键返回 true（删除「成功」），canonical 索引越界返回 true、在界内返回 false（不可删）；`typedArrayLength` 失败被 `catch return true`。不分配，只有 canonical 判定可能上抛。唯一调用方 `exec/vm_property.zig:466`。
 
 ### `decodeHexBytes` (`src/exec/array_ops.zig:6924`)
 

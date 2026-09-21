@@ -10,7 +10,7 @@ const core = @import("../core/root.zig");
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
 const builtin_dispatch = @import("builtin_dispatch.zig");
-const exceptions = @import("exceptions.zig");
+const exceptions = @import("exception_ops.zig");
 const exception_ops = @import("exception_ops.zig");
 const string_ops = @import("string_ops.zig");
 

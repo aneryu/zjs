@@ -9,12 +9,12 @@
 | 源码 | 清单函数 | 文档 |
 | --- | --- | --- |
 | `src/exec/array_ops.zig` | 224 | [15-array.md](15-array.md) 与 `15-array-ops-*.md` |
-| `src/exec/array_builtin_ops.zig` | 58 | [15-array-builtin.md](15-array-builtin.md) |
+| `src/exec/array_ops.zig` | 58 | [15-array-builtin.md](15-array-builtin.md) |
 | `src/exec/string_ops.zig` | 155 | [15-string.md](15-string.md) 与 `15-string-ops-*.md` |
-| `src/exec/string_builtin_ops.zig` | 110 | [15-string-builtin.md](15-string-builtin.md) |
+| `src/exec/string_ops.zig` | 110 | [15-string-builtin.md](15-string-builtin.md) |
 | `src/exec/iterator_ops.zig` | 100 | [15-iterator.md](15-iterator.md) 与 `15-iterator-ops-*.md` |
-| `src/exec/iterator_builtin_ops.zig` | 5 | [15-iterator-builtin.md](15-iterator-builtin.md) |
-| `src/exec/forof_ops.zig` | 24 | [15-forof.md](15-forof.md) |
+| `src/exec/iterator_ops.zig` | 5 | [15-iterator-builtin.md](15-iterator-builtin.md) |
+| `src/exec/iterator_ops.zig` | 24 | [15-forof.md](15-forof.md) |
 
 合计 **705** 个清单函数。`*_ops.zig` 是算法与 VM 入口；`*_builtin_ops.zig` 是 native-record 表（`internal_entries`）和少量 C ABI `exec_direct` 叶子。同一算法经常 **BOTH**：record 分发和 `arrayMethodFastCall` / `call_runtime` 名字级联都会走到。
 
@@ -166,8 +166,8 @@ String 类似：`prim_self` 叶子（平字符串 + int32 下标）在 `string_b
 ```sh
 python3 docs/code-walkthrough/_check_coverage.py \
   --docs 'docs/code-walkthrough/15-*.md' \
-  src/exec/array_ops.zig src/exec/array_builtin_ops.zig \
-  src/exec/string_ops.zig src/exec/string_builtin_ops.zig \
-  src/exec/iterator_ops.zig src/exec/iterator_builtin_ops.zig \
-  src/exec/forof_ops.zig
+  src/exec/array_ops.zig src/exec/array_ops.zig \
+  src/exec/string_ops.zig src/exec/string_ops.zig \
+  src/exec/iterator_ops.zig src/exec/iterator_ops.zig \
+  src/exec/iterator_ops.zig
 ```

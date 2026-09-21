@@ -1188,3 +1188,424 @@ pub fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt
 pub fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) AppendStringError!void {
     return core.value_string.appendValueString(rt, buffer, value, .{ .symbol = .describe });
 }
+
+
+// ----- merged from coercion_ops.zig -----
+// Primitive coercion: ToPrimitive/ToNumber/ToLength/ToUint32 helpers and wrapper extraction.
+const frame_mod = @import("frame.zig");
+const property_ops = @import("property_ops.zig");
+const call_runtime = @import("call_runtime.zig");
+const object_ops = @import("object_ops.zig");
+const exception_ops = @import("exception_ops.zig");
+const callObjectToPrimitiveMethod = object_ops.callObjectToPrimitiveMethod;
+const callValueOrBytecodeSyncInternal = call_runtime.callValueOrBytecodeSyncInternalOutlined;
+const getValueProperty = object_ops.getValueProperty;
+const isCallableValue = call_runtime.isCallableValue;
+const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
+pub inline fn toPrimitiveForAdditionFree(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    value: core.JSValue,
+) !core.JSValue {
+    if (!value.is(.object)) return value;
+    return toPrimitiveForAdditionObject(ctx, output, global, value);
+}
+
+/// The `Free` suffix is a refcount-era spelling of qjs `JS_ToPrimitiveFree`
+/// (it consumed its argument). Under the tracing GC nothing is consumed, so
+/// the "borrowing wrapper" is literally the same call; both names stay because
+/// each reads correctly at its own VM call sites.
+pub const toPrimitiveForAddition = toPrimitiveForAdditionFree;
+fn toPrimitiveForAdditionObject(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    value: core.JSValue,
+) !core.JSValue {
+    const symbol_to_primitive = core.atom.predefinedId("Symbol.toPrimitive", .symbol) orelse return toOrdinaryPrimitive(ctx, output, global, value);
+    const method = try getValueProperty(ctx, output, global, value, symbol_to_primitive, null, null);
+    if (!method.is(.undefined_value) and !method.is(.null_value)) {
+        // JS_ToPrimitiveInternal (quickjs.c JS_CallFree): a non-callable
+        // Symbol.toPrimitive is still called and reports "not a function"; an
+        // object return value throws "toPrimitive".
+        if (!isCallableValue(method)) return throwTypeErrorMessage(ctx, global, "not a function");
+        const hint = try createStringValue(ctx.runtime, "default");
+        const primitive = try callValueOrBytecodeSyncInternal(ctx, output, global, value, method, &.{hint}, null, null);
+        if (primitive.is(.object)) {
+            return throwTypeErrorMessage(ctx, global, "toPrimitive");
+        }
+        return primitive;
+    }
+
+    return toOrdinaryPrimitive(ctx, output, global, value);
+}
+
+pub fn toPrimitiveForNumber(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    value: core.JSValue,
+) !core.JSValue {
+    if (!value.is(.object)) return value;
+    const symbol_to_primitive = core.atom.predefinedId("Symbol.toPrimitive", .symbol) orelse return toOrdinaryPrimitiveNumber(ctx, output, global, value);
+    const method = try getValueProperty(ctx, output, global, value, symbol_to_primitive, null, null);
+    if (!method.is(.undefined_value) and !method.is(.null_value)) {
+        // JS_ToPrimitiveInternal (quickjs.c JS_CallFree): a non-callable
+        // Symbol.toPrimitive is still called and reports "not a function"; an
+        // object return value throws "toPrimitive".
+        if (!isCallableValue(method)) return throwTypeErrorMessage(ctx, global, "not a function");
+        const hint = try createStringValue(ctx.runtime, "number");
+        const primitive = try callValueOrBytecodeSyncInternal(ctx, output, global, value, method, &.{hint}, null, null);
+        if (primitive.is(.object)) {
+            return throwTypeErrorMessage(ctx, global, "toPrimitive");
+        }
+        return primitive;
+    }
+
+    return toOrdinaryPrimitiveNumber(ctx, output, global, value);
+}
+
+pub fn toOrdinaryPrimitive(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    value: core.JSValue,
+) !core.JSValue {
+    if (try callObjectToPrimitiveMethod(ctx, output, global, value, core.atom.ids.valueOf, null, null)) |primitive| return primitive;
+    if (try callObjectToPrimitiveMethod(ctx, output, global, value, core.atom.ids.toString, null, null)) |primitive| return primitive;
+    // JS_ToPrimitiveInternal: no primitive from valueOf/toString.
+    return throwTypeErrorMessage(ctx, global, "toPrimitive");
+}
+
+pub fn toOrdinaryPrimitiveNumber(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    value: core.JSValue,
+) !core.JSValue {
+    if (try callObjectToPrimitiveMethod(ctx, output, global, value, core.atom.ids.valueOf, null, null)) |primitive| return primitive;
+    if (try callObjectToPrimitiveMethod(ctx, output, global, value, core.atom.ids.toString, null, null)) |primitive| return primitive;
+    // JS_ToPrimitiveInternal: no primitive from valueOf/toString.
+    return throwTypeErrorMessage(ctx, global, "toPrimitive");
+}
+
+pub fn valueTruthy(value: core.JSValue) bool {
+    return isTruthy(value);
+}
+
+pub fn toUint16CodeUnit(number: f64) u16 {
+    if (std.math.isNan(number) or !std.math.isFinite(number) or number == 0) return 0;
+    const int = if (number < 0) -@floor(@abs(number)) else @floor(number);
+    const modulo = @mod(int, 65536.0);
+    return @intFromFloat(modulo);
+}
+
+pub fn toLengthIndex(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue) !usize {
+    var index: usize = undefined;
+    try toLengthIndexInto(ctx, output, global, value, &index);
+    return index;
+}
+
+/// QJS's `JS_ToLengthFree` returns an integer status and writes the converted
+/// length through an out pointer. Keep the same ABI shape here so callers do
+/// not need a 16-byte `!usize` result slot around the tag switch.
+noinline fn toLengthIndexInto(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue, index: *usize) !void {
+    // QJS `JS_ToLengthFree` enters `JS_ToInt64SatFree`, whose first switch
+    // handles integer/float tags directly and invokes ToNumber only for other
+    // values. Keep object/Symbol/BigInt coercion on the observable slow path.
+    if (fastToLengthIndex(value)) |converted| {
+        index.* = converted;
+        return;
+    }
+    index.* = try toLengthIndexSlow(ctx, output, global, value);
+}
+
+/// Observable ToPrimitive/ToNumber half of ToLength. Callers that have
+/// already rejected the numeric tags can enter here without repeating the
+/// primitive discriminator.
+pub fn toLengthIndexSlow(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue) !usize {
+    const length_number = try toLengthNumber(ctx, output, global, value);
+    if (length_number >= @as(f64, @floatFromInt(std.math.maxInt(usize)))) return std.math.maxInt(usize);
+    return @intFromFloat(length_number);
+}
+
+pub fn toLengthNumber(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue) !f64 {
+    const primitive = try toPrimitiveForNumber(ctx, output, global, value);
+    // JS_ToNumber on a bigint throws "cannot convert bigint to number".
+    if (primitive.isBigInt()) {
+        _ = throwTypeErrorMessage(ctx, global, "cannot convert bigint to number") catch |err| return err;
+        return error.TypeError;
+    }
+    const number_value = try toNumberValue(ctx.runtime, primitive);
+    const number = numberValue(number_value) orelse std.math.nan(f64);
+    if (std.math.isNan(number) or number <= 0) return 0;
+    const max_length = 9007199254740991.0;
+    if (number >= max_length) return max_length;
+    return @floor(number);
+}
+
+pub fn fastToLengthIndex(value: core.JSValue) ?usize {
+    if (value.as(.int)) |int_value| {
+        if (int_value <= 0) return 0;
+        return @intCast(int_value);
+    }
+    if (value.as(.float64)) |number| {
+        if (std.math.isNan(number) or number <= 0) return 0;
+        const max_length = 9007199254740991.0;
+        const clamped = if (number >= max_length) max_length else @floor(number);
+        if (clamped >= @as(f64, @floatFromInt(std.math.maxInt(usize)))) return std.math.maxInt(usize);
+        return @intFromFloat(clamped);
+    }
+    return null;
+}
+
+pub fn toUint32Number(number: f64) u32 {
+    if (std.math.isNan(number) or !std.math.isFinite(number) or number == 0) return 0;
+    const integer = if (number < 0) -@floor(@abs(number)) else @floor(number);
+    const modulo = @mod(integer, 4294967296.0);
+    return @intFromFloat(modulo);
+}
+
+pub fn uint32NumberValue(value: u32) core.JSValue {
+    if (value <= @as(u32, @intCast(std.math.maxInt(i32)))) return core.JSValue.int32(@intCast(value));
+    return core.JSValue.float64(@floatFromInt(value));
+}
+
+pub fn coerceOptionalNumberMethodArgument(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    args: []const core.JSValue,
+    preserve_undefined: bool,
+) !?core.JSValue {
+    if (args.len == 0) return null;
+    if (preserve_undefined and args[0].is(.undefined_value)) return null;
+    const primitive = try toPrimitiveForNumber(ctx, output, global, args[0]);
+    // JS_ToNumber on a bigint throws "cannot convert bigint to number".
+    if (primitive.isBigInt()) {
+        _ = throwTypeErrorMessage(ctx, global, "cannot convert bigint to number") catch |err| return err;
+        return error.TypeError;
+    }
+    return try toNumberValue(ctx.runtime, primitive);
+}
+
+/// The `[[PrimitiveValue]]` slot of a Number/Boolean/BigInt/Symbol wrapper, or
+/// null for anything else. `rt` is unused (borrowed reads only) and is kept
+/// only so the cross-file call sites keep their uniform `(rt, value)` shape.
+pub fn primitiveWrapperStoredValue(rt: *core.JSRuntime, value: core.JSValue) ?core.JSValue {
+    _ = rt;
+    if (!value.is(.object)) return null;
+    const object = core.value_semantics.objectFromValue(value) orelse return null;
+    switch (object.class_id) {
+        core.class.ids.number,
+        core.class.ids.boolean,
+        core.class.ids.big_int,
+        core.class.ids.symbol,
+        => if (object.objectData()) |stored| return stored else return null,
+        else => return null,
+    }
+}
+
+pub fn toNumberForDateMethod(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    value: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    if (value.is(.object)) {
+        const primitive = try toPrimitiveForNumber(ctx, output, global, value);
+        // JS_ToFloat64 on a bigint primitive throws "cannot convert bigint to
+        // number"; qjs date argument coercion never accepts bigints.
+        if (primitive.isBigInt()) {
+            _ = throwTypeErrorMessage(ctx, global, "cannot convert bigint to number") catch |err| return err;
+            return error.TypeError;
+        }
+        return toNumberValue(ctx.runtime, primitive);
+    }
+    // Neither leg needs the caller frame today: `toPrimitiveForNumber` opens
+    // its own native environment. The pair stays so the ~10 date_ops call
+    // sites keep passing the frame they already hold.
+    _ = caller_function;
+    _ = caller_frame;
+    if (value.isBigInt()) {
+        _ = throwTypeErrorMessage(ctx, global, "cannot convert bigint to number") catch |err| return err;
+        return error.TypeError;
+    }
+    return toNumberValue(ctx.runtime, value);
+}
+
+
+// ----- merged from primitive_ops.zig -----
+// Native record tables and dispatch for primitive wrappers and Symbol helpers.
+//
+// Boolean, BigInt, String, Number valueOf, and Symbol records share this
+// domain because they converge on the same wrapper/coercion machinery; Number
+// formatting stays in `number_ops`. Call inputs are borrowed and returned
+// values are owned.
+const builtin_dispatch = @import("builtin_dispatch.zig");
+const builtin_glue = @import("builtin_glue.zig");
+const exceptions = @import("exception_ops.zig");
+const HostError = exceptions.HostError;
+pub const description = core.symbol.description;
+pub const registryKey = core.symbol.registryKey;
+pub const canBeHeldWeakly = core.symbol.canBeHeldWeakly;
+pub fn toString(value: bool) []const u8 {
+    return if (value) "true" else "false";
+}
+
+/// `.primitive` native-builtin ids encode `class_tag * 10 + method` (class
+/// tags: 1 number, 2 boolean, 3 bigint, 4 symbol, 5 string; see
+/// `exec/object_ops.primitivePrototypeMethod`). Method 1 is toString, 2
+/// valueOf, 3 the constructor-called-as-function path; the Symbol-only getter
+/// (4 description) and method (5 [Symbol.toPrimitive]) also live here because
+/// they share the same QuickJS primitive wrapper dispatch domain. Methods 6+
+/// are the wrapper *constructor* statics (qjs's separate `js_<class>_funcs`
+/// lists), which do not route through `primitivePrototypeMethod`.
+const Tag = enum(u32) {
+    number = 1,
+    boolean = 2,
+    bigint = 3,
+    symbol = 4,
+    string = 5,
+};
+fn primitiveId(comptime tag: Tag, comptime method: u32) u32 {
+    return @intFromEnum(tag) * 10 + method;
+}
+
+/// Boolean's slice of the `.primitive` native-builtin domain: the
+/// `Boolean.prototype` toString/valueOf and `Boolean(...)` called as a
+/// function. The domain also carries the generic Number/BigInt/String prototype
+/// toString/valueOf entries below because their dispatch is the same shared exec
+/// op.
+pub const boolean_entries = [_]core.host_function.InternalEntry{
+    primitiveEntry("toString", 0, primitiveId(.boolean, 1)),
+    primitiveEntry("valueOf", 0, primitiveId(.boolean, 2)),
+    // Boolean(...) called as a function (constructor path id, method 3).
+    primitiveEntry("Boolean", 1, primitiveId(.boolean, 3)),
+};
+pub const shared_entries = [_]core.host_function.InternalEntry{
+    primitiveEntry("valueOf", 0, primitiveId(.number, 2)),
+    primitiveEntry("toString", 0, primitiveId(.bigint, 1)),
+    primitiveEntry("valueOf", 0, primitiveId(.bigint, 2)),
+    primitiveEntry("toString", 0, primitiveId(.string, 1)),
+    primitiveEntry("valueOf", 0, primitiveId(.string, 2)),
+};
+pub const symbol_entries = [_]core.host_function.InternalEntry{
+    primitiveEntry("toString", 0, 41),
+    primitiveEntry("valueOf", 0, 42),
+    primitiveEntry("Symbol", 0, 43),
+    primitiveEntry("get description", 0, 44),
+    primitiveEntry("[Symbol.toPrimitive]", 1, 45),
+};
+pub const bigint_asintn_id: u32 = primitiveId(.bigint, 6);
+pub const bigint_asuintn_id: u32 = primitiveId(.bigint, 7);
+pub const bigint_static_entries = [_]core.host_function.InternalEntry{
+    primitiveStaticEntry("asIntN", 2, bigint_asintn_id),
+    primitiveStaticEntry("asUintN", 2, bigint_asuintn_id),
+};
+pub const symbol_for_id: u32 = primitiveId(.symbol, 6);
+pub const symbol_key_for_id: u32 = primitiveId(.symbol, 7);
+pub const symbol_static_entries = [_]core.host_function.InternalEntry{
+    primitiveStaticEntry("for", 1, symbol_for_id),
+    primitiveStaticEntry("keyFor", 1, symbol_key_for_id),
+};
+fn primitiveEntry(comptime name: []const u8, comptime arity: u8, comptime id: u32) core.host_function.InternalEntry {
+    return .{
+        .name = name,
+        .length = arity,
+        .id = id,
+        .magic = @intCast(id),
+        .cproto = .generic_magic,
+        .native_function = builtin_dispatch.genericMagicFunction(&primitiveCall),
+    };
+}
+
+/// Shared record handler for the `.primitive` domain. It consumes the atomic
+/// final-call realm view and delegates to `primitivePrototypeMethod`, which stays in
+/// exec because the VM's prototype-method fast path also calls it.
+pub fn primitiveCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    const ctx = realm.realm;
+    const function_object = host_call.func_obj orelse return error.TypeError;
+    return object_ops.primitivePrototypeMethod(
+        ctx,
+        host_call.output,
+        realm.global,
+        function_object,
+        host_call.this_value,
+        host_call.magic,
+        host_call.args,
+        builtin_dispatch.callerBytecode(host_call),
+        builtin_dispatch.callerFrame(host_call),
+    );
+}
+
+fn primitiveStaticEntry(comptime name: []const u8, comptime arity: u8, comptime id: u32) core.host_function.InternalEntry {
+    return .{
+        .name = name,
+        .length = arity,
+        .id = id,
+        .magic = @intCast(id),
+        .cproto = .generic_magic,
+        .native_function = builtin_dispatch.genericMagicFunction(&primitiveStaticCall),
+    };
+}
+
+/// Shared record handler for the wrapper-primitive *constructor* statics
+/// (method ids 6+). These are ordinary `JS_CFUNC_*_DEF` entries in qjs, so
+/// they belong on the record path like every other builtin; before this they
+/// were the last `.none`-tagged bigint/symbol tables and fell through to
+/// `call_runtime.callNativeCallableByName`'s name cascade.
+fn primitiveStaticCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    const ctx = realm.realm;
+    return switch (host_call.magic) {
+        // qjs js_bigint_asUintN with magic 1 == signed.
+        bigint_asintn_id => builtin_glue.bigIntAsN(
+            ctx,
+            host_call.output,
+            realm.global,
+            host_call.args,
+            false,
+            builtin_dispatch.callerBytecode(host_call),
+            builtin_dispatch.callerFrame(host_call),
+        ),
+        // qjs js_bigint_asUintN with magic 0 == unsigned.
+        bigint_asuintn_id => builtin_glue.bigIntAsN(
+            ctx,
+            host_call.output,
+            realm.global,
+            host_call.args,
+            true,
+            builtin_dispatch.callerBytecode(host_call),
+            builtin_dispatch.callerFrame(host_call),
+        ),
+        // qjs js_symbol_for.
+        symbol_for_id => builtin_glue.symbolFor(
+            ctx,
+            host_call.output,
+            realm.global,
+            host_call.args,
+            builtin_dispatch.callerBytecode(host_call),
+            builtin_dispatch.callerFrame(host_call),
+        ),
+        // qjs js_symbol_keyFor.
+        symbol_key_for_id => builtin_glue.symbolKeyFor(ctx.runtime, host_call.args),
+        else => error.TypeError,
+    };
+}

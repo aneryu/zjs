@@ -122,7 +122,7 @@
 - **签名**：`pub fn uninitialized() JSValue`。
 - **作用**：构造内部未初始化/空槽哨兵。
 - **实现**：make(Tag.uninitialized,0)，payload为0。
-- **所有权 / 错误 / 调用**：立即值、不分配、非 GC 边、无 error set。它是**哨兵**而非普通值：TDZ 与派生 `this` 未初始化都用它，读到时由 `src/exec/vm_value.zig:127` 转成 `error.ReferenceError`、由 `src/exec/vm_control.zig:58` 转成 `error.DerivedThisUninitialized`，再在 `src/exec/exception_ops.zig:592` 变成 JS 的 ReferenceError；`JSValue.same`（`src/core/value.zig:520`）把它归入「同 tag 即相等」一族。
+- **所有权 / 错误 / 调用**：立即值、不分配、非 GC 边、无 error set。它是**哨兵**而非普通值：TDZ 与派生 `this` 未初始化都用它，读到时由 `src/exec/vm_opcodes.zig:127` 转成 `error.ReferenceError`、由 `src/exec/vm_opcodes.zig:58` 转成 `error.DerivedThisUninitialized`，再在 `src/exec/exception_ops.zig:592` 变成 JS 的 ReferenceError；`JSValue.same`（`src/core/value.zig:520`）把它归入「同 tag 即相等」一族。
 
 ### `JSValue.catchOffset` (`src/core/value.zig:171`)
 
