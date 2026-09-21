@@ -43,7 +43,8 @@ L1  exec entries    eval_entry.zig, root.Vm, standard_globals.zig
 L2  interpreter     zjs_vm.zig, inline_calls.zig,
                     tailcall_dispatch.zig + tailcall_dispatch_colds.zig
 L3  opcode bodies   vm_opcodes.zig, vm_property.zig
-L4  call router     call_runtime.zig, call.zig, construct.zig, call_site.zig
+L4  call router     call_runtime.zig (unique Call/Construct terminals),
+                    call_site.zig, remaining owners in call.zig / construct.zig
 L5  object/value    object_ops, array_ops, string_ops, iterator_ops,
                     property_ops, value_ops, exception_ops
 L6  domain builtins math, number, date, json, uri, regexp, reflect,
@@ -117,8 +118,9 @@ OP_call / OP_call_method / OP_tail_call
                 ├─ bytecode function object   → same
                 ├─ Proxy                      → object_ops.callProxyApply
                 ├─ NativeEntry / bound / host → builtin_dispatch
-                │                                 or call.zig fallback
-                └─ other                      → call.callValueWithThis*
+                │                                 or call.zig host ID / record
+                │                                 Object [[Call]] → objectConstructorValue
+                └─ other                      → TypeError "not a function"
 ```
 
 Host → JS (`Context.callFunction`, builtin callbacks) skips the opcode:
@@ -162,12 +164,17 @@ OP_call_constructor / new F(...)
         │
         ▼
  call_runtime.constructValueOrBytecodeWithNewTarget
-        ├─ Proxy / bound                → object_ops / recursion
+        ├─ Proxy trap / bound           → object_ops / recursion
         ├─ ordinary bytecode function   → create instance, runWithCallEnv
         │                                 (same-Machine fast path when eligible)
-        └─ builtin Date/String/RegExp/Array/…
-                                  → NativeEntry construct record
-                                  → construct.zig or domain *ops
+        ├─ TypedArray metadata          → typedArrayConstructVm
+        │                                 (TypedArray source copy:
+        │                                  constructTypedArrayTypedArrayInput)
+        ├─ Date/String/RegExp/Array/Promise/collection/Error/…
+                                  → NativeEntry construct record or domain *ops
+        ├─ Number/Boolean/WeakRef/FR/Iterator/Proxy name arms
+                                  → unique helpers (no empty-object fallback)
+        └─ illegal                      → TypeError "not a constructor"
 ```
 
 ### 3.6 Jobs, promises, Atomics wait
@@ -270,7 +277,7 @@ not extra runtime layers.
 | Change | File |
 | --- | --- |
 | New opcode hot/cold handler | `tailcall_dispatch.zig` / `_colds.zig`, body in `vm_opcodes.zig` or `vm_property.zig` |
-| New `[[Call]]` / `[[Construct]]` route | `call_runtime.zig`; construct-only builtins may land in `construct.zig` |
+| New `[[Call]]` / `[[Construct]]` route | `call_runtime.zig` unique terminal. `call.zig` / `construct.zig` keep remaining owners (host globals, Bound create, `objectConstructorValue`, TypedArray copy primitive); do not add a second generic classifier |
 | New standard method | `internal_entries` in the domain `*_ops.zig`, row in `internal_builtins.zig`, install in `standard_globals.zig` |
 | New throw helper | `exception_ops.zig` (`throw<Kind>Message` / `throw<Reason><Kind>`) |
 | New host→JS entry | `call_site.zig` (do not add a second CallSite) |

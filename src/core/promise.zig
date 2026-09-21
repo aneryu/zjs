@@ -24,8 +24,18 @@ pub fn constructWithPrototype(realm: *core.RealmContext, prototype: ?*core.Objec
     const object = try core.Object.create(rt, core.class.ids.promise, prototype);
     errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
     if (prototype == null) {
-        try core.function.defineNativeMethod(realm, object, "then", 2);
-        try core.function.defineNativeMethod(realm, object, "catch", 1);
+        const then_value = try core.function.defineNativeMethod(realm, object, "then", 2);
+        const then_fn = try core.Object.expect(then_value);
+        then_fn.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(
+            .promise,
+            @intFromEnum(core.host_function.builtin_method_ids.promise.PrototypeMethod.then),
+        );
+        const catch_value = try core.function.defineNativeMethod(realm, object, "catch", 1);
+        const catch_fn = try core.Object.expect(catch_value);
+        catch_fn.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(
+            .promise,
+            @intFromEnum(core.host_function.builtin_method_ids.promise.PrototypeMethod.catch_),
+        );
     }
     return object.value();
 }
@@ -81,11 +91,27 @@ test "fulfilledWithPrototype roots direct function bytecode result while constru
     const then_function = try core.Object.expect(then_value);
     try std.testing.expectEqual(core.class.ids.c_function_data, then_function.class_id);
     try std.testing.expectEqual(function_proto, then_function.getPrototype().?);
+    try std.testing.expectEqual(
+        core.function.nativeBuiltinId(
+            .promise,
+            @intFromEnum(core.host_function.builtin_method_ids.promise.PrototypeMethod.then),
+        ),
+        then_function.nativeFunctionId(),
+    );
+    try std.testing.expect(then_function.nativeEntry() == null);
 
     const catch_value = try promise.getProperty(core.atom.predefinedId("catch", .string).?);
     const catch_function = try core.Object.expect(catch_value);
     try std.testing.expectEqual(core.class.ids.c_function_data, catch_function.class_id);
     try std.testing.expectEqual(function_proto, catch_function.getPrototype().?);
+    try std.testing.expectEqual(
+        core.function.nativeBuiltinId(
+            .promise,
+            @intFromEnum(core.host_function.builtin_method_ids.promise.PrototypeMethod.catch_),
+        ),
+        catch_function.nativeFunctionId(),
+    );
+    try std.testing.expect(catch_function.nativeEntry() == null);
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     const stored = promise.promiseResult() orelse return error.TypeError;
@@ -121,122 +147,6 @@ pub fn markHandled(ctx: *core.JSContext, promise: *core.Object) void {
     if (ctx.runtime.current_exception.sameValue(reason)) {
         ctx.clearException();
     }
-}
-
-pub fn withResolvers(ctx: *core.JSContext, prototype: ?*core.Object) !core.JSValue {
-    const rt = ctx.runtime;
-    var promise_val = core.JSValue.undefinedValue();
-    var resolve_val = core.JSValue.undefinedValue();
-    var reject_val = core.JSValue.undefinedValue();
-    var result_val = core.JSValue.undefinedValue();
-    var root_frame = core.runtime.rootValues(.{
-        &promise_val,
-        &resolve_val,
-        &reject_val,
-        &result_val,
-    });
-    root_frame.activate(rt);
-    defer root_frame.deactivate(rt);
-
-    promise_val = try constructWithPrototype(ctx, prototype);
-    resolve_val = try createResolvingFunction(ctx, promise_val, false);
-    reject_val = try createResolvingFunction(ctx, promise_val, true);
-
-    const result = try core.Object.create(rt, core.class.ids.object, null);
-    result_val = result.value();
-    try defineData(rt, result, core.atom.ids.promise, promise_val);
-    try defineData(rt, result, core.atom.ids.resolve, resolve_val);
-    try defineData(rt, result, core.atom.ids.reject, reject_val);
-    return result_val;
-}
-
-fn createResolvingFunction(ctx: *core.JSContext, promise: core.JSValue, reject: bool) !core.JSValue {
-    const rt = ctx.runtime;
-    const function_proto = ctx.cached_function_proto orelse return error.InvalidBuiltinRegistry;
-    var rooted_promise = promise;
-    var function_val = core.JSValue.undefinedValue();
-    var state_val = core.JSValue.undefinedValue();
-    var root_frame = core.runtime.rootValues(.{ &rooted_promise, &function_val, &state_val });
-    root_frame.activate(rt);
-    defer root_frame.deactivate(rt);
-
-    function_val = try core.function.nativeDataFunctionWithPrototype(rt, function_proto, "", 1);
-    const header = function_val.refHeader() orelse return error.TypeError;
-    const object = core.Object.fromHeader(header);
-    const state = try core.Object.create(rt, core.class.ids.object, null);
-    state_val = state.value();
-    (try state.promiseAlreadyResolvedSlot(rt)).* = false;
-    try object.setInternalCallableTag(rt, .promise_resolving);
-    try object.setFunctionPromiseResolvingTarget(rt, rooted_promise);
-    try object.setFunctionPromiseResolvingState(rt, state_val);
-    (try object.functionPromiseResolvingRejectSlot(rt)).* = reject;
-    return function_val;
-}
-
-test "createResolvingFunction roots promise and state while allocating slots" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt, .{});
-    defer ctx.destroy();
-    const function_proto = try core.Object.create(rt, core.class.ids.object, null);
-    ctx.cached_function_proto = function_proto;
-
-    const promise_symbol = try rt.atoms.newValueSymbol("gc-promise-resolving-target-symbol");
-    const old_threshold = rt.gcThreshold();
-    rt.setGCThreshold(0);
-    defer rt.setGCThreshold(old_threshold);
-
-    const promise_value = try rt.takeSymbolValue(promise_symbol);
-    const function_value = try createResolvingFunction(ctx, promise_value, false);
-    const function_object = core.Object.fromHeader(function_value.refHeader() orelse return error.TypeError);
-
-    try std.testing.expect(rt.atoms.name(promise_symbol) != null);
-    const stored_target = function_object.functionPromiseResolvingTarget() orelse return error.TypeError;
-    try std.testing.expect(stored_target.same(promise_value));
-    const stored_state = function_object.functionPromiseResolvingState() orelse return error.TypeError;
-    const state_object = core.Object.fromHeader(stored_state.refHeader() orelse return error.TypeError);
-    try std.testing.expect(!state_object.promiseAlreadyResolved());
-
-    _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(rt.atoms.name(promise_symbol) == null);
-}
-
-test "withResolvers roots promise and resolving functions while creating result" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt, .{});
-    defer ctx.destroy();
-    const function_proto = try core.Object.create(rt, core.class.ids.object, null);
-    ctx.cached_function_proto = function_proto;
-
-    const old_threshold = rt.gcThreshold();
-    rt.setGCThreshold(0);
-    defer rt.setGCThreshold(old_threshold);
-
-    const result_value = try withResolvers(ctx, null);
-    const result = core.Object.fromHeader(result_value.refHeader() orelse return error.TypeError);
-
-    const promise_key = try rt.internAtom("promise");
-    const resolve_key = try rt.internAtom("resolve");
-    const reject_key = try rt.internAtom("reject");
-
-    const promise_value = try result.getProperty(promise_key);
-    const resolve_value = try result.getProperty(resolve_key);
-    const reject_value = try result.getProperty(reject_key);
-
-    try std.testing.expect(promiseObject(promise_value) != null);
-    const resolve_object = core.Object.fromHeader(resolve_value.refHeader() orelse return error.TypeError);
-    const reject_object = core.Object.fromHeader(reject_value.refHeader() orelse return error.TypeError);
-    try std.testing.expect(resolve_object.functionPromiseResolvingTarget().?.same(promise_value));
-    try std.testing.expect(reject_object.functionPromiseResolvingTarget().?.same(promise_value));
-    try std.testing.expect(!resolve_object.functionPromiseResolvingReject());
-    try std.testing.expect(reject_object.functionPromiseResolvingReject());
-
-    _ = rt.runObjectCycleRemoval();
-}
-
-fn defineData(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, value: core.JSValue) !void {
-    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, .all));
 }
 
 pub fn enqueueReaction(ctx: *core.JSContext, job: jobs.Func, args: []const core.JSValue) !void {

@@ -511,7 +511,6 @@ pub fn constructDynamicFunctionFromSource(
 // Class construction and super helpers.
 const construct_mod = @import("construct.zig");
 const date_ops = @import("date_ops.zig");
-const value_ops = @import("value_ops.zig");
 const array_construct_ref = core.function.NativeBuiltinRef{
     .domain = .array,
     .id = @intFromEnum(core.host_function.builtin_method_ids.array.ConstructorMethod.construct),
@@ -546,6 +545,96 @@ const typedArrayConstructToIndex = array_ops.typedArrayConstructToIndex;
 const reflectConstructPrototypeVm = object_ops.reflectConstructPrototypeVm;
 const throwRangeErrorMessage = exception_ops.throwRangeErrorMessage;
 const valueTruthy = coercion_ops.valueTruthy;
+
+pub fn constructIteratorWithNewTarget(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    constructor: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+    new_target: core.JSValue,
+) !core.JSValue {
+    _ = args;
+    if (new_target.sameValue(constructor)) return error.TypeError;
+    var prototype = try reflectConstructPrototypeVm(ctx, output, global, "Iterator", new_target, caller_function, caller_frame);
+    defer prototype.deinit(ctx.runtime);
+    const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype.object());
+    return instance.value();
+}
+
+pub fn numberConstructWithNewTarget(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    constructor: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+    new_target: core.JSValue,
+) !core.JSValue {
+    _ = constructor;
+    if (args.len >= 1 and args[0].is(.symbol)) return error.TypeError;
+    const primitive = try builtin_glue.numberFunctionCall(ctx, output, global, args);
+    var prototype = try reflectConstructPrototypeVm(ctx, output, global, "Number", new_target, caller_function, caller_frame);
+    defer prototype.deinit(ctx.runtime);
+    return try constructPrimitiveWrapperWithPrototype(ctx.runtime, core.class.ids.number, prototype.object(), primitive);
+}
+
+pub fn booleanConstructWithNewTarget(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    constructor: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+    new_target: core.JSValue,
+) !core.JSValue {
+    _ = constructor;
+    const primitive = core.JSValue.boolean(args.len >= 1 and valueTruthy(args[0]));
+    var prototype = try reflectConstructPrototypeVm(ctx, output, global, "Boolean", new_target, caller_function, caller_frame);
+    defer prototype.deinit(ctx.runtime);
+    return try constructPrimitiveWrapperWithPrototype(ctx.runtime, core.class.ids.boolean, prototype.object(), primitive);
+}
+
+pub fn weakRefConstructWithNewTarget(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    constructor: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+    new_target: core.JSValue,
+) !core.JSValue {
+    _ = constructor;
+    const target = if (args.len >= 1) args[0] else return error.TypeError;
+    if (!canBeHeldWeakly(ctx.runtime, target)) return error.TypeError;
+    var prototype = try reflectConstructPrototypeVm(ctx, output, global, "WeakRef", new_target, caller_function, caller_frame);
+    defer prototype.deinit(ctx.runtime);
+    return try constructWeakRefWithPrototype(ctx.runtime, target, prototype.object());
+}
+
+pub fn finalizationRegistryConstructWithNewTarget(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    constructor: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+    new_target: core.JSValue,
+) !core.JSValue {
+    _ = constructor;
+    const cleanup_callback = if (args.len >= 1) args[0] else return error.TypeError;
+    if (!isCallableValue(cleanup_callback)) return error.TypeError;
+    var prototype = try reflectConstructPrototypeVm(ctx, output, global, "FinalizationRegistry", new_target, caller_function, caller_frame);
+    defer prototype.deinit(ctx.runtime);
+    return try constructFinalizationRegistryWithPrototype(ctx, cleanup_callback, prototype.object());
+}
+
 pub fn constructBuiltinSuperConstructor(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -560,11 +649,7 @@ pub fn constructBuiltinSuperConstructor(
     if (std.mem.eql(u8, name, "Symbol") or std.mem.eql(u8, name, "BigInt")) return error.TypeError;
 
     if (std.mem.eql(u8, name, "Iterator")) {
-        if (new_target.sameValue(constructor)) return error.TypeError;
-        var prototype = try reflectConstructPrototypeVm(ctx, output, global, name, new_target, caller_function, caller_frame);
-        defer prototype.deinit(ctx.runtime);
-        const instance = try core.Object.create(ctx.runtime, core.class.ids.object, prototype.object());
-        return instance.value();
+        return try constructIteratorWithNewTarget(ctx, output, global, constructor, args, caller_function, caller_frame, new_target);
     }
 
     if (std.mem.eql(u8, name, "Function")) return try constructDynamicFunctionFromSource(ctx, output, global, constructor, new_target, args, .normal, caller_function, caller_frame);
@@ -601,6 +686,31 @@ pub fn constructBuiltinSuperConstructor(
         return try constructPromiseBuiltinSuperNativeVm(ctx, output, global, function_object, new_target, args, caller_function, caller_frame);
     }
 
+    if (std.mem.eql(u8, name, "Number")) {
+        return try numberConstructWithNewTarget(ctx, output, global, constructor, args, caller_function, caller_frame, new_target);
+    }
+    if (std.mem.eql(u8, name, "Boolean")) {
+        return try booleanConstructWithNewTarget(ctx, output, global, constructor, args, caller_function, caller_frame, new_target);
+    }
+    if (std.mem.eql(u8, name, "WeakRef")) {
+        return try weakRefConstructWithNewTarget(ctx, output, global, constructor, args, caller_function, caller_frame, new_target);
+    }
+    if (std.mem.eql(u8, name, "FinalizationRegistry")) {
+        return try finalizationRegistryConstructWithNewTarget(ctx, output, global, constructor, args, caller_function, caller_frame, new_target);
+    }
+    if (construct_mod.typedArrayElement(name)) |_| {
+        const function_object = objectFromValue(constructor) orelse return error.InvalidBuiltinRegistry;
+        return try array_ops.typedArrayConstructVm(ctx, output, global, new_target, function_object, args, caller_function, caller_frame);
+    }
+    if (std.mem.eql(u8, name, "Proxy")) {
+        const target = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+        const handler = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+        return @as(?core.JSValue, object_ops.constructProxyInstance(ctx, target, handler) catch |err| switch (err) {
+            error.TypeError => return @as(?core.JSValue, try exception_ops.throwTypeErrorMessage(ctx, global, "not an object")),
+            else => return err,
+        });
+    }
+
     var prototype = try reflectConstructPrototypeVm(ctx, output, global, name, new_target, caller_function, caller_frame);
     defer prototype.deinit(ctx.runtime);
     if (std.mem.eql(u8, name, "Object")) {
@@ -620,24 +730,6 @@ pub fn constructBuiltinSuperConstructor(
         };
     }
     if (std.mem.eql(u8, name, "String")) return try stringConstructWithPrototype(ctx, output, global, prototype.object(), args, caller_function, caller_frame);
-    if (std.mem.eql(u8, name, "Number")) {
-        if (args.len >= 1 and args[0].is(.symbol)) return error.TypeError;
-        // qjs js_number_constructor uses JS_ToNumeric
-        // (qjs:13030 → JS_ToNumberHintFree TON_FLAG_NUMERIC, qjs:12946),
-        // which ToPrimitive's objects (qjs:12975-12979) before ToNumber.
-        const primitive = if (args.len >= 1) blk: {
-            if (args[0].isBigInt())
-                break :blk value_ops.numberToValue(try value_ops.bigIntToNumber(ctx.runtime, args[0]));
-            const coerced = try coercion_ops.toPrimitiveForNumber(ctx, output, global, args[0]);
-            if (coerced.isBigInt())
-                break :blk value_ops.numberToValue(try value_ops.bigIntToNumber(ctx.runtime, coerced));
-            break :blk try value_ops.toNumberValue(ctx.runtime, coerced);
-        } else core.JSValue.int32(0);
-        return try constructPrimitiveWrapperWithPrototype(ctx.runtime, core.class.ids.number, prototype.object(), primitive);
-    }
-    if (std.mem.eql(u8, name, "Boolean")) {
-        return try constructPrimitiveWrapperWithPrototype(ctx.runtime, core.class.ids.boolean, prototype.object(), core.JSValue.boolean(args.len >= 1 and valueTruthy(args[0])));
-    }
     if (std.mem.eql(u8, name, "Date")) return try date_ops.dateConstructWithPrototype(ctx, output, global, prototype.object(), args);
     if (std.mem.eql(u8, name, "AggregateError")) {
         const constructor_global = if (objectFromValue(constructor)) |constructor_object|
@@ -648,23 +740,9 @@ pub fn constructBuiltinSuperConstructor(
     }
     if (std.mem.eql(u8, name, "SuppressedError")) return try suppressedErrorConstructWithPrototype(ctx, output, global, prototype.object(), args, caller_function, caller_frame);
     if (isErrorConstructorName(name)) return try errorConstructWithPrototype(ctx, output, global, name, prototype.object(), args, caller_function, caller_frame);
-    if (std.mem.eql(u8, name, "WeakRef")) {
-        const target = if (args.len >= 1) args[0] else return error.TypeError;
-        if (!canBeHeldWeakly(ctx.runtime, target)) return error.TypeError;
-        return try constructWeakRefWithPrototype(ctx.runtime, target, prototype.object());
-    }
-    if (std.mem.eql(u8, name, "FinalizationRegistry")) {
-        const cleanup_callback = if (args.len >= 1) args[0] else return error.TypeError;
-        if (!isCallableValue(cleanup_callback)) return error.TypeError;
-        return try constructFinalizationRegistryWithPrototype(ctx, cleanup_callback, prototype.object());
-    }
     if (std.mem.eql(u8, name, "DisposableStack")) return try disposableStackConstructWithPrototype(ctx, global, prototype.object());
     if (std.mem.eql(u8, name, "AsyncDisposableStack")) return try asyncDisposableStackConstructWithPrototype(ctx, global, prototype.object());
     if (core.host_function.builtin_method_id_lookup.collection.constructorId(name)) |kind| return try constructCollectionWithPrototypeFromVm(ctx, output, global, kind, args, prototype.object());
-    if (construct_mod.typedArrayElement(name)) |element| {
-        const function_object = object_ops.objectFromValue(constructor) orelse return error.InvalidBuiltinRegistry;
-        return try construct_mod.constructTypedArrayValue(ctx.runtime, function_object, prototype.object(), element, args);
-    }
 
     return null;
 }

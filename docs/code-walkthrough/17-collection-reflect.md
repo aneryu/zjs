@@ -141,14 +141,14 @@ Map/Set 热路径校验 `collection_method_owner_class`。Reflect.construct 对�
 
 - **签名**：`pub fn groupBy( ctx: *core.JSContext, args: []const core.JSValue, globals: []globals_mod.Slot, prototype: ?*core.Object, ) !core.JSValue`。
 - **作用**：带 ctx 的 groupBy 便利入口。
-- **实现**：直接转发 `groupByWithCallbackHost(ctx.runtime, args, prototype, collection_adapter.host(ctx, globals))`，即把回调能力接到 exec 的闭包调用上。
+- **实现**：直接转发 `groupByWithCallbackHost(ctx.runtime, args, prototype, collection_adapter.host(ctx, globals))`。回调经 `CallbackHost` → `callCallbackWithThis` → `call_runtime.callValueOrBytecodeRoot`。
 - **所有权 / 错误 / 调用**：返回的 Map 归调用方。
 
 ### `groupByWithCallbackHost` (`src/exec/collection_ops.zig:475`)
 
 - **签名**：`pub fn groupByWithCallbackHost( rt: *core.JSRuntime, args: []const core.JSValue, prototype: ?*core.Object, host: CallbackHost, ) !core.JSValue`。
 - **作用**：裸运行时版本的 `Map.groupBy`：只支持字符串与数组来源。
-- **实现**：实参少于 2 个、或 `args[1]` 不是 `isCallableObject` → `error.TypeError`；`constructWithPrototype(rt, 1, prototype)` 建结果 Map。`args[0]` 是字符串时交 `groupString` 按「字符串元素」分组并返回；否则必须是对象且 `isArray()`（不是数组 → `error.TypeError`），按 `arrayLength()` 逐下标 `getProperty` 取元素并 `addGroupedItem`。注意它不走通用 iterator 协议——那是 VM 路径 `mapGroupByRecord` 的职责。
+- **实现**：实参少于 2 个、或 `args[1]` 不是 `call_runtime.isCallableValue` → `error.TypeError`；`constructWithPrototype(rt, 1, prototype)` 建结果 Map。`args[0]` 是字符串时交 `groupString` 按「字符串元素」分组并返回；否则必须是对象且 `isArray()`（不是数组 → `error.TypeError`），按 `arrayLength()` 逐下标 `getProperty` 取元素并 `addGroupedItem`。注意它不走通用 iterator 协议——那是 VM 路径 `mapGroupByRecord` 的职责。
 - **所有权 / 错误 / 调用**：结果 Map 归调用方；回调通过 `host` 发出。
 
 ### `mapSet` (`src/exec/collection_ops.zig:502`)
@@ -267,7 +267,7 @@ Map/Set 热路径校验 `collection_method_owner_class`。Reflect.construct 对�
 
 - **签名**：`fn collectionForEach( object: *core.Object, args: []const core.JSValue, host: CallbackHost, ) !core.JSValue`。
 - **作用**：裸 `CallbackHost` 版本的 `Map/Set.prototype.forEach`。
-- **实现**：class 必须是 `map` 或 `set`；`args[0]` 必须过 `isCallableObject`，否则 `error.TypeError`；`this_arg` 取 `args[1]`，缺省 `undefined`。遍历前 `object.retainCollectionCursor()` / defer `releaseCollectionCursor()`：qjs `js_map_forEach`（quickjs.c:52318-52332）锁住当前 record 再前进，zjs 按下标走，所以锁的是 entry 数组——回调可以删条目，但槽位不能在游标下移动。循环按下标读条目（先自增），跳过 `!entry.active`，key 与 value 先取出本地副本（对应 quickjs.c:52322 的「must duplicate in case the record is deleted」；tracing GC 下这不是 retain，而是「回调前先读出」——回调期间 entry 槽可能被清空，`callback_args` 才是让这两个值保持可达的根），Set 的 value 就是 key；回调实参是 `(value, key, object.value())`，通过 `host.callWithThis(args[0], this_arg, ...)` 发出。结束返回 `undefined`。
+- **实现**：class 必须是 `map` 或 `set`；`args[0]` 必须过 `call_runtime.isCallableValue`，否则 `error.TypeError`；`this_arg` 取 `args[1]`，缺省 `undefined`。遍历前 `object.retainCollectionCursor()` / defer `releaseCollectionCursor()`：qjs `js_map_forEach`（quickjs.c:52318-52332）锁住当前 record 再前进，zjs 按下标走，所以锁的是 entry 数组——回调可以删条目，但槽位不能在游标下移动。循环按下标读条目（先自增），跳过 `!entry.active`，key 与 value 先取出本地副本（对应 quickjs.c:52322 的「must duplicate in case the record is deleted」；tracing GC 下这不是 retain，而是「回调前先读出」——回调期间 entry 槽可能被清空，`callback_args` 才是让这两个值保持可达的根），Set 的 value 就是 key；回调实参是 `(value, key, object.value())`，通过 `host.callWithThis(args[0], this_arg, ...)` 发出。结束返回 `undefined`。
 - **所有权 / 错误 / 调用**：不分配；空 `CallbackHost` 会让 `callWithThis` 直接 `error.TypeError`。
 
 ### `mapGetOrInsert` (`src/exec/collection_ops.zig:872`)
@@ -372,21 +372,21 @@ Map/Set 热路径校验 `collection_method_owner_class`。Reflect.construct 对�
 
 - **签名**：`fn validateSetLikeMethods(object: *core.Object) !void`。
 - **作用**：校验 set-like 参数带可调用的 `has` 与 `keys`。
-- **实现**：原生 `set` / `map` 直接放行；否则分别读 `has`、`keys` 属性，任一不满足 `isCallableClosure`（即 class 不是 `c_closure`）就 `error.TypeError`。
+- **实现**：原生 `set` / `map` 直接放行；否则分别读 `has`、`keys` 属性，任一不满足 `call_runtime.isCallableValue` 就 `error.TypeError`。
 - **所有权 / 错误 / 调用**：只被 `setLikeRecord` 调用。
 
 ### `setLikeHas` (`src/exec/collection_ops.zig:1186`)
 
 - **签名**：`fn setLikeHas(rt: *core.JSRuntime, record: SetLikeRecord, key: core.JSValue, host: CallbackHost) !bool`。
 - **作用**：对 set-like 参数问一次 `has`。
-- **实现**：原生 `set` / `map` 走内部 `collectionHas`，结果 `as(.boolean) orelse false`。否则**每次**重新读 `has` 属性并再校验一遍 `isCallableClosure`（不是就 `error.TypeError`），然后 `host.callWithThis(has_value, object.value(), &.{key})`，返回值同样 `as(.boolean) orelse false`。
+- **实现**：原生 `set` / `map` 走内部 `collectionHas`，结果 `as(.boolean) orelse false`。否则**每次**重新读 `has` 属性并再校验一遍 `call_runtime.isCallableValue`（不是就 `error.TypeError`），然后 `host.callWithThis(has_value, object.value(), &.{key})`，返回值同样 `as(.boolean) orelse false`。
 - **所有权 / 错误 / 调用**：回调经 `host` 发出；不分配。
 
 ### `setLikeKeys` (`src/exec/collection_ops.zig:1200`)
 
 - **签名**：`fn setLikeKeys(rt: *core.JSRuntime, record: SetLikeRecord, host: CallbackHost) ![]core.JSValue`。
 - **作用**：把 set-like 参数的键物化成一段切片。
-- **实现**：原生 `set` / `map` 直接遍历 entry 数组，跳过 `!entry.active`，用 `appendValue` 逐个收集 key（errdefer `freeValueList`）。否则读 `keys` 属性并校验是 closure，`host.callWithThis(keys_value, object.value(), &.{})` 调用它；结果必须是对象，且**必须是数组**——按下标 `getProperty` 逐个收集；不是数组就 `error.TypeError`。裸路径不实现通用 iterator 协议，那是 VM 路径 `setLikeKeysIterator` 的职责。
+- **实现**：原生 `set` / `map` 直接遍历 entry 数组，跳过 `!entry.active`，用 `appendValue` 逐个收集 key（errdefer `freeValueList`）。否则读 `keys` 属性并校验 `call_runtime.isCallableValue`，`host.callWithThis(keys_value, object.value(), &.{})` 调用它；结果必须是对象，且**必须是数组**——按下标 `getProperty` 逐个收集；不是数组就 `error.TypeError`。裸路径不实现通用 iterator 协议，那是 VM 路径 `setLikeKeysIterator` 的职责。
 - **所有权 / 错误 / 调用**：返回切片归调用方，用 `freeValueList` 释放。
 
 ### `appendValue` (`src/exec/collection_ops.zig:1230`)
@@ -438,19 +438,9 @@ Map/Set 热路径校验 `collection_method_owner_class`。Reflect.construct 对�
 - **实现**：读 `index.*` 处的码元并把下标 +1（String 恒为扁平，无需先物化）；若它是高代理且后面还有码元、且下一个是低代理，就再 +1 并用两个码元 `String.createUtf16` 造双码元字符串；否则用单个码元造字符串。孤立代理原样保留。
 - **所有权 / 错误 / 调用**：返回的新字符串归调用方（立即交给 `addGroupedItem`）。
 
-### `isCallableClosure` (`src/exec/collection_ops.zig:1383`)
+### `isCallableClosure` / `isCallableObject`（已删）
 
-- **签名**：`fn isCallableClosure(value: core.JSValue) bool`。
-- **作用**：判断值是不是 `c_closure` 类的可调用对象（裸路径校验 set-like 的 `has`/`keys` 用）。
-- **实现**：非对象、拿不到 `refHeader` 都返回 false；否则要求 `object.class_id == core.class.ids.c_closure`——比 `isCallableObject` 更窄，不接受 `c_function`。
-- **所有权 / 错误 / 调用**：纯谓词。
-
-### `isCallableObject` (`src/exec/collection_ops.zig:1390`)
-
-- **签名**：`fn isCallableObject(value: core.JSValue) bool`。
-- **作用**：判断值是不是本文件裸路径认可的可调用对象。
-- **实现**：非对象、拿不到 `refHeader` 都返回 false；class 是 `c_closure` 或 `c_function` 时为 true。注意它不认 `bound_function` / `bytecode_function` 这类 class，VM 路径改用 `call_runtime.isCallableValue`。
-- **所有权 / 错误 / 调用**：纯谓词；被 `groupByWithCallbackHost`、`collectionForEach`、`mapGetOrInsertComputed` 使用。
+**现行路径：无。** PR3 把 groupBy / forEach / getOrInsertComputed / set-like `has`/`keys` 的校验换成 `call_runtime.isCallableValue`。不再按 `c_closure` / `c_function` 白名单。JS `[[Call]]` 走 `callCallbackWithThis` → `callValueOrBytecodeRoot`。
 
 ### `collectionClassId` (`src/exec/collection_ops.zig:1422`)
 
@@ -713,21 +703,21 @@ Map/Set 热路径校验 `collection_method_owner_class`。Reflect.construct 对�
 
 ## `src/exec/collection_ops.zig` — 集合回调的 realm 适配
 
-`host()` 填 `CallbackHost.call = callWithThis`。成功堆结果归调用方。普通引擎失败在这里变成 pending JS 异常；只有七个硬/控制错误穿过 core 回调缝。
+`callbackHost()` 填 `CallbackHost.call = callCallbackWithThis`。JS [[Call]] 需要 Realm global；成功堆结果归调用方。普通引擎失败在这里变成 pending JS 异常；只有七个硬/控制错误穿过 core 回调缝。
 
 
-### `host` (`src/exec/collection_ops.zig:18`)
+### `callbackHost` (`src/exec/collection_ops.zig:2297`)
 
-- **签名**：`pub fn host(ctx: *core.JSContext, globals: []globals_mod.Slot) CallbackHost`。
+- **签名**：`pub fn callbackHost(ctx: *core.JSContext, globals: []globals_mod.Slot) CallbackHost`。
 - **作用**：把 exec 侧的调用能力打包成 core 集合算法要用的 `CallbackHost`。
-- **实现**：返回结构字面量 `.{ .ctx = ctx, .globals = globals, .call = callWithThis }`，没有别的逻辑。
-- **所有权 / 错误 / 调用**：`ctx` 与 `globals` 都是借用；调用方是 `collection_ops.collectionCall` 的无 global 分支（`src/exec/collection_ops.zig:225`）、`collectionGroupByRecord`（:259）与 `groupBy`（:493），每次进入集合算法时现场构造一个。
+- **实现**：返回结构字面量 `.{ .ctx = ctx, .globals = globals, .call = callCallbackWithThis }`，没有别的逻辑。
+- **所有权 / 错误 / 调用**：`ctx` 与 `globals` 都是借用；集合方法 / groupBy 进入算法时现场构造一个。
 
-### `callWithThis` (`src/exec/collection_ops.zig:26`)
+### `callCallbackWithThis` (`src/exec/collection_ops.zig:2305`)
 
-- **签名**：`fn callWithThis( ctx: *core.JSContext, callback: core.JSValue, this_value: core.JSValue, args: []const core.JSValue, globals: []globals_mod.Slot, ) CallbackError!core.JSValue`。
-- **作用**：`CallbackHost.call` 的实体：替集合算法回调一个 JS 可调用值。
-- **实现**：转发 `closure_mod.callWithThis(ctx.runtime, callback, this_value, args, globals)`；`catch` 到的错误交给 `narrowCallbackError` 收窄。
+- **签名**：`fn callCallbackWithThis( ctx: *core.JSContext, callback: core.JSValue, this_value: core.JSValue, args: []const core.JSValue, globals: []globals_mod.Slot, ) CallbackError!core.JSValue`。
+- **作用**：`CallbackHost.call` 的实体：替集合算法回调一个 JS 可调用值。正式 IsCallable / Call 入口，不是 `c_closure`。
+- **实现**：`ctx.global` 或 globals 槽里的 global；有 Realm 走 `call_runtime.callValueOrBytecodeRoot`；无 global → `InvalidBuiltinRegistry`。错误交给 `narrowCallbackError` 收窄。
 - **所有权 / 错误 / 调用**：callback / receiver / 实参都是借用，返回的堆结果归调用方；错误集被收窄成 `CallbackError`。
 
 ### `narrowCallbackError` (`src/exec/collection_ops.zig:37`)
@@ -740,66 +730,10 @@ Map/Set 热路径校验 `collection_method_owner_class`。Reflect.construct 对�
 
 ## `src/exec/reflect_ops.zig` — Reflect.* 与 Proxy.revocable 实现
 
-`reflectConstruct` 对带 construct 记录的内建（Date/RegExp/String、Array、集合）走 `callConstructRecord`，Number/WeakRef/FinalizationRegistry/TypedArray 各有专门分支，全不命中则造普通对象。`proxyRevocable` 造 `{proxy, revoke}`；revoke 闭包是一个 data function，靠写死的 `.reflect` `proxy_revoke` native id 回到 `revokeProxy`。（本文件原先还有 `reflectHasProperty` / `proxyReflectHasProperty` / `typedArrayReflectHas` 一组，三者只互相调用、没有任何外部入口——`Reflect.has` 真正走 `reflectHasCall` → `object_ops.hasValueProperty`——已作为不可达代码删除。）
+`Reflect.construct` 的唯一入口是 `reflectConstructCall`：校验 target / new.target 可构造，展开 argumentsList，再交给 `call_runtime.constructValueOrBytecodeWithNewTarget`。旧 `reflectConstruct` 分类器及 `ReflectConstructArguments` / `isConstructorValue` 已删。`proxyRevocable` 造 `{proxy, revoke}`；revoke 闭包是一个 data function，靠写死的 `.reflect` `proxy_revoke` native id 回到 `revokeProxy`。（本文件原先还有 `reflectHasProperty` / `proxyReflectHasProperty` / `typedArrayReflectHas` 一组，三者只互相调用、没有任何外部入口——`Reflect.has` 真正走 `reflectHasCall` → `object_ops.hasValueProperty`——已作为不可达代码删除。）
 
 
-### `reflectConstruct` (`src/exec/reflect_ops.zig:48`)
-
-- **签名**：`pub fn reflectConstruct(ctx: *core.JSContext, args: []const core.JSValue, globals: []globals_mod.Slot) !core.JSValue`。
-- **作用**：无 VM global 时的 `Reflect.construct` 回退实现：校验 target / new.target 可构造，解析实例原型，再按内建种类分派到对应构造路径。
-- **实现**：实参少于 2 个或 `isConstructorValue(args[0])` 为假 → `error.TypeError`；`thisObject(args[0])` 取 target，`nativeFunctionName` 取名字（失败按 null，成功则 defer free）；`new_target` 取 `args[2]`，缺省用 `args[0]`，同样要过 `isConstructorValue`。第一级分派看 native builtin id：`core.function.decodeNativeBuiltinId(target.nativeFunctionId())` 命中且 `reflectConstructTargetName` 给出类名（Date / RegExp / String）时，用 `ReflectConstructArguments` 展开 `args[1]`、`reflectConstructPrototype` 解析原型，再走 `builtin_dispatch.callConstructRecord`，返回非 null 即为结果。第二级是名字级联：`"Array"` 且 `target.arrayBuiltinMarker() == .constructor` → 走模块顶部固定的 `array_construct_ref` 记录；`"Iterator"` → new_target 与 `args[0]` 同值时 TypeError，否则只造一个普通 object 实例；`"Number"` → 参数是 Symbol 抛 TypeError，是 BigInt 走 `value_ops.bigIntToNumber`（对照 qjs `js_number_constructor`，quickjs.c:44822-44841：ToNumeric 之后 bigint 转 float64 而不抛），其余走 `value_ops.toIntegerOrInfinity`，无参数则 `int32(0)`，最后 `primitiveWrapper` 包成 Number 对象；`"FinalizationRegistry"` → 第一个参数必须存在且可调用，`createFinalizationRegistry` 后写 cleanup callback 槽；`"WeakRef"` → `core.symbol.canBeHeldWeakly` 校验后 `construct_mod.weakRefWithPrototype`；集合构造器名（`builtin_method_id_lookup.collection.constructorId`）→ 以 `.collection` domain 的 construct 记录、空参数列表调 `callConstructRecord`；`construct_mod.typedArrayElement(name)` 命中 → `construct_mod.constructTypedArrayValue`。全不命中时按 `target_name orelse "Object"` 解析原型并造普通 object 实例。
-- **所有权 / 错误 / 调用**：`target_name` 由 `rt.memory.allocator` 分配、defer 释放；`ReflectConstructArguments` 与 `OwnedPrototype` 各自 defer deinit；新建实例上挂 `errdefer core.Object.destroyFromHeader`。这是 null-global 回退入口（源码注释明说原始参数不做 VM 上下文强制转换），有 VM global 的路径走 `reflectConstructCall`；src 内直接调用方只有 `src/tests/exec.zig`。
-
-### `reflectConstructTargetName` (`src/exec/reflect_ops.zig:164`)
-
-- **签名**：`fn reflectConstructTargetName(native_ref: core.function.NativeBuiltinRef) ?[]const u8`。
-- **作用**：把已解码的 native-builtin ref 映射成 `reflectConstructPrototype` 要用的内建实例类名。
-- **实现**：按 `native_ref.domain` switch：`.date` 且 id 是 `date.ConstructorMethod.construct` → `"Date"`；`.regexp` 且 id 是 `regexp.ConstructorMethod.construct` → `"RegExp"`；`.string` 且 id 是 `string.ConstructorMethod.call`（不是 construct）→ `"String"`；其余一律 null，让调用方落到名字级联与普通实例回退。
-- **所有权 / 错误 / 调用**：返回的是静态字符串字面量，不需要释放；唯一调用方是 `reflectConstruct`。
-
-### `ReflectConstructArguments.init` (`src/exec/reflect_ops.zig:179`)
-
-- **签名**：`fn init(self: *ReflectConstructArguments, rt: *core.JSRuntime, value: core.JSValue) !void`。
-- **作用**：把 `Reflect.construct` 的 argumentsList 数组展开成参数切片，并把它钉成 GC 根。
-- **实现**：`reflectConstructArgumentList(rt, value)` 分配并填充 `self.values`，记下 `self.rt`，再 `self.root.init(rt, &self.values)` 把这段切片登记进 `ValueSliceRoot`。
-- **所有权 / 错误 / 调用**：切片归本结构所有，必须由 `deinit` 释放；错误（`error.TypeError` / OOM）直接上抛，此时结构仍是零值、`deinit` 是安全的 no-op。
-
-### `ReflectConstructArguments.deinit` (`src/exec/reflect_ops.zig:185`)
-
-- **签名**：`fn deinit(self: *ReflectConstructArguments) void`。
-- **作用**：撤销根登记并释放 `init` 分配的参数切片。
-- **实现**：`self.rt` 为 null（没 init 过）直接返回；否则依次 `self.root.deinit()`、`freeReflectConstructArgumentList(rt, self.values)`，最后 `self.* = .{}` 复位，因此重复 deinit 安全。
-- **所有权 / 错误 / 调用**：不返回错误；`reflectConstruct` 的每个分支都用 `defer construct_args.deinit()` 调它。
-
-### `reflectConstructArgumentList` (`src/exec/reflect_ops.zig:193`)
-
-- **签名**：`fn reflectConstructArgumentList(rt: *core.JSRuntime, value: core.JSValue) ![]core.JSValue`。
-- **作用**：把 argumentsList 参数（必须是数组）读成一段 `JSValue` 切片。
-- **实现**：`expectObjectArg` 取对象，`!object.isArray()` → `error.TypeError`；按 `object.arrayLength()` 一次性 `rt.memory.alloc`（errdefer free）；随后用一个独立的 `rooted_out` 切片 + `ValueSliceRoot` 只钉住**已初始化前缀**，循环 `object.getProperty(core.atom.atomFromUInt32(index))` 逐个写入并把 `rooted_out` 推进到 `out[0..initialized]`，避免取值过程中触发 GC 时扫到未初始化的槽位。
-- **所有权 / 错误 / 调用**：返回切片归调用方，由 `freeReflectConstructArgumentList` 释放；唯一调用方是 `ReflectConstructArguments.init`。
-
-### `freeReflectConstructArgumentList` (`src/exec/reflect_ops.zig:212`)
-
-- **签名**：`fn freeReflectConstructArgumentList(rt: *core.JSRuntime, values: []core.JSValue) void`。
-- **作用**：释放 `reflectConstructArgumentList` 分配的参数切片。
-- **实现**：长度为 0 时什么都不做（空切片不是堆分配），否则 `rt.memory.free(core.JSValue, values)`。
-- **所有权 / 错误 / 调用**：只被 `ReflectConstructArguments.deinit` 调用。
-
-### `isConstructorValue` (`src/exec/reflect_ops.zig:216`)
-
-- **签名**：`fn isConstructorValue(rt: *core.JSRuntime, value: core.JSValue) bool`。
-- **作用**：判断一个值能不能当 `Reflect.construct` 的 target / new.target 用。
-- **实现**：先 `value_ops.isFunctionObject` 过滤，再 `thisObject` 取对象；是 proxy 就对 `proxyTarget()` 递归。然后按 `object.class_id` 分：`c_function` 时，host entry function 看有没有自有 `prototype` 属性；否则先用 `decodeNativeBuiltinId` + `builtin_dispatch.isConstructRecordRef` 探记录表（带 construct 记录的 Date/RegExp/String 直接算构造器，不依赖名字），探不到才退回名字集合 `isBuiltinConstructorName`（取名失败返回 false，取到则 defer free）。`bytecode_function`、`c_closure`、`bound_function` 一律 true，其余 class 为 false。
-- **所有权 / 错误 / 调用**：不返回错误（取名字失败就地吞掉）；名字缓冲在函数内 defer 释放；调用方是 `reflectConstruct` 的两处入参校验。
-
-### `reflectConstructPrototype` (`src/exec/reflect_ops.zig:244`)
-
-- **签名**：`fn reflectConstructPrototype(ctx: *core.JSContext, target_name: []const u8, new_target: core.JSValue) !object_ops.OwnedPrototype`。
-- **作用**：解析新实例的 `[[Prototype]]`：优先取 new.target 的 `prototype`，否则退到 new.target 所在 realm 的内建原型。
-- **实现**：`thisObject(new_target)` 失败 → `error.TypeError`；读 `core.atom.ids.prototype`，是对象就直接包成 `OwnedPrototype{ .value = ... }` 返回。否则 `call_runtime.functionRealmContext(ctx, new_target)` 取 fallback realm：先试 `object_ops.constructorClassPrototypeId(target_name)` 查内建类原型，再试 `object_ops.nativeErrorKindFromConstructorName(target_name)` 查原生 Error 原型——两者查到 id 但 realm 里拿不到对象时返回 `error.InvalidBuiltinRegistry`；都不匹配则返回 `OwnedPrototype.fromObject(null)`（无原型）。
-- **所有权 / 错误 / 调用**：返回的 `OwnedPrototype` 由调用方 `defer prototype.deinit(rt)`；只被 `reflectConstruct` 的各分支调用。
-
-### `proxyRevocable` (`src/exec/reflect_ops.zig:260`)
+### `proxyRevocable` (`src/exec/reflect_ops.zig:31`)
 
 - **签名**：`pub fn proxyRevocable(rt: *core.JSRuntime, global: ?*core.Object, args: []const core.JSValue) !core.JSValue`。
 - **作用**：`Proxy.revocable(target, handler)`：建一个 proxy 与一个 revoke 闭包，装进 `{ proxy, revoke }` 结果对象。
@@ -813,14 +747,7 @@ Map/Set 热路径校验 `collection_method_owner_class`。Reflect.construct 对�
 - **实现**：取 `function_object.functionProxyRevokeTargetSlot(rt)`，`takeOptionalValueSlot` 把 proxy 取出**并清空**槽位——因此第二次调用拿不到值，直接返回 `undefined`（幂等）；拿到后 `thisObject` 取对象，`clearOptionalValueSlot(rt, proxy.proxyHandlerSlot())` 清 handler；无论哪条路径都返回 `undefined`。对照 QuickJS `js_proxy_revoke`。
 - **所有权 / 错误 / 调用**：不新分配；错误只可能来自槽位获取；调用方是 `reflect_proxy_ops.reflectCall` 的 `proxy_revoke` 臂（它负责取 `func_obj`）。
 
-### `isBuiltinConstructorName` (`src/exec/reflect_ops.zig:314`)
-
-- **签名**：`fn isBuiltinConstructorName(name: []const u8) bool`。
-- **作用**：按名字判断一个 native 函数是不是内建构造器。
-- **实现**：一长串 `std.mem.eql` 的或运算：Object / Function / AsyncFunction / GeneratorFunction / AsyncGeneratorFunction / Array / String / Number / Boolean / Symbol / BigInt / Date / RegExp，加上 `core.error_names.isErrorConstructorName(name)`，再加 Iterator / DisposableStack / AsyncDisposableStack / Promise / Map / Set / WeakMap / WeakSet / ArrayBuffer / DataView；全不匹配返回 false。
-- **所有权 / 错误 / 调用**：纯谓词；本文件里只被 `isConstructorValue` 调用。注意 `src/exec/call_runtime.zig:2527` 另有一个同名的 `pub` 版本，两者是各自独立的实现。
-
-### `reflectCallForNativeRecord` (`src/exec/reflect_ops.zig:341`)
+### `reflectCallForNativeRecord` (`src/exec/reflect_ops.zig:85`)
 
 - **签名**：`pub fn reflectCallForNativeRecord( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, id: u32, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !core.JSValue`。
 - **作用**：13 个 `Reflect.*` 静态方法的总分派：按记录 id 转到各自实现。
@@ -848,10 +775,10 @@ Map/Set 热路径校验 `collection_method_owner_class`。Reflect.construct 对�
 - **实现**：无实参 → `error.TypeError`；`object_ops.objectFromValue` 取不到对象 → `error.TypeError`；target 是 proxy 时把 `object_ops.proxyAwarePreventExtensions` 的布尔结果原样返回（trap 说失败就是 `false`）；普通对象直接 `object.preventExtensions()` 并返回 `true`。
 - **所有权 / 错误 / 调用**：不分配；调用方是 `reflectCallForNativeRecord` 的 `prevent_extensions` 臂。
 
-### `reflectConstructCall` (`src/exec/reflect_ops.zig:470`)
+### `reflectConstructCall` (`src/exec/reflect_ops.zig:214`)
 
 - **签名**：`pub fn reflectConstructCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !?core.JSValue`。
-- **作用**：有 VM global 时的 `Reflect.construct`：展开 argumentsList 后交给 VM 的构造分派器。
+- **作用**：唯一 `Reflect.construct` 入口：展开 argumentsList 后交给正式 Construct 分派器。测试入口也是本函数（`tests/exec.zig` `reflect construct roots argument list while resolving prototype`），不是已删的 `reflectConstruct`。
 - **实现**：实参少于 2 个或 `call_runtime.isConstructorLike(args[0])` 为假 → `error.TypeError`；`new_target` 取 `args[2]`（缺省 `args[0]`），同样要过 `isConstructorLike`。`array_ops.argsFromArrayLike` 把 `args[1]` 展开成参数切片，`defer call_runtime.freeArgs` 释放，并用 `ValueSliceRoot` 钉住。随后一个 TypedArray 专用前置：target 是非 proxy 对象时取 `call_mod.nativeFunctionNameForVm`（defer free），名字命中 `construct_mod.typedArrayElement` 就先跑 `array_ops.typedArrayValidateConstructArgsPreAllocate`，让参数强制转换的副作用发生在分配之前。最后 `call_runtime.constructValueOrBytecodeWithNewTarget(..., args[0], construct_args, ..., new_target)`。
 - **所有权 / 错误 / 调用**：参数切片与名字缓冲都在本函数 defer 释放；调用方是 `reflectCallForNativeRecord` 的 `construct` 臂。
 

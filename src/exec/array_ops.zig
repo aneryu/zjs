@@ -173,7 +173,7 @@ pub fn arrayMethodFastCall(
     // Every branch below requires `func` to be a NATIVE callable: the iterator
     // branch and all ~20 cascade members each open with
     // `callableObjectFromValue(func) orelse return null` (c_function /
-    // c_closure / bound_function). The overwhelmingly common method-call callee
+    // bound_function). The overwhelmingly common method-call callee
     // is a user *bytecode* function (e.g. `obj.m()`, `p.step()`), for which
     // `callableObjectFromValue` is null — so the whole cascade degenerates into
     // ~20 sequential no-op calls. Hoist the shared precondition and bail once.
@@ -461,7 +461,7 @@ pub fn typedArrayConstructVm(
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
-) !?core.JSValue {
+) !core.JSValue {
     const kind = function_object.typedArrayKind();
     const element = construct_mod.TypedArrayElement{
         .size = function_object.typedArrayElementSize(),
@@ -486,7 +486,17 @@ pub fn typedArrayConstructVm(
     }
 
     const source_object = objectFromValue(first) orelse return error.TypeError;
-    if (core.object.isTypedArrayObject(source_object)) return null;
+    if (core.object.isTypedArrayObject(source_object)) {
+        var prototype = try typedArrayConstructorPrototypeVm(ctx, output, global, constructor, function_object, caller_function, caller_frame);
+        defer prototype.deinit(ctx.runtime);
+        return try construct_mod.constructTypedArrayTypedArrayInput(
+            ctx.runtime,
+            prototype.object(),
+            array_buffer_prototype,
+            element,
+            source_object,
+        );
+    }
     if (source_object.class_id == core.class.ids.array_buffer or source_object.class_id == core.class.ids.shared_array_buffer) {
         var prototype = try typedArrayConstructorPrototypeVm(ctx, output, global, constructor, function_object, caller_function, caller_frame);
         defer prototype.deinit(ctx.runtime);
@@ -495,7 +505,7 @@ pub fn typedArrayConstructVm(
         }
         return try typedArrayConstructBufferVm(ctx, output, global, prototype.object(), element, args);
     }
-    if (try typedArrayConstructFromIterable(ctx, output, global, constructor, args, caller_function, caller_frame)) |value| {
+    if (try typedArrayConstructFromIterable(ctx, output, global, constructor, args, caller_function, caller_frame, function_object)) |value| {
         return value;
     }
     var prototype = try typedArrayConstructorPrototypeVm(ctx, output, global, constructor, function_object, caller_function, caller_frame);
@@ -725,6 +735,7 @@ pub fn typedArrayConstructFromIterable(
     args: []const core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
+    metadata_object: ?*core.Object,
 ) !?core.JSValue {
     if (args.len < 1 or !args[0].is(.object)) return null;
     const source_object = objectFromValue(args[0]) orelse return null;
@@ -789,7 +800,8 @@ pub fn typedArrayConstructFromIterable(
         try values.defineOwnProperty(ctx.runtime, core.Atom.taggedInt(index), core.Descriptor.data(item, .all));
     }
     values.setArrayLength(index);
-    if (callableObjectFromValue(constructor)) |function_object| {
+    const meta_object = metadata_object orelse callableObjectFromValue(constructor);
+    if (meta_object) |function_object| {
         if (function_object.typedArrayElementSize() != 0 and function_object.typedArrayKind() != .none) {
             const kind = function_object.typedArrayKind();
             const element = construct_mod.TypedArrayElement{
@@ -813,7 +825,7 @@ pub fn typedArrayConstructFromIterable(
             );
         }
     }
-    return try construct_mod.constructValue(ctx, constructor, &.{values_value}, &.{});
+    return error.TypeError;
 }
 
 pub fn arrayBufferAccessor(ctx: *core.JSContext, receiver: core.JSValue, accessor: []const u8) !core.JSValue {
@@ -1234,14 +1246,10 @@ test "typedArraySetCall roots typed array snapshot while reading source" {
     const global = try core.Object.create(rt, core.class.ids.object, null);
     const array_buffer_prototype = try core.Object.create(rt, core.class.ids.object, null);
     try ctx.setClassPrototype(core.class.ids.array_buffer, array_buffer_prototype);
-    const constructor_value = try core.function.nativeFunctionWithPrototypeAndCapacity(ctx, null, "BigInt64Array", 0, 2);
-    const constructor = objectFromValue(constructor_value) orelse return error.InvalidBuiltinRegistry;
-
     const element = construct_mod.typedArrayElement("BigInt64Array") orelse return error.TypeError;
-    const len_args = [_]core.JSValue{core.JSValue.int32(2)};
-    const source_value = try construct_mod.constructTypedArrayValue(rt, constructor, null, element, &len_args);
+    const source_value = try typedArrayConstructLengthVm(rt, array_buffer_prototype, null, element, 2);
     const source = objectFromValue(source_value) orelse return error.TypeError;
-    const target_value = try construct_mod.constructTypedArrayValue(rt, constructor, null, element, &len_args);
+    const target_value = try typedArrayConstructLengthVm(rt, array_buffer_prototype, null, element, 2);
     const target = objectFromValue(target_value) orelse return error.TypeError;
 
     const first_big_object = try core.bigint.BigInt.create(rt, @as(i128, 1) << 70);

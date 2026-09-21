@@ -448,11 +448,11 @@
 - **实现**：无 header null。
 - **所有权 / 错误 / 调用**：全 exec。
 
-### `isFunctionLikeClass` (`src/exec/call_runtime.zig:4425`)
+### `isFunctionLikeClass` (`src/exec/call_runtime.zig:4468`)
 
 - **签名**：`pub fn isFunctionLikeClass(class_id: core.class.ClassId) bool`。
 - **作用**：可调用 class 集。
-- **实现**：c_function/data/async resume/c_closure/bytecode/bound。
+- **实现**：c_function / c_function_data / async resume / bytecode / bound。不含已删的 `c_closure`。
 - **所有权 / 错误 / 调用**：`isCallableValue`。
 
 ### `throwPrivateBrandTypeError` (`src/exec/call_runtime.zig:4567`)

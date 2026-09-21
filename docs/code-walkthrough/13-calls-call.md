@@ -1,6 +1,15 @@
-# 13 — `call.zig`：公共 Call 入口与 host 全局
+# 13 — `call.zig`：host 全局与剩余 Call 所有者
 
-无活动 Machine 时的调用入口、CLI 可见 host 全局、`NativeEntry` 分发、无 Realm 的 `Object.*` 回退。热路径 ABI 是显式 `ctx`/`output`/`global`/caller-function/caller-frame，不经共享 context 再发布。对照 `js_call_c_function` 与 `OP_call_method`（quickjs.c:17562、18220）。
+通用 `callValue*` 分类器已删除。有 Realm 的 `[[Call]]` 入口是 `call_runtime.callValueOrBytecodeRoot*` / `CallSite`；公开 embedder 入口仍是 `Context.callFunction`。本文件留下的不是第二套 dispatcher：
+
+- host 全局：`installHostGlobals`、`callHostFunctionObjectForVm`、`output_host_entry`
+- 唯一 Bound 创建：`functionBindCall` / `createBoundFunction`
+- 名称臂命中后的 record：`callNativeFunctionRecord` / `callHostGlobalNativeFunctionRecord`
+- 无 Realm **数据平面**：`callObjectStatic` / `objectPrototypeMethodCall`（accessor 无 global → `InvalidBuiltinRegistry`，不 `[[Call]]` getter）
+- `evalGlobalScriptSource`：`eval_entry` 脚本入口
+- 主 dispatcher 仍借 `nativeFunctionDispatchNameRef` / `thisObject`，不是第二套算法
+
+热路径 ABI 是显式 `ctx`/`output`/`global`/caller-function/caller-frame，不经共享 context 再发布。对照 `js_call_c_function` 与 `OP_call_method`（quickjs.c:17562、18220）。
 
 ## 类型
 
@@ -9,7 +18,6 @@
 - `output_host_entry`：`print` 与 `console.log/warn/error` 共享的静态 managed `NativeEntry`；writer 来自活动 invocation 的 `vmCallerView`。
 - `VmDispatchName`：borrowed 或 owned 的 dispatch 名；`deinit` 只在 owned 时 free。
 - `string_construct_ref`：String 装箱走 String construct 记录。
-- `PromiseCombinatorCallbackMode` / `PromiseCapability`：遗留 Promise 合成函数（主路径已迁 `promise_ops`）。
 
 ---
 
@@ -62,40 +70,12 @@
 - **实现**：无 global → `InvalidBuiltinRegistry` 哨兵。`hostOutputValues` 用 `vmCallerView(ctx).output`。
 - **所有权 / 错误 / 调用**：NB2 managed。
 
-### `callValue` (`src/exec/call.zig:124`)
-
-- **签名**：`pub fn callValue( ctx: *core.JSContext, output: ?*std.Io.Writer, callee: core.JSValue, args: []const core.JSValue, ) HostError!core.JSValue`。
-- **作用**：this=undefined、无 globals 的调用。
-- **实现**：转 `callValueWithThisAndGlobals`。
-- **所有权 / 错误 / 调用**：测试/算法。
-
-### `callValueWithThis` (`src/exec/call.zig:133`)
-
-- **签名**：`pub fn callValueWithThis( ctx: *core.JSContext, output: ?*std.Io.Writer, this_value: core.JSValue, callee: core.JSValue, args: []const core.JSValue, ) !core.JSValue`。
-- **作用**：指定 this。
-- **实现**：空 globals。
-- **所有权 / 错误 / 调用**：纯转发（`globals` 传空切片），不分配、不建根；`this_value`/`callee`/`args` 全部借用，需由调用方在调用期间保活。error set 推断自 `callValueWithThisAndGlobals`（JS 异常以 `error.JSException` + `ctx` 上的 pending 值返回）。树内只有测试用（`src/tests/exec.zig:5850`、`5857`）；它是留给嵌入者的 pub 形态。
-
-### `callValueWithThisAndGlobals` (`src/exec/call.zig:143`)
-
-- **签名**：`pub fn callValueWithThisAndGlobals( ctx: *core.JSContext, output: ?*std.Io.Writer, globals: []globals_mod.Slot, this_value: core.JSValue, callee: core.JSValue, args: []const core.JSValue, ) !core.JSValue`。
-- **作用**：带测试全局槽。
-- **实现**：`global=null`。
-- **所有权 / 错误 / 调用**：c_closure 回调。
-
-### `callValueWithThisGlobalsAndGlobal` (`src/exec/call.zig:154`)
-
-- **签名**：`pub fn callValueWithThisGlobalsAndGlobal( ctx: *core.JSContext, output: ?*std.Io.Writer, global: ?*core.Object, globals: []globals_mod.Slot, input_this_value: core.JSValue, input_callee: core.JSValue, input_args: []const core.JSValue, ) !core.JSValue`。
-- **作用**：无 Machine 的分类 Call。
-- **实现**：≤8 参栈拷；更多则先 root 源窗口再 `ValueRootBuffer.initCopy`（分配是 GC 点）。root this/callee/args。Proxy apply；`expectCallableObject`；bound；遗留 Promise 合成函数；internal tag；hostFunctionKind；bytecode → `callValueOrBytecodeRoot`；c_closure；否则 `callNativeBuiltin`。
-- **所有权 / 错误 / 调用**：非可调用 TypeError。测试证明 overflow args 在 copy 分配时仍活。
-
-### `hostFunctionRecordFromId` (`src/exec/call.zig:273`)
+### `hostFunctionRecordFromId` (`src/exec/call.zig:160`)
 
 - **签名**：`fn hostFunctionRecordFromId(value: i32) ?HostFunctionRecord`。
 - **作用**：id → 记录。
 - **实现**：越界 null。
-- **所有权 / 错误 / 调用**：读 comptime 建好的 `host_function_records` 表，按值返回 `?HostFunctionRecord`（内含函数指针，不涉及所有权），越界/负值返回 `null`。不分配、不抛。调用方 `call.zig:223`（通用调用分发）与 `329`（VM 免 globals 分发），两处都把 `null` 翻成 `error.TypeError`。
+- **所有权 / 错误 / 调用**：读 comptime 建好的 `host_function_records` 表，按值返回 `?HostFunctionRecord`（内含函数指针，不涉及所有权），越界/负值返回 `null`。不分配、不抛。调用方 `callHostFunctionObjectForVm` 把 `null` 翻成 `error.TypeError`。
 
 ### `callHostFunction` (`src/exec/call.zig:278`)
 
@@ -160,75 +140,40 @@
 - **实现**：预定义 atom 优先。
 - **所有权 / 错误 / 调用**：预定义 atom 命中时直接写属性表（省掉 intern），否则转 `defineConstantPropertyAssumingNew`；数值经 `numberToValue` 变成立即数或堆 double，由属性表持有。error set 为分配错误。调用方是全局安装的 `NaN`/`Infinity` 两处（`call.zig:80`、`81`）。
 
-### `promiseObjectFromValue` (`src/exec/call.zig:381`)
-
-- **签名**：`fn promiseObjectFromValue(value: core.JSValue) ?*core.Object`。
-- **作用**：promise class 或 null。
-- **实现**：class_id 检查。
-- **所有权 / 错误 / 调用**：测试。
-
-### `expectCallableObject` (`src/exec/call.zig:387`)
+### `expectCallableObject` (`src/exec/call.zig:268`)
 
 - **签名**：`pub fn expectCallableObject(value: core.JSValue) ?*core.Object`。
 - **作用**：可调用对象门（含四类 bytecode）。
-- **实现**：c_function / data / async resume / bytecode / c_closure / bound。
-- **所有权 / 错误 / 调用**：`callValueWithThisGlobalsAndGlobal`。
+- **实现**：c_function / data / async resume / bytecode / bound。不含已删的 `c_closure`。
+- **所有权 / 错误 / 调用**：`functionBindCall` 与 callable 测试。
 
-### `promiseResolvingFunctionCall` (`src/exec/call.zig:400`)
-
-- **签名**：`fn promiseResolvingFunctionCall(rt: *core.JSRuntime, function_object: *core.Object, args: []const core.JSValue) !?core.JSValue`。
-- **作用**：遗留 resolve/reject 一次性结算。
-- **实现**：无 target 返回 null（不是这类函数）。已结算 no-op。写 result + rejected 标志。
-- **所有权 / 错误 / 调用**：VM 主路径在 `promise_ops`；此为无 Realm 回退。
-
-### `promiseCapabilityExecutorCall` (`src/exec/call.zig:412`)
-
-- **签名**：`fn promiseCapabilityExecutorCall(rt: *core.JSRuntime, function_object: *core.Object, args: []const core.JSValue) !?core.JSValue`。
-- **作用**：executor 把 resolve/reject 写入 capability slot。
-- **实现**：已填则 TypeError（不可二次执行）。
-- **所有权 / 错误 / 调用**：不分配；`setPromiseCapability` 把 `resolve`/`reject` 两个值存进 capability 槽（对象接手，含写屏障）。返回 `null` 表示「这个函数对象不是 capability executor」，交给调用方继续试别的臂；capability 已被填过则按规范抛 `error.TypeError`（对应 QuickJS 的 already-set 检查）。唯一调用方 `call.zig:210`；`src/exec/call_runtime.zig:880` 走的是 `promise_ops` 里的同名实现，不是这一个。
-
-### `promiseCombinatorElementCall` (`src/exec/call.zig:435`)
-
-- **签名**：`fn promiseCombinatorElementCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: ?*core.Object, globals: []globals_mod.Slot, function_object: *core.Object, args: []const core.JSValue, ) HostError!?core.JSValue`。
-- **作用**：Promise.all / allSettled / any 元素回调。
-- **实现**：mode 0 → null。called 标志。写 values[index]；remaining==0 时 resolve 或 AggregateError reject。
-- **所有权 / 错误 / 调用**：会再入 `callValueWithThisGlobalsAndGlobal`。
-
-### `activeGlobalObject` (`src/exec/call.zig:495`)
+### `activeGlobalObject` (`src/exec/call.zig:280`)
 
 - **签名**：`pub fn activeGlobalObject(_: *core.JSRuntime, global: ?*core.Object, globals: []globals_mod.Slot) !?*core.Object`。
 - **作用**：显式 global 或槽 `globalThis`。
 - **实现**：`getByAtom`。
-- **所有权 / 错误 / 调用**：无 Realm 属性路径。
+- **所有权 / 错误 / 调用**：无 Realm 属性路径与 `callWithRealmGlobal`。
 
-### `createPromiseBuiltinFunction` (`src/exec/call.zig:501`)
-
-- **签名**：`fn createPromiseBuiltinFunction(rt: *core.JSRuntime, global: ?*core.Object, name: []const u8, length: i32) !core.JSValue`。
-- **作用**：带 Function.prototype 的 native data 函数。
-- **实现**：无 global `InvalidBuiltinRegistry`。
-- **所有权 / 错误 / 调用**：capability 的 resolve/reject。
-
-### `createPromiseCapability` (`src/exec/call.zig:507`)
-
-- **签名**：`fn createPromiseCapability( ctx: *core.JSContext, output: ?*std.Io.Writer, global: ?*core.Object, globals: []globals_mod.Slot, constructor_value: core.JSValue, constructor_object: *core.Object, ) !PromiseCapability`。
-- **作用**：NewPromiseCapability。内建 Promise 快路径；否则 `new constructor(executor)`。
-- **实现**：五值 root。名字 "Promise" 时直接 construct + 两个 resolving 函数。否则 slot+executor tag，调 constructor，校验 resolve/reject 可调用。
-- **所有权 / 错误 / 调用**：测试覆盖 GC。主路径 `promise_ops`。
-
-### `installTestStandardRealm` (`src/exec/call.zig:582`)
+### `installTestStandardRealm` (`src/exec/call.zig:286`)
 
 - **签名**：`fn installTestStandardRealm(ctx: *core.JSContext) !*core.Object`。
 - **作用**：单测装标准 Realm。
 - **实现**：`configureRuntime`；建 global_object；失败 rollback intrinsic。
 - **所有权 / 错误 / 调用**：文件内测试。
 
-### `getValuePropertyViaGlobalSlots` (`src/exec/call.zig:624`)
+### `callWithRealmGlobal` (`src/exec/call.zig:302`)
+
+- **签名**：`fn callWithRealmGlobal( ctx: *core.JSContext, output: ?*std.Io.Writer, global: ?*core.Object, globals: []globals_mod.Slot, this_value: core.JSValue, callee: core.JSValue, args: []const core.JSValue, ) HostError!core.JSValue`。
+- **作用**：getter/setter/toString 的 `[[Call]]` 只在有 Realm global 时发生。
+- **实现**：`activeGlobalObject` 得到 global 后走 `callValueOrBytecodeSyncInternalOutlined`。无 global → `error.InvalidBuiltinRegistry`，不 `[[Call]]` JS。
+- **所有权 / 错误 / 调用**：`getValuePropertyViaGlobalSlots`、`objectAssignGet`/`objectAssignSet`、`objectPrototypeMethodCall` 的 toString 臂。
+
+### `getValuePropertyViaGlobalSlots` (`src/exec/call.zig:325`)
 
 - **签名**：`pub fn getValuePropertyViaGlobalSlots( ctx: *core.JSContext, output: ?*std.Io.Writer, global: ?*core.Object, globals: []globals_mod.Slot, receiver: core.JSValue, key: core.Atom, ) !core.JSValue`。
-- **作用**：无 Realm 时的 [[Get]]：沿原型，accessor 则调 getter。
-- **实现**：ToObject；有 active global 用 sync internal call。
-- **所有权 / 错误 / 调用**：bind 读 name/length（经 `getValuePropertyProxyAware`）；`reflect_ops` 取 proxy handler 的 trap 也直接用它。
+- **作用**：无 Realm 时的 [[Get]]：沿原型，data 描述符直读。
+- **实现**：ToObject；data 返回槽值；accessor 走 `callWithRealmGlobal`（无 global 则 `InvalidBuiltinRegistry`，不调 getter）。
+- **所有权 / 错误 / 调用**：bind 读 name/length（经 `getValuePropertyProxyAware`）。需要 JS getter 的调用方必须给 `ctx.global`。
 
 ### `getValuePropertyProxyAware` (`src/exec/call.zig:653`)
 
@@ -244,42 +189,7 @@
 - **实现**：无 global 则 `hasOwnProperty`。
 - **所有权 / 错误 / 调用**：bind 的 length。
 
-### `setArrayIndex` (`src/exec/call.zig:682`)
-
-- **签名**：`fn setArrayIndex(rt: *core.JSRuntime, array: *core.Object, index: u32, value: core.JSValue) !void`。
-- **作用**：定义下标并抬 length。
-- **实现**：`atomFromUInt32`。
-- **所有权 / 错误 / 调用**：combinator values。
-
-### `createPromiseSettlementRecord` (`src/exec/call.zig:690`)
-
-- **签名**：`pub noinline fn createPromiseSettlementRecord(rt: *core.JSRuntime, rejected: bool, payload: core.JSValue) !core.JSValue`。
-- **作用**：allSettled `{status, value|reason}`。
-- **实现**：root payload。与 `promise_ops.promiseSettlementRecord` 同走；保留一份 outlined 拷贝。
-- **所有权 / 错误 / 调用**：`promiseCombinatorElementCall`；`promise_ops.promiseSettlementRecord` 就是本函数的再导出别名。
-
-### `createPromiseAggregateError` (`src/exec/call.zig:728`)
-
-- **签名**：`fn createPromiseAggregateError(rt: *core.JSRuntime, global: ?*core.Object, errors: *core.Object) !core.JSValue`。
-- **作用**：any 失败时的 AggregateError。
-- **实现**：尽量用全局构造器 prototype；自有 name+errors。
-- **所有权 / 错误 / 调用**：新建 error 对象，`errdefer core.Object.destroyFromHeader` 覆盖后续两次属性定义的失败；成功后返回 owned 值。`errors` 数组由调用方持有并通过 `errors` 属性挂进实例。原型从全局的 `AggregateError.prototype` 借来（`constructorPrototype` 是 borrowed 读），拿不到就建无原型对象。error set 为分配/属性读错误。唯一调用方 `Promise.any` 的全拒绝路径（`call.zig:483`）。
-
-### `createPromiseCombinatorState` (`src/exec/call.zig:745`)
-
-- **签名**：`fn createPromiseCombinatorState( rt: *core.JSRuntime, resolve_value: core.JSValue, reject_value: core.JSValue, values: *core.Object, ) !*core.Object`。
-- **作用**：combinator 共享状态（remaining 初值 1）。
-- **实现**：三值 root。
-- **所有权 / 错误 / 调用**：测试注意增量 mark 下直接析构。
-
-### `callNativeBuiltin` (`src/exec/call.zig:802`)
-
-- **签名**：`fn callNativeBuiltin( ctx: *core.JSContext, output: ?*std.Io.Writer, global: ?*core.Object, globals: []globals_mod.Slot, this_value: core.JSValue, function_object: *core.Object, args: []const core.JSValue, ) HostError!core.JSValue`。
-- **作用**：记录表分发；名字链已删。
-- **实现**：`callNativeFunctionRecord` 空则 TypeError。
-- **所有权 / 错误 / 调用**：自身不分配、不建根，只是把 `callNativeFunctionRecord` 的 `null`（未登记的 id）翻成 `error.TypeError`——旧的按字符串名匹配的链路已实测为冷路径并删除。error set 是精确的 `HostError`，被调 builtin 的 JS 异常照常以 pending + `error.JSException` 形式返回。唯一调用方是本文件通用调用分发的兜底臂（`call.zig:234`）。
-
-### `callNativeFunctionRecord` (`src/exec/call.zig:818`)
+### `callNativeFunctionRecord` (`src/exec/call.zig:379`)
 
 - **签名**：`pub fn callNativeFunctionRecord( ctx: *core.JSContext, output: ?*std.Io.Writer, global: ?*core.Object, globals: []globals_mod.Slot, this_value: core.JSValue, function_object: *core.Object, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) HostError!?core.JSValue`。
 - **作用**：`nativeEntry()` 或 decode id → `callInternalRecord`；`.host` 域走 `callHostGlobalNativeFunctionRecord`。
@@ -296,9 +206,9 @@
 ### `functionBindCall` (`src/exec/call.zig:899`)
 
 - **签名**：`pub fn functionBindCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: ?*core.Object, globals: []globals_mod.Slot, this_value: core.JSValue, args: []const core.JSValue, ) HostError!core.JSValue`。
-- **作用**：`Function.prototype.bind`。
-- **实现**：不可调用 TypeError；thisArg 默认 undefined；rest 为 bound args。
-- **所有权 / 错误 / 调用**：function 域记录与 VM bind 快路径都进这里。
+- **作用**：`Function.prototype.bind`：唯一 Bound 创建入口。
+- **实现**：不可调用 TypeError；thisArg 默认 undefined；rest 为 bound args；转 `createBoundFunction`。
+- **所有权 / 错误 / 调用**：function 域记录与 VM bind 快路径都进这里。 Bound `[[Call]]` 在 `call_runtime.callBoundFunction`。
 
 ### `createRealmObject` (`src/exec/call.zig:913`)
 
@@ -310,9 +220,9 @@
 ### `callObjectStatic` (`src/exec/call.zig:953`)
 
 - **签名**：`pub fn callObjectStatic( ctx: *core.JSContext, output: ?*std.Io.Writer, global: ?*core.Object, globals: []globals_mod.Slot, id: u32, args: []const core.JSValue, ) !core.JSValue`。
-- **作用**：无 Realm 的 `Object.assign/create/keys/...`。
-- **实现**：按 `StaticMethod` id。assign 只拷 enumerable；create 可 defineProperties；keys/values/entries 用 `ownEntriesArray`；描述符路径 `materializeMappedArgumentsDescriptorValue`；setPrototypeOf 映 PrototypeCycle/NotExtensible→TypeError。未知 id TypeError。
-- **所有权 / 错误 / 调用**：`object_builtin_ops` 在 `global==null` 时委托。
+- **作用**：无 Realm **数据平面**的 `Object.assign/create/keys/...`。JS Object 方法继续走 `.object` record / `objectCall`。
+- **实现**：按 `StaticMethod` id。assign 只拷 enumerable own data；create 可 defineProperties；keys/values/entries 用 `ownEntriesArray`；描述符路径 `materializeMappedArgumentsDescriptorValue`；setPrototypeOf 映 PrototypeCycle/NotExtensible→TypeError。未知 id TypeError。accessor 无 global 不 `[[Call]]` getter。
+- **所有权 / 错误 / 调用**：`object_ops` 在 `global==null` 时的数据平面残留。
 
 ### `objectStaticToObjectValue` (`src/exec/call.zig:1156`)
 
@@ -326,7 +236,7 @@
 - **签名**：`fn objectAssignGet( ctx: *core.JSContext, output: ?*std.Io.Writer, global: ?*core.Object, globals: []globals_mod.Slot, receiver: core.JSValue, desc: core.Descriptor, ) HostError!core.JSValue`。
 - **作用**：assign 读源：data 或调 getter。
 - **实现**：generic → undefined。
-- **所有权 / 错误 / 调用**：data 描述符直接把槽里的值借回，accessor 则调 getter（`callValueWithThisGlobalsAndGlobal`，可重入 JS 并抛）。自身不分配、不建根，error set 是精确的 `HostError`。唯一调用方 `Object.assign` 的拷贝循环（`call.zig:981`）。
+- **所有权 / 错误 / 调用**：data 描述符直接把槽里的值借回，accessor 则走 `callWithRealmGlobal`（有 Realm 可重入 JS；无 global → `InvalidBuiltinRegistry`）。自身不分配、不建根，error set 是精确的 `HostError`。唯一调用方 `Object.assign` 的拷贝循环。
 
 ### `objectAssignSet` (`src/exec/call.zig:1197`)
 
@@ -352,9 +262,9 @@
 ### `objectPrototypeMethodCall` (`src/exec/call.zig:1271`)
 
 - **签名**：`pub fn objectPrototypeMethodCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: ?*core.Object, globals: []globals_mod.Slot, method: i32, this_value: core.JSValue, args: []const core.JSValue, ) !core.JSValue`。
-- **作用**：无 Realm 的 `Object.prototype.*`（ordinal 1–10）。
-- **实现**：toString / 调 toString / valueOf / hasOwn / isPrototypeOf / propertyIsEnumerable / __define(G|S)etter / __lookup(G|S)etter。
-- **所有权 / 错误 / 调用**：object 域 `global==null`。
+- **作用**：无 Realm **数据平面**的 `Object.prototype.*`（ordinal 1–10）。
+- **实现**：toString / 调 toString / valueOf / hasOwn / isPrototypeOf / propertyIsEnumerable / __define(G|S)etter / __lookup(G|S)etter。`toLocaleString` 要 `[[Call]]` toString，因此走 `callWithRealmGlobal`。
+- **所有权 / 错误 / 调用**：object 域 `global==null` 残留。accessor 无 global → `InvalidBuiltinRegistry`。
 
 ### `objectPrototypeToString` (`src/exec/call.zig:1301`)
 
@@ -447,12 +357,12 @@
 - **实现**：trunc；负零当 0。
 - **所有权 / 错误 / 调用**：纯数值运算，不分配、不抛、无 error set：NaN/−∞/负数一律 0，+∞ 原样保留，其余按 `trunc(length) − 绑定实参数` 且不小于 0。唯一调用方 `createBoundFunction`（`call.zig:1523`）。
 
-### `createBoundFunction` (`src/exec/call.zig:1473`)
+### `createBoundFunction` (`src/exec/call.zig:1026`)
 
 - **签名**：`fn createBoundFunction( ctx: *core.JSContext, output: ?*std.Io.Writer, global: ?*core.Object, globals: []globals_mod.Slot, target: core.JSValue, bound_this: core.JSValue, bound_args: []const core.JSValue, ) !core.JSValue`。
-- **作用**：`[[BoundTarget]]`/`[[BoundThis]]`/`[[BoundArgs]]` + name/length。
+- **作用**：唯一 Bound 创建：`[[BoundTarget]]`/`[[BoundThis]]`/`[[BoundArgs]]` + name/length。`function_ops` bind 记录走这里。
 - **实现**：proxy 感知读 length/name。原型拷 target。bound args 最后一步进 payload cell（无精确根窗口，靠 conservative + 不手 free）。Realm 在最终目标选择。
-- **所有权 / 错误 / 调用**：`functionBindCall`。测试 GC。
+- **所有权 / 错误 / 调用**：`functionBindCall`。测试 GC。 Bound `[[Call]]` 走 `call_runtime.callBoundFunction`，不是本文件旧转发。
 
 ### `Trigger.trigger` (`src/exec/call.zig:1619`)
 
@@ -468,14 +378,7 @@
 - **实现**：精确扫描；任一 atom 丢失设 `lost_arg`。
 - **所有权 / 错误 / 调用**：同族探针的多实参版：`atom_ids` 是测试栈上的借用切片，回调只读不改；同样摘 hook + `defer` 还原、`catch {}` 吞错误，用 `collections`/`lost_arg` 记录多次收集后是否丢过实参。由 GC 触发钩子经函数指针调用。
 
-### `callBoundFunction` (`src/exec/call.zig:1766`)
-
-- **签名**：`fn callBoundFunction( ctx: *core.JSContext, output: ?*std.Io.Writer, global: ?*core.Object, globals: []globals_mod.Slot, object: *core.Object, args: []const core.JSValue, ) HostError!core.JSValue`。
-- **作用**：合并 bound args 再调 target，this 为 boundThis。
-- **实现**：`boundFunctionArgs` + `freeArgs`。
-- **所有权 / 错误 / 调用**：无 Machine 路径。
-
-### `objectToString` (`src/exec/call.zig:1781`)
+### `objectToString` (`src/exec/call.zig:1328`)
 
 - **签名**：`fn objectToString(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue`。
 - **作用**：`[object Tag]`，Tag 来自 `Symbol.toStringTag` 或默认。
@@ -622,14 +525,7 @@
 - **实现**：`isObject` + `fromHeader`。
 - **所有权 / 错误 / 调用**：全文件。
 
-### `constructorPrototype` (`src/exec/call.zig:2120`)
-
-- **签名**：`pub fn constructorPrototype(rt: *core.JSRuntime, object: *core.Object) ?*core.Object`。
-- **作用**：自有 `.prototype` 数据对象。
-- **实现**：`getOwnDataObjectBorrowed`。
-- **所有权 / 错误 / 调用**：`getOwnDataObjectBorrowed` 是借用读：不触发 getter、不分配、不抛，返回的原型对象由构造器的属性槽持有；`rt` 参数被 `_ =` 丢弃。调用方 `call.zig:537`、`564`、`735`（Promise/普通实例/AggregateError 三处取原型）。
-
-### `hostOutputValues` (`src/exec/call.zig:2125`)
+### `hostOutputValues` (`src/exec/call.zig:1664`)
 
 - **签名**：`fn hostOutputValues( ctx: *core.JSContext, global: *core.Object, output: ?*std.Io.Writer, values: []const core.JSValue, ) HostError!core.JSValue`。
 - **作用**：print：空格分隔，末尾换行。string 原样，其它 `printHostArgument`（对齐 `js_print` quickjs-libc.c:4063）。
@@ -766,13 +662,13 @@
 
 - **签名**：`fn isFunctionClass(class_id: core.ClassId) bool`。
 - **作用**：toString/callable 用的函数 class 集。
-- **实现**：含四类 bytecode 与 c_closure。
+- **实现**：含四类 bytecode、`c_function` / `c_function_data` / bound / async resume。不含已删的 `c_closure`。
 - **所有权 / 错误 / 调用**：测试四类。
 
-### `evalGlobalScriptSource` (`src/exec/call.zig:2435`)
+### `evalGlobalScriptSource` (`src/exec/call.zig:1973`)
 
 - **签名**：`pub fn evalGlobalScriptSource( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, source: []const u8, filename: []const u8, ) !core.JSValue`。
-- **作用**：`$262.evalScript` / 嵌入 `evalScript`：在指定 global 上跑 script。
+- **作用**：`$262.evalScript` / 嵌入 `evalScript`：`eval_entry` 脚本入口，在指定 global 上跑 script。
 - **实现**：最外层 `updateNativeStackTop`。若 ctx.global 不是该 global，临时把 `ctx.lexicals` 换成 `global.globalLexicals`。compile script `return_completion=true`。语法错误 compile-error 表面。根函数 `.root_global`，`this`=global，`direct_eval_vars_reach_global=true`。恢复 lexicals 时 root 完成值。
 - **所有权 / 错误 / 调用**：`eval_entry.evalScriptSource`。错误 `normalizeEvalRuntimeError`。
 

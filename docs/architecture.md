@@ -196,7 +196,9 @@ File and function naming conventions in `exec/`:
 | Enter here | Owns |
 | --- | --- |
 | `zjs_vm.zig` | interpreter loop |
-| `call.zig` / `call_runtime.zig` / `construct.zig` / `call_site.zig` | calls and construct |
+| `call_runtime.zig` / `call_site.zig` | unique `[[Call]]` / `[[Construct]]` terminals and CallSite |
+| `call.zig` | host globals, unique Bound create, Object data-plane leftovers, `evalGlobalScriptSource` |
+| `construct.zig` | unique construct bodies (`objectConstructorValue`, `weakRefWithPrototype`, `constructDOMExceptionObject`, `constructTypedArrayTypedArrayInput`) |
 | `eval_entry.zig` | eval |
 | `module.zig` | modules |
 | `promise_ops.zig` | Promise abstract operations |

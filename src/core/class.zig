@@ -78,6 +78,7 @@ pub const ids = struct {
     pub const bytecode_function: ClassId = 13;
     pub const bound_function: ClassId = 14;
     pub const c_function_data: ClassId = 15;
+    /// Retired synthetic-callable class; id 16 is a reserved hole.
     pub const c_closure: ClassId = 16;
     pub const generator_function: ClassId = 17;
     pub const for_in_iterator: ClassId = 18;

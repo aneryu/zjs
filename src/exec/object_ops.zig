@@ -2383,7 +2383,6 @@ pub fn callableObjectFromValue(value: core.JSValue) ?*core.Object {
     if (object.class_id != core.class.ids.c_function and
         object.class_id != core.class.ids.c_function_data and
         !core.class.isAsyncFunctionResumeClass(object.class_id) and
-        object.class_id != core.class.ids.c_closure and
         object.class_id != core.class.ids.bound_function) return null;
     return object;
 }
@@ -4764,6 +4763,44 @@ pub fn callProxyApply(
     return callValueOrBytecodeSyncInternal(ctx, output, global, handler_value, trap, &.{ target_value, this_value, arg_array }, caller_function, caller_frame);
 }
 
+pub fn constructProxyInstance(
+    ctx: *core.JSContext,
+    target: core.JSValue,
+    handler: core.JSValue,
+) !core.JSValue {
+    const rt = ctx.runtime;
+    if (objectFromValue(target) == null or objectFromValue(handler) == null) return error.TypeError;
+
+    var rooted_target = target;
+    var rooted_handler = handler;
+    var root_frame = core.runtime.rootValues(.{ &rooted_target, &rooted_handler });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
+
+    const proxy = try core.Object.create(rt, core.class.ids.proxy, null);
+    errdefer core.Object.destroyFromHeader(rt, proxy.gcHeader());
+    try proxy.ensureProxyPayload(rt);
+    try proxy.setOptionalValueSlot(rt, proxy.proxyTargetSlot(), rooted_target);
+    try proxy.setOptionalValueSlot(rt, proxy.proxyHandlerSlot(), rooted_handler);
+    return proxy.value();
+}
+
+test "constructProxyInstance allocates a proxy whose [[Prototype]] is null" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt, .{});
+    defer ctx.destroy();
+
+    const target = try core.Object.create(rt, core.class.ids.object, null);
+    const handler = try core.Object.create(rt, core.class.ids.object, null);
+    const proxy_value = try constructProxyInstance(ctx, target.value(), handler.value());
+    const proxy = objectFromValue(proxy_value) orelse return error.TypeError;
+    try std.testing.expectEqual(core.class.ids.proxy, proxy.class_id);
+    try std.testing.expect(proxy.getPrototype() == null);
+    try std.testing.expect(proxy.proxyTarget() != null);
+    try std.testing.expect(proxy.proxyHandler() != null);
+}
+
 pub fn constructProxy(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -5271,12 +5308,10 @@ fn objectConstructorCall(
     return construct_mod.objectConstructorValue(host_call.ctx, host_call.args, constructor);
 }
 
-/// Shared record handler for the `.object` domain. With a realm global the
-/// statics and prototype methods dispatch through `objectCallForNativeRecord`
-/// below (the relocated `Object.*` implementations, now co-located with the
-/// declaration table); the bare-runtime (no global) path takes the
-/// primitive-only `call.objectPrototypeMethodCall`/`call.callObjectStatic`
-/// fallbacks that live with the shared property helpers in call.zig.
+/// Shared record handler for the `.object` domain. JS methods stay on the
+/// `.object` record and `objectCallForNativeRecord` (kept private). Callers
+/// that need JS behavior must pass a Realm global. The no-global arm is
+/// data-plane only: own data descriptors, no getter [[Call]].
 fn objectCall(
     native_ctx: *core.JSContext,
     native_this: core.JSValue,
@@ -5298,8 +5333,8 @@ fn objectCall(
         return try objectCallForNativeRecord(ctx, output, realm.global, this_value, id, args, caller_function, caller_frame);
     }
 
-    // Explicit synthetic/prebootstrap reuse has no callable carrier. Preserve
-    // the algorithm-local optional global and legacy slots only in this arm.
+    // Synthetic/prebootstrap reuse has no callable carrier. Keep the optional
+    // global only in this arm; without one, stay on the data-plane helpers.
     const global = host_call.global;
     const globals = host_call.globals;
     if (global) |global_object| return try objectCallForNativeRecord(ctx, output, global_object, this_value, id, args, caller_function, caller_frame);

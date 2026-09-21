@@ -263,12 +263,14 @@ pub fn nativeFunctionForGlobal(rt: *JSRuntime, global: *Object, name: []const u8
 /// descriptor install), so engine-core callers may use it without reaching
 /// into builtins. The C_FUNCTION_DATA callback retains caller-realm execution
 /// semantics, while its construction-time object surface uses the supplied
-/// realm's final Function.prototype.
-pub fn defineNativeMethod(realm: *RealmContext, target: *Object, name: []const u8, length: i32) !void {
+/// realm's final Function.prototype. Returns the installed method so the
+/// caller can write `nativeFunctionIdSlot` without a second Get.
+pub fn defineNativeMethod(realm: *RealmContext, target: *Object, name: []const u8, length: i32) !JSValue {
     const rt = realm.runtime;
     const function_proto = realm.cached_function_proto orelse return error.InvalidBuiltinRegistry;
     const method = try nativeDataFunctionWithPrototype(rt, function_proto, name, length);
     try defineMethodData(rt, target, name, method, true, false, true);
+    return method;
 }
 
 fn defineMethodData(

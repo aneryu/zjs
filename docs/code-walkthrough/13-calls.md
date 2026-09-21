@@ -10,11 +10,11 @@
 | [13-calls-runtime.md](13-calls-runtime.md) | `call_runtime.zig`：`OP_call`、分发、inline、apply/call、bound |
 | [13-calls-runtime-construct.md](13-calls-runtime-construct.md) | `call_runtime.zig`：`[[Construct]]`、same-Machine `new`、Realm |
 | [13-calls-runtime-env.md](13-calls-runtime-env.md) | `call_runtime.zig`：全局词法、间接 eval、generator、instanceof |
-| [13-calls-call.md](13-calls-call.md) | `call.zig`：公共 Call 入口、host 全局、Object.* 无 Realm 回退 |
-| [13-calls-construct.md](13-calls-construct.md) | `construct.zig`：无 VM 的构造路由（Error / TypedArray / 集合） |
+| [13-calls-call.md](13-calls-call.md) | `call.zig`：host 全局、唯一 Bound 创建、Object.* 无 Realm 数据平面、`evalGlobalScriptSource` |
+| [13-calls-construct.md](13-calls-construct.md) | `construct.zig`：剩余构造体（`objectConstructorValue`、WeakRef/DOMException、TypedArray 复制） |
 | [13-calls-site.md](13-calls-site.md) | `call_site.zig` + `host_invocation.zig`：resolved-once CallSite |
 | [13-calls-eval.md](13-calls-eval.md) | `eval_entry.zig` + `eval_ops.zig`：脚本入口与直接 eval |
-| [13-calls-closure.md](13-calls-closure.md) | `closure.zig`：测试用 `c_closure`（不是字节码闭包） |
+| [13-calls-closure.md](13-calls-closure.md) | 历史：`c_closure` 执行器已删（ClassId 16 空位保留） |
 | [13-calls-native.md](13-calls-native.md) | `native_legacy.zig`：`InternalEntry` → `NativeEntry` thunk |
 
 ## 1. 一次 JS 调用怎么走
@@ -43,7 +43,10 @@ opcode OP_call / OP_tail_call / OP_call_method
               │     ├ InternalCallableTag  → Promise/async 合成函数
               │     ├ hostFunctionKind     → print/console
               │     └ 名字慢路             → callNativeCallableByName
-              └─ 其余                     → call.zig callValueWithThisGlobalsAndGlobal
+              │           ├ Object [[Call]] → objectConstructorValue
+              │           ├ 无/空 dispatch 名 → undefined
+              │           └ 有名链尽         → TypeError
+              └─ 其余                     → TypeError "not a function"
 ```
 
 宿主 → JS（`JSContext.callFunction`、内建回调）不走 opcode，走 `CallSite`：
@@ -65,13 +68,18 @@ CallSite.call / call0..call4
 ```
 constructValueOrBytecodeWithNewTarget
         │  pollInterrupt（调用者 Realm，一次）
-        ├─ Proxy                         → constructProxy
+        ├─ Proxy trap                    → constructProxy
         ├─ bound                         → 合并 boundArgs，递归
         ├─ 普通字节码函数对象            → constructOrdinaryBytecodeFunctionObject
         │     派生类：this = uninitialized，无实例
         │     基类：js_create_from_ctor 实例再跑体
         │     same-Machine 快路径：resolveSameMachineConstructor
-        └─ 内建 Date/String/RegExp/Array → NativeEntry construct 记录
+        ├─ TypedArray 元数据             → typedArrayConstructVm
+        │     TypedArray 源复制：constructTypedArrayTypedArrayInput
+        ├─ Date/String/RegExp/Array/…    → NativeEntry construct 记录或域 *ops
+        ├─ Number/Boolean/WeakRef/FR/Iterator/Proxy
+        │                                → 唯一 helper（不造空对象兜底）
+        └─ 非法                          → TypeError "not a constructor"
 ```
 
 ## 2. 必须记住的不变量
@@ -82,7 +90,7 @@ constructValueOrBytecodeWithNewTarget
 - **尾调用**：严格模式普通调用的 `return f(...)` 降成 `OP_tail_call`，复用调用者帧（相对 pinned QuickJS 的文档化分叉）。方法位置尾调用仍不在范围内。`return eval(...)` 若 callee 不是 `%eval%`，`execDirectEval` 产出 `tail_inline`。
 - **CallSite resolved-once**：`init` 付 class 检查 / `resolveInlineFunction` / Realm / pin；`call` 只做 poll + 压 Entry + 跑到边界。
 - **直接 vs 间接 eval**：直接 eval 用调用者作用域种子（`createDirectEvalClosureSeed`）和调用者 `this`/`new.target`；间接 eval 编译为 `eval_indirect`，`this` 是全局对象，sloppy `var` 进全局变量环境。
-- **字节码闭包捕获**在 `object_ops.createRootBytecodeFunctionObject` + 帧 `captureLocal`/`captureArg`；`closure.zig` 是测试夹具 `c_closure`，不是语言闭包。
+- **字节码闭包捕获**在 `object_ops.createRootBytecodeFunctionObject` + 帧 `captureLocal`/`captureArg`。`c_closure` 执行器已删（ClassId 16 空位保留）。
 
 ## 3. 覆盖核对
 

@@ -242,7 +242,8 @@ const NativeRecordStackProbe = struct {
     fn call(ctx: *core.JSContext, _: core.JSValue, _: []const core.JSValue) core.errors.HostError!core.JSValue {
         calls += 1;
         if (!recurse or calls >= 256) return core.JSValue.int32(7);
-        return engine.exec.call.callValue(ctx, null, callable, &.{});
+        const global = ctx.global orelse return error.InvalidBuiltinRegistry;
+        return engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, core.JSValue.undefinedValue(), callable, &.{}, null, null);
     }
 };
 
@@ -4843,13 +4844,59 @@ test "super call paths reject null live parents and do not authorize ordinary cl
     );
 }
 
-test "bound function call skips zero-length combined args allocation" {
+test "retired c_closure class is not a live callable" {
     const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
-    const target = try engine.exec.closure.create(rt, .returns_undefined);
+    const leftover = (try core.Object.create(rt, core.class.ids.c_closure, null)).value();
+    try std.testing.expect(engine.exec.call.expectCallableObject(leftover) == null);
+    try std.testing.expect(!engine.exec.call.isCallableObjectValue(leftover));
+    try std.testing.expect(!engine.exec.call_runtime.isFunctionLikeClass(core.class.ids.c_closure));
+    try std.testing.expect(!engine.exec.call_runtime.isCallableValue(leftover));
+    try std.testing.expect(!(try engine.exec.call_runtime.isConstructorLike(ctx, leftover)));
+    try std.testing.expect(!engine.exec.value_ops.isFunctionObject(leftover));
+    engine.exec.standard_globals.configureRuntime(rt);
+    const global = try engine.exec.zjs_vm.contextGlobal(ctx);
+    try std.testing.expectError(
+        error.TypeError,
+        engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, core.JSValue.undefinedValue(), leftover, &.{}, null, null),
+    );
+}
+
+test "four-class function-like predicates exclude retired c_closure" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+
+    const class_ids = [_]core.ClassId{
+        core.class.ids.bytecode_function,
+        core.class.ids.generator_function,
+        core.class.ids.async_function,
+        core.class.ids.async_generator_function,
+    };
+    for (class_ids) |class_id| {
+        const function_object = try core.Object.create(rt, class_id, null);
+        const function_value = function_object.value();
+        try std.testing.expect(engine.exec.call.expectCallableObject(function_value) != null);
+        try std.testing.expect(engine.exec.call.isCallableObjectValue(function_value));
+        try std.testing.expect(engine.exec.call_runtime.isFunctionLikeClass(class_id));
+        try std.testing.expect(engine.exec.value_ops.isFunctionObject(function_value));
+    }
+
+    try std.testing.expect(!engine.exec.call_runtime.isFunctionLikeClass(core.class.ids.c_closure));
+    try std.testing.expect(!engine.exec.call_runtime.isFunctionLikeClass(core.class.ids.object));
+}
+
+test "bound function call skips zero-length combined args allocation" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt, .{});
+    defer ctx.destroy();
+    engine.exec.standard_globals.configureRuntime(rt);
+    const global = try engine.exec.zjs_vm.contextGlobal(ctx);
+
+    const target = try testNativeCallback(ctx, "returnsUndefined", nativeReturnsUndefined);
     const bound = try core.Object.create(rt, core.class.ids.bound_function, null);
     bound.boundTargetSlot().* = target;
     bound.boundThisSlot().* = core.JSValue.undefinedValue();
@@ -4857,7 +4904,7 @@ test "bound function call skips zero-length combined args allocation" {
     const base_bytes = rt.memory.allocated_bytes;
     const base_allocations = rt.memory.allocation_count;
 
-    const result = try engine.exec.call.callValue(ctx, null, bound.value(), &.{});
+    const result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, core.JSValue.undefinedValue(), bound.value(), &.{}, null, null);
     try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqual(base_bytes, rt.memory.allocated_bytes);
     try std.testing.expectEqual(base_allocations, rt.memory.allocation_count);
@@ -4974,18 +5021,6 @@ test "value ops own primitive VM semantics" {
     try std.testing.expectEqual(true, eq_result.as(.boolean).?);
 
     try std.testing.expect(!engine.exec.value_ops.isTruthy(core.JSValue.int32(0)));
-}
-
-test "closure helper stores closure state outside the VM" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-
-    const closure_value = try engine.exec.closure.create(rt, .counter);
-    const first = try engine.exec.closure.callCClosure(rt, closure_value, &.{}, &.{});
-    const second = try engine.exec.closure.callCClosure(rt, closure_value, &.{}, &.{});
-
-    try std.testing.expectEqual(@as(?i32, 1), first.as(.int));
-    try std.testing.expectEqual(@as(?i32, 2), second.as(.int));
 }
 
 test "resident set_var_ref preserves assignment results and refcounted self-assignment" {
@@ -5369,7 +5404,7 @@ test "call subsystem installs and invokes host globals" {
     var output_buffer: [256]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
     const args = [_]core.JSValue{ core.JSValue.int32(1), core.JSValue.boolean(true) };
-    const result = try engine.exec.call.callValue(ctx, &stream, print, &args);
+    const result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, &stream, global, core.JSValue.undefinedValue(), print, &args, null, null);
 
     try std.testing.expect(result.is(.undefined_value));
     try std.testing.expectEqualStrings("1 true\n", stream.buffered());
@@ -5384,7 +5419,7 @@ test "call subsystem installs and invokes host globals" {
     try std.testing.expect(log_object.nativeEntry() == print_object.nativeEntry());
 
     const log_args = [_]core.JSValue{ core.JSValue.int32(2), core.JSValue.boolean(false) };
-    const log_result = try engine.exec.call.callValue(ctx, &stream, log, &log_args);
+    const log_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, &stream, global, core.JSValue.undefinedValue(), log, &log_args, null, null);
     try std.testing.expect(log_result.is(.undefined_value));
     try std.testing.expectEqualStrings("1 true\n2 false\n", stream.buffered());
 
@@ -5396,14 +5431,14 @@ test "call subsystem installs and invokes host globals" {
     const same_value = try assert_object.getProperty(same_value_key);
 
     const same_args = [_]core.JSValue{ core.JSValue.float64(std.math.nan(f64)), core.JSValue.float64(std.math.nan(f64)) };
-    const same_result = try engine.exec.call.callValue(ctx, null, same_value, &same_args);
+    const same_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, core.JSValue.undefinedValue(), same_value, &same_args, null, null);
     try std.testing.expect(same_result.is(.undefined_value));
     const mismatch_args = [_]core.JSValue{ core.JSValue.int32(1), core.JSValue.int32(2) };
-    try std.testing.expectError(error.JSException, engine.exec.call.callValue(ctx, null, same_value, &mismatch_args));
+    try std.testing.expectError(error.JSException, engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, core.JSValue.undefinedValue(), same_value, &mismatch_args, null, null));
 
     const test262_key = try rt.internAtom("Test262Error");
     const test262_ctor = try global.getProperty(test262_key);
-    const test262_error = try engine.exec.call.callValue(ctx, null, test262_ctor, &.{});
+    const test262_error = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, core.JSValue.undefinedValue(), test262_ctor, &.{}, null, null);
     try std.testing.expect(test262_error.is(.object));
 
     const map_value = try engine.exec.collection_ops.construct(ctx, 1);
@@ -5417,14 +5452,14 @@ test "call subsystem installs and invokes host globals" {
     const stored_value_obj = try core.string.String.createUtf8(rt, "value");
     const stored_value = stored_value_obj.value();
     const set_args = [_]core.JSValue{ stored_key, stored_value };
-    const set_result = try engine.exec.call.callValueWithThis(ctx, null, map_value, map_set, &set_args);
+    const set_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, map_value, map_set, &set_args, null, null);
     try std.testing.expect(set_result.same(map_value));
     // NB2 (design §7 C3): the Zig error identity across the native seam is
     // `JSException`; the class lives on the pending exception.
-    try std.testing.expectError(error.JSException, engine.exec.call.callValue(ctx, null, map_set, &set_args));
+    try std.testing.expectError(error.JSException, engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, core.JSValue.undefinedValue(), map_set, &set_args, null, null));
     try std.testing.expect(ctx.hasException());
     ctx.clearException();
-    const get_result = try engine.exec.call.callValueWithThis(ctx, null, map_value, map_get, &.{stored_key});
+    const get_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, map_value, map_get, &.{stored_key}, null, null);
     var get_text = std.ArrayList(u8).empty;
     defer get_text.deinit(rt.memory.allocator);
     try engine.exec.value_ops.appendRawString(rt, &get_text, get_result);
@@ -5467,14 +5502,14 @@ test "native builtin record dispatch is independent from dispatch-name strings" 
     try std.testing.expectEqualStrings("notMathAbs", dispatch_name);
 
     const args = [_]core.JSValue{core.JSValue.int32(-8)};
-    const result = try engine.exec.call.callValue(ctx, null, fake, &args);
+    const result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, core.JSValue.undefinedValue(), fake, &args, null, null);
     try std.testing.expectEqual(@as(f64, 8.0), engine.exec.value_ops.numberValue(result).?);
 
     // Plain op_call must prefer the resolved record memo. The encoded id is a
     // bootstrap key, not work to repeat after the function object is bound.
     fake_object.nativeEntrySlot().* = abs_record;
     fake_object.nativeFunctionIdSlot().* = 0;
-    const memo_result = try engine.exec.call.callValue(ctx, null, fake, &args);
+    const memo_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, core.JSValue.undefinedValue(), fake, &args, null, null);
     try std.testing.expectEqual(@as(f64, 8.0), engine.exec.value_ops.numberValue(memo_result).?);
 
     const fake_key = try rt.internAtom("fake");
@@ -5515,26 +5550,28 @@ test "bytecode calls execute directly from the shared function bytecode" {
     try std.testing.expect(fb.byteCode().len != 0);
 
     const first_args = [_]core.JSValue{core.JSValue.int32(1)};
-    const first = try engine.exec.call.callValueWithThisGlobalsAndGlobal(
+    const first = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
-        &.{},
         core.JSValue.undefinedValue(),
         function_value,
         &first_args,
+        null,
+        null,
     );
     try std.testing.expectEqual(@as(?i32, 2), first.as(.int));
 
     const second_args = [_]core.JSValue{core.JSValue.int32(2)};
-    const second = try engine.exec.call.callValueWithThisGlobalsAndGlobal(
+    const second = try engine.exec.call_runtime.callValueOrBytecodeRoot(
         js.context,
         null,
         global,
-        &.{},
         core.JSValue.undefinedValue(),
         function_value,
         &second_args,
+        null,
+        null,
     );
     try std.testing.expectEqual(@as(?i32, 3), second.as(.int));
 
@@ -7026,7 +7063,7 @@ test "number native builtin records cover static and prototype dispatch" {
     defer rt.memory.allocator.free(static_dispatch_name);
     try std.testing.expectEqualStrings("notNumberIsInteger", static_dispatch_name);
     const static_args = [_]core.JSValue{core.JSValue.float64(3.5)};
-    const static_result = try engine.exec.call.callValue(ctx, null, fake_static, &static_args);
+    const static_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, core.JSValue.undefinedValue(), fake_static, &static_args, null, null);
     try std.testing.expectEqual(false, static_result.as(.boolean).?);
 
     const prototype_value = try number_object.getProperty(prototype_key);
@@ -7042,7 +7079,7 @@ test "number native builtin records cover static and prototype dispatch" {
     defer rt.memory.allocator.free(proto_dispatch_name);
     try std.testing.expectEqualStrings("notNumberToFixed", proto_dispatch_name);
     const fixed_args = [_]core.JSValue{core.JSValue.int32(2)};
-    const proto_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, core.JSValue.float64(1.25), fake_proto, &fixed_args);
+    const proto_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, core.JSValue.float64(1.25), fake_proto, &fixed_args, null, null);
     const proto_string = proto_result.asStringBody().?;
     try std.testing.expect(proto_string.eqlBytes("1.25"));
 
@@ -7087,7 +7124,7 @@ test "string static native builtin records ignore dispatch names" {
     try std.testing.expectEqualStrings("notStringFromCodePoint", dispatch_name);
 
     const args = [_]core.JSValue{core.JSValue.int32(0x41)};
-    const result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, core.JSValue.undefinedValue(), fake, &args);
+    const result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, core.JSValue.undefinedValue(), fake, &args, null, null);
     const result_string = result.asStringBody().?;
     try std.testing.expect(result_string.eqlBytes("A"));
 
@@ -7134,7 +7171,7 @@ test "string prototype native builtin records ignore dispatch names" {
     const needle_string = try core.string.String.createUtf8(rt, "n");
     const receiver_string = try core.string.String.createUtf8(rt, "banana");
     const direct_args = [_]core.JSValue{ needle_string.value(), core.JSValue.int32(3) };
-    const direct_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver_string.value(), fake, &direct_args);
+    const direct_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, receiver_string.value(), fake, &direct_args, null, null);
     try std.testing.expectEqual(@as(i32, 4), direct_result.as(.int).?);
 
     const fake_key = try rt.internAtom("fakeStringIndexOf");
@@ -7212,7 +7249,7 @@ test "date static native builtin records ignore dispatch names" {
     try std.testing.expectEqualStrings("notDateUTC", dispatch_name);
 
     const args = [_]core.JSValue{ core.JSValue.int32(2024), core.JSValue.int32(0), core.JSValue.int32(1) };
-    const result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, core.JSValue.undefinedValue(), fake, &args);
+    const result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, core.JSValue.undefinedValue(), fake, &args, null, null);
     try std.testing.expectEqual(@as(f64, 1704067200000), engine.exec.value_ops.numberValue(result).?);
 
     const fake_key = try rt.internAtom("fakeDateUTC");
@@ -7237,6 +7274,7 @@ test "date constructor native builtin records ignore dispatch names" {
     defer ctx.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
     try helpers.installHostGlobalsBare(rt, global);
+    ctx.global = global;
 
     const date_key = try rt.internAtom("Date");
     const date_value = try global.getProperty(date_key);
@@ -7253,7 +7291,7 @@ test "date constructor native builtin records ignore dispatch names" {
     const prototype_value = try date_object.getProperty(core.atom.ids.prototype);
     try fake_object.defineOwnProperty(rt, core.atom.ids.prototype, core.Descriptor.data(prototype_value, .method));
 
-    const call_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, core.JSValue.undefinedValue(), fake, &.{});
+    const call_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, core.JSValue.undefinedValue(), fake, &.{}, null, null);
     var call_buffer = std.ArrayList(u8).empty;
     defer call_buffer.deinit(rt.memory.allocator);
     try engine.exec.value_ops.appendRawString(rt, &call_buffer, call_result);
@@ -7261,7 +7299,15 @@ test "date constructor native builtin records ignore dispatch names" {
     try std.testing.expect(std.mem.indexOf(u8, call_buffer.items, "GMT+") != null or
         std.mem.indexOf(u8, call_buffer.items, "GMT-") != null);
 
-    const construct_result = try engine.exec.construct.constructValue(ctx, fake, &.{core.JSValue.int32(1)}, &.{});
+    const construct_result = try engine.exec.call_runtime.constructValueOrBytecode(
+        ctx,
+        null,
+        global,
+        fake,
+        &.{core.JSValue.int32(1)},
+        null,
+        null,
+    );
     const construct_ms = try engine.exec.date_ops.methodCall(rt, construct_result, .get_time);
     try std.testing.expectEqual(@as(f64, 1), engine.exec.value_ops.numberValue(construct_ms).?);
 
@@ -7286,23 +7332,26 @@ test "date constructor native builtin records ignore dispatch names" {
     try std.testing.expectEqualStrings("true\n2\ntrue\n3\n", output.buffered());
 }
 
-test "constructValue AggregateError releases copied errors array owner" {
+test "AggregateError construct releases copied errors array owner" {
     const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
-    const global = try core.Object.create(rt, core.class.ids.global_object, null);
-    _ = try global.ensureGlobalPayload(rt);
+    const global = try core.Object.create(rt, core.class.ids.object, null);
+    _ = try global.ensureRealmPayload(rt);
+    var realm_global_slot: ?*core.Object = global;
+    var realm_roots = core.runtime.rootObjects(.{&realm_global_slot});
+    realm_roots.activate(rt);
+    defer realm_roots.deactivate(rt);
+    engine.exec.standard_globals.configureRuntime(rt);
+    try rt.installStandardGlobals(global);
     ctx.global = global;
-    const function_proto = try core.Object.create(rt, core.class.ids.object, null);
-    ctx.cached_function_proto = function_proto;
-    const object_proto = try core.Object.create(rt, core.class.ids.object, null);
-    try global.setCachedRealmValue(rt, .object_prototype, object_proto.value());
 
-    const name = try rt.internAtom("AggregateError");
-    const constructor = try engine.exec.construct.functionObject(ctx, name);
+    const constructor = try global.getProperty(try rt.internAtom("AggregateError"));
 
     const source = try core.Object.createArray(rt, null);
+    const array_ctor = helpers.objectFromValue(try global.getProperty(try rt.internAtom("Array")));
+    try source.setPrototype(rt, helpers.objectFromValue(try array_ctor.getProperty(core.atom.ids.prototype)));
     try source.defineOwnProperty(rt, core.Atom.taggedInt(0), core.Descriptor.data(core.JSValue.int32(1), .all));
     try source.defineOwnProperty(rt, core.Atom.taggedInt(1), core.Descriptor.data(core.JSValue.int32(2), .all));
     source.setArrayLength(2);
@@ -7318,11 +7367,97 @@ test "constructValue AggregateError releases copied errors array owner" {
     live_roots.activate(rt);
     defer live_roots.deactivate(rt);
 
+    const ConstructOnce = struct {
+        noinline fn run(c: *core.JSContext, g: *core.Object, ctor: core.JSValue, src: core.JSValue) !void {
+            var constructed = try engine.exec.call_runtime.constructValueOrBytecode(c, null, g, ctor, &.{src}, null, null);
+            constructed = core.JSValue.undefinedValue();
+        }
+    };
+
+    // Warm interned stack / shape objects from the first formal construct.
+    try ConstructOnce.run(ctx, global, constructor, source.value());
+    _ = rt.runObjectCycleRemoval();
     const baseline_objects = rt.gc.liveCountKind(.object);
-    _ = try engine.exec.construct.constructValue(ctx, constructor, &.{source.value()}, &.{});
+    try ConstructOnce.run(ctx, global, constructor, source.value());
     _ = rt.runObjectCycleRemoval();
 
     try std.testing.expectEqual(baseline_objects, rt.gc.liveCountKind(.object));
+}
+
+test "construct prefix runs before prototype Get for Number WeakRef FinalizationRegistry Iterator" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    _ = try js.eval(
+        \\function probe(ctor, args) {
+        \\  let got = false;
+        \\  const P = new Proxy(ctor, {
+        \\    get(t, k, r) {
+        \\      if (k === "prototype") got = true;
+        \\      return Reflect.get(t, k, r);
+        \\    }
+        \\  });
+        \\  try { new P(...args); } catch (e) {}
+        \\  return got;
+        \\}
+        \\assert.sameValue(probe(Number, [Symbol()]), false);
+        \\assert.sameValue(probe(Number, [3]), true);
+        \\assert.sameValue(probe(WeakRef, [1]), false);
+        \\assert.sameValue(probe(WeakRef, [{}]), true);
+        \\assert.sameValue(probe(FinalizationRegistry, [1]), false);
+        \\assert.sameValue(probe(FinalizationRegistry, [function() {}]), true);
+        \\try { new Iterator(); throw new Error("unreachable"); } catch (e) {
+        \\  assert.sameValue(e instanceof TypeError, true);
+        \\}
+        \\class SubIterator extends Iterator { constructor() { super(); } }
+        \\const it = new SubIterator();
+        \\assert.sameValue(Object.getPrototypeOf(it), SubIterator.prototype);
+        \\const a = new Uint8Array([1, 2, 3]);
+        \\const b = new Uint8Array(a);
+        \\assert.sameValue(a.buffer === b.buffer, false);
+        \\assert.sameValue(Array.prototype.join.call(b, ","), "1,2,3");
+        \\const c = new Uint8Array(new Uint16Array([256, 1]));
+        \\assert.sameValue(Array.prototype.join.call(c, ","), "0,1");
+    );
+}
+
+test "Proxy construct does not Get prototype for foreign newTarget or illegal args" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+    _ = try js.eval(
+        \\function probe(ctor, args) {
+        \\  let got = false;
+        \\  const P = new Proxy(ctor, {
+        \\    get(t, k, r) {
+        \\      if (k === "prototype") got = true;
+        \\      return Reflect.get(t, k, r);
+        \\    }
+        \\  });
+        \\  try { new P(...args); } catch (e) {}
+        \\  return got;
+        \\}
+        \\assert.sameValue(probe(Proxy, [{}, {}]), false);
+        \\assert.sameValue(probe(Proxy, [1, {}]), false);
+        \\assert.sameValue(probe(Proxy, []), false);
+        \\function NT() {}
+        \\const legal = Reflect.construct(Proxy, [{}, {}], NT);
+        \\assert.sameValue(typeof legal, "object");
+        \\try { Reflect.construct(Proxy, [1, {}], NT); throw new Error("unreachable"); } catch (e) {
+        \\  assert.sameValue(e instanceof TypeError, true);
+        \\}
+        \\let got = false;
+        \\function NTget() {}
+        \\const nt = new Proxy(NTget, {
+        \\  get(t, k, r) {
+        \\    if (k === "prototype") got = true;
+        \\    return Reflect.get(t, k, r);
+        \\  }
+        \\});
+        \\try { Reflect.construct(Proxy, [1, {}], nt); } catch (e) {}
+        \\assert.sameValue(got, false);
+        \\got = false;
+        \\try { Reflect.construct(Proxy, [{}, {}], nt); } catch (e) {}
+        \\assert.sameValue(got, false);
+    );
 }
 
 test "date prototype native builtin records ignore dispatch names" {
@@ -7352,7 +7487,7 @@ test "date prototype native builtin records ignore dispatch names" {
 
     const direct_receiver = try engine.exec.date_ops.construct(rt, &.{core.JSValue.int32(0)});
     const direct_args = [_]core.JSValue{core.JSValue.int32(1)};
-    const direct_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_receiver, fake, &direct_args);
+    const direct_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, direct_receiver, fake, &direct_args, null, null);
     try std.testing.expectEqual(@as(f64, 1), engine.exec.value_ops.numberValue(direct_result).?);
 
     const fake_key = try rt.internAtom("fakeDateSetTime");
@@ -7399,7 +7534,7 @@ test "array static native builtin records ignore dispatch names" {
 
     const direct_array = try engine.exec.array_builtin_ops.construct(rt, &.{core.JSValue.int32(1)});
     const direct_is_array_args = [_]core.JSValue{direct_array};
-    const is_array_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, core.JSValue.undefinedValue(), fake_is_array, &direct_is_array_args);
+    const is_array_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, core.JSValue.undefinedValue(), fake_is_array, &direct_is_array_args, null, null);
     try std.testing.expectEqual(true, is_array_result.as(.boolean).?);
 
     const fake_from = try engine.core.function.nativeFunction(ctx, "notArrayFrom", 1);
@@ -7409,7 +7544,7 @@ test "array static native builtin records ignore dispatch names" {
     defer rt.memory.allocator.free(from_dispatch_name);
     try std.testing.expectEqualStrings("notArrayFrom", from_dispatch_name);
 
-    const direct_from_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, array_value, fake_from, &direct_is_array_args);
+    const direct_from_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, array_value, fake_from, &direct_is_array_args, null, null);
     const direct_from_array = core.Object.fromHeader(direct_from_result.refHeader().?);
     try std.testing.expect(direct_from_array.isArray());
     try std.testing.expectEqual(@as(u32, 1), direct_from_array.arrayLength());
@@ -7472,7 +7607,7 @@ test "array prototype native builtin records ignore dispatch names" {
 
     const direct_array = try engine.exec.array_builtin_ops.constructWithPrototype(rt, &.{ core.JSValue.int32(1), core.JSValue.int32(2) }, prototype_object);
     const separator = (try core.string.String.createUtf8(rt, ":")).value();
-    const join_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_array, fake_join, &.{separator});
+    const join_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, direct_array, fake_join, &.{separator}, null, null);
     var join_text = std.ArrayList(u8).empty;
     defer join_text.deinit(rt.memory.allocator);
     try engine.exec.value_ops.appendRawString(rt, &join_text, join_result);
@@ -7481,7 +7616,7 @@ test "array prototype native builtin records ignore dispatch names" {
     const fake_to_string = try engine.core.function.nativeFunction(ctx, "notArrayToString", 0);
     const fake_to_string_object = core.Object.fromHeader(fake_to_string.refHeader().?);
     fake_to_string_object.nativeFunctionIdSlot().* = to_string_object.nativeFunctionIdSlot().*;
-    const to_string_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_array, fake_to_string, &.{});
+    const to_string_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, direct_array, fake_to_string, &.{}, null, null);
     var to_string_text = std.ArrayList(u8).empty;
     defer to_string_text.deinit(rt.memory.allocator);
     try engine.exec.value_ops.appendRawString(rt, &to_string_text, to_string_result);
@@ -7563,7 +7698,7 @@ test "collection native builtin records ignore dispatch names" {
     const direct_map = try engine.exec.collection_ops.constructWithPrototype(rt, 1, map_prototype_object);
     const direct_key = (try core.string.String.createUtf8(rt, "direct")).value();
     const direct_args = [_]core.JSValue{ direct_key, core.JSValue.int32(7) };
-    const direct_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_map, fake_map_set, &direct_args);
+    const direct_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, direct_map, fake_map_set, &direct_args, null, null);
     try std.testing.expect(direct_result.same(direct_map));
     const direct_get_result = try engine.exec.collection_ops.methodCall(rt, direct_map, 2, &.{direct_key});
     try std.testing.expectEqual(@as(?i32, 7), direct_get_result.as(.int));
@@ -7685,10 +7820,10 @@ test "buffer native builtin records ignore dispatch names" {
     try std.testing.expectEqualStrings("notArrayBufferSlice", dispatch_name);
 
     const direct_buffer = try engine.exec.buffer_ops.arrayBufferConstructArgs(rt, &.{core.JSValue.int32(6)}, array_buffer_prototype_object);
-    const direct_slice_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_buffer, fake_array_buffer_slice, &.{ core.JSValue.int32(1), core.JSValue.int32(4) });
+    const direct_slice_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, direct_buffer, fake_array_buffer_slice, &.{ core.JSValue.int32(1), core.JSValue.int32(4) }, null, null);
     const direct_slice_object = core.Object.fromHeader(direct_slice_result.refHeader().?);
     try std.testing.expectEqual(@as(usize, 3), direct_slice_object.byteStorage().len);
-    const direct_length_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_buffer, fake_array_buffer_byte_length, &.{});
+    const direct_length_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, direct_buffer, fake_array_buffer_byte_length, &.{}, null, null);
     try std.testing.expectEqual(@as(?i32, 6), direct_length_result.as(.int));
 
     const fake_is_view_key = try rt.internAtom("fakeArrayBufferIsView");
@@ -7773,9 +7908,9 @@ test "typed array accessor native builtin records ignore dispatch names" {
 
     const direct_buffer = try engine.exec.buffer_ops.arrayBufferConstructArgs(rt, &.{core.JSValue.int32(8)}, null);
     const direct_typed_array = try engine.exec.buffer_ops.typedArrayConstructWithOptions(rt, 1, .uint8, direct_buffer, &.{direct_buffer}, prototype_object);
-    const direct_byte_length = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_typed_array, fake_byte_length, &.{});
+    const direct_byte_length = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, direct_typed_array, fake_byte_length, &.{}, null, null);
     try std.testing.expectEqual(@as(?i32, 8), direct_byte_length.as(.int));
-    const direct_length = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, direct_typed_array, fake_length, &.{});
+    const direct_length = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, direct_typed_array, fake_length, &.{}, null, null);
     try std.testing.expectEqual(@as(?i32, 8), direct_length.as(.int));
 
     const fake_byte_length_key = try rt.internAtom("fakeTypedArrayByteLength");
@@ -7828,7 +7963,7 @@ test "regexp static native builtin records ignore dispatch names" {
 
     const dot = try core.string.String.createUtf8(rt, ".");
     const direct_args = [_]core.JSValue{dot.value()};
-    const direct_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, core.JSValue.undefinedValue(), fake, &direct_args);
+    const direct_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, core.JSValue.undefinedValue(), fake, &direct_args, null, null);
     try std.testing.expect(direct_result.isString());
     const direct_result_string = direct_result.asStringBody().?;
     try std.testing.expect(direct_result_string.eqlBytes("\\."));
@@ -7900,7 +8035,7 @@ test "regexp prototype native builtin records ignore dispatch names" {
     const receiver = try engine.exec.regexp_ops.constructWithPrototype(rt, pattern_string.value(), flags_string.value(), prototype_object);
     const input_string = try core.string.String.createUtf8(rt, "cat");
     const direct_args = [_]core.JSValue{input_string.value()};
-    const exec_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_exec, &direct_args);
+    const exec_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, receiver, fake_exec, &direct_args, null, null);
     const exec_array = core.Object.fromHeader(exec_result.refHeader().?);
     try std.testing.expect(exec_array.isArray());
     const first_match = try exec_array.getProperty(core.Atom.taggedInt(0));
@@ -7911,10 +8046,10 @@ test "regexp prototype native builtin records ignore dispatch names" {
     const index_value = try exec_array.getProperty(index_key);
     try std.testing.expectEqual(@as(i32, 1), index_value.as(.int).?);
 
-    const test_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_test, &direct_args);
+    const test_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, receiver, fake_test, &direct_args, null, null);
     try std.testing.expectEqual(true, test_result.as(.boolean).?);
 
-    const to_string_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_to_string, &.{});
+    const to_string_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, receiver, fake_to_string, &.{}, null, null);
     try std.testing.expect(to_string_result.isString());
     const to_string_result_string = to_string_result.asStringBody().?;
     try std.testing.expect(to_string_result_string.eqlBytes("/a/"));
@@ -7995,27 +8130,27 @@ test "regexp symbol native builtin records ignore dispatch names" {
     const replacement_string = try core.string.String.createUtf8(rt, "o");
 
     const one_arg = [_]core.JSValue{input_string.value()};
-    const search_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_search, &one_arg);
+    const search_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, receiver, fake_search, &one_arg, null, null);
     try std.testing.expectEqual(@as(i32, 1), search_result.as(.int).?);
 
-    const match_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_match, &one_arg);
+    const match_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, receiver, fake_match, &one_arg, null, null);
     const match_array = core.Object.fromHeader(match_result.refHeader().?);
     const match_zero = try match_array.getProperty(core.Atom.taggedInt(0));
     try std.testing.expect(match_zero.isString());
     const match_zero_string = match_zero.asStringBody().?;
     try std.testing.expect(match_zero_string.eqlBytes("a"));
 
-    const match_all_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_match_all, &one_arg);
+    const match_all_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, receiver, fake_match_all, &one_arg, null, null);
     const match_all_iterator = core.Object.fromHeader(match_all_result.refHeader().?);
     try std.testing.expectEqual(core.class.ids.regexp_string_iterator, match_all_iterator.class_id);
 
     const replace_args = [_]core.JSValue{ input_string.value(), replacement_string.value() };
-    const replace_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_replace, &replace_args);
+    const replace_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, receiver, fake_replace, &replace_args, null, null);
     try std.testing.expect(replace_result.isString());
     const replace_result_string = replace_result.asStringBody().?;
     try std.testing.expect(replace_result_string.eqlBytes("cot"));
 
-    const split_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_split, &one_arg);
+    const split_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, receiver, fake_split, &one_arg, null, null);
     const split_array = core.Object.fromHeader(split_result.refHeader().?);
     try std.testing.expect(split_array.isArray());
     try std.testing.expectEqual(@as(u32, 2), split_array.arrayLength());
@@ -8088,12 +8223,12 @@ test "regexp accessor native builtin records ignore dispatch names" {
     const flags_string = try core.string.String.createUtf8(rt, "g");
     const receiver = try engine.exec.regexp_ops.constructWithPrototype(rt, pattern_string.value(), flags_string.value(), prototype_object);
 
-    const source_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_source, &.{});
+    const source_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, receiver, fake_source, &.{}, null, null);
     try std.testing.expect(source_result.isString());
     const source_string = source_result.asStringBody().?;
     try std.testing.expect(source_string.eqlBytes("a\\/b"));
 
-    const global_result = try engine.exec.call.callValueWithThisGlobalsAndGlobal(ctx, null, global, &.{}, receiver, fake_global, &.{});
+    const global_result = try engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, receiver, fake_global, &.{}, null, null);
     try std.testing.expectEqual(true, global_result.as(.boolean).?);
 
     const fake_source_key = try rt.internAtom("fakeRegExpSourceGetter");
@@ -17706,14 +17841,15 @@ test "true C function without its RealmRef fails the final-arm invariant" {
 
     try std.testing.expectError(
         error.InvalidBuiltinRegistry,
-        engine.exec.call.callValueWithThisGlobalsAndGlobal(
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
             js.context,
             null,
             global,
-            &.{},
             core.JSValue.undefinedValue(),
             function_value,
             &.{},
+            null,
+            null,
         ),
     );
 }
@@ -19425,8 +19561,8 @@ test "reflect construct roots argument list while resolving prototype" {
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
-    // `reflectConstruct` routes builtin construction (Array, like Date/RegExp/
-    // String) through the internal record table, so the realm globals must be
+    // `reflectConstructCall` routes builtin construction (Array, like Date/RegExp/
+    // String) through the VM construct dispatcher, so the realm globals must be
     // installed to wire `rt.internal_builtins` before the construct record is
     // reachable.
     const realm_global = try core.Object.create(rt, core.class.ids.object, null);
@@ -19469,9 +19605,8 @@ test "reflect construct roots argument list while resolving prototype" {
         rt.memory.trigger_gc_ctx = saved_trigger_ctx;
     }
 
-    var globals = [_]engine.exec.globals.Slot{};
     const reflect_args = [_]core.JSValue{ target, args_object.value(), new_target };
-    _ = try engine.exec.reflect_ops.reflectConstruct(ctx, &reflect_args, globals[0..]);
+    _ = try engine.exec.reflect_ops.reflectConstructCall(ctx, null, realm_global, &reflect_args, null, null);
     var result_alive = true;
 
     try std.testing.expect(!probe.trace_failed);
@@ -24021,9 +24156,38 @@ test "native builtin records use callee realm for errors and created objects" {
     try std.testing.expect(result.is(.undefined_value));
 }
 
+fn testNativeCallback(
+    realm: *core.JSContext,
+    comptime name: []const u8,
+    comptime body: core.host_function.NativeGenericFn,
+) !core.JSValue {
+    const entry = try realm.runtime.allocNativeEntry(
+        engine.exec.native_legacy.genericEntry(body, 0),
+    );
+    const function_value = try core.function.nativeFunction(realm, name, 0);
+    const function_object = try core.Object.expect(function_value);
+    function_object.installNativeEntry(entry);
+    return function_value;
+}
+
+fn nativeThrowsTypeError(_: *core.JSContext, _: core.JSValue, _: []const core.JSValue) core.errors.HostError!core.JSValue {
+    return error.TypeError;
+}
+
+fn nativeReturnsUndefined(_: *core.JSContext, _: core.JSValue, _: []const core.JSValue) core.errors.HostError!core.JSValue {
+    return core.JSValue.undefinedValue();
+}
+
+fn mutateHeldCollectionThenThrow(rt: *core.JSRuntime, map_value: core.JSValue, key: core.JSValue) !void {
+    const value = try engine.exec.value_ops.createStringValue(rt, "mutated");
+    _ = try engine.exec.collection_ops.methodCall(rt, map_value, 1, &.{ key, value });
+    return error.JSException;
+}
+
 test "collection callback adapter materializes errors in its explicit realm" {
     const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
+    engine.exec.standard_globals.configureRuntime(rt);
 
     const caller = try core.JSContext.create(rt, .{});
     defer caller.destroy();
@@ -24032,7 +24196,7 @@ test "collection callback adapter materializes errors in its explicit realm" {
     defer callback_realm.destroy();
     const callback_global = try engine.exec.zjs_vm.contextGlobal(callback_realm);
 
-    const callback = try engine.exec.closure.create(rt, .throws_type_error);
+    const callback = try testNativeCallback(callback_realm, "throwsTypeError", nativeThrowsTypeError);
 
     const callback_host = engine.exec.collection_adapter.callbackHost(callback_realm, &.{});
     try std.testing.expectError(
@@ -24049,6 +24213,20 @@ test "collection callback adapter materializes errors in its explicit realm" {
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(callback_type_error, error_object.getPrototype().?);
     try std.testing.expect(caller_type_error != callback_type_error);
+}
+
+test "collection callback adapter requires a Realm global for JS [[Call]]" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt, .{});
+    defer ctx.destroy();
+
+    const callback = (try core.Object.create(rt, core.class.ids.c_function, null)).value();
+    const callback_host = engine.exec.collection_adapter.callbackHost(ctx, &.{});
+    try std.testing.expectError(
+        error.JSException,
+        callback_host.callWithThis(callback, core.JSValue.undefinedValue(), &.{}),
+    );
 }
 
 test "constructor static prototype and accessor handlers keep their callee realm" {
@@ -24958,19 +25136,10 @@ test "host WeakMap mutation closure rejects registered symbol keys" {
     const map_value = try engine.exec.collection_ops.constructBare(rt, 3);
     const map_object = objectFromValue(map_value);
 
-    const closure_value = try engine.exec.closure.create(rt, .mutates_map_key3_then_throws);
-
     const registered_atom = try rt.atoms.internGlobalSymbol("registered");
+    const registered_key = try rt.symbolValue(registered_atom);
 
-    const map_name = try rt.internAtom("map");
-    const key_name = try rt.internAtom("obj3");
-
-    var globals = [_]engine.exec.globals.Slot{
-        .{ .name = map_name, .value = map_value },
-        .{ .name = key_name, .value = try rt.symbolValue(registered_atom) },
-    };
-
-    if (engine.exec.closure.callCClosure(rt, closure_value, &.{}, globals[0..])) |_| {
+    if (mutateHeldCollectionThenThrow(rt, map_value, registered_key)) |_| {
         try std.testing.expect(false);
     } else |err| {
         try std.testing.expectEqual(error.TypeError, err);
@@ -25000,21 +25169,39 @@ test "host WeakMap mutation closure links entries into existing weak index" {
 
     const mutation_key = try core.Object.create(rt, core.class.ids.object, null);
 
-    const closure_value = try engine.exec.closure.create(rt, .mutates_map_key3_then_throws);
-
-    const map_name = try rt.internAtom("map");
-    const key_name = try rt.internAtom("obj3");
-
-    var globals = [_]engine.exec.globals.Slot{
-        .{ .name = map_name, .value = map_value },
-        .{ .name = key_name, .value = mutation_key.value() },
-    };
-
-    try std.testing.expectError(error.JSException, engine.exec.closure.callCClosure(rt, closure_value, &.{}, globals[0..]));
+    try std.testing.expectError(
+        error.JSException,
+        mutateHeldCollectionThenThrow(rt, map_value, mutation_key.value()),
+    );
 
     try std.testing.expectEqual(@as(usize, 9), map_object.weakCollectionEntries().len);
     const get_result = try engine.exec.collection_ops.methodCall(rt, map_value, 2, &.{mutation_key.value()});
     try helpers.expectStringValueBytes(get_result, "mutated");
+}
+
+test "Map forEach mutation closure rewrites a held map then throws" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    const result = try js.eval(
+        \\var map = new Map([[1, "a"], [2, "b"], [3, "c"]]);
+        \\try {
+        \\  map.forEach(function (value, key) {
+        \\    if (key === 1) {
+        \\      map.set(1, "mutated");
+        \\      throw new TypeError("mutated");
+        \\    }
+        \\  });
+        \\  throw new Test262Error("expected throw");
+        \\} catch (error) {
+        \\  assert.sameValue(error instanceof TypeError, true);
+        \\  assert.sameValue(map.get(1), "mutated");
+        \\  assert.sameValue(map.get(2), "b");
+        \\  assert.sameValue(map.size, 3);
+        \\}
+    );
+
+    try std.testing.expect(result.is(.undefined_value));
 }
 
 // Test-side stand-in for the retired engine `__setlike_mode` fixture: a
@@ -25357,6 +25544,7 @@ test "TypedArray Reflect.construct fallback uses the realm intrinsic after globa
 test "Set.prototype.symmetricDifference tracks receiver mutations from a set-like keys call" {
     const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
+    engine.exec.standard_globals.configureRuntime(rt);
 
     const callback_ctx = try core.JSContext.create(rt, .{});
     defer callback_ctx.destroy();
@@ -25376,7 +25564,7 @@ test "Set.prototype.symmetricDifference tracks receiver mutations from a set-lik
     const size_key = try rt.internAtom("size");
     try setlike.defineOwnProperty(rt, size_key, core.Descriptor.data(core.JSValue.int32(4), .all));
 
-    const noop = try engine.exec.closure.create(rt, .returns_undefined);
+    const noop = try testNativeCallback(callback_ctx, "noop", nativeReturnsUndefined);
 
     const has_key = try rt.internAtom("has");
     try setlike.defineOwnProperty(rt, has_key, core.Descriptor.data(noop, .all));
@@ -25414,13 +25602,6 @@ test "host map closure releases appended value when entry allocation fails" {
     try std.testing.expectEqual(@as(usize, 8), map_object.collectionEntries().len);
     try std.testing.expectEqual(@as(usize, 8), map_object.collectionEntriesCapacity());
 
-    const closure_value = try engine.exec.closure.create(rt, .mutates_map_key1_then_throws);
-
-    const map_name = try rt.internAtom("map");
-    var globals = [_]engine.exec.globals.Slot{
-        .{ .name = map_name, .value = map_value },
-    };
-
     // TGC S4-b: sweep first -- storage cells are collected carriers, so the
     // limit-triggered retry collection would otherwise drop the account below
     // the captured baseline.
@@ -25428,7 +25609,10 @@ test "host map closure releases appended value when entry allocation fails" {
     const old_bytes = rt.memory.allocated_bytes;
     const old_allocations = rt.memory.allocation_count;
     rt.setMemoryLimit(old_bytes + @sizeOf(core.string.String) + "mutated".len);
-    try std.testing.expectError(error.OutOfMemory, engine.exec.closure.callCClosure(rt, closure_value, &.{}, globals[0..]));
+    try std.testing.expectError(
+        error.OutOfMemory,
+        mutateHeldCollectionThenThrow(rt, map_value, core.JSValue.int32(1)),
+    );
     rt.setMemoryLimit(null);
 
     try std.testing.expectEqual(old_bytes, rt.memory.allocated_bytes);
@@ -25445,16 +25629,14 @@ test "host map closure rolls back appended entry when size update fails" {
     const map_object = objectFromValue(map_value);
 
     _ = try engine.exec.collection_ops.methodCall(rt, map_value, 1, &.{ core.JSValue.int32(1), core.JSValue.int32(11) });
+    inline for (.{ 10, 11, 12, 13, 14, 15, 16 }) |key| {
+        _ = try engine.exec.collection_ops.methodCall(rt, map_value, 1, &.{ core.JSValue.int32(key), core.JSValue.int32(key) });
+    }
+    try std.testing.expectEqual(@as(usize, 8), map_object.collectionEntries().len);
+    try std.testing.expectEqual(@as(usize, 8), map_object.collectionEntriesCapacity());
 
     try fillOwnPropertyStorageForFailure(rt, map_object);
-    try std.testing.expect(map_object.deleteProperty(rt, core.atom.predefinedId("size", .string).?));
-
-    const closure_value = try engine.exec.closure.create(rt, .mutates_map_key3_then_throws);
-
-    const map_name = try rt.internAtom("map");
-    var globals = [_]engine.exec.globals.Slot{
-        .{ .name = map_name, .value = map_value },
-    };
+    _ = map_object.deleteProperty(rt, core.atom.predefinedId("size", .string).?);
 
     const old_len = map_object.collectionEntries().len;
     const old_active = map_object.collectionActiveCount();
@@ -25465,7 +25647,10 @@ test "host map closure rolls back appended entry when size update fails" {
     const old_bytes = rt.memory.allocated_bytes;
 
     rt.setMemoryLimit(old_bytes + @sizeOf(core.string.String) + "mutated".len);
-    try std.testing.expectError(error.OutOfMemory, engine.exec.closure.callCClosure(rt, closure_value, &.{}, globals[0..]));
+    try std.testing.expectError(
+        error.OutOfMemory,
+        mutateHeldCollectionThenThrow(rt, map_value, core.JSValue.int32(3)),
+    );
     rt.setMemoryLimit(null);
 
     const entries_slot = map_object.collectionEntriesSlot();
@@ -26435,4 +26620,292 @@ test "native callee realm preserves argument evaluation and constructor forwardi
         \\  assert.sameValue(caught, true);
         \\}
     );
+}
+
+fn pr0ObjectFromValue(value: core.JSValue) !*core.Object {
+    const header = value.refHeader() orelse return error.TestUnexpectedResult;
+    return core.Object.fromHeader(header);
+}
+
+test "PR0 lock official resolver Get then once self-resolution TypeError and shared once-state" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const ctx = js.context;
+    const rt = js.runtime;
+    const global = try engine.exec.zjs_vm.contextGlobal(ctx);
+    const promise_proto = engine.exec.promise_ops.promisePrototypeFromGlobal(rt, global);
+    const call_main = engine.exec.call_runtime.callValueOrBytecodeRoot;
+    const undef = core.JSValue.undefinedValue();
+
+    const makePair = struct {
+        fn run(c: *core.JSContext, g: *core.Object, proto: ?*core.Object) !struct {
+            promise: *core.Object,
+            resolve: core.JSValue,
+            reject: core.JSValue,
+        } {
+            const promise_val = try core.promise.constructWithPrototype(c, proto);
+            const pair = try engine.exec.promise_ops.createPromiseResolvingPair(c.runtime, g, promise_val);
+            return .{
+                .promise = try pr0ObjectFromValue(promise_val),
+                .resolve = pair.resolve,
+                .reject = pair.reject,
+            };
+        }
+    }.run;
+
+    {
+        const pair = try makePair(ctx, global, promise_proto);
+        const resolve_obj = try pr0ObjectFromValue(pair.resolve);
+        const reject_obj = try pr0ObjectFromValue(pair.reject);
+        const resolve_state = resolve_obj.functionPromiseResolvingState() orelse return error.TestUnexpectedResult;
+        const reject_state = reject_obj.functionPromiseResolvingState() orelse return error.TestUnexpectedResult;
+        try std.testing.expect(resolve_state.same(reject_state));
+        try std.testing.expect(!resolve_obj.functionPromiseResolvingReject());
+        try std.testing.expect(reject_obj.functionPromiseResolvingReject());
+    }
+
+    {
+        const pair = try makePair(ctx, global, promise_proto);
+        const thenable = try js.evalWithOptions(
+            \\({ get then() { globalThis.__pr1ThenGets = (globalThis.__pr1ThenGets || 0) + 1; globalThis.__pr1ThenCalls = (globalThis.__pr1ThenCalls || 0); return function (resolve) { globalThis.__pr1ThenCalls += 1; resolve(42); }; } })
+        , .{ .filename = "<repl>" });
+        const result = try call_main(ctx, null, global, undef, pair.resolve, &.{thenable}, null, null);
+        try std.testing.expect(result.is(.undefined_value));
+        try std.testing.expect(pair.promise.promiseResult() == null);
+        try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
+        const gets_key = try rt.internAtom("__pr1ThenGets");
+        const calls_key = try rt.internAtom("__pr1ThenCalls");
+        try std.testing.expectEqual(@as(?i32, 1), (try global.getProperty(gets_key)).as(.int));
+        try std.testing.expectEqual(@as(?i32, 0), (try global.getProperty(calls_key)).as(.int));
+
+        var drained: usize = 0;
+        while (drained < 8) : (drained += 1) {
+            const status = try engine.exec.promise_ops.drainOnePendingJob(ctx, null, global);
+            if (status == .empty) break;
+            try std.testing.expectEqual(core.jobs.RunOneStatus.success, status);
+        }
+        try std.testing.expectEqual(@as(?i32, 42), pair.promise.promiseResult().?.as(.int));
+        try std.testing.expect(!pair.promise.promiseIsRejected());
+        const gets_after = try js.evalWithOptions("globalThis.__pr1ThenGets || 0", .{ .filename = "<repl>" });
+        const calls_after = try js.evalWithOptions("globalThis.__pr1ThenCalls || 0", .{ .filename = "<repl>" });
+        try std.testing.expectEqual(@as(?i32, 1), gets_after.as(.int));
+        try std.testing.expectEqual(@as(?i32, 1), calls_after.as(.int));
+    }
+
+    {
+        const pair = try makePair(ctx, global, promise_proto);
+        const result = try call_main(ctx, null, global, undef, pair.resolve, &.{pair.promise.value()}, null, null);
+        try std.testing.expect(result.is(.undefined_value));
+        try expectRejectedPromiseNamedError(&js, pair.promise.value(), "TypeError", "promise self resolution");
+    }
+
+    {
+        const pair = try makePair(ctx, global, promise_proto);
+        const never_thenable = try js.evalWithOptions("({ then() {} })", .{ .filename = "<repl>" });
+        _ = try call_main(ctx, null, global, undef, pair.resolve, &.{never_thenable}, null, null);
+        _ = try call_main(ctx, null, global, undef, pair.reject, &.{core.JSValue.int32(99)}, null, null);
+        try std.testing.expect(pair.promise.promiseResult() == null);
+        const resolve_state = (try pr0ObjectFromValue(pair.resolve)).functionPromiseResolvingState() orelse return error.TestUnexpectedResult;
+        try std.testing.expect((try pr0ObjectFromValue(resolve_state)).promiseAlreadyResolved());
+    }
+}
+
+test "PR0 lock createPromiseResolvingPair shares once-state" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const ctx = js.context;
+    const rt = js.runtime;
+    const global = try engine.exec.zjs_vm.contextGlobal(ctx);
+    const promise_proto = engine.exec.promise_ops.promisePrototypeFromGlobal(rt, global);
+    const never_thenable = try js.evalWithOptions("({ then() {} })", .{ .filename = "<repl>" });
+
+    const pair_promise_val = try core.promise.constructWithPrototype(ctx, promise_proto);
+    const pair = try engine.exec.promise_ops.createPromiseResolvingPair(rt, global, pair_promise_val);
+    const pair_resolve_state = (try pr0ObjectFromValue(pair.resolve)).functionPromiseResolvingState() orelse return error.TestUnexpectedResult;
+    const pair_reject_state = (try pr0ObjectFromValue(pair.reject)).functionPromiseResolvingState() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(pair_resolve_state.same(pair_reject_state));
+
+    _ = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        ctx,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        pair.resolve,
+        &.{never_thenable},
+        null,
+        null,
+    );
+    _ = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        ctx,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        pair.reject,
+        &.{core.JSValue.int32(99)},
+        null,
+        null,
+    );
+    const pair_promise = try pr0ObjectFromValue(pair_promise_val);
+    try std.testing.expect(pair_promise.promiseResult() == null);
+    try std.testing.expect((try pr0ObjectFromValue(pair_resolve_state)).promiseAlreadyResolved());
+}
+
+test "Promise.withResolvers shares once-state so thenable resolve ignores later reject" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const ctx = js.context;
+    const global = try engine.exec.zjs_vm.contextGlobal(ctx);
+    const never_thenable = try js.evalWithOptions("({ then() {} })", .{ .filename = "<repl>" });
+
+    const wr_value = try js.evalWithOptions("Promise.withResolvers()", .{ .filename = "<repl>" });
+    const wr = try pr0ObjectFromValue(wr_value);
+    const wr_promise_val = try wr.getProperty(core.atom.ids.promise);
+    const wr_resolve = try wr.getProperty(core.atom.ids.resolve);
+    const wr_reject = try wr.getProperty(core.atom.ids.reject);
+    const wr_resolve_state = (try pr0ObjectFromValue(wr_resolve)).functionPromiseResolvingState() orelse return error.TestUnexpectedResult;
+    const wr_reject_state = (try pr0ObjectFromValue(wr_reject)).functionPromiseResolvingState() orelse return error.TestUnexpectedResult;
+    try std.testing.expect(wr_resolve_state.same(wr_reject_state));
+
+    _ = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        ctx,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        wr_resolve,
+        &.{never_thenable},
+        null,
+        null,
+    );
+    _ = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        ctx,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        wr_reject,
+        &.{core.JSValue.int32(99)},
+        null,
+        null,
+    );
+    const wr_promise = try pr0ObjectFromValue(wr_promise_val);
+    try std.testing.expect(wr_promise.promiseResult() == null);
+    try std.testing.expect((try pr0ObjectFromValue(wr_resolve_state)).promiseAlreadyResolved());
+}
+
+test "PR0 lock named leftover 1424 TypeError vs empty-name undefined vs native_ref miss byName" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const ctx = js.context;
+    const rt = js.runtime;
+    const global = try engine.exec.zjs_vm.contextGlobal(ctx);
+
+    const named = try core.function.nativeFunction(ctx, "leftover1424Named", 0);
+    try global.defineOwnProperty(rt, try rt.internAtom("leftover1424Named"), core.Descriptor.data(named, .all));
+
+    const empty = try core.function.nativeFunction(ctx, "", 0);
+    try global.defineOwnProperty(rt, try rt.internAtom("leftover1424Empty"), core.Descriptor.data(empty, .all));
+
+    const miss = try core.function.nativeFunction(ctx, "leftover1424NativeRefMiss", 0);
+    const miss_object = try pr0ObjectFromValue(miss);
+    miss_object.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.promise, 999);
+    try std.testing.expect(core.function.decodeNativeBuiltinId(miss_object.nativeFunctionId()) != null);
+    try std.testing.expect(rt.internalBuiltinRecord(
+        @intCast(@intFromEnum(core.function.NativeBuiltinDomain.promise)),
+        999,
+    ) == null);
+    try global.defineOwnProperty(rt, try rt.internAtom("leftover1424NativeRefMiss"), core.Descriptor.data(miss, .all));
+
+    const miss_as_object = try core.function.nativeFunction(ctx, "Object", 0);
+    const miss_as_object_fn = try pr0ObjectFromValue(miss_as_object);
+    miss_as_object_fn.nativeFunctionIdSlot().* = core.function.nativeBuiltinId(.promise, 999);
+    try global.defineOwnProperty(
+        rt,
+        try rt.internAtom("leftover1424NativeRefObject"),
+        core.Descriptor.data(miss_as_object, .all),
+    );
+
+    const call_main = engine.exec.call_runtime.callValueOrBytecodeRoot;
+    const undef = core.JSValue.undefinedValue();
+
+    try std.testing.expectError(error.TypeError, call_main(ctx, null, global, undef, named, &.{}, null, null));
+    if (ctx.hasException()) ctx.clearException();
+
+    const empty_result = try call_main(ctx, null, global, undef, empty, &.{}, null, null);
+    try std.testing.expect(empty_result.is(.undefined_value));
+
+    try std.testing.expectError(error.TypeError, call_main(ctx, null, global, undef, miss, &.{}, null, null));
+    if (ctx.hasException()) ctx.clearException();
+
+    // native_ref miss with dispatch name "Object" still TypeError inside
+    // byName's callNativeFunctionRecord (call.zig:845), not 1089 undefined
+    // and not the 1126 Object [[Call]] arm.
+    try std.testing.expectError(
+        error.TypeError,
+        call_main(ctx, null, global, undef, miss_as_object, &.{core.JSValue.int32(7)}, null, null),
+    );
+    if (ctx.hasException()) ctx.clearException();
+}
+
+test "Object getValuePropertyViaGlobalSlots reads data and rejects no-global accessors" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt, .{});
+    defer ctx.destroy();
+    try std.testing.expect(ctx.global == null);
+
+    const object = try core.Object.create(rt, core.class.ids.object, null);
+    const data_key = try rt.internAtom("data");
+    try object.defineOwnProperty(rt, data_key, core.Descriptor.data(core.JSValue.int32(7), .all));
+    const data = try engine.exec.call.getValuePropertyViaGlobalSlots(ctx, null, null, &.{}, object.value(), data_key);
+    try std.testing.expectEqual(@as(?i32, 7), data.as(.int));
+
+    const acc_key = try rt.internAtom("acc");
+    const getter_object = try core.Object.create(rt, core.class.ids.object, null);
+    try object.defineOwnProperty(
+        rt,
+        acc_key,
+        core.Descriptor.accessor(getter_object.value(), core.JSValue.undefinedValue(), .{ .configurable = true }),
+    );
+    try std.testing.expectError(
+        error.InvalidBuiltinRegistry,
+        engine.exec.call.getValuePropertyViaGlobalSlots(ctx, null, null, &.{}, object.value(), acc_key),
+    );
+}
+
+test "Object [[Call]] leftover name arm boxes primitives without Get prototype" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const ctx = js.context;
+    const rt = js.runtime;
+    const global = try engine.exec.zjs_vm.contextGlobal(ctx);
+
+    const leftover = try core.function.nativeFunction(ctx, "Object", 1);
+    const leftover_object = try pr0ObjectFromValue(leftover);
+    try std.testing.expectEqual(@as(i32, 0), leftover_object.nativeFunctionIdSlot().*);
+    try std.testing.expect(leftover_object.nativeEntry() == null);
+
+    const thrower = try js.evalWithOptions(
+        "(function () { throw new Error('prototype-get'); })",
+        .{ .filename = "<repl>" },
+    );
+    try leftover_object.defineOwnProperty(
+        rt,
+        core.atom.ids.prototype,
+        core.Descriptor.accessor(thrower, core.JSValue.undefinedValue(), .{ .configurable = true }),
+    );
+
+    const boxed = try engine.exec.call_runtime.callValueOrBytecodeRoot(
+        ctx,
+        null,
+        global,
+        core.JSValue.undefinedValue(),
+        leftover,
+        &.{core.JSValue.int32(7)},
+        null,
+        null,
+    );
+    try std.testing.expect(boxed.is(.object));
+    const boxed_object = try pr0ObjectFromValue(boxed);
+    try std.testing.expectEqual(core.class.ids.number, boxed_object.class_id);
+    try std.testing.expectEqual(@as(?i32, 7), boxed_object.objectData().?.as(.int));
+    try std.testing.expect(!ctx.hasException());
 }

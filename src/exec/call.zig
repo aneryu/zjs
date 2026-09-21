@@ -121,119 +121,6 @@ fn outputHostThunk(
     return result;
 }
 
-pub fn callValue(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    callee: core.JSValue,
-    args: []const core.JSValue,
-) HostError!core.JSValue {
-    return callValueWithThisAndGlobals(ctx, output, &.{}, core.JSValue.undefinedValue(), callee, args);
-}
-
-pub fn callValueWithThis(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    this_value: core.JSValue,
-    callee: core.JSValue,
-    args: []const core.JSValue,
-) !core.JSValue {
-    return callValueWithThisAndGlobals(ctx, output, &.{}, this_value, callee, args);
-}
-
-pub fn callValueWithThisAndGlobals(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    globals: []globals_mod.Slot,
-    this_value: core.JSValue,
-    callee: core.JSValue,
-    args: []const core.JSValue,
-) !core.JSValue {
-    return callValueWithThisGlobalsAndGlobal(ctx, output, null, globals, this_value, callee, args);
-}
-
-pub fn callValueWithThisGlobalsAndGlobal(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []globals_mod.Slot,
-    input_this_value: core.JSValue,
-    input_callee: core.JSValue,
-    input_args: []const core.JSValue,
-) !core.JSValue {
-    var this_value = input_this_value;
-    var callee = input_callee;
-    var inline_args: [8]core.JSValue = undefined;
-    var args_buffer: core.runtime.ValueRootBuffer = .{};
-    defer args_buffer.deinit(ctx.runtime);
-    var args: []core.JSValue = inline_args[0..0];
-    if (input_args.len <= inline_args.len) {
-        args = inline_args[0..input_args.len];
-        @memcpy(args, input_args);
-    } else {
-        // `initCopy` allocates, and an allocation is a collection point. Until
-        // the copy lands, the caller's `input_args` window is the only storage
-        // naming these values, so it has to be a declared root for the
-        // duration of the copy -- the destination buffer does not exist yet.
-        var source_slices = [_]core.runtime.ValueRootSlice{
-            .{ .borrowed = input_args },
-        };
-        var source_frame = core.runtime.ValueRootFrame{ .slices = &source_slices };
-        source_frame.activate(ctx.runtime);
-        defer source_frame.deactivate(ctx.runtime);
-        args_buffer = try core.runtime.ValueRootBuffer.initCopy(ctx.runtime, input_args);
-        args = args_buffer.values;
-    }
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &this_value },
-        .{ .value = &callee },
-    };
-    var root_slices = [_]core.runtime.ValueRootSlice{
-        .{ .mutable = &args },
-    };
-    var root_frame = core.runtime.ValueRootFrame{
-        .values = &root_values,
-        .slices = &root_slices,
-    };
-    root_frame.activate(ctx.runtime);
-    defer root_frame.deactivate(ctx.runtime);
-
-    if (thisObject(callee)) |proxy| {
-        if (proxy.proxyTarget() != null and object_ops.proxyTargetIsCallable(callee)) {
-            return object_ops.callProxyApply(ctx, output, global orelse return error.TypeError, callee, proxy, this_value, args, null, null);
-        }
-    }
-    const object = expectCallableObject(callee) orelse return error.TypeError;
-    if (object.class_id == core.class.ids.bound_function) {
-        return callBoundFunction(ctx, output, global, globals, object, args);
-    }
-    if (try promiseResolvingFunctionCall(ctx.runtime, object, args)) |value| return value;
-    if (try promiseCapabilityExecutorCall(ctx.runtime, object, args)) |value| return value;
-    if (try promiseCombinatorElementCall(ctx, output, global, globals, object, args)) |value| return value;
-    if (object.class_id == core.class.ids.c_function_data or core.class.isAsyncFunctionResumeClass(object.class_id)) {
-        const tag = if (core.class.isAsyncFunctionResumeClass(object.class_id))
-            core.host_function.InternalCallableTag.async_function_resume
-        else
-            object.internalCallableTag();
-        if (tag != .none) {
-            const active_global = global orelse ctx.global orelse return error.TypeError;
-            if (try call_runtime.callInternalCallableByTag(ctx, output, active_global, object, tag, args, null, null)) |value| return value;
-        }
-    }
-    if (object.hostFunctionKind()) |kind| {
-        const record = hostFunctionRecordFromId(kind) orelse return error.TypeError;
-        return callHostFunction(ctx, output, global, globals, object, this_value, args, record, .{});
-    }
-    if (core.class.isBytecodeFunctionClass(object.class_id)) {
-        return call_runtime.callValueOrBytecodeRoot(ctx, output, global orelse return error.TypeError, this_value, callee, args, null, null);
-    }
-    if (object.class_id == core.class.ids.c_closure) {
-        return callWithThis(ctx.runtime, callee, this_value, args, globals) catch |err| switch (err) {
-            else => err,
-        };
-    }
-    return callNativeBuiltin(ctx, output, global, globals, this_value, object, args);
-}
-
 // Engine-internal host callables dispatched by id. Host/embedder native
 // functions never extend this enum: they are `NativeEntry`s (zjs.native).
 // The id values are frozen; gaps left by the deleted legacy qjs:std/qjs:os
@@ -378,12 +265,6 @@ fn defineNumberConstantPropertyAssumingNew(rt: *core.JSRuntime, object: *core.Ob
     try object.defineOwnPropertyAssumingNew(rt, key, core.Descriptor.data(value_ops.numberToValue(value), .none));
 }
 
-fn promiseObjectFromValue(value: core.JSValue) ?*core.Object {
-    const object = thisObject(value) orelse return null;
-    if (object.class_id != core.class.ids.promise) return null;
-    return object;
-}
-
 pub fn expectCallableObject(value: core.JSValue) ?*core.Object {
     const header = value.refHeader() orelse return null;
     if (!value.is(.object)) return null;
@@ -392,191 +273,14 @@ pub fn expectCallableObject(value: core.JSValue) ?*core.Object {
         object.class_id != core.class.ids.c_function_data and
         !core.class.isAsyncFunctionResumeClass(object.class_id) and
         !core.class.isBytecodeFunctionClass(object.class_id) and
-        object.class_id != core.class.ids.c_closure and
         object.class_id != core.class.ids.bound_function) return null;
     return object;
 }
-
-fn promiseResolvingFunctionCall(rt: *core.JSRuntime, function_object: *core.Object, args: []const core.JSValue) !?core.JSValue {
-    const target_value = function_object.functionPromiseResolvingTarget() orelse return null;
-    const target = thisObject(target_value) orelse return core.JSValue.undefinedValue();
-    if (target.class_id != core.class.ids.promise) return core.JSValue.undefinedValue();
-    if (target.promiseResult() != null) return core.JSValue.undefinedValue();
-    const reject = function_object.functionPromiseResolvingReject();
-    const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    try target.setPromiseResult(rt, value);
-    target.promiseIsRejectedSlot().* = reject;
-    return core.JSValue.undefinedValue();
-}
-
-fn promiseCapabilityExecutorCall(rt: *core.JSRuntime, function_object: *core.Object, args: []const core.JSValue) !?core.JSValue {
-    const slot_value = function_object.functionPromiseCapabilitySlot() orelse return null;
-    const slot = thisObject(slot_value) orelse return error.TypeError;
-    const current_resolve = slot.promiseCapabilityResolve();
-    const current_reject = slot.promiseCapabilityReject();
-    if ((current_resolve != null and !current_resolve.?.is(.undefined_value)) or
-        (current_reject != null and !current_reject.?.is(.undefined_value)))
-    {
-        return error.TypeError;
-    }
-    const resolve = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const reject = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    try slot.setPromiseCapability(rt, resolve, reject);
-    return core.JSValue.undefinedValue();
-}
-
-const PromiseCombinatorCallbackMode = enum(u8) {
-    all_resolve = 1,
-    all_settled_fulfill = 2,
-    all_settled_reject = 3,
-    any_reject = 4,
-};
-
-fn promiseCombinatorElementCall(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []globals_mod.Slot,
-    function_object: *core.Object,
-    args: []const core.JSValue,
-) HostError!?core.JSValue {
-    const mode: PromiseCombinatorCallbackMode = switch (function_object.functionPromiseCombinatorMode()) {
-        0 => return null,
-        @intFromEnum(PromiseCombinatorCallbackMode.all_resolve) => .all_resolve,
-        @intFromEnum(PromiseCombinatorCallbackMode.all_settled_fulfill) => .all_settled_fulfill,
-        @intFromEnum(PromiseCombinatorCallbackMode.all_settled_reject) => .all_settled_reject,
-        @intFromEnum(PromiseCombinatorCallbackMode.any_reject) => .any_reject,
-        else => return error.TypeError,
-    };
-    if (function_object.functionPromiseCombinatorCalled()) return core.JSValue.undefinedValue();
-    (try function_object.functionPromiseCombinatorCalledSlot(ctx.runtime)).* = true;
-
-    const state_value = function_object.functionPromiseCombinatorState() orelse return error.TypeError;
-    const state = thisObject(state_value) orelse return error.TypeError;
-    const values_value = state.promiseCombinatorValues() orelse return error.TypeError;
-    const values = thisObject(values_value) orelse return error.TypeError;
-    const index = function_object.functionPromiseCombinatorIndex();
-    const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-
-    switch (mode) {
-        .all_resolve => try setArrayIndex(ctx.runtime, values, index, value),
-        .all_settled_fulfill, .all_settled_reject => {
-            const record = try createPromiseSettlementRecord(ctx.runtime, mode == .all_settled_reject, value);
-            try setArrayIndex(ctx.runtime, values, index, record);
-        },
-        .any_reject => try setArrayIndex(ctx.runtime, values, index, value),
-    }
-
-    const remaining = state.promiseCombinatorRemaining();
-    const next_remaining = remaining - 1;
-    (try state.promiseCombinatorRemainingSlot(ctx.runtime)).* = next_remaining;
-    if (next_remaining != 0) return core.JSValue.undefinedValue();
-
-    const resolve_value = state.promiseCombinatorResolve() orelse return error.TypeError;
-    const reject_value = state.promiseCombinatorReject() orelse return error.TypeError;
-    switch (mode) {
-        .all_resolve, .all_settled_fulfill, .all_settled_reject => {
-            _ = try callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, core.JSValue.undefinedValue(), resolve_value, &.{values_value});
-        },
-        .any_reject => {
-            const aggregate_error = try createPromiseAggregateError(ctx.runtime, try activeGlobalObject(ctx.runtime, global, globals), values);
-            _ = try callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, core.JSValue.undefinedValue(), reject_value, &.{aggregate_error});
-        },
-    }
-    return core.JSValue.undefinedValue();
-}
-
-const PromiseCapability = struct {
-    promise: core.JSValue,
-    resolve: core.JSValue,
-    reject: core.JSValue,
-};
 
 pub fn activeGlobalObject(_: *core.JSRuntime, global: ?*core.Object, globals: []globals_mod.Slot) !?*core.Object {
     if (global) |global_object| return global_object;
     const global_value = globals_mod.getByAtom(globals, core.atom.ids.globalThis);
     return thisObject(global_value);
-}
-
-fn createPromiseBuiltinFunction(rt: *core.JSRuntime, global: ?*core.Object, name: []const u8, length: i32) !core.JSValue {
-    const global_object = global orelse return error.InvalidBuiltinRegistry;
-    const function_proto = object_ops.functionPrototypeFromGlobal(rt, global_object) orelse return error.InvalidBuiltinRegistry;
-    return core.function.nativeDataFunctionWithPrototype(rt, function_proto, name, length);
-}
-
-fn createPromiseCapability(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []globals_mod.Slot,
-    constructor_value: core.JSValue,
-    constructor_object: *core.Object,
-) !PromiseCapability {
-    var promise_val = core.JSValue.undefinedValue();
-    var resolve_val = core.JSValue.undefinedValue();
-    var reject_val = core.JSValue.undefinedValue();
-    var capability_slot_val = core.JSValue.undefinedValue();
-    var executor_val = core.JSValue.undefinedValue();
-
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &promise_val },
-        .{ .value = &resolve_val },
-        .{ .value = &reject_val },
-        .{ .value = &capability_slot_val },
-        .{ .value = &executor_val },
-    };
-    var root_frame = core.runtime.ValueRootFrame{
-        .values = &root_values,
-    };
-    root_frame.activate(ctx.runtime);
-    defer root_frame.deactivate(ctx.runtime);
-
-    if (try constructorNameEql(ctx.runtime, constructor_object, "Promise")) {
-        const active_global = try activeGlobalObject(ctx.runtime, global, globals);
-        promise_val = try core.promise.constructWithPrototype(ctx, constructorPrototype(ctx.runtime, constructor_object));
-        resolve_val = try createPromiseBuiltinFunction(ctx.runtime, active_global, "", 1);
-        reject_val = try createPromiseBuiltinFunction(ctx.runtime, active_global, "", 1);
-        const resolve_object = thisObject(resolve_val) orelse return error.TypeError;
-        const reject_object = thisObject(reject_val) orelse return error.TypeError;
-        try resolve_object.setInternalCallableTag(ctx.runtime, .promise_resolving);
-        try resolve_object.setFunctionPromiseResolvingTarget(ctx.runtime, promise_val);
-        (try resolve_object.functionPromiseResolvingRejectSlot(ctx.runtime)).* = false;
-        try reject_object.setInternalCallableTag(ctx.runtime, .promise_resolving);
-        try reject_object.setFunctionPromiseResolvingTarget(ctx.runtime, promise_val);
-        (try reject_object.functionPromiseResolvingRejectSlot(ctx.runtime)).* = true;
-        return .{
-            .promise = promise_val,
-            .resolve = resolve_val,
-            .reject = reject_val,
-        };
-    }
-
-    const active_global = try activeGlobalObject(ctx.runtime, global, globals);
-    const capability_slot = try core.Object.create(ctx.runtime, core.class.ids.object, null);
-    capability_slot_val = capability_slot.value();
-
-    executor_val = try createPromiseBuiltinFunction(ctx.runtime, active_global, "", 2);
-    const executor_object = thisObject(executor_val) orelse return error.TypeError;
-    try executor_object.setInternalCallableTag(ctx.runtime, .promise_capability_executor);
-    try executor_object.setFunctionPromiseCapabilitySlot(ctx.runtime, capability_slot_val);
-
-    const instance = try core.Object.create(ctx.runtime, core.class.ids.object, constructorPrototype(ctx.runtime, constructor_object));
-    promise_val = instance.value();
-
-    const call_result = try callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, promise_val, constructor_value, &.{executor_val});
-    if (call_result.is(.object)) {
-        const next_promise_val = call_result;
-        promise_val = next_promise_val;
-    }
-
-    resolve_val = if (capability_slot.promiseCapabilityResolve()) |stored| stored else core.JSValue.undefinedValue();
-    reject_val = if (capability_slot.promiseCapabilityReject()) |stored| stored else core.JSValue.undefinedValue();
-    if (!isCallableObjectValue(resolve_val) or !isCallableObjectValue(reject_val)) return error.TypeError;
-    return .{
-        .promise = promise_val,
-        .resolve = resolve_val,
-        .reject = reject_val,
-    };
 }
 
 fn installTestStandardRealm(ctx: *core.JSContext) !*core.Object {
@@ -593,32 +297,29 @@ fn installTestStandardRealm(ctx: *core.JSContext) !*core.Object {
     return global;
 }
 
-test "createPromiseCapability roots builtin promise capability under GC" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt, .{});
-    defer ctx.destroy();
-
-    const global = try installTestStandardRealm(ctx);
-
-    const constructor_value = try core.function.nativeFunction(ctx, "Promise", 1);
-    const constructor = thisObject(constructor_value) orelse return error.TypeError;
-
-    const old_threshold = rt.gcThreshold();
-    rt.setGCThreshold(0);
-    defer rt.setGCThreshold(old_threshold);
-
-    const capability = try createPromiseCapability(ctx, null, global, &.{}, constructor_value, constructor);
-
-    const promise = promiseObjectFromValue(capability.promise) orelse return error.TypeError;
-    const resolve_object = thisObject(capability.resolve) orelse return error.TypeError;
-    const reject_object = thisObject(capability.reject) orelse return error.TypeError;
-    try std.testing.expect(resolve_object.functionPromiseResolvingTarget().?.same(promise.value()));
-    try std.testing.expect(reject_object.functionPromiseResolvingTarget().?.same(promise.value()));
-    try std.testing.expect(!resolve_object.functionPromiseResolvingReject());
-    try std.testing.expect(reject_object.functionPromiseResolvingReject());
-
-    _ = rt.runObjectCycleRemoval();
+/// [[Call]] a getter/setter/toString only when a Realm global is available.
+/// No-global accessors are data-plane leftovers: they must not [[Call]] JS (KD20).
+fn callWithRealmGlobal(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: ?*core.Object,
+    globals: []globals_mod.Slot,
+    this_value: core.JSValue,
+    callee: core.JSValue,
+    args: []const core.JSValue,
+) HostError!core.JSValue {
+    const active_global = (try activeGlobalObject(ctx.runtime, global, globals)) orelse
+        return error.InvalidBuiltinRegistry;
+    return call_runtime.callValueOrBytecodeSyncInternalOutlined(
+        ctx,
+        output,
+        active_global,
+        this_value,
+        callee,
+        args,
+        null,
+        null,
+    );
 }
 
 pub fn getValuePropertyViaGlobalSlots(
@@ -639,12 +340,8 @@ pub fn getValuePropertyViaGlobalSlots(
             .generic => core.JSValue.undefinedValue(),
             .accessor => if (desc.getter.is(.undefined_value))
                 core.JSValue.undefinedValue()
-            else blk: {
-                if (try activeGlobalObject(ctx.runtime, global, globals)) |active_global| {
-                    break :blk try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, active_global, receiver_value, desc.getter, &.{}, null, null);
-                }
-                break :blk try callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, receiver_value, desc.getter, &.{});
-            },
+            else
+                try callWithRealmGlobal(ctx, output, global, globals, receiver_value, desc.getter, &.{}),
         };
     }
     return core.JSValue.undefinedValue();
@@ -677,142 +374,6 @@ fn hasOwnPropertyProxyAware(
         return desc != null;
     }
     return object.hasOwnProperty(key);
-}
-
-fn setArrayIndex(rt: *core.JSRuntime, array: *core.Object, index: u32, value: core.JSValue) !void {
-    try array.defineOwnProperty(rt, core.Atom.taggedInt(index), core.Descriptor.data(value, .all));
-    if (array.arrayLength() <= index) array.setArrayLength(index + 1);
-}
-
-/// Leftover Promise.allSettled record mint. `promise_ops.promiseSettlementRecord`
-/// is the same walk (defineValueProperty == defineObjectProperty). Keep one
-/// outlined copy; do not fold other combinator callbacks.
-pub noinline fn createPromiseSettlementRecord(rt: *core.JSRuntime, rejected: bool, payload: core.JSValue) !core.JSValue {
-    var rooted_payload = payload;
-    var root_frame = core.runtime.rootValues(.{&rooted_payload});
-    root_frame.activate(rt);
-    defer root_frame.deactivate(rt);
-
-    const record = try core.Object.create(rt, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(rt, record.gcHeader());
-    const status = try value_ops.createStringValue(rt, if (rejected) "rejected" else "fulfilled");
-    try defineObjectProperty(rt, record, core.atom.ids.status, status);
-    try defineObjectProperty(rt, record, if (rejected) core.atom.ids.reason else core.atom.ids.value, rooted_payload);
-    return record.value();
-}
-
-test "createPromiseSettlementRecord roots direct symbol payload while defining status" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-call-promise-settlement-record-symbol");
-    const old_threshold = rt.gcThreshold();
-    rt.setGCThreshold(0);
-    defer rt.setGCThreshold(old_threshold);
-
-    const payload_value = try rt.takeSymbolValue(symbol_atom);
-    const record_value = try createPromiseSettlementRecord(rt, false, payload_value);
-    const record = thisObject(record_value) orelse return error.TypeError;
-
-    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    const value_atom = try rt.internAtom("value");
-    {
-        const value = try record.getProperty(value_atom);
-        try std.testing.expect(value.same(payload_value));
-    }
-
-    _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(rt.atoms.name(symbol_atom) == null);
-}
-
-fn createPromiseAggregateError(rt: *core.JSRuntime, global: ?*core.Object, errors: *core.Object) !core.JSValue {
-    var prototype: ?*core.Object = null;
-    if (global) |global_object| {
-        const ctor_key = core.atom.ids.AggregateError;
-        const ctor_value = try global_object.getProperty(ctor_key);
-        if (thisObject(ctor_value)) |ctor_object| {
-            prototype = constructorPrototype(rt, ctor_object);
-        }
-    }
-    const instance = try core.Object.create(rt, core.class.ids.error_, prototype);
-    errdefer core.Object.destroyFromHeader(rt, instance.gcHeader());
-    const name_value = try value_ops.createStringValue(rt, "AggregateError");
-    try defineObjectProperty(rt, instance, core.atom.ids.name, name_value);
-    try defineObjectProperty(rt, instance, core.atom.ids.errors, errors.value());
-    return instance.value();
-}
-
-fn createPromiseCombinatorState(
-    rt: *core.JSRuntime,
-    resolve_value: core.JSValue,
-    reject_value: core.JSValue,
-    values: *core.Object,
-) !*core.Object {
-    var rooted_resolve = resolve_value;
-    var rooted_reject = reject_value;
-    var rooted_values = values.value();
-    var root_frame = core.runtime.rootValues(.{ &rooted_resolve, &rooted_reject, &rooted_values });
-    root_frame.activate(rt);
-    defer root_frame.deactivate(rt);
-
-    const state = try core.Object.create(rt, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(rt, state.gcHeader());
-    try state.setPromiseCombinatorResolve(rt, rooted_resolve);
-    try state.setPromiseCombinatorReject(rt, rooted_reject);
-    try state.setPromiseCombinatorValues(rt, rooted_values);
-    (try state.promiseCombinatorRemainingSlot(rt)).* = 1;
-    return state;
-}
-
-test "createPromiseCombinatorState roots direct function bytecode resolve while creating state" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-
-    const values = try core.Object.create(rt, core.class.ids.array, null);
-
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-combinator-state-resolve-bytecode-symbol");
-    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{ .cpool_count = 1 }, &.{try rt.takeSymbolValue(symbol_atom)});
-
-    const resolve_value = core.JSValue.functionBytecode(&fb.header);
-
-    const old_threshold = rt.gcThreshold();
-    rt.setGCThreshold(0);
-    defer rt.setGCThreshold(old_threshold);
-
-    const state = try createPromiseCombinatorState(rt, resolve_value, core.JSValue.undefinedValue(), values);
-    var state_alive = true;
-    defer if (state_alive) core.Object.destroyFromHeader(rt, state.gcHeader());
-
-    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
-    const stored = state.promiseCombinatorResolve() orelse return error.TypeError;
-    try std.testing.expect(stored.same(resolve_value));
-
-    // The zero threshold opened an incremental mark while constructing the
-    // state. This test deliberately bypasses normal tracer ownership with a
-    // direct destructor below, so first close that epoch and drain the entry
-    // which may name `state`; freeing it while queued is exactly the O2-B
-    // raw-pointer lifetime violation.
-    rt.gc.abortCycle();
-    core.Object.destroyFromHeader(rt, state.gcHeader());
-    state_alive = false;
-    _ = rt.runObjectCycleRemoval();
-    try std.testing.expect(rt.atoms.name(symbol_atom) == null);
-}
-
-fn callNativeBuiltin(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []globals_mod.Slot,
-    this_value: core.JSValue,
-    function_object: *core.Object,
-    args: []const core.JSValue,
-) HostError!core.JSValue {
-    if (try callNativeFunctionRecord(ctx, output, global, globals, this_value, function_object, args, null, null)) |value| return value;
-    // Every dispatchable builtin is reachable through the integer
-    // record mechanism; the legacy string-name chain that used to live
-    // here was measured cold and removed.
-    return error.TypeError;
 }
 
 pub fn callNativeFunctionRecord(
@@ -942,14 +503,9 @@ const ValueSliceRoot = array_ops.ValueSliceRoot;
 // needs the standard-global installer registered first; the bootstrap-integration
 // tests live in the test tree so they exercise the public setup seam.
 
-/// Bare-runtime (no realm global) `Object.*` static fallback. Reached via the
-/// `.object` native-record handler in `exec/object_ops.zig` when the
-/// host record path supplies no realm global; the realm path takes the
-/// realm-path Object.* implementations in the same owner file. Stays in call.zig because
-/// it leans on the shared call.zig property/descriptor helper web
-/// (`expectObjectArg`, `descriptorFromObjectBare`, `objectStaticToObjectValue`, ...)
-/// that the rest of this file owns — the BOTH split keeps the core here and the
-/// thin dispatch entry in the Object native-record owner.
+/// Bare-runtime (no realm global) `Object.*` data-plane fallback. JS Object
+/// methods go through `.object` / `objectCallForNativeRecord`; this arm only
+/// reads own data descriptors. Accessors do not [[Call]] getters.
 pub fn callObjectStatic(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -1189,7 +745,7 @@ fn objectAssignGet(
         .generic => core.JSValue.undefinedValue(),
         .accessor => {
             if (desc.getter.is(.undefined_value)) return core.JSValue.undefinedValue();
-            return callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, receiver, desc.getter, &.{});
+            return callWithRealmGlobal(ctx, output, global, globals, receiver, desc.getter, &.{});
         },
     };
 }
@@ -1208,7 +764,7 @@ fn objectAssignSet(
         switch (desc.kind) {
             .accessor => {
                 if (desc.setter.is(.undefined_value)) return error.TypeError;
-                _ = try callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, target_value, desc.setter, &.{value});
+                _ = try callWithRealmGlobal(ctx, output, global, globals, target_value, desc.setter, &.{value});
                 return;
             },
             .data => {
@@ -1223,7 +779,7 @@ fn objectAssignSet(
                 switch (desc.kind) {
                     .accessor => {
                         if (desc.setter.is(.undefined_value)) return error.TypeError;
-                        _ = try callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, target_value, desc.setter, &.{value});
+                        _ = try callWithRealmGlobal(ctx, output, global, globals, target_value, desc.setter, &.{value});
                         return;
                     },
                     .data => {
@@ -1264,10 +820,8 @@ fn objectIsFrozen(rt: *core.JSRuntime, object: *core.Object) !bool {
     return true;
 }
 
-/// Bare-runtime (no realm global) `Object.prototype.*` fallback, dispatched by
-/// the `prototypeMethodOrdinal` mapping. Like `callObjectStatic`, this is the
-/// `global == null` branch of the `.object` domain record handler and stays in
-/// call.zig alongside the shared property helpers it depends on.
+/// Bare-runtime (no realm global) `Object.prototype.*` data-plane fallback.
+/// `toLocaleString` [[Call]]s `toString` and therefore needs a Realm global.
 pub fn objectPrototypeMethodCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -1284,7 +838,7 @@ pub fn objectPrototypeMethodCall(
             const receiver_value = try objectStaticToObjectValue(ctx, global, this_value);
             const receiver = try expectObjectArg(receiver_value);
             const method_value = try receiver.getProperty(to_string_key);
-            return callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, receiver_value, method_value, &.{});
+            return callWithRealmGlobal(ctx, output, global, globals, receiver_value, method_value, &.{});
         },
         3 => objectPrototypeValueOf(ctx, global, this_value),
         4 => objectPrototypeHasOwn(ctx, global, this_value, args),
@@ -1385,7 +939,6 @@ pub fn isCallableObjectValue(value: core.JSValue) bool {
     return object.class_id == core.class.ids.c_function or
         object.class_id == core.class.ids.c_function_data or
         core.class.isAsyncFunctionResumeClass(object.class_id) or
-        object.class_id == core.class.ids.c_closure or
         object.class_id == core.class.ids.bound_function or
         core.class.isBytecodeFunctionClass(object.class_id);
 }
@@ -1584,12 +1137,12 @@ test "createBoundFunction roots bound this and args while creating function" {
     try std.testing.expect(rt.atoms.name(arg_atom) == null);
 }
 
-test "callValueWithThisGlobalsAndGlobal roots inline args before bound argument merge" {
+test "callValueOrBytecodeRoot roots inline args before bound argument merge" {
     const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
-    _ = try installTestStandardRealm(ctx);
+    const global = try installTestStandardRealm(ctx);
 
     const target = try core.function.nativeFunction(ctx, "get [Symbol.species]", 0);
     const target_object = thisObject(target) orelse return error.TypeError;
@@ -1645,14 +1198,15 @@ test "callValueWithThisGlobalsAndGlobal roots inline args before bound argument 
         rt.memory.trigger_gc_ctx = saved_trigger_ctx;
     }
 
-    _ = try callValueWithThisGlobalsAndGlobal(
+    _ = try call_runtime.callValueOrBytecodeRoot(
         ctx,
         null,
-        null,
-        globals[0..],
+        global,
         core.JSValue.undefinedValue(),
         bound_value,
         &args,
+        null,
+        null,
     );
     rt.memory.trigger_gc_fn = saved_trigger_fn;
     rt.memory.trigger_gc_ctx = saved_trigger_ctx;
@@ -1664,16 +1218,24 @@ test "callValueWithThisGlobalsAndGlobal roots inline args before bound argument 
     try std.testing.expect(rt.atoms.name(arg_atom) == null);
 }
 
-test "callValueWithThisGlobalsAndGlobal roots overflow args across the copy allocation" {
+test "callValueOrBytecodeRoot roots overflow args across the copy allocation" {
     const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
-    _ = try installTestStandardRealm(ctx);
+    const global = try installTestStandardRealm(ctx);
 
-    // Closure kind 17 echoes `args[0]` back, so the callee has to read the
+    // Native identity echoes `args[0]` back, so the callee has to read the
     // window the helper handed it -- not the caller's original slice.
-    var callee = try create(rt, .identity);
+    const Identity = struct {
+        fn call(_: *core.JSContext, _: core.JSValue, call_args: []const core.JSValue) HostError!core.JSValue {
+            if (call_args.len < 1) return error.TypeError;
+            return call_args[0];
+        }
+    };
+    const entry = try rt.allocNativeEntry(builtin_dispatch.genericEntry(&Identity.call, 1));
+    var callee = try core.function.nativeFunction(ctx, "identity", 1);
+    (try core.Object.expect(callee)).installNativeEntry(entry);
 
     // Strictly above the 8-slot inline buffer: this is the `initCopy` arm, and
     // `initCopy` allocates, which is a collection point.
@@ -1739,15 +1301,15 @@ test "callValueWithThisGlobalsAndGlobal roots overflow args across the copy allo
         rt.memory.trigger_gc_ctx = saved_trigger_ctx;
     }
 
-    var globals = [_]globals_mod.Slot{};
-    const result = try callValueWithThisGlobalsAndGlobal(
+    const result = try call_runtime.callValueOrBytecodeRoot(
         ctx,
         null,
-        null,
-        globals[0..],
+        global,
         core.JSValue.undefinedValue(),
         callee,
         args[0..],
+        null,
+        null,
     );
     rt.memory.trigger_gc_fn = saved_trigger_fn;
     rt.memory.trigger_gc_ctx = saved_trigger_ctx;
@@ -1761,21 +1323,6 @@ test "callValueWithThisGlobalsAndGlobal roots overflow args across the copy allo
         try std.testing.expect(rt.atoms.name(atom_id) != null);
         try std.testing.expectEqual(atom_id, arg.asSymbolAtom() orelse return error.TestUnexpectedResult);
     }
-}
-
-fn callBoundFunction(
-    ctx: *core.JSContext,
-    output: ?*std.Io.Writer,
-    global: ?*core.Object,
-    globals: []globals_mod.Slot,
-    object: *core.Object,
-    args: []const core.JSValue,
-) HostError!core.JSValue {
-    const target = object.boundTarget() orelse return error.TypeError;
-    const bound_this = object.boundThis() orelse return error.TypeError;
-    const combined = try call_runtime.boundFunctionArgs(ctx.runtime, object, args);
-    defer call_runtime.freeArgs(ctx.runtime, combined);
-    return callValueWithThisGlobalsAndGlobal(ctx, output, global, globals, bound_this, target, combined);
 }
 
 fn objectToString(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
@@ -1805,7 +1352,6 @@ fn defaultObjectTag(object: *core.Object) []const u8 {
         core.class.ids.c_function_data,
         core.class.ids.async_function_resolve,
         core.class.ids.async_function_reject,
-        core.class.ids.c_closure,
         => "[object Function]",
         core.class.ids.map => "[object Map]",
         core.class.ids.set => "[object Set]",
@@ -2115,13 +1661,6 @@ pub fn thisObject(value: core.JSValue) ?*core.Object {
     return core.Object.fromHeader(header);
 }
 
-const constructorNameEql = call_runtime.constructorNameEqlLocal;
-
-pub fn constructorPrototype(rt: *core.JSRuntime, object: *core.Object) ?*core.Object {
-    _ = rt;
-    return object.getOwnDataObjectBorrowed(core.atom.ids.prototype);
-}
-
 fn hostOutputValues(
     ctx: *core.JSContext,
     global: *core.Object,
@@ -2403,8 +1942,7 @@ fn isFunctionClass(class_id: core.ClassId) bool {
         core.class.isBytecodeFunctionClass(class_id) or
         class_id == core.class.ids.bound_function or
         class_id == core.class.ids.c_function_data or
-        core.class.isAsyncFunctionResumeClass(class_id) or
-        class_id == core.class.ids.c_closure;
+        core.class.isAsyncFunctionResumeClass(class_id);
 }
 
 test "four-class bytecode callable consumers accept every class" {
@@ -2516,158 +2054,6 @@ pub fn evalGlobalScriptSource(
     }
     return result;
 }
-
-
-// ----- merged from closure.zig -----
-// Synthetic `c_closure` callback fixtures for collection adapters and tests.
-//
-// A fixture object stores its `Kind` and a small integer state as ordinary
-// properties; call arguments and global slots are borrowed, while returned
-// heap values carry an owned reference. This is not bytecode closure
-// construction, which lives in the core function representation and the VM
-// call machinery; the fixtures are dispatched through this file and
-// `collection_ops.zig`.
-pub const Kind = enum(i32) {
-    /// Returns its counter, incremented on every (argument-less) call.
-    counter = 2,
-    throws_type_error = 7,
-    throws_exception = 12,
-    returns_undefined = 13,
-    /// Returns its first argument.
-    identity = 17,
-    /// Rewrites the global `map` entry for key 1 to "mutated", then throws.
-    mutates_map_key1_then_throws = 38,
-    /// Rewrites the global `map` entry for key 3 to "mutated", then throws.
-    mutates_map_key3_then_throws = 39,
-};
-pub fn create(rt: *core.JSRuntime, kind: Kind) !core.JSValue {
-    const object = try core.Object.create(rt, core.class.ids.c_closure, null);
-    errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
-    try defineIntProperty(rt, object, "__closure_kind", @intFromEnum(kind));
-    try defineIntProperty(rt, object, "__closure_value", 0);
-    return object.value();
-}
-
-pub fn callCClosure(rt: *core.JSRuntime, closure_value: core.JSValue, args: []const core.JSValue, globals: []globals_mod.Slot) !core.JSValue {
-    return callWithThis(rt, closure_value, core.JSValue.undefinedValue(), args, globals);
-}
-
-pub fn callWithThis(rt: *core.JSRuntime, closure_value: core.JSValue, this_value: core.JSValue, args: []const core.JSValue, globals: []globals_mod.Slot) !core.JSValue {
-    _ = this_value;
-    const closure = try expectClosure(closure_value);
-    const kind = std.enums.fromInt(Kind, try getIntProperty(rt, closure, "__closure_kind")) orelse return error.TypeError;
-    switch (kind) {
-        .counter => {
-            if (args.len != 0) return error.TypeError;
-            const value = try getIntProperty(rt, closure, "__closure_value") + 1;
-            try defineIntProperty(rt, closure, "__closure_value", value);
-            return core.JSValue.int32(value);
-        },
-        .throws_type_error => return error.TypeError,
-        .throws_exception => return error.JSException,
-        .returns_undefined => return core.JSValue.undefinedValue(),
-        .identity => {
-            if (args.len < 1) return error.TypeError;
-            return args[0];
-        },
-        .mutates_map_key1_then_throws => {
-            try setGlobalMapString(rt, globals, 1, "mutated");
-            return error.JSException;
-        },
-        .mutates_map_key3_then_throws => {
-            try setGlobalMapString(rt, globals, 3, "mutated");
-            return error.JSException;
-        },
-    }
-}
-
-fn expectClosure(value: core.JSValue) !*core.Object {
-    const header = value.refHeader() orelse return error.TypeError;
-    if (!value.is(.object)) return error.TypeError;
-    const closure = core.Object.fromHeader(header);
-    if (closure.class_id != core.class.ids.c_closure) return error.TypeError;
-    return closure;
-}
-
-fn defineIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8, value: i32) !void {
-    const key = try rt.internAtom(name);
-    try object.defineOwnProperty(rt, key, core.Descriptor.data(core.JSValue.int32(value), .all));
-}
-
-fn getIntProperty(rt: *core.JSRuntime, object: *core.Object, name: []const u8) !i32 {
-    const key = try rt.internAtom(name);
-    const value = try object.getProperty(key);
-    return value.as(.int) orelse error.TypeError;
-}
-
-fn setGlobalMapString(rt: *core.JSRuntime, globals: []globals_mod.Slot, key_int: i32, bytes: []const u8) !void {
-    const map_value = try globals_mod.getByName(rt, globals, "map");
-    const map_object = try expectObject(map_value);
-    if (map_object.class_id == core.class.ids.weakmap) return setGlobalWeakMapString(rt, globals, map_object, key_int, bytes);
-    if (map_object.class_id != core.class.ids.map) return error.TypeError;
-    const key = core.JSValue.int32(key_int);
-    const value = try value_ops.createStringValue(rt, bytes);
-    for (map_object.collectionEntriesSlot().items) |*entry| {
-        if (!entry.active) continue;
-        if (entry.key.as(.int) == key_int) {
-            const next_value = value;
-            entry.value = next_value;
-            return;
-        }
-    }
-    try appendUnindexedCollectionEntryAndDefineSize(rt, map_object, .{ .key = key, .value = value, .active = true });
-}
-
-fn setGlobalWeakMapString(rt: *core.JSRuntime, globals: []globals_mod.Slot, map_object: *core.Object, key_int: i32, bytes: []const u8) !void {
-    var key_name_buf: [32]u8 = undefined;
-    const key_name = std.fmt.bufPrint(&key_name_buf, "obj{d}", .{key_int}) catch unreachable;
-    var key_value = try globals_mod.getByName(rt, globals, key_name);
-    if (key_value.is(.undefined_value)) {
-        key_value = try getGlobalObjectProperty(rt, globals, key_name);
-    }
-    const value = try value_ops.createStringValue(rt, bytes);
-    try core.collection.setWeakMapEntry(rt, map_object, key_value, value);
-}
-
-fn getGlobalObjectProperty(rt: *core.JSRuntime, globals: []globals_mod.Slot, name: []const u8) !core.JSValue {
-    const global = try getGlobalThisObject(rt, globals);
-    const key = try rt.internAtom(name);
-    return try global.getProperty(key);
-}
-
-fn getGlobalThisObject(rt: *core.JSRuntime, globals: []globals_mod.Slot) !*core.Object {
-    const global_value = try globals_mod.getByName(rt, globals, "globalThis");
-    const header = global_value.refHeader() orelse return error.TypeError;
-    if (!global_value.is(.object)) return error.TypeError;
-    return core.Object.fromHeader(header);
-}
-
-fn appendUnindexedCollectionEntryAndDefineSize(rt: *core.JSRuntime, object: *core.Object, entry: core.object.CollectionEntry) !void {
-    const pending_entry = entry;
-
-    const index = try object.appendCollectionEntryUnindexed(rt, pending_entry);
-    object.collectionActiveCountSlot().* += 1;
-
-    var inserted = true;
-    errdefer if (inserted) rollbackLastUnindexedCollectionEntry(object, index);
-
-    object.clearCollectionIndex(rt);
-    try defineIntProperty(rt, object, "size", @intCast(object.collectionActiveCount()));
-    inserted = false;
-}
-
-fn rollbackLastUnindexedCollectionEntry(object: *core.Object, index: usize) void {
-    const entries_slot = object.collectionEntriesSlot();
-    std.debug.assert(index + 1 == entries_slot.items.len);
-    if (!entries_slot.items[index].active) return;
-    entries_slot.items[index] = .{ .key = core.JSValue.undefinedValue(), .value = core.JSValue.undefinedValue(), .active = false };
-    entries_slot.items = entries_slot.items.ptr[0..index];
-    const active_count = object.collectionActiveCountSlot();
-    if (active_count.* != 0) active_count.* -= 1;
-}
-
-const expectObject = core.value_semantics.expectObject;
-
 
 // ----- merged from print_inspector.zig -----
 // CLI `print` / `console.log` value inspector: the QuickJS `JS_PrintValue`
@@ -3118,7 +2504,6 @@ fn isCallableClass(class_id: core.class.ClassId) bool {
         core.class.ids.bytecode_function,
         core.class.ids.bound_function,
         core.class.ids.c_function_data,
-        core.class.ids.c_closure,
         core.class.ids.generator_function,
         core.class.ids.async_function,
         core.class.ids.async_generator_function,

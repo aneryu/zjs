@@ -1646,15 +1646,18 @@ fn createModuleEvaluationWaiter(
     std.debug.assert(context.runtime == state.runtime);
     const waiters = state.waiterList();
     const rt = state.runtime;
-    const resolvers_value = try core.promise.withResolvers(context, exec.promise_ops.promisePrototypeFromGlobal(rt, global));
-    const resolvers = try exec.property_ops.expectObject(resolvers_value);
-    const promise_atom = core.atom.ids.promise;
-    const resolve_atom = core.atom.ids.resolve;
-    const reject_atom = core.atom.ids.reject;
+    const capability = try exec.promise_ops.internalPromiseCapability(
+        context,
+        global,
+        exec.promise_ops.promisePrototypeFromGlobal(rt, global),
+    );
+    var promise = capability.promise;
+    var resolve = capability.resolve;
+    var reject = capability.reject;
+    var root_frame = core.runtime.rootValues(.{ &promise, &resolve, &reject });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
-    const promise = try resolvers.getProperty(promise_atom);
-    const resolve = try resolvers.getProperty(resolve_atom);
-    const reject = try resolvers.getProperty(reject_atom);
     const owned_path = try state.allocator.dupe(u8, path);
     errdefer state.allocator.free(owned_path);
     var realm = core.RealmRef.retain(context);
@@ -1800,7 +1803,7 @@ pub fn createModuleAwaitReactionPromise(
     awaited: core.JSValue,
 ) !core.JSValue {
     const promise_constructor = try exec.promise_ops.promiseDefaultConstructor(context, global);
-    const awaited_promise = try exec.promise_ops.promiseStaticCall(
+    var awaited_promise = try exec.promise_ops.promiseStaticCall(
         context,
         output,
         global,
@@ -1810,16 +1813,21 @@ pub fn createModuleAwaitReactionPromise(
         null,
         null,
     );
+    var reaction_promise = core.JSValue.undefinedValue();
+    var resolve = core.JSValue.undefinedValue();
+    var reject = core.JSValue.undefinedValue();
+    var root_frame = core.runtime.rootValues(.{ &awaited_promise, &reaction_promise, &resolve, &reject });
+    root_frame.activate(runtime);
+    defer root_frame.deactivate(runtime);
 
-    const resolvers_value = try core.promise.withResolvers(context, exec.promise_ops.promisePrototypeFromGlobal(runtime, global));
-    const resolvers = try exec.property_ops.expectObject(resolvers_value);
-    const promise_atom = core.atom.ids.promise;
-    const resolve_atom = core.atom.ids.resolve;
-    const reject_atom = core.atom.ids.reject;
-
-    const reaction_promise = try resolvers.getProperty(promise_atom);
-    const resolve = try resolvers.getProperty(resolve_atom);
-    const reject = try resolvers.getProperty(reject_atom);
+    const capability = try exec.promise_ops.internalPromiseCapability(
+        context,
+        global,
+        exec.promise_ops.promisePrototypeFromGlobal(runtime, global),
+    );
+    reaction_promise = capability.promise;
+    resolve = capability.resolve;
+    reject = capability.reject;
     try exec.promise_ops.performPromiseThen(
         context,
         output,
@@ -2008,20 +2016,29 @@ fn enqueueDynamicImportJobWithAttributes(
     attributes: core.JSValue,
 ) exec.exceptions.HostError!core.JSValue {
     const rt = ctx.runtime;
-    _ = global;
-    // This function owns the incoming `attributes` reference; defineOwnProperty
-    // below dups it into the job slot, so free the original on return.
-    const resolvers_value = try core.promise.withResolvers(ctx, prototype);
-    const resolvers = try exec.property_ops.expectObject(resolvers_value);
+    var promise_value = core.JSValue.undefinedValue();
+    var resolve_value = core.JSValue.undefinedValue();
+    var reject_value = core.JSValue.undefinedValue();
+    var specifier_value = specifier;
+    var attributes_value = attributes;
+    var basename_value = core.JSValue.undefinedValue();
+    var root_frame = core.runtime.rootValues(.{
+        &promise_value,
+        &resolve_value,
+        &reject_value,
+        &specifier_value,
+        &attributes_value,
+        &basename_value,
+    });
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
 
-    const promise_atom = core.atom.ids.promise;
-    const resolve_atom = core.atom.ids.resolve;
-    const reject_atom = core.atom.ids.reject;
-    const promise_value = try resolvers.getProperty(promise_atom);
-    const resolve_value = try resolvers.getProperty(resolve_atom);
-    const reject_value = try resolvers.getProperty(reject_atom);
+    const capability = try exec.promise_ops.internalPromiseCapability(ctx, global, prototype);
+    promise_value = capability.promise;
+    resolve_value = capability.resolve;
+    reject_value = capability.reject;
 
-    const basename_value = try exec.value_ops.createStringValue(rt, referrer_path);
+    basename_value = try exec.value_ops.createStringValue(rt, referrer_path);
 
     try rt.job_queue.enqueueDynamicImport(
         ctx,
@@ -2029,8 +2046,8 @@ fn enqueueDynamicImportJobWithAttributes(
         resolve_value,
         reject_value,
         basename_value,
-        specifier,
-        attributes,
+        specifier_value,
+        attributes_value,
     );
     return promise_value;
 }

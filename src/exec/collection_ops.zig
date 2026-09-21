@@ -480,7 +480,7 @@ pub fn groupByWithCallbackHost(
     host: CallbackHost,
 ) !core.JSValue {
     if (args.len < 2) return error.TypeError;
-    if (!isCallableObject(args[1])) return error.TypeError;
+    if (!call_runtime.isCallableValue(args[1])) return error.TypeError;
 
     const map_value = try constructWithPrototype(rt, 1, prototype);
     const map = try expectObject(map_value);
@@ -836,7 +836,7 @@ fn collectionForEach(
     host: CallbackHost,
 ) !core.JSValue {
     if (object.class_id != core.class.ids.map and object.class_id != core.class.ids.set) return error.TypeError;
-    if (args.len < 1 or !isCallableObject(args[0])) return error.TypeError;
+    if (args.len < 1 or !call_runtime.isCallableValue(args[0])) return error.TypeError;
     const this_arg = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     // js_map_forEach locks the current record for the
     // duration of the callback and only then advances. zjs walks by index, so
@@ -886,7 +886,7 @@ fn mapGetOrInsertComputed(
     callback: core.JSValue,
     host: CallbackHost,
 ) !core.JSValue {
-    if (!isCallableObject(callback)) return error.TypeError;
+    if (!call_runtime.isCallableValue(callback)) return error.TypeError;
     if (object.class_id == core.class.ids.weakmap) {
         const key_identity = (try weakKeyIdentityRegister(rt, key)) orelse return error.TypeError;
         if (findWeakEntry(object, key_identity)) |index| return object.weakCollectionEntriesSlot().items[index].value;
@@ -1169,11 +1169,11 @@ fn validateSetLikeMethods(object: *core.Object) !void {
 
     const has_key = core.atom.ids.has;
     const has_value = try object.getProperty(has_key);
-    if (!isCallableClosure(has_value)) return error.TypeError;
+    if (!call_runtime.isCallableValue(has_value)) return error.TypeError;
 
     const keys_key = core.atom.ids.keys;
     const keys_value = try object.getProperty(keys_key);
-    if (!isCallableClosure(keys_value)) return error.TypeError;
+    if (!call_runtime.isCallableValue(keys_value)) return error.TypeError;
 }
 
 fn setLikeHas(rt: *core.JSRuntime, record: SetLikeRecord, key: core.JSValue, host: CallbackHost) !bool {
@@ -1184,7 +1184,7 @@ fn setLikeHas(rt: *core.JSRuntime, record: SetLikeRecord, key: core.JSValue, hos
     }
     const has_key = core.atom.ids.has;
     const has_value = try object.getProperty(has_key);
-    if (!isCallableClosure(has_value)) return error.TypeError;
+    if (!call_runtime.isCallableValue(has_value)) return error.TypeError;
     var has_args = [_]core.JSValue{key};
     const out = try host.callWithThis(has_value, object.value(), &has_args);
     return out.as(.boolean) orelse false;
@@ -1204,7 +1204,7 @@ fn setLikeKeys(rt: *core.JSRuntime, record: SetLikeRecord, host: CallbackHost) !
 
     const keys_key = core.atom.ids.keys;
     const keys_value = try object.getProperty(keys_key);
-    if (!isCallableClosure(keys_value)) return error.TypeError;
+    if (!call_runtime.isCallableValue(keys_value)) return error.TypeError;
     const iterable_value = try host.callWithThis(keys_value, object.value(), &.{});
     const iterable = try expectObject(iterable_value);
     if (iterable.isArray()) {
@@ -1371,20 +1371,6 @@ fn stringElementAt(rt: *core.JSRuntime, string_object: *core.string.String, inde
     const units = [_]u16{first};
     const out = try core.string.String.createUtf16(rt, &units);
     return out.value();
-}
-
-fn isCallableClosure(value: core.JSValue) bool {
-    if (!value.is(.object)) return false;
-    const header = value.refHeader() orelse return false;
-    const object = core.Object.fromHeader(header);
-    return object.class_id == core.class.ids.c_closure;
-}
-
-fn isCallableObject(value: core.JSValue) bool {
-    if (!value.is(.object)) return false;
-    const header = value.refHeader() orelse return false;
-    const object = core.Object.fromHeader(header);
-    return object.class_id == core.class.ids.c_closure or object.class_id == core.class.ids.c_function;
 }
 
 // Weak-collection GC sweep relocated to engine core (`core/collection.zig`) in
@@ -2306,26 +2292,35 @@ fn mapAppendGroupByValue(
 // successful heap results are owned by the caller. The explicit `JSContext`
 // is the error realm authority: ordinary engine failures become a pending JS
 // exception here, while only the seven hard/control outcomes cross the core
-// callback seam. Synthetic `c_closure` bodies live in `call.zig`; collection
-// algorithms stay in this file.
-const closure_mod = @import("call.zig");
+// callback seam. JS [[Call]] requires a Realm global (KD20); missing that is
+// `InvalidBuiltinRegistry`, not a re-entry into `c_closure`.
 pub fn callbackHost(ctx: *core.JSContext, globals: []globals_mod.Slot) CallbackHost {
     return .{
         .ctx = ctx,
         .globals = globals,
-        .call = callWithThis,
+        .call = callCallbackWithThis,
     };
 }
 
-fn callWithThis(
+fn callCallbackWithThis(
     ctx: *core.JSContext,
     callback: core.JSValue,
     this_value: core.JSValue,
     args: []const core.JSValue,
     globals: []globals_mod.Slot,
 ) CallbackError!core.JSValue {
-    return closure_mod.callWithThis(ctx.runtime, callback, this_value, args, globals) catch |err|
-        return narrowCallbackError(ctx, err);
+    const global = ctx.global orelse globalObjectFromGlobals(globals) orelse
+        return narrowCallbackError(ctx, error.InvalidBuiltinRegistry);
+    return call_runtime.callValueOrBytecodeRoot(
+        ctx,
+        null,
+        global,
+        this_value,
+        callback,
+        args,
+        null,
+        null,
+    ) catch |err| return narrowCallbackError(ctx, err);
 }
 
 fn narrowCallbackError(ctx: *core.JSContext, err: anytype) CallbackError {

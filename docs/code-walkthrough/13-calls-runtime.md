@@ -211,7 +211,7 @@ VM 调用路由。操作数窗口借用直到 `popOwnedStackRegion`；`pushOwned
 ### `callNativeCallableObject` (`src/exec/call_runtime.zig:944`)
 
 - **签名**：`noinline fn callNativeCallableObject( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, func: core.JSValue, function_object: *core.Object, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) HostError!core.JSValue`。
-- **作用**：c_function / data / bound / async resume / c_closure 的 class 分发：先记录/host/tag，名字链只做最后兼容。
+- **作用**：c_function / data / bound / async resume 的 class 分发：先记录/host/tag，名字链只做最后兼容。
 - **实现**：`vmNativeCallableDispatch`：
   - `.bound_function` → `callBoundFunction`。
   - `.resolved_record`：`preflightCFunctionCall` + `CallRealmView.caller` + `callInternalRecordDirectInRealm`；失败 `throwRuntimeErrorForGlobal` 后原样返回 err。
@@ -219,7 +219,7 @@ VM 调用路由。操作数窗口借用直到 `popOwnedStackRegion`；`pushOwned
   - `.host_function`：`callHostFunctionObjectForVm`，有值返回。
   - `.internal`：函数 Realm 上 `callInternalCallableByTag`。
   - `.name_dispatch` 以及上面未命中：`finalCallableRealmView` 后 `callNativeCallableByName`。
-- **所有权 / 错误 / 调用**：dispatch 对 c_function/data/async_function_resolve/reject/c_closure/bound。记录失败必须先挂起 JS 异常再返回 Zig err。
+- **所有权 / 错误 / 调用**：dispatch 对 c_function/data/async_function_resolve/reject/bound。记录失败必须先挂起 JS 异常再返回 Zig err。
 
 ### `callValueOrBytecodeDispatch` (`src/exec/call_runtime.zig:1006`)
 
@@ -232,14 +232,14 @@ VM 调用路由。操作数窗口借用直到 `popOwnedStackRegion`；`pushOwned
 
 - **签名**：`pub fn callValueOrBytecodeDispatchAfterInterruptPoll( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, func: core.JSValue, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, copy_argv: bool, ) HostError!core.JSValue`。
 - **作用**：权威 Call 分类（JS_CallInternal 形状）。
-- **实现**：裸 FB → `callRawFunctionBytecode`。对象：四类 bytecode → `callFunctionObjectBytecode`；callable proxy → `callProxyApply`；c_function/data/async resume/c_closure/bound → `callNativeCallableObject`。不可调用 `throwTypeErrorMessage("not a function")`。其余 `callValueWithThisGlobalsAndGlobal`。
+- **实现**：裸 FB → `callRawFunctionBytecode`。对象：四类 bytecode → `callFunctionObjectBytecode`；callable proxy → `callProxyApply`；c_function/data/async resume/bound → `callNativeCallableObject`。其余一律 `throwTypeErrorMessage("not a function")`。不再退回 `call.zig` 通用分类器。
 - **所有权 / 错误 / 调用**：CallSite generic、sync 回退。
 
 ### `callNativeCallableByName` (`src/exec/call_runtime.zig:1068`)
 
 - **签名**：`noinline fn callNativeCallableByName( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, func: core.JSValue, function_object: *core.Object, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) HostError!core.JSValue`。
 - **作用**：没有稳定 native record / internal tag 的可调用对象的兼容名字分发；故意不与字节码共享调用帧。
-- **实现**：`nativeFunctionDispatchNameRef` 借 atom 支持的 ASCII 名（不每调用 `[]u8` 分配；URI 热路径会来数百万次）。空名 / 无可用名 → undefined。先精确 `eql`：`raw`、`sumPrecise`、DisposableStack / AsyncDisposableStack 方法、`callNativeFunctionRecord`、`collectionPrototypeMethodByName`。然后首字节 switch 走常见全局：`Array` 构造（须 `arrayBuiltinMarker()==.constructor`）、`BigInt`/`Number`/`Object`/`String`、`d`/`e` 的 URI id、`fromCharCode`。其余是约 48 条 `eql` 加若干探针的冷链（源码注释记的 ~95 是加首字节 switch 之前走到 URI 要过的检查数）：`get [Symbol.species]`、动态 Function 族、`parseInt`/`parseFloat`/`isNaN`/`isFinite`、`RegExp`（`NativeBacktraceScope` + `regExpFunctionCall`）、Error 构造、iterator `next`/`throw`/`return` 与 `@@iterator`/`@@asyncIterator`/`@@asyncDispose`、`apply`/`call`、`__proto__` 访问器、Array/TypedArray 方法族、`eval`（间接，Realm 取函数对象 `functionRealmGlobal`）、regexp 符号、DataView get/set、String 原型。链尽 `callValueWithThisGlobalsAndGlobal`。对齐 qjs：`JS_CallInternal` 按 class 进专用调用函数，C/native 不与字节码共帧。
+- **实现**：`nativeFunctionDispatchNameRef` 借 atom 支持的 ASCII 名（不每调用 `[]u8` 分配；URI 热路径会来数百万次）。空名 / 无可用名 → undefined。先精确 `eql`：`raw`、`sumPrecise`、DisposableStack / AsyncDisposableStack 方法、`callNativeFunctionRecord`、`collectionPrototypeMethodByName`。然后首字节 switch 走常见全局：`Array` 构造（须 `arrayBuiltinMarker()==.constructor`）、`BigInt`/`Number`/`Object`（`objectConstructorValue`，不合成 newTarget）/`String`、`d`/`e` 的 URI id、`fromCharCode`。其余是约 48 条 `eql` 加若干探针的冷链（源码注释记的 ~95 是加首字节 switch 之前走到 URI 要过的检查数）：`get [Symbol.species]`、动态 Function 族、`parseInt`/`parseFloat`/`isNaN`/`isFinite`、`RegExp`（`NativeBacktraceScope` + `regExpFunctionCall`）、Error 构造、iterator `next`/`throw`/`return` 与 `@@iterator`/`@@asyncIterator`/`@@asyncDispose`、`apply`/`call`、`__proto__` 访问器、Array/TypedArray 方法族、`eval`（间接，Realm 取函数对象 `functionRealmGlobal`）、regexp 符号、DataView get/set、String 原型。有名或 `.native_ref` miss 后链尽 → `error.TypeError`（不是 undefined，也不再入旧 `callValue*`）。对齐 qjs：`JS_CallInternal` 按 class 进专用调用函数，C/native 不与字节码共帧。
 - **所有权 / 错误 / 调用**：`callNativeCallableObject` 的最后一臂。RegExp/Array Iterator 等仍要 `materializeRuntimeError`。`DisposableStack`/`AsyncDisposableStack` 当构造名直接 `TypeError`。
 
 ### `Trigger.trigger` (`src/exec/call_runtime.zig:1454`)

@@ -1053,21 +1053,20 @@ pub fn callValueOrBytecodeDispatchAfterInterruptPoll(
             core.class.ids.c_function_data,
             core.class.ids.async_function_resolve,
             core.class.ids.async_function_reject,
-            core.class.ids.c_closure,
             core.class.ids.bound_function,
             => return callNativeCallableObject(ctx, output, global, this_value, func, object, args, caller_function, caller_frame),
             else => {},
         }
     }
-    if (!isCallableValue(func)) return exception_ops.throwTypeErrorMessage(ctx, global, "not a function");
-    return call_mod.callValueWithThisGlobalsAndGlobal(ctx, output, global, &.{}, this_value, func, args);
+    return exception_ops.throwTypeErrorMessage(ctx, global, "not a function");
 }
 
-/// Compatibility fallback for callable objects which do not carry a stable
-/// native record or internal-callable tag. Keep this legacy name dispatch out
-/// of the normal call frame: QuickJS classifies the callable in
-/// `JS_CallInternal` and enters a class-specific call function, so a C/native
-/// call does not share a frame with bytecode and compatibility dispatch.
+/// Name-chain fallback for callable objects which do not carry a stable
+/// native record or internal-callable tag. Keep this name dispatch out of the
+/// normal call frame: QuickJS classifies the callable in `JS_CallInternal` and
+/// enters a class-specific call function, so a C/native call does not share a
+/// frame with bytecode. A named leftover after this chain is TypeError (KD19);
+/// missing or empty dispatch name returns undefined.
 noinline fn callNativeCallableByName(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -1123,7 +1122,9 @@ noinline fn callNativeCallableByName(
                 return builtin_glue.numberFunctionCall(ctx, output, global, args);
             },
             'O' => if (std.mem.eql(u8, name, "Object")) {
-                return construct_mod.constructValue(ctx, func, args, &.{});
+                // Object [[Call]] is ToObject, not Construct. Do not synthesize
+                // newTarget or enter constructValue (that Gets prototype first).
+                return construct_mod.objectConstructorValue(ctx, args, function_object);
             },
             'S' => if (std.mem.eql(u8, name, "String")) {
                 return string_ops.stringFunctionCall(ctx, output, global, args, caller_function, caller_frame);
@@ -1421,7 +1422,9 @@ noinline fn callNativeCallableByName(
             else => err,
         };
     }
-    return call_mod.callValueWithThisGlobalsAndGlobal(ctx, output, global, &.{}, this_value, func, args);
+    // Named leftover / `.native_ref` miss after a real [[Call]] is TypeError
+    // (KD19). Missing or empty dispatch name already returned undefined above.
+    return error.TypeError;
 }
 
 test "callValueOrBytecodeRoot roots inline args before bytecode frame allocation" {
@@ -2231,11 +2234,10 @@ fn constructValueOrBytecodeInEnvironment(
                     return constructed;
                 }
             }
-            if (array_ops.typedArrayConstructVm(ctx, output, global, func, function_object, args, caller_function, caller_frame) catch |err| switch (err) {
+            return array_ops.typedArrayConstructVm(ctx, output, global, new_target, function_object, args, caller_function, caller_frame) catch |err| switch (err) {
                 error.RangeError => return exception_ops.throwRangeErrorMessage(ctx, global, "invalid array index"),
                 else => return err,
-            }) |value| return value;
-            return construct_mod.constructValue(ctx, func, args, &.{});
+            };
         }
         if (try array_ops.constructArrayBufferNativeRecord(ctx, output, global, func, function_object, args, new_target)) |constructed| {
             return constructed;
@@ -2302,12 +2304,20 @@ fn constructValueOrBytecodeInEnvironment(
         if (std.mem.eql(u8, name, "GeneratorFunction")) return function_ops.constructGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
         if (std.mem.eql(u8, name, "AsyncGeneratorFunction")) return promise_ops.constructAsyncGeneratorFunctionFromSource(ctx, output, global, func, args, caller_function, caller_frame);
         if (std.mem.eql(u8, name, "Symbol")) return exception_ops.throwTypeErrorMessage(ctx, global, "Symbol is not a constructor");
-        if (core.typed_array_names.isConcrete(name)) {
-            if (try array_ops.typedArrayConstructFromIterable(ctx, output, global, func, args, caller_function, caller_frame)) |value| return value;
-        }
         if (std.mem.eql(u8, name, "Number")) {
-            const primitive = try builtin_glue.numberFunctionCall(ctx, output, global, args);
-            return construct_mod.constructValue(ctx, func, &.{primitive}, &.{});
+            return function_ops.numberConstructWithNewTarget(ctx, output, global, func, args, caller_function, caller_frame, new_target);
+        }
+        if (std.mem.eql(u8, name, "Boolean")) {
+            return function_ops.booleanConstructWithNewTarget(ctx, output, global, func, args, caller_function, caller_frame, new_target);
+        }
+        if (std.mem.eql(u8, name, "WeakRef")) {
+            return function_ops.weakRefConstructWithNewTarget(ctx, output, global, func, args, caller_function, caller_frame, new_target);
+        }
+        if (std.mem.eql(u8, name, "FinalizationRegistry")) {
+            return function_ops.finalizationRegistryConstructWithNewTarget(ctx, output, global, func, args, caller_function, caller_frame, new_target);
+        }
+        if (std.mem.eql(u8, name, "Iterator")) {
+            return function_ops.constructIteratorWithNewTarget(ctx, output, global, func, args, caller_function, caller_frame, new_target);
         }
         if (construct_native_ref) |native_ref| {
             if (native_ref.domain == .string and native_ref.id == string_construct_id) {
@@ -2365,7 +2375,9 @@ fn constructValueOrBytecodeInEnvironment(
             return try object_ops.dataViewConstructWithPrototype(ctx.runtime, args[0], coerced, prototype.object());
         }
         if (std.mem.eql(u8, name, "Proxy")) {
-            return construct_mod.constructValue(ctx, func, args, &.{}) catch |err| switch (err) {
+            const target = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            const handler = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+            return object_ops.constructProxyInstance(ctx, target, handler) catch |err| switch (err) {
                 error.TypeError => return exception_ops.throwTypeErrorMessage(ctx, global, "not an object"),
                 else => err,
             };
@@ -2432,7 +2444,7 @@ fn constructValueOrBytecodeInEnvironment(
     // constructor-only object checks. This is the path used by a live
     // `super()` after the derived constructor's [[Prototype]] becomes null.
     if (!func.is(.object)) return exception_ops.throwTypeErrorMessage(ctx, global, "not a function");
-    return construct_mod.constructValue(ctx, func, args, &.{});
+    return exception_ops.throwTypeErrorMessage(ctx, global, "not a constructor");
 }
 
 fn constructExternalHostFunction(
@@ -4457,7 +4469,6 @@ pub fn isFunctionLikeClass(class_id: core.class.ClassId) bool {
     return class_id == core.class.ids.c_function or
         class_id == core.class.ids.c_function_data or
         core.class.isAsyncFunctionResumeClass(class_id) or
-        class_id == core.class.ids.c_closure or
         core.class.isBytecodeFunctionClass(class_id) or
         class_id == core.class.ids.bound_function;
 }
@@ -4542,7 +4553,6 @@ pub fn isConstructorLike(ctx: *core.JSContext, value: core.JSValue) error{OutOfM
         if (function_object.isHostEntryFunction()) {
             return function_object.hasOwnProperty(core.atom.ids.prototype);
         }
-        if (function_object.class_id == core.class.ids.c_closure) return true;
         // A function carrying a construct-capable builtin native id (Date/
         // RegExp/String) is a constructor regardless of its dispatch name
         // (Phase 6b-3e: replaces the `date.isConstructorRecord` short circuit

@@ -126,7 +126,7 @@ VM 构造路径对齐 `JS_CallConstructorInternal`（源码注释引 quickjs.c:2
 
 - **签名**：`fn constructValueOrBytecodeWithNewTargetAfterInterruptPoll( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, func: core.JSValue, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, new_target: core.JSValue, copy_argv: bool, ) HostError!core.JSValue`。
 - **作用**：构造总分类。
-- **实现**：proxy → `constructProxy`。bound：合并 args（`ValueSliceRoot` 根住），new.target 若仍是 wrapper 则换成 target。TypedArray 元数据（自定义 new.target 先 `constructBuiltinSuperConstructor`，`RangeError` 映射成 `invalid array index`）；再试 `constructArrayBufferNativeRecord`。有 FB：class 门后 `constructOrdinaryBytecodeFunctionObject`（提到名字 cascade 之前，避免 `new E()` 付 ~20 次 eql）。Object 记录且 new.target==func → 与 call 共享 ToObject 体（realm 用构造器对象的）。名字取 `nativeFunctionDispatchNameRef`，拿不到才分配。`!new_target.sameValue(func)` 且内建名（`Array` 还须 `arrayBuiltinMarker()==.constructor`）才跑 super 构造。然后 Function/AsyncFunction/GeneratorFunction/AsyncGeneratorFunction 动态源码族、Symbol 拒绝、具体 TypedArray 名的 iterable 构造、Number 装箱、String·Date 记录、Array marker、Promise、DisposableStack/AsyncDisposableStack、RegExp、collection、AB·SAB、DataView、Proxy、DOMException、AggregateError/SuppressedError/Error、host entry；最后 `c_function` 且非内建名 → `TypeError`。裸 FB：派生无实例（`this` 保持 uninitialized），基类 `createConstructorInstance` 后体返回 object 才顶替实例；另有一条 `functionObjectFromValue` 兜底回到 `constructOrdinaryBytecodeFunctionObject`。普通 `object` class 且非 proxy → `not a constructor`；非 object `not a function`（派生 ctor `[[Prototype]]` 变 null 后的 `super()`）。最后 `construct.constructValue`。
+- **实现**：proxy → `constructProxy`。bound：合并 args（`ValueSliceRoot` 根住），new.target 若仍是 wrapper 则换成 target。TypedArray 元数据（自定义 new.target 先 `constructBuiltinSuperConstructor`，`RangeError` 映射成 `invalid array index`）；同类源复制走 `constructTypedArrayTypedArrayInput`，不再因 `typedArrayConstructVm` 返回 null 退回通用分类器。再试 `constructArrayBufferNativeRecord`。有 FB：class 门后 `constructOrdinaryBytecodeFunctionObject`（提到名字 cascade 之前，避免 `new E()` 付 ~20 次 eql）。Object 记录且 new.target==func → 与 call 共享 ToObject 体（realm 用构造器对象的）。名字取 `nativeFunctionDispatchNameRef`，拿不到才分配。`!new_target.sameValue(func)` 且内建名（`Array` 还须 `arrayBuiltinMarker()==.constructor`）才跑 super 构造。然后 Function/AsyncFunction/GeneratorFunction/AsyncGeneratorFunction 动态源码族、Symbol 拒绝、Number/Boolean/WeakRef/FinalizationRegistry/Iterator 直接名字臂（先校验前缀再 Get prototype）、String·Date 记录、Array marker、Promise、DisposableStack/AsyncDisposableStack、RegExp、collection、AB·SAB、DataView、Proxy（`constructProxyInstance`，`[[Prototype]]=null`）、DOMException、AggregateError/SuppressedError/Error、host entry；`c_function` 且非内建名 → `TypeError`。裸 FB：派生无实例（`this` 保持 uninitialized），基类 `createConstructorInstance` 后体返回 object 才顶替实例；另有一条 `functionObjectFromValue` 兜底回到 `constructOrdinaryBytecodeFunctionObject`。普通 `object` class 且非 proxy → `not a constructor`；非 object `not a function`（派生 ctor `[[Prototype]]` 变 null 后的 `super()`）。无 terminal 一律 TypeError，不造空对象、不调用 `constructValue`。
 - **所有权 / 错误 / 调用**：dispatch 名 borrowed 优先。
 
 ### `constructExternalHostFunction` (`src/exec/call_runtime.zig:2407`)
@@ -141,7 +141,7 @@ VM 构造路径对齐 `JS_CallConstructorInternal`（源码注释引 quickjs.c:2
 - **签名**：`pub fn isBuiltinConstructorName(name: []const u8) bool`。
 - **作用**：~30 路名字，含 Error 集与具体 TypedArray。
 - **实现**：一长串 `mem.eql` + `error_names` + `typed_array_names.isConcrete`。
-- **所有权 / 错误 / 调用**：new.target≠func 的 super 门上短路在 new.target 比较之后（避免每次 `new Map()` 扫表）；另被构造分类末尾的 `c_function` 拒绝门与 `isConstructorLike` 的名字兜底使用。`reflect_ops` 另有一份同名私有实现。
+- **所有权 / 错误 / 调用**：new.target≠func 的 super 门上短路在 new.target 比较之后（避免每次 `new Map()` 扫表）；另被构造分类末尾的 `c_function` 拒绝门与 `isConstructorLike` 的名字兜底使用。`reflect_ops` 的同名私有副本已随旧 `reflectConstruct` 删除；唯一实现在本文件。
 
 ### `createConstructorInstance` (`src/exec/call_runtime.zig:2556`)
 
@@ -175,7 +175,7 @@ VM 构造路径对齐 `JS_CallConstructorInternal`（源码注释引 quickjs.c:2
 
 - **签名**：`pub fn functionRealmContext(caller: *core.JSContext, function_value: core.JSValue) HostError!*core.JSContext`。
 - **作用**：冷 `JS_GetFunctionRealm`。不可用来提前切实际 dispatch：Bound/Proxy 包装在调用者 Realm。
-- **实现**：c_function → nativeFunctionRealm；bytecode 四类 → bytecodeFunctionRealmContext；proxy 递归 target（revoked 抛）；bound 递归；其余 caller（含 C_FUNCTION_DATA/C_CLOSURE）。
+- **实现**：c_function → nativeFunctionRealm；bytecode 四类 → bytecodeFunctionRealmContext；proxy 递归 target（revoked 抛）；bound 递归；其余 caller（含 `c_function_data`、Promise/async 合成 class）。`c_closure` 执行器已删；ClassId 16 空位若落入 else 也用 caller realm。
 - **所有权 / 错误 / 调用**：只读查询，不分配、不建根，返回的 `*JSContext` 由 Realm 自己持有。error set `HostError`：注册表缺失返回 `error.InvalidBuiltinRegistry`；revoked proxy 先 `throwTypeErrorMessage` 写 pending 异常再走 `unreachable` 之前的抛出路径。调用方 `src/exec/object_ops.zig:1612`、`3307`，`src/exec/array_ops.zig:3670` 等 5 处（另有 `function_ops.zig:471`、`reflect_ops.zig:249`），都是 `new.target` 跨 Realm 取原型的场合。
 
 ### `functionRealmGlobal` (`src/exec/call_runtime.zig:2663`)
@@ -206,11 +206,11 @@ VM 构造路径对齐 `JS_CallConstructorInternal`（源码注释引 quickjs.c:2
 - **实现**：class + FB flags。
 - **所有权 / 错误 / 调用**：测试夹具：新建 Object 与 `FunctionBytecode.createFixture` 都不带 errdefer，所有权直接挂到 runtime，由测试末尾 `rt.destroy()` 统一回收；`publishFixtureNoFail` 把 FB 登记进运行时。error set 是推断的分配错误。只在本文件的 constructability 测试里用。
 
-### `isConstructorLike` (`src/exec/call_runtime.zig:4493`)
+### `isConstructorLike` (`src/exec/call_runtime.zig:4535`)
 
 - **签名**：`pub fn isConstructorLike(ctx: *core.JSContext, value: core.JSValue) error{OutOfMemory}!bool`。
 - **作用**：`IsConstructor`。
-- **实现**：裸 FB；函数对象上的 FB；bound 递归；c_function_data/async resume/html DDA false；host entry 看自有 prototype；c_closure true；construct 记录 ref true；否则名字表。OOM 必须冒泡，不能把真构造器判成 false。proxy `proxyTargetIsConstructor`。
+- **实现**：裸 FB；函数对象上的 FB；bound 递归；c_function_data/async resume/html DDA false；host entry 看自有 prototype；construct 记录 ref true；否则名字表。无 `c_closure` 臂（执行器已删，ClassId 16 空位不是构造器）。OOM 必须冒泡，不能把真构造器判成 false。proxy `proxyTargetIsConstructor`。
 - **所有权 / 错误 / 调用**：`new` 门与 `%ThrowTypeError%` 无关。
 
 ## 覆盖核对

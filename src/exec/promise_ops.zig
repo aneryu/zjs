@@ -329,6 +329,35 @@ pub fn createPromiseResolvingPair(rt: *core.JSRuntime, global: *core.Object, pro
     };
 }
 
+/// Module loading/evaluation waiters and dynamic import. Allocates a Promise
+/// with the caller's prototype (including null) and the unique resolving pair.
+/// Does not read `globalThis.Promise`, invoke a user constructor, or allocate
+/// a JS `{promise,resolve,reject}` result object. Helper roots end on return;
+/// the three values must enter the waiter/queue hold chain before the next
+/// allocation.
+pub fn internalPromiseCapability(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    prototype: ?*core.Object,
+) !PromiseCapabilityVm {
+    var promise_val = core.JSValue.undefinedValue();
+    var resolve_val = core.JSValue.undefinedValue();
+    var reject_val = core.JSValue.undefinedValue();
+    var root_frame = core.runtime.rootValues(.{ &promise_val, &resolve_val, &reject_val });
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
+
+    promise_val = try core.promise.constructWithPrototype(ctx, prototype);
+    const pair = try createPromiseResolvingPair(ctx.runtime, global, promise_val);
+    resolve_val = pair.resolve;
+    reject_val = pair.reject;
+    return .{
+        .promise = promise_val,
+        .resolve = resolve_val,
+        .reject = reject_val,
+    };
+}
+
 pub fn createPromiseResolvingFunction(rt: *core.JSRuntime, global: *core.Object, promise: core.JSValue, reject: bool, state: *core.Object) !core.JSValue {
     var rooted_promise = promise;
     var state_val = state.value();
@@ -409,6 +438,123 @@ test "createPromiseResolvingFunction roots promise and state while allocating fu
     _ = rt.runObjectCycleRemoval();
     try std.testing.expect(rt.atoms.name(promise_symbol) == null);
     try std.testing.expect(rt.atoms.name(state_symbol) == null);
+}
+
+test "internalPromiseCapability roots promise and shared resolving pair under GC" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt, .{});
+    defer ctx.destroy();
+    const global = try testStandardGlobal(ctx);
+    const marker_key = try rt.internAtom("marker");
+
+    const old_threshold = rt.gcThreshold();
+    rt.setGCThreshold(0);
+    defer rt.setGCThreshold(old_threshold);
+
+    const capability = try internalPromiseCapability(ctx, global, promisePrototypeFromGlobal(rt, global));
+    const promise = objectFromValue(capability.promise) orelse return error.TypeError;
+    const resolve_object = objectFromValue(capability.resolve) orelse return error.TypeError;
+    const reject_object = objectFromValue(capability.reject) orelse return error.TypeError;
+
+    try std.testing.expect(resolve_object.functionPromiseResolvingTarget().?.same(promise.value()));
+    try std.testing.expect(reject_object.functionPromiseResolvingTarget().?.same(promise.value()));
+    try std.testing.expect(!resolve_object.functionPromiseResolvingReject());
+    try std.testing.expect(reject_object.functionPromiseResolvingReject());
+    const resolve_state = resolve_object.functionPromiseResolvingState() orelse return error.TypeError;
+    const reject_state = reject_object.functionPromiseResolvingState() orelse return error.TypeError;
+    try std.testing.expect(resolve_state.same(reject_state));
+
+    const promise_symbol = try rt.atoms.newValueSymbol("gc-internal-promise-capability-symbol");
+    var marker_value = try rt.takeSymbolValue(promise_symbol);
+    var marker_roots = core.runtime.rootValues(.{&marker_value});
+    marker_roots.activate(rt);
+    try promise.defineOwnProperty(rt, marker_key, core.Descriptor.data(marker_value, .all));
+    marker_roots.deactivate(rt);
+
+    var resolve_slot: ?*core.Object = resolve_object;
+    var live_roots = core.runtime.rootObjects(.{&resolve_slot});
+    live_roots.activate(rt);
+    var live_roots_active = true;
+    defer if (live_roots_active) live_roots.deactivate(rt);
+
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.atoms.name(promise_symbol) != null);
+    const stored_target = resolve_slot.?.functionPromiseResolvingTarget() orelse return error.TypeError;
+    const stored_promise = objectFromValue(stored_target) orelse return error.TypeError;
+    {
+        const stored_marker = try stored_promise.getProperty(marker_key);
+        try std.testing.expectEqual(promise_symbol, stored_marker.asSymbolAtom().?);
+    }
+
+    live_roots.deactivate(rt);
+    live_roots_active = false;
+    _ = rt.runObjectCycleRemoval();
+    try std.testing.expect(rt.atoms.name(promise_symbol) == null);
+}
+
+test "internalPromiseCapability passes a null prototype through" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt, .{});
+    defer ctx.destroy();
+    const global = try testStandardGlobal(ctx);
+
+    const capability = try internalPromiseCapability(ctx, global, null);
+    const promise = objectFromValue(capability.promise) orelse return error.TypeError;
+    try std.testing.expect(promise.getPrototype() == null);
+    const then_value = try promise.getProperty(core.atom.predefinedId("then", .string).?);
+    const then_function = objectFromValue(then_value) orelse return error.TypeError;
+    try std.testing.expectEqual(core.class.ids.c_function_data, then_function.class_id);
+    try std.testing.expectEqual(
+        core.function.nativeBuiltinId(
+            .promise,
+            @intFromEnum(core.host_function.builtin_method_ids.promise.PrototypeMethod.then),
+        ),
+        then_function.nativeFunctionId(),
+    );
+}
+
+test "no-proto Promise then/catch dispatch by nativeFunctionIdSlot" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt, .{});
+    defer ctx.destroy();
+    const global = try testStandardGlobal(ctx);
+
+    const promise_value = try core.promise.constructWithPrototype(ctx, null);
+    const promise = objectFromValue(promise_value) orelse return error.TypeError;
+    const then_value = try promise.getProperty(core.atom.predefinedId("then", .string).?);
+    const then_function = objectFromValue(then_value) orelse return error.TypeError;
+    try std.testing.expectEqual(core.class.ids.c_function_data, then_function.class_id);
+    try std.testing.expectEqual(
+        core.function.nativeBuiltinId(
+            .promise,
+            @intFromEnum(core.host_function.builtin_method_ids.promise.PrototypeMethod.then),
+        ),
+        then_function.nativeFunctionId(),
+    );
+    try std.testing.expect(then_function.nativeEntry() == null);
+
+    const catch_value = try promise.getProperty(core.atom.predefinedId("catch", .string).?);
+    const catch_function = objectFromValue(catch_value) orelse return error.TypeError;
+    try std.testing.expectEqual(core.class.ids.c_function_data, catch_function.class_id);
+    try std.testing.expectEqual(
+        core.function.nativeBuiltinId(
+            .promise,
+            @intFromEnum(core.host_function.builtin_method_ids.promise.PrototypeMethod.catch_),
+        ),
+        catch_function.nativeFunctionId(),
+    );
+    try std.testing.expect(catch_function.nativeEntry() == null);
+
+    const then_result = try callValueOrBytecodeRoot(ctx, null, global, promise_value, then_value, &.{}, null, null);
+    const then_promise = objectFromValue(then_result) orelse return error.TypeError;
+    try std.testing.expectEqual(core.class.ids.promise, then_promise.class_id);
+
+    const catch_result = try callValueOrBytecodeRoot(ctx, null, global, promise_value, catch_value, &.{}, null, null);
+    const catch_promise = objectFromValue(catch_result) orelse return error.TypeError;
+    try std.testing.expectEqual(core.class.ids.promise, catch_promise.class_id);
 }
 
 /// qjs `list_add_tail(&rd->link, &s->promise_reactions[is_reject])`
@@ -1971,7 +2117,19 @@ test "promiseKeyedResult roots direct symbol values while defining keyed result"
     try std.testing.expect(rt.atoms.name(value_symbol) == null);
 }
 
-pub const promiseSettlementRecord = call_mod.createPromiseSettlementRecord;
+pub noinline fn promiseSettlementRecord(rt: *core.JSRuntime, rejected: bool, payload: core.JSValue) !core.JSValue {
+    var rooted_payload = payload;
+    var root_frame = core.runtime.rootValues(.{&rooted_payload});
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
+
+    const record = try core.Object.create(rt, core.class.ids.object, null);
+    errdefer core.Object.destroyFromHeader(rt, record.gcHeader());
+    const status = try value_ops.createStringValue(rt, if (rejected) "rejected" else "fulfilled");
+    try defineValueProperty(rt, record, core.atom.ids.status, status);
+    try defineValueProperty(rt, record, if (rejected) core.atom.ids.reason else core.atom.ids.value, rooted_payload);
+    return record.value();
+}
 
 test "promiseSettlementRecord roots direct symbol payload while defining status" {
     const rt = try core.JSRuntime.create(std.testing.allocator, .{});

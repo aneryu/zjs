@@ -44,7 +44,7 @@
 
 - **签名**：`fn call(ctx: *core.JSContext, _: core.JSValue, _: []const core.JSValue) core.errors.HostError!core.JSValue`。
 - **作用**：测试夹具/探针 `NativeRecordStackProbe.call`，给周围 `test` 块提供可注入行为或断言助手。
-- **实现**：用的是结构体级 `var`（`callable`/`calls`/`recurse`）而非实例状态：每次进入 `calls += 1`；当 `recurse` 为假或 `calls >= 256` 时返回 `core.JSValue.int32(7)` 收束递归，否则 `engine.exec.call.callValue(ctx, null, callable, &.{})` 无参回调 JS，制造 native↔JS 交替的深栈。同结构体里 `record` 由 `engine.exec.native_legacy.genericEntry(&call, 0)` 包成 `core.NativeEntry`。
+- **实现**：用的是结构体级 `var`（`callable`/`calls`/`recurse`）而非实例状态：每次进入 `calls += 1`；当 `recurse` 为假或 `calls >= 256` 时返回 `core.JSValue.int32(7)` 收束递归，否则 `engine.exec.call_runtime.callValueOrBytecodeRoot(ctx, null, global, undefined, callable, &.{})` 无参回调 JS，制造 native↔JS 交替的深栈。同结构体里 `record` 由 `engine.exec.native_legacy.genericEntry(&call, 0)` 包成 `core.NativeEntry`。
 - **所有权 / 错误 / 调用**：返回 `core.errors.HostError!core.JSValue`，由测试 `try`/`expectError` 消费。
 
 ### `InterruptOomArm.call` (`tests/exec.zig:290`)
@@ -1386,12 +1386,12 @@
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 6 处 `std.testing.expect*`。约 6 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "constructValue AggregateError releases copied errors array owner"` (`tests/exec.zig:7774`)
+### `test "AggregateError construct releases copied errors array owner"` (`tests/exec.zig:7335`)
 
 - **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「constructValue AggregateError releases copied errors array owner」。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。强制 major / 环回收后比对 `liveCount` 或对象身份。断言 1 处 `std.testing.expect*`。约 1 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
+- **作用**：钉住正式 Construct（`call_runtime.constructValueOrBytecode`）拷贝 AggregateError 的 errors 数组后释放所有者，不再走已删的 `constructValue`。
+- **实现**：裸 Runtime + `installStandardGlobals`。`constructValueOrBytecode(AggregateError, [source])` 两次，中间 `runObjectCycleRemoval`，比对 `liveCountKind(.object)`。断言 1 处 `std.testing.expect*`。
+- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；constructor/source/realm global 经 `rootObjects` 保活。
 
 ### `test "date prototype native builtin records ignore dispatch names"` (`tests/exec.zig:7813`)
 
