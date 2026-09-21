@@ -67,5 +67,7 @@ test {
         _ = @import("src/compiler/tests.zig");
         _ = @import("src/parser/tests.zig");
         _ = @import("src/bytecode/tests.zig");
+        _ = @import("src/libs/number_format.zig");
+        _ = @import("src/libs/unicode.zig");
     }
 }
