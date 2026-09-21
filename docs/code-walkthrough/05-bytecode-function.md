@@ -62,7 +62,7 @@ GC 对象，VM 真正跑的东西。镜像 `JSFunctionBytecode`（quickjs.c:768-
 - **签名**：`pub fn init(value: Init) BytecodeVarDef`。
 - **作用**：把 Init 压成 12 字节 runtime 行。
 - **实现**：flags 打包 const/lexical/captured/has_scope 与 var_kind；未捕获时 var_ref_idx 强制 0。
-- **所有权 / 错误 / 调用**：不分配、无 error set，按值返回 12 字节行。生产路径唯一调用方是同结构体的 `fromCompile`（`src/bytecode.zig:3336`）；直接以 `.init` 造行的只有夹具与单测（`src/exec/call_runtime.zig:1437` 的 test 块、`src/tests/exec.zig:3438`）。
+- **所有权 / 错误 / 调用**：不分配、无 error set，按值返回 12 字节行。生产路径唯一调用方是同结构体的 `fromCompile`（`src/bytecode.zig:3336`）；直接以 `.init` 造行的只有夹具与单测（`src/exec/call_runtime.zig:1437` 的 test 块、`tests/exec.zig:3438`）。
 
 
 ### `BytecodeVarDef.fromCompile` (`src/bytecode/function_bytecode.zig:134`)

@@ -8,15 +8,11 @@
 
 const std = @import("std");
 const cli_process = @import("cli_process.zig");
-const test262_root = @import("zjs");
+const zjs = @import("zjs");
 
-/// Message-only panics in ReleaseFast, full traces everywhere else.
-pub const panic = @import("panic_policy.zig").policy;
-
-const zjs = test262_root;
-const runtime_layer = test262_root.runtime;
-const parser = test262_root.parser;
-const core_runtime = test262_root.core.runtime;
+const runtime_layer = zjs.runtime;
+const parser = zjs.parser;
+const core_runtime = zjs.core.runtime;
 const runner_options = @import("run_test262_options.zig");
 const runner_reporter = @import("run_test262_reporter.zig");
 const runner_names = @import("run_test262_names.zig");
@@ -24,7 +20,7 @@ const runner_metadata = @import("run_test262_metadata.zig");
 const runner_config = @import("run_test262_config.zig");
 const runner_known_errors = @import("run_test262_known_errors.zig");
 const runner_source = @import("run_test262_source.zig");
-const runner_host = test262_root.test262_host;
+const runner_host = @import("run_test262_host.zig");
 
 pub const Config = runner_options.Config;
 pub const FeatureOverrideKind = runner_options.FeatureOverrideKind;
@@ -91,13 +87,13 @@ pub fn main(init: std.process.Init) !void {
     defer summary.deinit(init.gpa);
 
     try printSummary(io, summary);
-    if (comptime test262_root.core.gc.roots_diag_enabled) {
+    if (comptime zjs.core.gc.roots_diag_enabled) {
         // R3: every worker runtime is already torn down here, but the
         // process-wide census outlives them, so a whole sweep prints one
         // attribution table.
         var diag_buf: [4096]u8 = undefined;
         var diag_writer = std.Io.File.stderr().writer(io, &diag_buf);
-        try test262_root.core.gc_conservative_diag.reportGlobal(&diag_writer.interface);
+        try zjs.core.gc_conservative_diag.reportGlobal(&diag_writer.interface);
         try diag_writer.interface.flush();
     }
     const has_unexpected = summary.failed != 0 or summary.fixed != 0;
@@ -658,12 +654,12 @@ fn runEmbeddedEngine(
     var event_loop = runtime_layer.EventLoop.init(ctx, .{ .output = &output });
     event_loop.install();
     errdefer event_loop.deinit();
-    const global_obj = try ctx.globalObject();
+    const global_obj = try zjs.globalObjectPtr(ctx);
     try installTest262Globals(rt, ctx, global_obj);
     defer {
         event_loop.deinit();
         _ = cleanupTest262Agents(rt);
-        test262_root.exec.atomics_ops.cleanupAtomicsWaitersForContext(ctx.core);
+        zjs.exec.atomics_ops.cleanupAtomicsWaitersForContext(ctx.core);
         ctx.destroy();
         rt.destroy();
     }
@@ -672,7 +668,7 @@ fn runEmbeddedEngine(
     // and qjs's run-test262 providing the module loader): [async] dynamic-import
     // tests are SCRIPTS, so import() must work in script mode. The state must
     // outlive eval + the job drain below (the import job resolves in runJobs).
-    var dynamic_import_state = test262_root.exec.module_graph.DynamicImportState{
+    var dynamic_import_state = zjs.exec.module_graph.DynamicImportState{
         .runtime = ctx.runtimePtr(),
         .output = &output,
         .io = io,
@@ -680,10 +676,10 @@ fn runEmbeddedEngine(
         .max_source_size = 16 * 1024 * 1024,
     };
     defer dynamic_import_state.deinit();
-    var dynamic_import_scope = try test262_root.exec.module_graph.installDynamicImport(&dynamic_import_state);
+    var dynamic_import_scope = try zjs.exec.module_graph.installDynamicImport(&dynamic_import_state);
     defer dynamic_import_scope.deinit();
     var value = (if (run_as_module)
-        test262_root.exec.module_graph.evalFileModuleGraphWithOutput(ctx.runtimePtr(), ctx.core, source, &output, path, io, allocator, 16 * 1024 * 1024)
+        zjs.exec.module_graph.evalFileModuleGraphWithOutput(ctx.runtimePtr(), ctx.core, source, &output, path, io, allocator, 16 * 1024 * 1024)
     else
         ctx.eval(source, .{
             .mode = .script,
@@ -848,8 +844,8 @@ fn runExternalEngine(
         std.Io.Dir.cwd().deleteFile(io, temp_path) catch {};
     };
 
-    const argv_script = [_][]const u8{ engine_path, temp_path };
-    const argv_script_can_block = [_][]const u8{ engine_path, "--can-block", temp_path };
+    const argv_script = [_][]const u8{ engine_path, "-s", temp_path };
+    const argv_script_can_block = [_][]const u8{ engine_path, "--can-block", "-s", temp_path };
     const argv_module = [_][]const u8{ engine_path, "-m", temp_path };
     const argv_module_can_block = [_][]const u8{ engine_path, "--can-block", "-m", temp_path };
     const timeout: std.Io.Timeout = if (timeout_ms) |ms|
@@ -1689,7 +1685,7 @@ test "test262 typed array iterator staging source parses after installing global
         rt.setNativeStackSize(core_runtime.default_native_stack_size * 4);
         const ctx = try zjs.JSContext.create(rt, .{});
         defer ctx.destroy();
-        const global = try ctx.globalObject();
+        const global = try zjs.globalObjectPtr(ctx);
         try installTest262Globals(rt, ctx, global);
         var parsed = try parser.compile(.{ .realm = ctx.core }, source, .{
             .mode = .script,

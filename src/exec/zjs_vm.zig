@@ -696,6 +696,6 @@ const throwTypeErrorIntrinsicForGlobal = call_runtime.throwTypeErrorIntrinsicFor
 pub const getValueProperty = object_ops.getValueProperty;
 
 // `engine eval host globals and throw intrinsic tear down cleanly` was relocated
-// to `src/tests/exec.zig` in Phase 6b-3 STEP 7B: it bootstraps a bare runtime's
+// to `tests/exec.zig` in Phase 6b-3 STEP 7B: it bootstraps a bare runtime's
 // standard globals through `rt.installStandardGlobals`, with the installer
 // registered through the runtime bootstrap seam.

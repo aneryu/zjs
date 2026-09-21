@@ -4,11 +4,7 @@ const artifacts_mod = @import("artifacts.zig");
 
 pub const TestGraph = struct {
     test_step: *std.Build.Step,
-    // The long-running stress tier. Not part of test_step: per-change
-    // close-out (docs/verification-policy.md) runs `zig build test`, and the
-    // stress tier's cost belongs to the production/CI/merge-batch gates.
-    stress_step: *std.Build.Step,
-    /// The unified suite again under every GC diagnostic switch
+    /// The engine suite again under every GC diagnostic switch
     /// (`test-gc-stress`). ~1 minute, so it rides checkpoint-gate.
     gc_stress_step: *std.Build.Step,
     smoke_step: *std.Build.Step,
@@ -33,7 +29,25 @@ fn addZjsTest(
     return t;
 }
 
-fn runUnifiedTests(
+fn addEngineModule(ctx: build_config.Ctx, unified: bool) *std.Build.Module {
+    // The unified suite is rooted at the repository so `src/` unit tests
+    // and `tests/` integration tests stay one module. Host compiles keep
+    // `src/root.zig` and never see `tests/`.
+    const mod = ctx.b.createModule(.{
+        .root_source_file = ctx.b.path(if (unified) "test_root.zig" else "src/root.zig"),
+        .target = ctx.target,
+        .optimize = ctx.optimize,
+        .link_libc = true,
+    });
+    const inputs = if (unified)
+        ctx.engine_inputs.withUnifiedTestSuite(true)
+    else
+        ctx.engine_inputs;
+    mod.addOptions("build_options", build_config.addEngineOptions(ctx.b, inputs));
+    return mod;
+}
+
+fn runEngineTests(
     ctx: build_config.Ctx,
     exe: *std.Build.Step.Compile,
     gc_stress: bool,
@@ -71,26 +85,20 @@ fn addSmokeStep(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) *std.
 pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) TestGraph {
     const b = ctx.b;
 
-    // Unified tests (one binary, `src/internal_root.zig`). `-Dtest-filter` builds
-    // a separate, symbolised diagnostic selection. `test-fast -- <substring>`
-    // is the same kind of compile-time filter, as its own step.
-    const test_filter = b.option([]const u8, "test-filter", "Only run unified tests whose name contains this substring");
+    // Engine suite (`test_root.zig` is the test root; `@import("zjs")` is itself).
+    // `-Dtest-filter` builds a separate, symbolised diagnostic selection.
+    // `test-fast -- <substring>` is the same kind of compile-time filter, as
+    // its own step. CLI tests are a separate compile so engine files never
+    // path-import `src/cli/`. `$262` is the `test262_host` module.
+    const test_filter = b.option([]const u8, "test-filter", "Only run engine tests whose name contains this substring");
     // Strip by default on the full run (owner ruling 2026-09-06). A
     // `-Dtest-filter` run is a diagnosis and keeps DWARF. `-Dtest-strip=false`
     // forces DWARF on the full run. Both variants sit in the cache.
-    const test_strip = b.option(bool, "test-strip", "Build the unified test binary without debug info (default: true for the full run, false under -Dtest-filter)") orelse (test_filter == null);
-    // One module: Zig collects tests from the root module only, so the test
-    // root `src/unified_tests.zig` imports the engine by path and mirrors
-    // `internal_root.zig` (the module imports itself as `zjs`). Keeping the
-    // stress and CLI families out of `internal_root.zig` is what lets the
-    // CLI executable, whose root is `src/cli/zjs.zig`, link the same engine
-    // sources without a module clash.
-    const unified_root = b.createModule(.{
-        .root_source_file = b.path("src/unified_tests.zig"),
-        .target = ctx.target,
-        .optimize = ctx.optimize,
-        .link_libc = true,
-    });
+    const test_strip = b.option(bool, "test-strip", "Build the engine test binary without debug info (default: true for the full run, false under -Dtest-filter)") orelse (test_filter == null);
+
+    const unified_root = addEngineModule(ctx, true);
+    unified_root.addImport("zjs", unified_root);
+    unified_root.addImport("test262_host", build_config.addTest262Host(ctx, unified_root));
     const unified_tests = addZjsTest(
         ctx,
         "unified-tests",
@@ -98,17 +106,29 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         if (test_filter) |f| &.{ f, "zjs.pull_test_modules" } else &.{},
     );
     unified_tests.root_module.strip = test_strip;
-    // Own options object so this compile root does not share a generated
-    // options file with the public `zjs` module or the CLI.
-    unified_tests.root_module.addImport("zjs", unified_tests.root_module);
-    unified_tests.root_module.addOptions("build_options", build_config.addEngineOptions(b, ctx.engine_inputs.withUnifiedTestSuite(true)));
 
-    const test_step = b.step("test", "Run all Zig tests (defaults to Debug optimization unless overridden)");
-    const run_unified = runUnifiedTests(ctx, unified_tests, false);
+    const host_engine = addEngineModule(ctx, false);
+    const cli_root = b.createModule(.{
+        .root_source_file = b.path("src/cli/tests.zig"),
+        .target = ctx.target,
+        .optimize = ctx.optimize,
+        .link_libc = true,
+        .imports = &.{
+            .{ .name = "zjs", .module = host_engine },
+        },
+    });
+    const cli_tests = addZjsTest(ctx, "cli-tests", cli_root, &.{});
+    cli_tests.root_module.strip = test_strip;
+
+    const test_step = b.step("test", "Run engine and CLI Zig tests (defaults to Debug optimization unless overridden)");
+    const run_unified = runEngineTests(ctx, unified_tests, false);
     if (test_filter) |f| run_unified.setEnvironmentVariable("ZJS_TEST_FILTER", f);
     test_step.dependOn(&run_unified.step);
+    if (test_filter == null) {
+        test_step.dependOn(&b.addRunArtifact(cli_tests).step);
+    }
 
-    const fast_test_step = b.step("test-fast", "Run tests whose names contain a required substring: test-fast -- <substring>");
+    const fast_test_step = b.step("test-fast", "Run engine tests whose names contain a required substring: test-fast -- <substring>");
     const missing_fast_filter = "test-fast requires a nonempty substring: zig build test-fast -- '<name>'";
     if (b.args) |args| {
         var nonempty = false;
@@ -126,7 +146,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
             filters[args.len] = "zjs.pull_test_modules";
             const fast_tests = addZjsTest(ctx, "fast-tests", unified_root, filters);
             fast_tests.root_module.strip = false;
-            const run_fast = runUnifiedTests(ctx, fast_tests, false);
+            const run_fast = runEngineTests(ctx, fast_tests, false);
             run_fast.setEnvironmentVariable("ZJS_TEST_FILTER", args[0]);
             fast_test_step.dependOn(&run_fast.step);
         }
@@ -134,29 +154,16 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         fast_test_step.dependOn(&b.addFail(missing_fast_filter).step);
     }
 
-    const gc_stress_step = b.step("test-gc-stress", "Run the unified suite under ZJS_GC_STRESS=1 ZJS_GC_VERIFY_MINOR=fatal ZJS_MINOR_AUDIT=fatal (~1 min; part of checkpoint-gate)");
-    gc_stress_step.dependOn(&runUnifiedTests(ctx, unified_tests, true).step);
-
-    // Stress tier is compiled into the unified binary but SkipZigTest unless
-    // ZJS_RUN_STRESS=1. This step is a compile-time filtered binary so it
-    // does not re-run the rest of the suite.
-    const stress_tests = addZjsTest(ctx, "stress-tests", unified_root, &.{
-        "stress.",
-        "zjs.pull_test_modules",
-    });
-    const run_stress_tests = build_config.runArtifactOnCpus(b, ctx.gate_run_cpus, stress_tests);
-    run_stress_tests.setEnvironmentVariable("ZJS_RUN_STRESS", "1");
-    run_stress_tests.setName("run test unified-tests (stress tier)");
-    const stress_step = b.step("test-stress", "Run the long-running stress tier (stack exhaustion, bigint kernel sweeps)");
-    stress_step.dependOn(&run_stress_tests.step);
+    const gc_stress_step = b.step("test-gc-stress", "Run the engine suite under ZJS_GC_STRESS=1 ZJS_GC_VERIFY_MINOR=fatal ZJS_MINOR_AUDIT=fatal (~1 min; part of checkpoint-gate)");
+    gc_stress_step.dependOn(&runEngineTests(ctx, unified_tests, true).step);
 
     const smoke_step = addSmokeStep(ctx, artifacts);
 
     // Nightly instrumentation, not a checkpoint dependency. Compile-time
-    // filter selects the shared exec/builtin tiers; the dedicated runner
+    // filter selects the VM/eval integration suite; the dedicated runner
     // runs that selection twice so pass 0 warms lazy Realm state.
     const leak_census_tests = addZjsTest(ctx, "leak-census-tests", unified_root, &.{
-        "exec.tests.",
+        "tests.exec.",
         "zjs.pull_test_modules",
     });
     leak_census_tests.test_runner = .{
@@ -169,9 +176,9 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     const test_leak_census_step = b.step("test-leak-census", "Run the shared exec and builtins tiers twice and reject unaccounted retained growth (instrumentation tier; runs nightly)");
     test_leak_census_step.dependOn(&run_leak_census_tests.step);
 
-    // Public-module assembly check. Independent `zjs` module rooted at
-    // `src/root.zig` (not internal_root) and its own options object.
-    // Hangs on engine-production-gate, not checkpoint.
+    // Embedder cookbook check. Independent `zjs` module rooted at
+    // `src/root.zig` and its own options object. Hangs on
+    // engine-production-gate, not checkpoint.
     const embedding_engine_options = build_config.addEngineOptions(b, ctx.engine_inputs);
     const embedding_zjs_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
@@ -183,6 +190,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     // contents generate one file, and one file may only be the root of one module.
     const embedding_options_mod = embedding_engine_options.createModule();
     embedding_zjs_mod.addImport("build_options", embedding_options_mod);
+    embedding_zjs_mod.addImport("test262_host", build_config.addTest262Host(ctx, embedding_zjs_mod));
     const embedding_root = b.createModule(.{
         .root_source_file = b.path("tests/embedding_examples.zig"),
         .target = ctx.target,
@@ -206,9 +214,9 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
 
     // OOM injection (`zig build test-oom`): `checkAllAllocationFailures` over
     // an embedded JS corpus, plus fail-at-N recovery canaries. Compiles the
-    // engine (`internal_root`), not the unified suite.
+    // engine (`src/root.zig`), not the unified suite.
     const oom_engine_mod = b.createModule(.{
-        .root_source_file = b.path("src/internal_root.zig"),
+        .root_source_file = b.path("src/root.zig"),
         .target = ctx.target,
         .optimize = ctx.optimize,
         .link_libc = true,
@@ -217,6 +225,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     // option rather than `builtin.is_test` so `zig build test` does not
     // change the shipped heap.
     oom_engine_mod.addOptions("build_options", build_config.addEngineOptions(b, ctx.engine_inputs.withOomInjection(true)));
+    oom_engine_mod.addImport("test262_host", build_config.addTest262Host(ctx, oom_engine_mod));
     const oom_tests = addZjsTest(ctx, "oom-tests", b.createModule(.{
         .root_source_file = b.path("tests/oom.zig"),
         .target = ctx.target,
@@ -230,16 +239,16 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     const test_oom_step = b.step("test-oom", "Run allocation-failure injection over the embedded OOM corpus plus recovery canaries (instrumentation tier; runs nightly)");
     test_oom_step.dependOn(&run_oom_tests.step);
 
-    // Sema-only compile of the unified root (`-fno-emit-bin`). Shares
-    // `unified_tests.root_module` so this analyses exactly what `test`
-    // compiles. Not a gate. See docs/testing-graph.md.
+    // Sema-only compile of the engine and CLI roots (`-fno-emit-bin`).
+    // Not a gate. See docs/testing-graph.md.
     const check_unified = addZjsTest(ctx, "check-unified-tests", unified_tests.root_module, &.{});
-    const check_step = b.step("check", "Semantic-analysis-only compile of the unified test root: reject a non-compiling edit without codegen, link, or running any test");
+    const check_cli = addZjsTest(ctx, "check-cli-tests", cli_tests.root_module, &.{});
+    const check_step = b.step("check", "Semantic-analysis-only compile of the engine and CLI test roots: reject a non-compiling edit without codegen, link, or running any test");
     check_step.dependOn(&check_unified.step);
+    check_step.dependOn(&check_cli.step);
 
     return .{
         .test_step = test_step,
-        .stress_step = stress_step,
         .gc_stress_step = gc_stress_step,
         .smoke_step = smoke_step,
         .embedding_step = embedding_step,

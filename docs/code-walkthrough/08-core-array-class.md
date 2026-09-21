@@ -408,7 +408,7 @@ Table持MemoryAccount/AtomTable借用、owner线程、两个可扩展slice及各
 - **签名**：`pub fn runPayloadFinalizerForTest( self: *Table, id: ClassId, runtime: *anyopaque, object: *anyopaque, payload: *Payload, ) bool`。
 - **作用**：测试里直接跑 payload_finalizer。
 - **实现**：先线程 assert；非 test 构建走 `@compileError`。pinCallback 取得 generation 并 defer releaseCallback；再经 recordPtr 取 payload_finalizer，缺 record 或缺回调返回 false，否则调用 (runtime,object,payload) 后返回 true。
-- **所有权 / 错误 / 调用**：测试专用（非 test 构建是 `@compileError`）。所有权上它**不释放 payload**，只把 `runtime`/`object`/`payload` 三个裸指针原样转交给注册的 `payload_finalizer`，三者的存活由调用方保证；`pinCallback`/`releaseCallback` 成对护住 class 记录，使 finalizer 运行期间该 class 不被注销。返回 bool 而非 error：class 不存在、未注册 finalizer、pin 失败都返回 false，无法区分。与生产版 `runPayloadFinalizer`（`src/core/class.zig:702`）的差别是跳过 generation 校验。调用方 `src/tests/core.zig:4022`、`:4025`。
+- **所有权 / 错误 / 调用**：测试专用（非 test 构建是 `@compileError`）。所有权上它**不释放 payload**，只把 `runtime`/`object`/`payload` 三个裸指针原样转交给注册的 `payload_finalizer`，三者的存活由调用方保证；`pinCallback`/`releaseCallback` 成对护住 class 记录，使 finalizer 运行期间该 class 不被注销。返回 bool 而非 error：class 不存在、未注册 finalizer、pin 失败都返回 false，无法区分。与生产版 `runPayloadFinalizer`（`src/core/class.zig:702`）的差别是跳过 generation 校验。调用方 `tests/core.zig:4022`、`:4025`。
 
 ### `Table.runPayloadFinalizer` (`src/core/class.zig:702`)
 

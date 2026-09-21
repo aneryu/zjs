@@ -521,7 +521,7 @@ pub const isArrayValue = core_array.isArrayValue;
 /// QuickJS source map: narrow array literal helper used by transitional
 /// `new_array` bytecode. No production caller is left (array literals lower
 /// through the VM's own fast path); it remains only as the subject of the
-/// GC-reentrancy unit tests in `src/tests/exec.zig`.
+/// GC-reentrancy integration tests in `tests/exec.zig`.
 pub fn construct(rt: *core.JSRuntime, values: []const core.JSValue) !core.JSValue {
     return constructWithPrototype(rt, values, null);
 }
@@ -542,7 +542,7 @@ pub fn constructConstructorWithPrototype(rt: *core.JSRuntime, args: []const core
 
 /// Shared body of `construct` / `constructConstructorWithPrototype`. Reached
 /// from production only through the latter; the direct entry point is exercised
-/// by the GC-reentrancy unit tests in `src/tests/exec.zig`.
+/// by the GC-reentrancy integration tests in `tests/exec.zig`.
 pub fn constructWithPrototype(rt: *core.JSRuntime, values: []const core.JSValue, prototype: ?*core.Object) !core.JSValue {
     const rooted = try RootedValueCopies.init(rt, values);
     defer rooted.deinit(rt);
@@ -587,7 +587,7 @@ fn arrayLengthFromNumber(value: core.JSValue) ?u32 {
 /// QuickJS source map: selected Array.prototype methods currently covered by
 /// smoke fixtures and transitional array opcodes. No production caller is left
 /// (the spec paths go through `array_ops`); this entry point remains only as
-/// the subject of the GC-reentrancy unit tests in `src/tests/core.zig`.
+/// the subject of the GC-reentrancy integration tests in `tests/core.zig`.
 pub fn methodCall(rt: *core.JSRuntime, receiver: core.JSValue, method: u32, args: []const core.JSValue) !core.JSValue {
     return methodCallWithRealm(null, rt, receiver, method, args);
 }

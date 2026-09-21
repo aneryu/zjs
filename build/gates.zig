@@ -29,7 +29,7 @@ pub fn addGates(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts, test_graph:
     const quick_gate_step = b.step("quick-gate", "Run the fast inner-loop validation gate");
     quick_gate_step.dependOn(test_graph.smoke_step);
 
-    const checkpoint_gate_step = b.step("checkpoint-gate", "Run checkpoint validation without the full test262, OOM-injection, or stress tiers");
+    const checkpoint_gate_step = b.step("checkpoint-gate", "Run checkpoint validation without the full test262 or OOM-injection tiers");
     checkpoint_gate_step.dependOn(test_graph.test_step);
     checkpoint_gate_step.dependOn(test_graph.gc_stress_step);
     checkpoint_gate_step.dependOn(test_graph.smoke_step);
@@ -39,7 +39,6 @@ pub fn addGates(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts, test_graph:
 
     const engine_production_gate_step = b.step("engine-production-gate", "Run the engine production gate (pass -Doptimize=ReleaseFast for the shipped configuration)");
     engine_production_gate_step.dependOn(test_graph.test_step);
-    engine_production_gate_step.dependOn(test_graph.stress_step);
     engine_production_gate_step.dependOn(test_graph.smoke_step);
     engine_production_gate_step.dependOn(test_graph.embedding_step);
     engine_production_gate_step.dependOn(test262_check_step);

@@ -34,13 +34,13 @@ fn resolvedZjsPath(buf: *[1024]u8) []const u8 {
     }
 }
 
-fn perfOpcodeCount(stderr: []const u8) !u64 {
-    const needle = "\"opcodes_executed\": ";
-    const start = (std.mem.indexOf(u8, stderr, needle) orelse return error.MissingOpcodeCount) + needle.len;
+fn profileOpcodeCount(stdout: []const u8) !u64 {
+    const needle = "opcodes executed: ";
+    const start = (std.mem.indexOf(u8, stdout, needle) orelse return error.MissingOpcodeCount) + needle.len;
     var end = start;
-    while (end < stderr.len and std.ascii.isDigit(stderr[end])) : (end += 1) {}
+    while (end < stdout.len and std.ascii.isDigit(stdout[end])) : (end += 1) {}
     if (end == start) return error.MissingOpcodeCount;
-    return try std.fmt.parseInt(u64, stderr[start..end], 10);
+    return try std.fmt.parseInt(u64, stdout[start..end], 10);
 }
 
 test "zjs CLI behavior" {
@@ -168,7 +168,6 @@ test "zjs CLI behavior" {
             .argv = &[_][]const u8{
                 zjs_profile_path,
                 "--profile-opcodes",
-                "--perf-json",
                 "-e",
                 "let s = ''; for (let i = 0; i < 2000; i++) s += 'x'; print(s.length);",
             },
@@ -186,7 +185,7 @@ test "zjs CLI behavior" {
         // Exactly one string-append add dispatch per iteration; the fused
         // range path must not add per-iteration dispatch overhead beyond
         // the measured shape (30,019 total at recalibration).
-        const opcodes = try perfOpcodeCount(result.stderr);
+        const opcodes = try profileOpcodeCount(result.stdout);
         try std.testing.expect(opcodes >= 10_000);
         try std.testing.expect(opcodes <= 32_000);
     }
@@ -216,23 +215,6 @@ test "zjs CLI behavior" {
             // the same fail-closed contract applies.
             try std.testing.expectEqual(@as(u8, 2), exit_code);
         }
-    }
-
-    // Production perf-json remains available without opcode profiling.
-    {
-        const result = try std.process.run(allocator, std.testing.io, .{
-            .argv = &.{ zjs_path, "--perf-json", "-e", "print(42);" },
-        });
-        defer allocator.free(result.stdout);
-        defer allocator.free(result.stderr);
-        try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
-        try std.testing.expectEqualStrings("42\n", result.stdout);
-        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, result.stderr, .{});
-        defer parsed.deinit();
-        try std.testing.expectEqual(false, parsed.value.object.get("opcode_profile_enabled").?.bool);
-        try std.testing.expect(parsed.value.object.contains("memory"));
-        try std.testing.expect(!parsed.value.object.contains("opcode_profile"));
-        try std.testing.expect(!parsed.value.object.contains("ic"));
     }
 
     // 6. Prepared native Math calls must route sumPrecise through its iterable-aware implementation.
@@ -306,6 +288,52 @@ test "zjs CLI behavior" {
             .data = "fileSloppyGlobal = 2; console.log(fileSloppyGlobal, globalThis.fileSloppyGlobal);",
         });
 
+        {
+            const result = try std.process.run(allocator, std.testing.io, .{
+                .argv = &[_][]const u8{ zjs_path, temp_filename },
+            });
+            defer allocator.free(result.stdout);
+            defer allocator.free(result.stderr);
+
+            const exit_code = switch (result.term) {
+                .exited => |code| code,
+                else => 255,
+            };
+            // Files default to module: undeclared assignment is a ReferenceError.
+            try std.testing.expectEqual(@as(u8, 1), exit_code);
+            try std.testing.expect(std.mem.indexOf(u8, result.stderr, "ReferenceError") != null);
+        }
+
+        {
+            const result = try std.process.run(allocator, std.testing.io, .{
+                .argv = &[_][]const u8{ zjs_path, "-s", temp_filename },
+            });
+            defer allocator.free(result.stdout);
+            defer allocator.free(result.stderr);
+
+            const exit_code = switch (result.term) {
+                .exited => |code| code,
+                else => 255,
+            };
+            try std.testing.expectEqual(@as(u8, 0), exit_code);
+            try std.testing.expectEqualStrings("2 2\n", result.stdout);
+            try std.testing.expectEqualStrings("", result.stderr);
+        }
+    }
+
+    // 9. A file path is a module even without import/export or -m.
+    {
+        const root_dir = ".zig-cache/smoke-cli-default-module";
+        const temp_filename = root_dir ++ "/import_meta.js";
+
+        std.Io.Dir.cwd().deleteTree(std.testing.io, root_dir) catch {};
+        defer std.Io.Dir.cwd().deleteTree(std.testing.io, root_dir) catch {};
+        try std.Io.Dir.cwd().createDirPath(std.testing.io, root_dir);
+        try std.Io.Dir.cwd().writeFile(std.testing.io, .{
+            .sub_path = temp_filename,
+            .data = "console.log(typeof import.meta.url);\n",
+        });
+
         const result = try std.process.run(allocator, std.testing.io, .{
             .argv = &[_][]const u8{ zjs_path, temp_filename },
         });
@@ -317,7 +345,7 @@ test "zjs CLI behavior" {
             else => 255,
         };
         try std.testing.expectEqual(@as(u8, 0), exit_code);
-        try std.testing.expectEqualStrings("2 2\n", result.stdout);
+        try std.testing.expectEqualStrings("string\n", result.stdout);
         try std.testing.expectEqualStrings("", result.stderr);
     }
 }
@@ -452,7 +480,6 @@ test "CLI top-level range fast paths collapse completion-store loops" {
             .argv = &[_][]const u8{
                 zjs_path,
                 "--profile-opcodes",
-                "--perf-json",
                 "-e",
                 case.source,
             },
@@ -467,7 +494,7 @@ test "CLI top-level range fast paths collapse completion-store loops" {
         try std.testing.expectEqual(@as(u8, 0), exit_code);
         try std.testing.expect(std.mem.startsWith(u8, result.stdout, case.expected_stdout_prefix));
 
-        const opcodes = try perfOpcodeCount(result.stderr);
+        const opcodes = try profileOpcodeCount(result.stdout);
         try std.testing.expect(opcodes >= case.min_opcodes);
         try std.testing.expect(opcodes <= case.max_opcodes);
     }

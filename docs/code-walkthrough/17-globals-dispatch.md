@@ -958,7 +958,7 @@ typed 桥：exec 的 native 调用点 ↔ `rt.internal_builtins`。QuickJS 对�
 - **签名**：`pub inline fn nativeFromBits(b: NativeBits) NativeValue`。
 - **作用**：整数覆盖按位转回 `NativeValue`。
 - **实现**：`@bitCast`。
-- **所有权 / 错误 / 调用**：无：`nativeToBits` 的逆向 `@bitCast`，不分配、无 error set。调用方跨文件：`src/exec/vm_native.zig:65` 收 `callRecordFromVmInRealm` 的返回（另有 `src/tests/exec.zig:18705` 一处测试），其余 8 处都在本文件：`hostResultToValue`（117）、`hostErrorToValue`（122）、`embedderErrorToValue`（135/140/143）、`throwTypeErrorSentinel`（892/895）、`callNativeAccessorTarget`（1078）。
+- **所有权 / 错误 / 调用**：无：`nativeToBits` 的逆向 `@bitCast`，不分配、无 error set。调用方跨文件：`src/exec/vm_native.zig:65` 收 `callRecordFromVmInRealm` 的返回（另有 `tests/exec.zig:18705` 一处测试），其余 8 处都在本文件：`hostResultToValue`（117）、`hostErrorToValue`（122）、`embedderErrorToValue`（135/140/143）、`throwTypeErrorSentinel`（892/895）、`callNativeAccessorTarget`（1078）。
 
 ### `nativeExc` (`src/exec/builtin_dispatch.zig:40`)
 
@@ -1708,7 +1708,7 @@ Number/BigInt 作函数调用、parseInt/parseFloat、DataView 参数、WeakRef/
 - **签名**：`pub inline fn defineNativeDataMethod(rt: *core.JSRuntime, global: *core.Object, object: *core.Object, atom_id: core.Atom, length: i32) !void`。
 - **作用**：在对象上装一个**不带** native 记录 id 的原生方法（可写 / 不可枚举 / 可配置的数据属性），因此它的调用仍走 `callNativeCallableByName` 的名字级联。
 - **实现**：`inline` 包装，转 `defineNativeDataMethodMaybeId(..., native_builtin_id = null)`；实体里用 `core.function.nativeFunctionForGlobal(rt, global, core.atom.predefinedName(atom_id), length)` 建函数对象，`null` 分支跳过 `setNativeBuiltinIdAndRecord`，最后 `object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, true, false, true))`。与 `defineNativeDataMethodWithNativeId` 共享同一个 `noinline` 实体，差别只有那个 `?i32`。
-- **所有权 / 错误 / 调用**：`inline` 包装，转给 `defineNativeDataMethodMaybeId`（`src/exec/builtin_glue.zig:654`）并把 `native_builtin_id` 传 null——即**不盖记录 id**，这类方法的调用走 legacy 名字链。那边新建的函数对象由 `defineOwnProperty` 写进属性表（flags 固定 `{writable=true, enumerable=false, configurable=true}`），不建根。错误：`expectObject` 失败时 `error.TypeError` + 分配失败。错误一路 `try` 上抛到 VM 的 native 终端（`builtin_dispatch.nativeFromHostError` → `materializeRuntimeError`）才建 Error 对象、装 pending exception 并换成哨兵，本函数自己不碰 pending。 只有 2 个调用点：`src/exec/object_ops.zig:2188`/2190（经 71 行别名，给 wrap-for-valid-iterator 原型装 `next` / `return`）；`src/tests/exec.zig:11394` 那条同名回归测试是纯 JS 断言，并不直接调用它。
+- **所有权 / 错误 / 调用**：`inline` 包装，转给 `defineNativeDataMethodMaybeId`（`src/exec/builtin_glue.zig:654`）并把 `native_builtin_id` 传 null——即**不盖记录 id**，这类方法的调用走 legacy 名字链。那边新建的函数对象由 `defineOwnProperty` 写进属性表（flags 固定 `{writable=true, enumerable=false, configurable=true}`），不建根。错误：`expectObject` 失败时 `error.TypeError` + 分配失败。错误一路 `try` 上抛到 VM 的 native 终端（`builtin_dispatch.nativeFromHostError` → `materializeRuntimeError`）才建 Error 对象、装 pending exception 并换成哨兵，本函数自己不碰 pending。 只有 2 个调用点：`src/exec/object_ops.zig:2188`/2190（经 71 行别名，给 wrap-for-valid-iterator 原型装 `next` / `return`）；`tests/exec.zig:11394` 那条同名回归测试是纯 JS 断言，并不直接调用它。
 
 ### `defineNativeDataMethodWithNativeId` (`src/exec/builtin_glue.zig:664`)
 

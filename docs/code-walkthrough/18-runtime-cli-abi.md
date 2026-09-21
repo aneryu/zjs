@@ -29,14 +29,14 @@ zjs / zjs-profile                    run-test262 / test-runner
                 再回到 1，直到四条宿主臂都空
 ```
 
-`src/event_loop.zig` 就是嵌入方看见的门面（`zjs.runtime`：事件循环）。模块图、Atomics wake/cleanup、ArrayBuffer detach 由 CLI / test262 直接调 `src/exec/`。`src/cli/panic_policy.zig` 给两个二进制钉 ReleaseFast 的无符号表 panic。
+`src/event_loop.zig` 就是嵌入方看见的门面（`zjs.runtime`：事件循环）。模块图、Atomics wake/cleanup、ArrayBuffer detach 由 CLI / test262 直接调 `src/exec/`。
 
 ## 分册目录
 
 | 文件 | 覆盖 |
 | --- | --- |
 | [18-event-loop.md](18-event-loop.md) | `src/event_loop.zig` |
-| [18-cli.md](18-cli.md) | `src/cli/zjs.zig`、`cli_process.zig`、`panic_policy.zig` |
+| [18-cli.md](18-cli.md) | `src/cli/zjs.zig`、`cli_process.zig` |
 | [18-test262.md](18-test262.md) | `run_test262*.zig`：选项、配置、名字、元数据、已知失败、源、host `$262.agent`、reporter、编排 |
 
 ## CLI argv 契约
@@ -46,11 +46,12 @@ zjs / zjs-profile                    run-test262 / test-runner
 | 调用 | 行为 |
 | --- | --- |
 | `zjs -e "<script>"` | 把第二个参数当脚本源，`filename = "<eval>"`，`EvalMode.script`，`discard_script_result = true`。`-e` **不能**与 `--can-block` 同用，且 `rest` 必须正好两个词（`-e` + 源）。 |
-| `zjs <file.js>` | 读文件（上限 64 MiB）。`.mjs` 或首 token 为 `import`（后不跟 `(`/`.`）/`export` 则当模块，否则脚本。文件名及其后参数成为 `scriptArgs`（含路径自身，对齐 qjs）。 |
-| `zjs -m <file>` | 强制模块模式；其余同文件路径。 |
+| `zjs <file.js>` | 读文件（上限 64 MiB），**一律 module**（不嗅探、不看扩展名）。文件名及其后参数成为 `scriptArgs`（含路径自身，对齐 qjs）。 |
+| `zjs -m <file>` | 显式模块模式；与默认相同，其余同文件路径。 |
+| `zjs -s <file>` | 强制 script 模式（sloppy、无静态 `import`/`export`）；其余同文件路径。 |
 | 缺参 / 未知旗标 / `-h` / `--help` | `parseArgs` 返回 `error.Usage`；`main` 打 usage 到 stderr 并 **`exit(2)`**。 |
 
-可选旗标必须出现在位置参数之前：`-d`/`--dump`、`-T`/`--trace`、`--profile-opcodes`、`--gc-stats`、`--gc-gate-settle`、`--gc-mark-footprint`、`--gc-block-census`、`--perf-json`、`--leak-check`、`--memory-limit n`、`--stack-size n`、`-I`/`--include file`、`--can-block`（仅文件模式）。读文件失败、引擎 init 失败、求值抛错走 `exit(1)`。成功路径默认 `exit(0)` 而不 `deinit` Runtime（短命进程把内存还给 OS；`--leak-check` 才显式拆循环/context/runtime 好让 GPA 验漏）。
+可选旗标必须出现在位置参数之前（`--` 之后的词一律当路径/`scriptArgs`，即使以 `-` 开头）：`-d`/`--dump`、`-T`/`--trace`、`--profile-opcodes`、`--gc-stats`、`--gc-gate-settle`、`--gc-mark-footprint`、`--gc-block-census`、`--leak-check`、`--memory-limit n`、`--stack-size n`、`-I`/`--include file`、`--can-block`（仅文件模式）。取值旗标也接受 `--memory-limit=7` / `--include=prelude.js`；bool 旗标粘值（`--dump=1`）是 Usage。读文件失败、引擎 init 失败、求值抛错走 `exit(1)`。成功路径默认 `exit(0)` 而不 destroy runtime/context/event loop（短命进程把内存还给 OS；`--leak-check` 才显式按 loop → context → runtime 拆，好让 GPA 验漏）。
 
 `run-test262` 是另一条根：缺 `-c` 且没有任何选择器时 `error.Usage` → stderr + `exit(2)`。默认每测 20 s 超时。意外失败或 known-error 被修掉（`fixed != 0`）`exit(1)`，否则 `exit(0)`。
 
@@ -70,7 +71,7 @@ zjs / zjs-profile                    run-test262 / test-runner
 
 ## test262 宿主 `$262.agent`
 
-`src/test262_host.zig` 实现 test262 的多 agent 协调器，不是引擎公共 API。
+`src/cli/run_test262_host.zig` 实现 test262 的多 agent 协调器，不是引擎公共 API。
 
 进程级 `Test262AgentCoordinator`（mutex + cond + agent 表 + report 表）跨 worker 线程共享。每个 `$262.agent.start(source)`：
 
@@ -122,6 +123,5 @@ owner 2026-09-06 D8（设计稿 0.9）：**硬切**。下列路径已从树中�
 ## 覆盖核对
 
 - 清单函数数: 见当前 `src/event_loop.zig` + `src/cli/*`
-- 零函数文件: `src/cli/panic_policy.zig`（正文有文件级讲解）
 - 本文标题覆盖: 见各分册合计；以 `_check_coverage.py` 为准
 - 未覆盖: 无

@@ -23,7 +23,7 @@
 | `tests/fixtures/test262/harness/` | 本地精简 harness（`asyncHelpers.js`、`doneprintHandle.js`），给 runner 单测 / 嵌入夹具，不替代 `test262/harness` |
 | `tests/fixtures/test262-overrides/test/` | 覆盖上游 test262 个别用例（TypedArray slice species、BigInt string-nan、Error prototype 等 staging） |
 
-统一套件与 CLI smoke 还读 `tests/perf/`、`.zig-cache/smoke-*` 临时脚本；那些由测试自己写。
+统一套件与 CLI smoke 还读 `.zig-cache/smoke-*` 临时脚本；那些由测试自己写。
 
 旁路：日常 `zig build test` 用 Zig 默认 test runner。`tools/leak_census_runner.zig` 只给夜间 `test-leak-census` 做两遍 in-process 跑。属工具树，函数级讲解不在本册重复。
 

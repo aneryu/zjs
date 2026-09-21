@@ -80,20 +80,22 @@ Cross-session project lessons, domain-context routing, and evidence rules:
 
 See `docs/architecture.md`. Short map:
 
-- `src/root.zig`: public embedder entry.
+- `src/root.zig`: engine module (`@import("zjs")`).
 - `src/core/`: values, runtime, objects, GC.
 - `src/parser.zig`: lexer, parser, TypeScript erasure.
 - `src/compiler/`: the compiler.
 - `src/bytecode.zig`: bytecode carrier and packing.
 - `src/exec/`: VM, builtins, calls, modules, promises.
-- `src/event_loop.zig`: host event loop (`zjs.runtime`).
-- `src/js_context.zig`: public `JSContext` facade over core + exec.
-- `src/native.zig`: host-function registration (`zjs.native.managed`).
+- `src/event_loop.zig`: host event loop (`zjs.EventLoop`).
+- `src/js_context.zig`: public `Context` facade over core + exec.
+- `src/native.zig`: host-function thunks used by `Context.defineFunction`.
 - `src/libs/`, `src/cli/`. Zig unit tests live next to the code they
-  exercise: a package `tests.zig` pulled from the package root (same
-  shape as `src/compiler/tests.zig`), plus colocated `test` blocks.
-  Public-root embedding, CLI smoke, and OOM-injection tests live under
-  `tests/`.
+  exercise: colocated `test` blocks plus package `tests.zig` for
+  module-internal behavior (`src/parser/tests.zig`,
+  `src/compiler/tests.zig`, `src/bytecode/tests.zig`). Integration
+  tests live under `tests/`: public API, runtime/GC, VM/eval across
+  modules, embedding, CLI smoke, and OOM injection. Integration
+  harness: `tests/harness.zig` and `tests/harness/`.
 
 ## Commands
 

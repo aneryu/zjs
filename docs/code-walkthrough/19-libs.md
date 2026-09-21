@@ -14,7 +14,7 @@
 
 ## `src/libs/root.zig`：再导出图
 
-零函数文件。职责是给 `src/internal_root.zig` / `src/core/` 一个稳定的库入口，避免调用方直接写四个相对路径。
+零函数文件。职责是给 `src/root.zig` / `src/core/` 一个稳定的库入口，避免调用方直接写四个相对路径。
 
 ```
 src/libs/root.zig

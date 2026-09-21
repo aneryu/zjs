@@ -18,30 +18,31 @@ This document is the active boundary guide for ordinary project documentation.
 - `NativeEntry` (`native_entry.zig`), the single immutable native-function
   record that builtins, host functions, and native accessors resolve to.
 
-`src/root.zig` is the public Zig module imported by embedders as `zjs`. It
-re-exports the low-level embedding API and the explicit `zjs.runtime`
-namespace.
+`src/root.zig` is the single Zig module imported as `zjs`. Embedders use
+`Runtime`, `Context`, `Value`, `Call`, and `EventLoop`. The same file
+re-exports engine layers for the CLI, test262, and in-tree tests.
 
-`src/js_context.zig` is the host `JSContext` facade. `src/native.zig` is
-`zjs.native.managed`. There is no landed `src/kernel/` directory; earlier
-"kernel API" language maps to these files plus `src/root.zig`.
+`src/js_context.zig` is the host `Context` facade. `src/native.zig` builds
+the comptime thunk used by `Context.defineFunction`. There is no landed
+`src/kernel/` directory; earlier "kernel API" language maps to these files
+plus `src/root.zig`.
 
-`src/event_loop.zig` owns the host event loop and is the `zjs.runtime`
-module. Module file graph helpers, Atomics waiter cleanup, and ArrayBuffer
-detach live in `src/exec/` and are not re-exported through this namespace.
-The former dynamic plugin loader (`plugin.zig`, the `zjs.ffi` ABI) was
+`src/event_loop.zig` owns the host event loop and is the public
+`zjs.EventLoop` type. `src/root.zig` also re-exports that file as `runtime`
+for in-tree hosts. Module file graph helpers, Atomics waiter cleanup, and
+ArrayBuffer detach live in `src/exec/` and are not re-exported through this
+type. The former dynamic plugin loader (`plugin.zig`, the `zjs.ffi` ABI) was
 deleted 2026-09-06; its successor, the FNABI loader, lives in the `fun`
-repository and is an embedder of `zjs.native` like any other.
-
-`src/internal_root.zig` is repository-local aggregation for CLI, test262, and
-internal tests. It is not the public embedding contract.
+repository and is an embedder of `Context.defineFunction` like any other.
 
 ## Core Rules
 
 - `src/core/` must not depend on CLI policy, test262 harness glue, plugin
   loaders, JSI/FFI policy, event-loop policy, or product-runtime APIs.
 - Public embedding APIs are added through `src/root.zig`, `src/js_context.zig`,
-  `src/native.zig`, or an explicit `zjs.runtime` entrypoint.
+  `src/native.zig`, or `zjs.EventLoop`. Layer re-exports on `src/root.zig`
+  (`core`, `exec`, `parser`, `JSRuntime`, …) are for in-tree hosts, not a
+  second embedder surface.
 - New runtime features should depend on core primitives. Core must not depend
   on runtime features.
 - `zjs` and `run-test262` are runtime users. They do not own core concepts.
@@ -56,13 +57,13 @@ generated stubs.
 The central public primitives are:
 
 ```zig
-zjs.JSRuntime
-zjs.JSContext
-zjs.JSValue
-zjs.native.managed
-zjs.native.Call / Spec / Options
-zjs.host.defineScriptArgs
-zjs.runtime
+zjs.Runtime
+zjs.Context
+zjs.Value
+zjs.Call
+zjs.EventLoop
+Context.defineFunction
+Context.defineScriptArgs
 ```
 
 Do not introduce a public `Engine` facade as the central API. It hides lifetime
@@ -126,28 +127,21 @@ the arity, the optional `state` pointer, and JIT effect annotations. The VM
 switches on the kind once per call and never branches on where the entry
 came from: there is no registry, no id space, and no string lookup on the
 call path. Builtin entries are comptime rodata; host entries are allocated
-in the runtime's entry arena by `JSContext.createFunction` and are never
+in the runtime's entry arena by `Context.createFunction` and are never
 freed before the runtime dies (retiring one rewrites its kind to a tombstone
 in place).
 
-`zjs.native` (`src/native.zig`) is the only public way to make an
-entry: `managed(f)` wraps `fn (*zjs.native.Call) E!JSValue` into a
+`Context.defineFunction` / `createFunction` is the only public way to make an
+entry: a plain `fn (*Call) E!Value` is wrapped at comptime into a
 `callconv(.c)` thunk (the call receives the callee realm, `this`, and a view
-of the VM operand window; Zig errors map to JS exceptions at the seam);
-`leaf(f)` / `leafWithState(f)` infer an FNABI v1 primitive signature from
-the Zig function type, and the VM marshals the arguments so the target never
-sees a `JSValue`. `JSContext.defineFunction` / `createFunction` turn the
-resulting `Spec` plus per-registration `Options` (`length`, `state`,
-`finalize`, `with_prototype`, `realm_global`) into a function object. The
-reverse direction, native -> JS, is `JSContext.callFunction` (one-shot) and
-`zjs.CallSite` (resolved once, called repeatedly); both enter the same
-resident dispatch loop a builtin callback uses. Host-side property access
-has the same pair: the `JSContext.getProperty` / `defineDataProperty`
-one-shots, and `zjs.PropertySite` (resolved once), which reuses the VM's W1
-`PropSiteCache` entry and its `Shape.identity` guard. The rooting, exception,
-realm, backtrace, interrupt, entry-lifetime, and thread contracts are
-C1-C10 in the design document and are restated for embedders in
-`docs/public-api-contract.md`.
+of the VM operand window; Zig errors map to JS exceptions at the seam).
+Leaf signatures stay engine-private. Per-registration `FunctionOptions`
+carry `length`, `state`, `finalize`, `with_prototype`, and `realm_global`.
+The reverse direction, native -> JS, is `Context.callFunction`. Host-side
+property access is `Context.getProperty` / `defineDataProperty`. The
+rooting, exception, realm, backtrace, interrupt, entry-lifetime, and thread
+contracts are C1-C10 in the design document and are restated for embedders
+in `docs/public-api-contract.md`.
 
 ## Current Exceptions
 
@@ -157,7 +151,7 @@ is harness and Annex-B specific; it is not a general embedding API.
 The QuickJS-shaped `std`/`os` host-function records and their installers have
 been deleted (recoverable from git history). The internal `HostFunction`
 enum is reserved for engine-internal callables; host-provided functions are
-`NativeEntry`s created through `zjs.native`, never members of that enum.
+`NativeEntry`s created through `Context.defineFunction`, never members of that enum.
 `src/core/` still carries the `std_file` class payload plumbing
 (`class.ids.std_file`, `StdFilePayload`); nothing instantiates it from the
 engine anymore.

@@ -463,7 +463,7 @@
 - **签名**：`pub fn isConstructor(self: *JSContext, val: JSValue) bool`。
 - **作用**：公共「像构造器吗」谓词，**不可失败**；OOM 时保守 `false`。
 - **实现**：`isConstructorLike catch false`。引擎内部用可失败版本传 OOM。
-- **所有权 / 错误 / 调用**：不分配、不建根。`isConstructorLike` 的 error set 在这里被整体吞掉（`catch false`），所以 OOM 既不返回错误也不留 pending exception，读数与「真的不是构造器」不可区分；需要区分的引擎内部路径用可失败版本（`src/exec/object_ops.zig:4195` 的 class extends 校验一线）。树内调用方是 CLI 的 test262 宿主 `src/test262_host.zig:724`。
+- **所有权 / 错误 / 调用**：不分配、不建根。`isConstructorLike` 的 error set 在这里被整体吞掉（`catch false`），所以 OOM 既不返回错误也不留 pending exception，读数与「真的不是构造器」不可区分；需要区分的引擎内部路径用可失败版本（`src/exec/object_ops.zig:4195` 的 class extends 校验一线）。树内调用方是 CLI 的 test262 宿主 `src/cli/run_test262_host.zig:724`。
 
 ### `JSContext.functionName` (`src/js_context.zig:439`)
 

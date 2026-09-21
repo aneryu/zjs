@@ -20,9 +20,9 @@ zjs 是 **QuickJS 的 Zig 重写**，已经从「对照镜像」变成独立引�
 embedder / CLI / tests
         │
         ▼
- src/root.zig          CLI/测试门面（JSRuntime / JSContext / JSValue / native.managed）
- src/js_context.zig    宿主 JSContext 门面
- src/native.zig        NativeEntry thunk（zjs.native.managed）
+ src/root.zig          唯一引擎模块（Runtime / Context / Value / Call / EventLoop，以及层 re-export）
+ src/js_context.zig    宿主 Context 门面
+ src/native.zig        NativeEntry thunk（zjs.Call）
         │
         ▼
  src/core/             值、对象、形状、属性、GC、Runtime/Context   ← 禁止依赖 parser/exec/runtime/CLI
@@ -39,15 +39,15 @@ embedder / CLI / tests
 - `event_loop.zig`：宿主定时器、fd/signal、job draining（`zjs.runtime`）。
 - `simple_token.zig`：QuickJS `simple_next_token` 那种前瞻用的 token 子集。
 
-`src/internal_root.zig` 聚合 CLI / test262 / 仓内测试，**不是**公共嵌入契约。
+`src/root.zig` 同时是嵌入门面和 CLI / test262 / 仓内测试的编译根。嵌入方用 `Runtime` / `Context` / `Value` / `Call` / `EventLoop`；仓内宿主另用层 re-export。
 
 ## 3. 一次 `eval` 走多远
 
 以嵌入代码为例：
 
 ```zig
-const rt = try zjs.JSRuntime.create(allocator, .{});
-const ctx = try zjs.JSContext.create(rt, .{});
+const rt = try zjs.Runtime.create(allocator, .{});
+const ctx = try zjs.Context.create(rt, .{});
 const result = try ctx.eval("let x = 1 + 2; x;", .{});
 ```
 
@@ -138,7 +138,7 @@ zjs **已经是**栈式字节码解释器，没有迁到寄存器机的证据支
 
 - `src/libs/`：regexp 引擎、unicode 表与属性、bigint、dtoa/number format。这些是移植/生成代码，函数名常保留上游拼写。
 - `src/cli/zjs.zig`：CLI。`run_test262*.zig` 把 test262 跑法拆开：options / config / names / metadata / known errors / source / host / reporter。
-- 各包 `tests.zig`：Zig 单测（`src/core/tests.zig` 等）；`tests/`：嵌入 / smoke / OOM 与 `tests/fixtures/`。
+- 各包 `tests.zig`：Zig 单元测试（`src/compiler/tests.zig` 等）；`tests/`：集成测试（公开 API / 运行时 / GC / VM）、嵌入 / smoke / OOM 与 `tests/fixtures/`。
 - `build.zig` + `build/`：产物、配置、gates、perf、测试步骤。Zig 钉 0.16.0。
 
 ## 10. 怎样用后面的分册

@@ -20,7 +20,7 @@ recover them from git history when needed.
   the embedding test target.
 - [Public API Contract](public-api-contract.md): the supported Zig API surface
   and ownership rules.
-- Native functions and native -> JS calls (`zjs.native`, `zjs.CallSite`):
+- Native functions and native -> JS calls (`zjs.Call`, `Context.defineFunction`):
   the cookbook's Native Functions / Typed Leaf / Calling JavaScript From The
   Host / Rooting Rules sections and the contract's Native Functions chapter;
   the mechanism is the

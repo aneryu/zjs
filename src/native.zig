@@ -1,8 +1,9 @@
 //! Host-function registration: a comptime `callconv(.c)` thunk over a plain
 //! Zig function becomes the `NativeEntry.target`, so a host function is
-//! dispatched exactly like a builtin. CLI, test262, and in-repo tests
-//! install functions with `managed`. There is no per-call arena, handle
-//! scope, marshalling framework, or registry lookup.
+//! dispatched exactly like a builtin. The public `Context.defineFunction`
+//! path wraps the function through `managed`; CLI, test262, and in-repo
+//! tests may still call `managed` directly. There is no per-call arena,
+//! handle scope, marshalling framework, or registry lookup.
 //!
 //! Rooting: every `JSValue` in `argv` stays alive for the duration of the
 //! call (the machine's operand window); values the function creates are
@@ -101,7 +102,7 @@ pub const Options = struct {
     /// Also create a `prototype` object with a back-pointing `constructor`.
     with_prototype: bool = false,
     /// Realm to create the function in (defaults to the context's realm).
-    realm_global: ?*core.Object = null,
+    realm_global: ?JSValue = null,
 };
 
 /// Build a managed native function from `f: fn (*Call) E!JSValue`. Any
@@ -112,9 +113,9 @@ pub const Options = struct {
 pub fn managed(comptime f: anytype) Spec {
     const F = @TypeOf(f);
     const info = @typeInfo(F);
-    if (info != .@"fn") @compileError("zjs.native.managed expects a function");
+    if (info != .@"fn") @compileError("native.managed expects a function");
     const params = info.@"fn".params;
-    if (params.len != 1 or params[0].type != *Call) @compileError("zjs.native.managed expects fn (*zjs.native.Call) E!JSValue");
+    if (params.len != 1 or params[0].type != *Call) @compileError("native.managed expects fn (*Call) E!Value");
     const Thunk = struct {
         fn thunk(
             ctx: *core.JSContext,
@@ -125,7 +126,7 @@ pub fn managed(comptime f: anytype) Spec {
             func_obj: ?*core.Object,
         ) callconv(.c) JSValue {
             var call = Call{
-                .ctx = JSContext.borrowCore(ctx),
+                .ctx = js_context.borrowCore(ctx),
                 .this = this,
                 .argv = argv,
                 .argc = argc,

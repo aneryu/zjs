@@ -15,7 +15,7 @@ closed class-B ledger (§3.2, §6), the audit build (`-Dzjs_ownership_audit`,
 §7), and the rooting rule (§8). The former static JS checker and its
 allowlist were removed.
 
-Section numbers are load-bearing: `build.zig` and `src/tests/core.zig` cite
+Section numbers are load-bearing: `build.zig` and `tests/core.zig` cite
 them. Do not renumber.
 
 ---
@@ -279,7 +279,7 @@ let the table grow monotonically with intern/free churn; the audit itself
 could then turn a high-churn test into an OOM under a different table
 geometry, and what it found would not be trustworthy.
 
-`src/tests/core.zig` has a liveness self-check (`ownership audit
+`tests/core.zig` has a liveness self-check (`ownership audit
 quarantines every atom slot the last sweep retired`): `SkipZigTest` when the
 audit is off; when on, it sweeps two atoms dead at once and asserts that
 *neither* slot is taken by the interns that follow, and that both are reused
@@ -546,5 +546,5 @@ zig build test -Dzjs_ownership_audit=true
   safepoint unrooted" needs the call graph. The run-time counterparts are
   what close the gap — `-Dzjs_ownership_audit`'s one-slot quarantine (§7)
   and the S3 tests that force a major inside the window
-  (`src/tests/core.zig` "TGC S3-*", `src/tests/exec.zig`'s JSON /
+  (`tests/core.zig` "TGC S3-*", `tests/exec.zig`'s JSON /
   host-define probes, which go red the moment their frame is deleted).

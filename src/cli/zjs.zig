@@ -2,55 +2,17 @@
 //! Source buffers live through evaluation; `--leak-check` selects explicit event-loop, context, and runtime teardown.
 const std = @import("std");
 const cli_process = @import("cli_process.zig");
-const engine = @import("zjs");
-const sort_erased = engine.sort_erased;
-const simple_token = engine.simple_token;
-const platform_clock = engine.platform_clock;
-/// Message-only panics in ReleaseFast, full traces everywhere else.
-/// See `panic_policy.zig` for why the shipped binary drops the symbolizer.
-pub const panic = @import("panic_policy.zig").policy;
+const zjs = @import("zjs");
+const sort_erased = zjs.sort_erased;
 
-const public_api = engine.public_api;
-const zjs = public_api;
-const runtime_layer = public_api.runtime;
-
-const max_include_paths = 16;
 const eval_filename = "<eval>";
+const max_include_paths = 16;
 
 pub const CliError = error{
     Usage,
 };
 
-/// One job for `main`: a source buffer plus the filename, args, and eval mode
-/// used to run it. `-e` and files differ only in how `parseArgs` / `loadSource`
-/// fill this; later stages do not switch on the input form.
-pub const Command = struct {
-    pub const Input = enum {
-        /// `-e`: `source` is argv text and always runs as a script.
-        eval,
-        /// A path: `loadSource` reads it into `source`; the file (or `-m`)
-        /// decides script vs module like qjs `JS_DetectModule`.
-        file,
-    };
-
-    input: Input,
-    path: []const u8,
-    /// argv text for `.eval`; the gpa-owned file contents for `.file` once
-    /// `loadSource` has run.
-    source: []const u8 = &.{},
-    script_args: []const []const u8 = &.{},
-    mode: zjs.context.EvalMode = .script,
-    options: RuntimeOptions = .{},
-
-    fn detectModule(self: Command) bool {
-        return self.input == .file;
-    }
-
-    fn deinitSource(self: Command, allocator: std.mem.Allocator) void {
-        if (self.input == .file) allocator.free(self.source);
-    }
-};
-
+/// Shared runtime switches collected before the path / `-e` word.
 pub const RuntimeOptions = struct {
     memory_limit: ?usize = null,
     stack_size: ?usize = null,
@@ -61,7 +23,6 @@ pub const RuntimeOptions = struct {
     gc_stats: bool = false,
     gc_gate_settle: bool = false,
     gc_block_census: bool = false,
-    perf_json: bool = false,
     leak_check: bool = false,
     /// Compile-only diagnostic: print a fingerprint of the compiled bytecode
     /// tree instead of running the file. Used by the parser identity gate.
@@ -85,285 +46,224 @@ pub const RuntimeOptions = struct {
     }
 };
 
-/// Every option that may precede the command word. Aliases share one tag.
-const Flag = enum {
-    can_block,
-    dump_memory,
-    trace_memory,
-    gc_stats,
-    gc_gate_settle,
-    gc_block_census,
-    gc_mark_footprint,
-    profile_opcodes,
-    perf_json,
-    bytecode_fingerprint,
-    bytecode_fingerprint_verbose,
-    leak_check,
-    memory_limit,
-    stack_size,
-    include,
+/// One job for `main`: a path, a source buffer, script args, and eval mode.
+/// Files default to module; `-e` and `-s` pin script. `loadSource` only reads
+/// a path — it does not sniff. Later stages do not switch on how the job
+/// was filled.
+pub const Command = struct {
+    path: []const u8,
+    /// argv text for `-e`, including empty. `null` until `loadSource` reads a path.
+    source: ?[]const u8 = null,
+    script_args: []const []const u8 = &.{},
+    mode: zjs.Context.EvalMode = .module,
+    options: RuntimeOptions = .{},
 };
 
-const flag_names = std.StaticStringMap(Flag).initComptime(.{
-    .{ "--can-block", .can_block },
-    .{ "-d", .dump_memory },
-    .{ "--dump", .dump_memory },
-    .{ "-T", .trace_memory },
-    .{ "--trace", .trace_memory },
-    .{ "--gc-stats", .gc_stats },
-    .{ "--gc-gate-settle", .gc_gate_settle },
-    .{ "--gc-block-census", .gc_block_census },
-    .{ "--gc-mark-footprint", .gc_mark_footprint },
-    .{ "--profile-opcodes", .profile_opcodes },
-    .{ "--perf-json", .perf_json },
-    .{ "--bytecode-fingerprint", .bytecode_fingerprint },
-    .{ "--bytecode-fingerprint-verbose", .bytecode_fingerprint_verbose },
-    .{ "--leak-check", .leak_check },
-    .{ "--memory-limit", .memory_limit },
-    .{ "--stack-size", .stack_size },
-    .{ "-I", .include },
-    .{ "--include", .include },
-});
+const Token = union(enum) {
+    long: struct { name: []const u8, value: ?[]const u8 },
+    short: u8,
+    positional: []const u8,
+    end_of_options,
+};
 
-pub fn parseArgs(args: []const []const u8) CliError!Command {
-    var rest = args;
+/// One row per option. Aliases are the optional short letter. `.set` is the
+/// RuntimeOptions bools to turn on; `.take` is the following (or `=`) value.
+const Option = struct {
+    long: []const u8,
+    short: ?u8 = null,
+    set: []const std.meta.FieldEnum(RuntimeOptions) = &.{},
+    take: Take = .none,
+
+    const Take = enum { none, memory_limit, stack_size, include };
+};
+
+const option_table = [_]Option{
+    .{ .long = "can-block", .set = &.{.can_block} },
+    .{ .long = "dump", .short = 'd', .set = &.{.dump_memory} },
+    .{ .long = "trace", .short = 'T', .set = &.{.trace_memory} },
+    // The panel's census costs whole-heap walks per major, so the
+    // collector only performs them when someone is going to read
+    // them. The marked-set/storage census is NOT among them: it is
+    // the one walk large enough to move the scores this panel is
+    // used to judge, so it has its own flag below.
+    .{ .long = "gc-stats", .set = &.{ .gc_stats, .gc_detailed_reports } },
+    // Gate-only contract: retain the natural endpoint, then complete
+    // any irreversible destruction transaction before publishing the
+    // stats the checker treats as settled. This implies --gc-stats so
+    // callers cannot accidentally request a silent settlement.
+    .{ .long = "gc-gate-settle", .set = &.{ .gc_stats, .gc_gate_settle, .gc_detailed_reports } },
+    // TGC S4-f (2). A pure exit-time walk of the block table: nothing
+    // on a collector or allocator path consults it, so unlike
+    // `--gc-mark-footprint` it does not move the numbers it prints.
+    .{ .long = "gc-block-census", .set = &.{ .gc_stats, .gc_block_census, .gc_detailed_reports } },
+    // Opt in to the marked-set/storage census and print the panel that
+    // reads it. Measured cost on splay: Splay -9.8%, SplayLatency
+    // -23.7% against the same binary. That is a study tool, not a
+    // ruler -- do not take pause or score numbers from a run with it.
+    .{ .long = "gc-mark-footprint", .set = &.{ .gc_stats, .gc_detailed_reports, .gc_mark_footprint } },
+    .{ .long = "profile-opcodes", .set = &.{.profile_opcodes} },
+    .{ .long = "bytecode-fingerprint", .set = &.{.bytecode_fingerprint} },
+    .{ .long = "bytecode-fingerprint-verbose", .set = &.{ .bytecode_fingerprint, .bytecode_fingerprint_verbose } },
+    .{ .long = "leak-check", .set = &.{.leak_check} },
+    .{ .long = "memory-limit", .take = .memory_limit },
+    .{ .long = "stack-size", .take = .stack_size },
+    .{ .long = "include", .short = 'I', .take = .include },
+};
+
+pub fn parseArgs(argv: []const []const u8) CliError!Command {
+    var rest = argv;
     var opts = RuntimeOptions{};
     while (rest.len != 0) {
-        const flag = flag_names.get(rest[0]) orelse break;
-        rest = rest[1..];
-        switch (flag) {
-            .can_block => opts.can_block = true,
-            .dump_memory => opts.dump_memory = true,
-            .trace_memory => opts.trace_memory = true,
-            .gc_stats => {
-                opts.gc_stats = true;
-                // The panel's census costs whole-heap walks per major, so the
-                // collector only performs them when someone is going to read
-                // them. The marked-set/storage census is NOT among them: it is
-                // the one walk large enough to move the scores this panel is
-                // used to judge, so it has its own flag below.
-                opts.gc_detailed_reports = true;
-            },
-            .gc_gate_settle => {
-                // Gate-only contract: retain the natural endpoint, then complete
-                // any irreversible destruction transaction before publishing the
-                // stats the checker treats as settled. This implies --gc-stats so
-                // callers cannot accidentally request a silent settlement.
-                opts.gc_stats = true;
-                opts.gc_gate_settle = true;
-                opts.gc_detailed_reports = true;
-            },
-            .gc_block_census => {
-                // TGC S4-f (2). A pure exit-time walk of the block table: nothing
-                // on a collector or allocator path consults it, so unlike
-                // `--gc-mark-footprint` it does not move the numbers it prints.
-                opts.gc_stats = true;
-                opts.gc_block_census = true;
-                opts.gc_detailed_reports = true;
-            },
-            .gc_mark_footprint => {
-                // Opt in to the marked-set/storage census and print the panel that
-                // reads it. Measured cost on splay: Splay -9.8%, SplayLatency
-                // -23.7% against the same binary. That is a study tool, not a
-                // ruler -- do not take pause or score numbers from a run with it.
-                opts.gc_stats = true;
-                opts.gc_detailed_reports = true;
-                opts.gc_mark_footprint = true;
-            },
-            .profile_opcodes => opts.profile_opcodes = true,
-            .perf_json => opts.perf_json = true,
-            .bytecode_fingerprint => opts.bytecode_fingerprint = true,
-            .bytecode_fingerprint_verbose => {
-                opts.bytecode_fingerprint = true;
-                opts.bytecode_fingerprint_verbose = true;
-            },
-            .leak_check => opts.leak_check = true,
-            .memory_limit, .stack_size, .include => {
-                if (rest.len == 0) return error.Usage;
-                const value = rest[0];
+        const tok = tokenize(rest[0]);
+        switch (tok) {
+            .end_of_options => {
                 rest = rest[1..];
-                switch (flag) {
-                    .memory_limit => opts.memory_limit = parseLimitKBytes(value) catch return error.Usage,
-                    .stack_size => opts.stack_size = parseLimitKBytes(value) catch return error.Usage,
-                    .include => opts.addInclude(value) catch return error.Usage,
-                    else => unreachable,
-                }
+                if (rest.len == 0) return error.Usage;
+                return .{ .path = rest[0], .script_args = rest, .options = opts };
+            },
+            .positional => break,
+            .long, .short => {
+                const spec = lookupOption(tok) orelse {
+                    if (isCommandWord(rest[0])) break;
+                    return error.Usage;
+                };
+                rest = rest[1..];
+                try applyOption(&opts, spec, tok, &rest);
             },
         }
     }
-    if (rest.len == 0) {
-        return error.Usage;
-    }
+    if (rest.len == 0) return error.Usage;
     if (std.mem.eql(u8, rest[0], "-h") or std.mem.eql(u8, rest[0], "--help")) return error.Usage;
     if (std.mem.eql(u8, rest[0], "-e")) {
         if (opts.can_block or rest.len != 2) return error.Usage;
-        return .{ .input = .eval, .path = eval_filename, .source = rest[1], .options = opts };
+        return .{ .path = eval_filename, .source = rest[1], .mode = .script, .options = opts };
     }
     if (std.mem.eql(u8, rest[0], "-m")) {
         if (rest.len < 2) return error.Usage;
-        return .{ .input = .file, .path = rest[1], .script_args = rest[1..], .mode = .module, .options = opts };
+        return .{ .path = rest[1], .script_args = rest[1..], .mode = .module, .options = opts };
+    }
+    if (std.mem.eql(u8, rest[0], "-s")) {
+        if (rest.len < 2) return error.Usage;
+        return .{ .path = rest[1], .script_args = rest[1..], .mode = .script, .options = opts };
     }
     if (rest[0].len != 0 and rest[0][0] != '-') {
-        return .{ .input = .file, .path = rest[0], .script_args = rest[0..], .options = opts };
+        return .{ .path = rest[0], .script_args = rest[0..], .options = opts };
     }
     return error.Usage;
 }
 
-fn printUsage(io: std.Io) !void {
-    try cli_process.printError(io, "usage: zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-mark-footprint] [--gc-block-census] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-mark-footprint] [--gc-block-census] [--perf-json] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m] <file.js>\n");
+fn tokenize(arg: []const u8) Token {
+    if (std.mem.eql(u8, arg, "--")) return .end_of_options;
+    if (std.mem.startsWith(u8, arg, "--")) {
+        const body = arg[2..];
+        if (std.mem.indexOfScalar(u8, body, '=')) |eq| {
+            return .{ .long = .{ .name = body[0..eq], .value = body[eq + 1 ..] } };
+        }
+        return .{ .long = .{ .name = body, .value = null } };
+    }
+    if (arg.len == 2 and arg[0] == '-') return .{ .short = arg[1] };
+    return .{ .positional = arg };
+}
+
+fn lookupOption(tok: Token) ?Option {
+    switch (tok) {
+        .long => |long| {
+            for (option_table) |opt| {
+                if (std.mem.eql(u8, opt.long, long.name)) return opt;
+            }
+        },
+        .short => |c| {
+            for (option_table) |opt| {
+                if (opt.short == c) return opt;
+            }
+        },
+        else => {},
+    }
+    return null;
+}
+
+fn applyOption(opts: *RuntimeOptions, spec: Option, tok: Token, rest: *[]const []const u8) CliError!void {
+    const inline_value: ?[]const u8 = switch (tok) {
+        .long => |long| long.value,
+        else => null,
+    };
+    if (spec.take == .none) {
+        if (inline_value != null) return error.Usage;
+        applyBools(opts, spec.set);
+        return;
+    }
+    const value = inline_value orelse blk: {
+        if (rest.len == 0) return error.Usage;
+        const next = rest.*[0];
+        rest.* = rest.*[1..];
+        break :blk next;
+    };
+    switch (spec.take) {
+        .none => unreachable,
+        .memory_limit => opts.memory_limit = parseLimitKBytes(value) catch return error.Usage,
+        .stack_size => opts.stack_size = parseLimitKBytes(value) catch return error.Usage,
+        .include => opts.addInclude(value) catch return error.Usage,
+    }
+}
+
+fn applyBools(opts: *RuntimeOptions, fields: []const std.meta.FieldEnum(RuntimeOptions)) void {
+    for (fields) |field| {
+        switch (field) {
+            inline else => |tag| {
+                if (@FieldType(RuntimeOptions, @tagName(tag)) == bool) {
+                    @field(opts, @tagName(tag)) = true;
+                } else unreachable;
+            },
+        }
+    }
+}
+
+fn isCommandWord(arg: []const u8) bool {
+    return std.mem.eql(u8, arg, "-e") or
+        std.mem.eql(u8, arg, "-m") or
+        std.mem.eql(u8, arg, "-s") or
+        std.mem.eql(u8, arg, "-h") or
+        std.mem.eql(u8, arg, "--help");
 }
 
 fn parseLimitKBytes(text: []const u8) !usize {
     if (text.len == 0) return error.InvalidCharacter;
-    const kbytes = try engine.core.value_format.parseAsciiInt(usize, text, 10);
+    const kbytes = try zjs.core.value_format.parseAsciiInt(usize, text, 10);
     return std.math.mul(usize, kbytes, 1024) catch error.Overflow;
 }
 
-test "zjs args accept eval source" {
-    const command = try parseArgs(&.{ "-e", "1" });
-    try std.testing.expectEqualStrings("1", command.source);
-    try std.testing.expectEqualStrings(eval_filename, command.path);
-    try std.testing.expectEqual(Command.Input.eval, command.input);
+fn printUsage(io: std.Io) !void {
+    try cli_process.printError(io, "usage: zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-mark-footprint] [--gc-block-census] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-mark-footprint] [--gc-block-census] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m|-s] <file.js>\n");
 }
-
-test "zjs args accept one file" {
-    const command = try parseArgs(&.{"input.js"});
-    try std.testing.expectEqualStrings("input.js", command.path);
-    try std.testing.expectEqual(Command.Input.file, command.input);
-}
-
-test "zjs args accept file script arguments" {
-    const command = try parseArgs(&.{ "input.js", "empty_loop" });
-    try std.testing.expectEqualStrings("input.js", command.path);
-    try std.testing.expectEqual(@as(usize, 2), command.script_args.len);
-    try std.testing.expectEqualStrings("input.js", command.script_args[0]);
-    try std.testing.expectEqualStrings("empty_loop", command.script_args[1]);
-}
-
-test "zjs args accept runtime limits" {
-    const command = try parseArgs(&.{ "--memory-limit", "7", "--stack-size", "9", "input.js" });
-    try std.testing.expectEqual(@as(?usize, 7 * 1024), command.options.memory_limit);
-    try std.testing.expectEqual(@as(?usize, 9 * 1024), command.options.stack_size);
-
-    try std.testing.expectError(error.Usage, parseArgs(&.{ "--stack-size", "11" }));
-}
-
-test "zjs args accept include preload files" {
-    const command = try parseArgs(&.{ "-I", "prelude.js", "--include", "setup.mjs", "input.js" });
-    try std.testing.expectEqual(@as(usize, 2), command.options.include_count);
-    try std.testing.expectEqualStrings("prelude.js", command.options.includes()[0]);
-    try std.testing.expectEqualStrings("setup.mjs", command.options.includes()[1]);
-}
-
-test "zjs args reject the retired gc-shadow-check flag" {
-    // The shadow observer went with the rc collector (2026-08-29); the flag it
-    // gated must now be an error rather than a silently ignored word.
-    try std.testing.expectError(error.Usage, parseArgs(&.{ "--gc-shadow-check", "-e", "1" }));
-}
-
-test "zjs args accept memory dump flag" {
-    const command = try parseArgs(&.{ "-d", "input.js" });
-    try std.testing.expectEqualStrings("input.js", command.path);
-    try std.testing.expect(command.options.dump_memory);
-}
-
-test "zjs args accept memory trace flag" {
-    const command = try parseArgs(&.{ "-T", "input.js" });
-    try std.testing.expectEqualStrings("input.js", command.path);
-    try std.testing.expect(command.options.trace_memory);
-}
-
-test "zjs args accept opcode profile flag" {
-    const command = try parseArgs(&.{ "--profile-opcodes", "input.js" });
-    try std.testing.expectEqualStrings("input.js", command.path);
-    try std.testing.expect(command.options.profile_opcodes);
-
-    const eval_command = try parseArgs(&.{ "--profile-opcodes", "-e", "1" });
-    try std.testing.expectEqualStrings(eval_filename, eval_command.path);
-    try std.testing.expect(eval_command.options.profile_opcodes);
-}
-
-test "zjs args accept perf json flag for eval and files only" {
-    const command = try parseArgs(&.{ "--perf-json", "input.js" });
-    try std.testing.expectEqualStrings("input.js", command.path);
-    try std.testing.expect(command.options.perf_json);
-
-    const eval_command = try parseArgs(&.{ "--perf-json", "-e", "1" });
-    try std.testing.expectEqualStrings(eval_filename, eval_command.path);
-    try std.testing.expect(eval_command.options.perf_json);
-
-    try std.testing.expectError(error.Usage, parseArgs(&.{"--perf-json"}));
-}
-
-test "zjs args accept module file" {
-    const command = try parseArgs(&.{ "-m", "input.mjs" });
-    try std.testing.expectEqualStrings("input.mjs", command.path);
-    try std.testing.expectEqual(zjs.context.EvalMode.module, command.mode);
-}
-
-test "zjs args accept module file script arguments" {
-    const command = try parseArgs(&.{ "-m", "input.mjs", "arg" });
-    try std.testing.expectEqualStrings("input.mjs", command.path);
-    try std.testing.expectEqual(zjs.context.EvalMode.module, command.mode);
-    try std.testing.expectEqual(@as(usize, 2), command.script_args.len);
-    try std.testing.expectEqualStrings("input.mjs", command.script_args[0]);
-    try std.testing.expectEqualStrings("arg", command.script_args[1]);
-}
-
-test "zjs args gate settlement implies GC stats" {
-    const command = try parseArgs(&.{ "--gc-gate-settle", "input.js" });
-    try std.testing.expect(command.options.gc_gate_settle);
-    try std.testing.expect(command.options.gc_stats);
-}
-
-test "zjs args reject missing source" {
-    try std.testing.expectError(error.Usage, parseArgs(&.{"-e"}));
-    try std.testing.expectError(error.Usage, parseArgs(&.{"-m"}));
-    try std.testing.expectError(error.Usage, parseArgs(&.{ "-i", "extra" }));
-}
-
-const Runtime = struct {
-    runtime: *zjs.JSRuntime,
-    context: *zjs.JSContext,
-    event_loop: runtime_layer.EventLoop,
-
-    pub fn deinit(self: *Runtime) void {
-        self.event_loop.deinit();
-        self.context.destroy();
-        self.runtime.destroy();
-    }
-};
 
 pub fn main(init: std.process.Init) !void {
-    const total_start = platform_clock.monotonicNanos();
-    const allocator = init.gpa;
-    const arena = init.arena.allocator();
-    const io = init.io;
-    const args = try cli_process.argsToSlice(arena, init.minimal.args);
-
-    var command = parseArgs(args[1..]) catch {
-        try printUsage(io);
+    const argv = try init.minimal.args.toSlice(init.arena.allocator());
+    var command = parseArgs(argv[1..]) catch {
+        try printUsage(init.io);
         std.process.exit(2);
     };
+    try execute(init, &command);
+}
+
+fn execute(init: std.process.Init, command: *Command) !void {
+    const allocator = init.gpa;
+    const io = init.io;
     const runtime_options = command.options;
 
-    var read_source_ns: u64 = 0;
-    try loadSource(&command, allocator, io, &read_source_ns);
-    defer command.deinitSource(allocator);
+    const owned_source = try loadSource(command, allocator, io);
+    defer if (owned_source) |bytes| allocator.free(bytes);
+    const source = command.source.?;
+    const path = command.path;
+    const mode = command.mode;
+    const script_args = command.script_args;
 
     var stdout_buf: [4096]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
     const stdout = &stdout_writer.interface;
     var opcode_profile: zjs.OpcodeProfile = undefined;
     initOpcodeProfile(&opcode_profile);
-    var eval_timing = zjs.context.EvalTiming{};
-    var include_ns: u64 = 0;
-    var setup_ns: u64 = 0;
-    var eval_ns: u64 = 0;
-    var jobs_ns: u64 = 0;
 
-    const runtime_start = platform_clock.monotonicNanos();
-    const rt = zjs.JSRuntime.create(allocator, .{
+    const rt = zjs.Runtime.create(allocator, .{
         .trace_writer = if (runtime_options.trace_memory) stdout else null,
         .memory_limit = runtime_options.memory_limit,
         .gc_threshold = zjs.default_gc_threshold,
@@ -373,79 +273,65 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     };
     errdefer rt.destroy();
-    const ctx = zjs.JSContext.create(rt, .{}) catch |err| {
+    const ctx = zjs.Context.create(rt, .{}) catch |err| {
         try cli_process.printErrorJoin(io, &.{ "zjs: context init failed: ", @errorName(err), "\n" });
         std.process.exit(1);
     };
     errdefer ctx.destroy();
-    var runtime = Runtime{
-        .runtime = rt,
-        .context = ctx,
-        .event_loop = runtime_layer.EventLoop.init(ctx, .{ .output = stdout }),
-    };
+    var event_loop = zjs.EventLoop.init(ctx, .{ .output = stdout });
     // `install` publishes `*EventLoop` to the context. Do that only after the
-    // bundle lives in `main`'s frame; a by-value move of an already-installed
+    // loop lives in this frame; a by-value move of an already-installed
     // loop would leave the host vtable pointing at a dead stack slot.
-    runtime.event_loop.install();
-    errdefer runtime.event_loop.deinit();
-    const runtime_create_ns = platform_clock.elapsedNanosSince(runtime_start);
+    event_loop.install();
+    errdefer event_loop.deinit();
 
-    const setup_start = platform_clock.monotonicNanos();
-    try configureRuntime(&runtime, command.script_args, runtime_options, &opcode_profile, io);
+    try configureRuntime(rt, ctx, script_args, runtime_options, &opcode_profile, io);
     // Install the file-loader dynamic import for every mode, mirroring qjs
     // installing js_module_loader unconditionally (qjs.c JS_SetModuleLoaderFunc):
     // import() works from scripts and -e, not only under -m. The state lives
     // for the whole process, so import jobs drained after evaluation (event
     // loop turns) still resolve.
-    var dynamic_import_state = engine.exec.module_graph.DynamicImportState{
-        .runtime = runtime.context.runtimePtr(),
+    var dynamic_import_state = zjs.exec.module_graph.DynamicImportState{
+        .runtime = ctx.runtimePtr(),
         .output = stdout,
         .io = io,
         .allocator = allocator,
         .max_source_size = max_source_size,
     };
-    var dynamic_import_scope = try engine.exec.module_graph.installDynamicImport(&dynamic_import_state);
+    var dynamic_import_scope = try zjs.exec.module_graph.installDynamicImport(&dynamic_import_state);
     defer dynamic_import_scope.deinit();
-    setup_ns = platform_clock.elapsedNanosSince(setup_start);
 
-    // NB: we intentionally do NOT `defer runtime.deinit()` on the happy path.
-    // `JSRuntime.destroy` asserts that the runtime has no outstanding
-    // allocations, which catches refcounting bugs in `zig build test` where
-    // the engine is used in-process. As a short-lived CLI process, zjs
-    // returns from `main` and the OS reclaims memory a few microseconds
-    // later; calling `deinit` here only exposes latent leaks to the
-    // test262 runner, where the 2s panic+backtrace path caused many
+    // NB: we intentionally do NOT tear down the event loop / context / runtime
+    // on the happy path. `JSRuntime.destroy` asserts that the runtime has no
+    // outstanding allocations, which catches refcounting bugs in
+    // `zig build test` where the engine is used in-process. As a short-lived
+    // CLI process, zjs returns from `main` and the OS reclaims memory a few
+    // microseconds later; calling destroy here only exposes latent leaks to
+    // the test262 runner, where the 2s panic+backtrace path caused many
     // otherwise-passing tests to be misreported as timeouts. The historical
     // validation note is preserved in the convergence docs' git history.
-    const include_start = platform_clock.monotonicNanos();
-    runIncludeFiles(runtime.context, runtime_options, stdout, io, allocator) catch |err|
-        try failEvaluation(&runtime, stdout, io, err);
-    include_ns = platform_clock.elapsedNanosSince(include_start);
+    runIncludeFiles(ctx, runtime_options, stdout, io, allocator) catch |err|
+        try failEvaluation(ctx, rt, &event_loop, stdout, io, err);
 
     if (runtime_options.bytecode_fingerprint) {
-        if (command.input != .file) {
+        if (owned_source == null) {
             try cli_process.printError(io, "zjs: --bytecode-fingerprint requires a file argument\n");
             std.process.exit(2);
         }
-        const mode = detectFileMode(command.path, command.source, command.mode);
-        try printBytecodeFingerprint(stdout, runtime.context, command.source, command.path, mode, runtime_options.bytecode_fingerprint_verbose);
+        try printBytecodeFingerprint(stdout, ctx, source, path, mode, runtime_options.bytecode_fingerprint_verbose);
         try stdout.flush();
         return;
     }
 
-    const eval_start = platform_clock.monotonicNanos();
     const value = evalSource(
-        runtime.context,
-        command.source,
+        ctx,
+        source,
         stdout,
-        command.path,
-        command.mode,
-        command.detectModule(),
+        path,
+        mode,
         io,
         allocator,
-        &eval_timing,
-    ) catch |err| try failEvaluation(&runtime, stdout, io, err);
-    eval_ns = platform_clock.elapsedNanosSince(eval_start);
+    ) catch |err| try failEvaluation(ctx, rt, &event_loop, stdout, io, err);
     try stdout.flush();
 
     if (value.is(.exception)) {
@@ -453,108 +339,105 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     }
 
-    const jobs_start = platform_clock.monotonicNanos();
-    try dynamic_import_state.runJobs(runtime.context.core);
+    try dynamic_import_state.runJobs(ctx.core);
     // Post-eval jobs (module-mode microtasks in particular) print into the
     // buffered stdout writer; flush before any exit path so their output is
     // not dropped (qjs.c main: js_std_loop writes unbuffered per job).
     try stdout.flush();
-    jobs_ns = platform_clock.elapsedNanosSince(jobs_start);
-    if (runtime.context.hasUnhandledRejection() or runtime.context.hasException()) {
-        try reportUnhandledRejections(io, runtime.context, runtime.runtime);
+    if (ctx.hasUnhandledRejection() or ctx.hasException()) {
+        try reportUnhandledRejections(io, ctx, rt);
         std.process.exit(1);
     }
 
-    try dumpRequested(stdout, io, command.path, runtime.runtime, runtime_options, &opcode_profile, .{
-        .total_ns = platform_clock.elapsedNanosSince(total_start),
-        .read_source_ns = read_source_ns,
-        .runtime_create_ns = runtime_create_ns,
-        .setup_ns = setup_ns,
-        .include_ns = include_ns,
-        .eval_ns = eval_ns,
-        .jobs_ns = jobs_ns,
-        .zjs = eval_timing,
-    });
+    try dumpRequested(stdout, rt, runtime_options, &opcode_profile);
 
     // Explicit exit skips the remaining defers (source_text free, etc.) on the default path.
-    // However, if leak checking is explicitly requested, we deinit the runtime
-    // and return normally so all defers (including those for source_text and options) execute,
-    // allowing the GeneralPurposeAllocator to perform full validation.
-    engine.printSmallInlineProbe();
+    // However, if leak checking is explicitly requested, we tear down the
+    // event loop, context, and runtime and return normally so all defers
+    // (including those for source_text and options) execute, allowing the
+    // GeneralPurposeAllocator to perform full validation.
+    zjs.printSmallInlineProbe();
     if (runtime_options.leak_check) {
         // Restore the loader hook while the runtime it points at is still
         // alive. The trailing `defer dynamic_import_scope.deinit()` would
-        // otherwise run after `runtime.deinit()` and touch a destroyed
-        // runtime; `restore` is idempotent, so calling it here is safe and
-        // the defer becomes a no-op.
+        // otherwise run after `rt.destroy()` and touch a destroyed runtime;
+        // `restore` is idempotent, so calling it here is safe and the defer
+        // becomes a no-op.
         dynamic_import_scope.deinit();
         dynamic_import_state.deinit();
-        runtime.deinit();
+        event_loop.deinit();
+        ctx.destroy();
+        rt.destroy();
         return;
     }
     std.process.exit(0);
 }
 
-fn loadSource(command: *Command, allocator: std.mem.Allocator, io: std.Io, read_source_ns: *u64) !void {
-    if (command.input == .eval) return;
-    const read_start = platform_clock.monotonicNanos();
+fn loadSource(command: *Command, allocator: std.mem.Allocator, io: std.Io) !?[]const u8 {
+    if (command.source != null) return null;
     const bytes = std.Io.Dir.cwd().readFileAlloc(io, command.path, allocator, .limited(max_source_size)) catch |err| {
         try cli_process.printErrorJoin(io, &.{ "zjs: unable to read ", command.path, ": ", @errorName(err), "\n" });
         std.process.exit(1);
     };
     command.source = bytes;
-    read_source_ns.* = platform_clock.elapsedNanosSince(read_start);
+    return bytes;
 }
 
 fn configureRuntime(
-    runtime: *Runtime,
+    rt: *zjs.Runtime,
+    ctx: *zjs.Context,
     script_args: []const []const u8,
     runtime_options: RuntimeOptions,
     opcode_profile: *zjs.OpcodeProfile,
     io: std.Io,
 ) !void {
-    applyRuntimeOptions(runtime, runtime_options);
-    runtime.context.setTrackUnhandledRejections(true);
+    applyRuntimeOptions(rt, ctx, runtime_options);
+    ctx.setTrackUnhandledRejections(true);
     if (runtime_options.profile_opcodes) {
         if (!zjs.opcode_profile_build_enabled) {
             try cli_process.printError(io, "zjs: --profile-opcodes requires a profiling build; run 'zig build zjs-profile' or rebuild with -Dzjs_enable_opcode_profile=true (refusing to emit an all-zero profile)\n");
             std.process.exit(2);
         }
-        runtime.runtime.setOpcodeProfile(opcode_profile);
-    } else if (runtime_options.perf_json) {
-        _ = zjs.activateOpcodeProfile(opcode_profile);
+        rt.setOpcodeProfile(opcode_profile);
     }
-    zjs.host.defineScriptArgs(runtime.context, script_args) catch |err| {
+    ctx.defineScriptArgs(script_args) catch |err| {
         try cli_process.printErrorJoin(io, &.{ "zjs: scriptArgs setup failed: ", @errorName(err), "\n" });
         std.process.exit(1);
     };
-    runtime.context.setPreserveUncaughtException(true);
+    ctx.setPreserveUncaughtException(true);
 }
 
-fn applyRuntimeOptions(runtime: *Runtime, runtime_options: RuntimeOptions) void {
-    engine.core.gc_trace_stw.detailed_reports = runtime_options.gc_detailed_reports;
-    engine.core.gc_trace_stw.mark_footprint_census = runtime_options.gc_mark_footprint;
+fn applyRuntimeOptions(rt: *zjs.Runtime, ctx: *zjs.Context, runtime_options: RuntimeOptions) void {
+    zjs.core.gc_trace_stw.detailed_reports = runtime_options.gc_detailed_reports;
+    zjs.core.gc_trace_stw.mark_footprint_census = runtime_options.gc_mark_footprint;
     // `detailed_reports` is one input of the barrier gate; a flip against a
     // live Registry must republish it (gc.refreshBarrierGate contract).
-    runtime.runtime.gc.refreshBarrierGate();
-    runtime.runtime.setCanBlock(runtime_options.can_block);
-    if (runtime_options.memory_limit) |limit| runtime.runtime.setMemoryLimit(limit);
+    rt.gc.refreshBarrierGate();
+    rt.setCanBlock(runtime_options.can_block);
+    if (runtime_options.memory_limit) |limit| rt.setMemoryLimit(limit);
     if (runtime_options.stack_size) |size| {
-        runtime.runtime.setStackSize(size);
-        runtime.context.setStackLimit(size);
+        rt.setStackSize(size);
+        ctx.setStackLimit(size);
     }
 }
 
-fn failEvaluation(runtime: *Runtime, output: *std.Io.Writer, io: std.Io, err: anyerror) !noreturn {
-    try exitIfRequested(runtime, output, err);
-    if (runtime.context.hasException()) try output.flush();
-    try printEvaluationError(io, runtime.context, runtime.runtime, err);
+fn failEvaluation(
+    ctx: *zjs.Context,
+    rt: *zjs.Runtime,
+    event_loop: *zjs.EventLoop,
+    output: *std.Io.Writer,
+    io: std.Io,
+    err: anyerror,
+) !noreturn {
+    try exitIfRequested(event_loop, output, err);
+    if (ctx.hasException()) try output.flush();
+    try printEvaluationError(io, ctx, rt, err);
     std.process.exit(1);
 }
 
-fn exitIfRequested(runtime: *Runtime, output: *std.Io.Writer, err: anyerror) !void {
+fn exitIfRequested(event_loop: *zjs.EventLoop, output: *std.Io.Writer, err: anyerror) !void {
     if (err != error.ProcessExit) return;
-    const code = runtime.event_loop.exitCode() orelse return;
+    const code = event_loop.exitCode() orelse return;
     try output.flush();
     std.process.exit(code);
 }
@@ -562,12 +445,11 @@ fn exitIfRequested(runtime: *Runtime, output: *std.Io.Writer, err: anyerror) !vo
 const max_source_size = 64 * 1024 * 1024;
 
 fn evalScript(
-    ctx: *zjs.JSContext,
+    ctx: *zjs.Context,
     source_text: []const u8,
     output: *std.Io.Writer,
     filename: []const u8,
-    timing: ?*zjs.context.EvalTiming,
-) !zjs.JSValue {
+) !zjs.Value {
     return ctx.eval(source_text, .{
         .mode = .script,
         .filename = filename,
@@ -575,38 +457,34 @@ fn evalScript(
         .parse_strict = false,
         .runtime_strict = false,
         .discard_script_result = true,
-        .timing = timing,
     });
 }
 
 fn evalSource(
-    ctx: *zjs.JSContext,
+    ctx: *zjs.Context,
     source_text: []const u8,
     output: *std.Io.Writer,
     path: []const u8,
-    explicit_mode: zjs.context.EvalMode,
-    detect_module: bool,
+    mode: zjs.Context.EvalMode,
     io: std.Io,
     allocator: std.mem.Allocator,
-    timing: ?*zjs.context.EvalTiming,
-) !zjs.JSValue {
-    const mode = if (detect_module) detectFileMode(path, source_text, explicit_mode) else explicit_mode;
+) !zjs.Value {
     if (mode == .module) {
         return runFileModule(ctx, source_text, output, path, io, allocator, max_source_size);
     }
-    return evalScript(ctx, source_text, output, path, timing);
+    return evalScript(ctx, source_text, output, path);
 }
 
 fn runFileModule(
-    ctx: *zjs.JSContext,
+    ctx: *zjs.Context,
     source_text: []const u8,
     output: *std.Io.Writer,
     path: []const u8,
     io: std.Io,
     allocator: std.mem.Allocator,
     max_size: usize,
-) !zjs.JSValue {
-    return try engine.exec.module_graph.evalFileModuleGraphWithOutput(
+) !zjs.Value {
+    return try zjs.exec.module_graph.evalFileModuleGraphWithOutput(
         ctx.runtimePtr(),
         ctx.core,
         source_text,
@@ -619,7 +497,7 @@ fn runFileModule(
 }
 
 fn runIncludeFiles(
-    ctx: *zjs.JSContext,
+    ctx: *zjs.Context,
     runtime_options: RuntimeOptions,
     output: *std.Io.Writer,
     io: std.Io,
@@ -628,7 +506,7 @@ fn runIncludeFiles(
     for (runtime_options.includes()) |path| {
         const source = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(max_source_size));
         defer allocator.free(source);
-        _ = try evalSource(ctx, source, output, path, .script, true, io, allocator, null);
+        _ = try evalSource(ctx, source, output, path, .module, io, allocator);
     }
 }
 
@@ -638,13 +516,13 @@ fn runIncludeFiles(
 /// line for a corpus produce byte-identical bytecode for it.
 fn printBytecodeFingerprint(
     output: *std.Io.Writer,
-    ctx: *zjs.JSContext,
+    ctx: *zjs.Context,
     source_text: []const u8,
     path: []const u8,
-    mode: zjs.context.EvalMode,
+    mode: zjs.Context.EvalMode,
     verbose: bool,
 ) !void {
-    var compiled = engine.parser.compile(.{ .realm = ctx.core }, source_text, .{
+    var compiled = zjs.parser.compile(.{ .realm = ctx.core }, source_text, .{
         .mode = if (mode == .module) .module else .script,
         .filename = path,
         .return_completion = mode != .module,
@@ -672,7 +550,7 @@ fn printBytecodeFingerprint(
     try output.print("{x:0>16} functions={d} {s}\n", .{ hasher.final(), function_count, path });
 }
 
-fn fingerprintFunctionBytecode(hasher: *std.hash.Wyhash, fb: *const engine.bytecode.FunctionBytecode, function_count: *u32, verbose: ?*std.Io.Writer) void {
+fn fingerprintFunctionBytecode(hasher: *std.hash.Wyhash, fb: *const zjs.bytecode.FunctionBytecode, function_count: *u32, verbose: ?*std.Io.Writer) void {
     function_count.* += 1;
     const code = fb.byteCode();
     if (verbose) |out| {
@@ -701,7 +579,7 @@ fn fingerprintFunctionBytecode(hasher: *std.hash.Wyhash, fb: *const engine.bytec
     };
     hasher.update(std.mem.sliceAsBytes(scalars[0..]));
     for (fb.cpoolSlice()) |value| {
-        if (engine.exec.call_runtime.functionBytecodeFromValue(value)) |child| {
+        if (zjs.exec.call_runtime.functionBytecodeFromValue(value)) |child| {
             hasher.update("fb");
             fingerprintFunctionBytecode(hasher, child, function_count, verbose);
         } else if (value.isTracerOwned()) {
@@ -723,71 +601,7 @@ fn fingerprintFunctionBytecode(hasher: *std.hash.Wyhash, fb: *const engine.bytec
     }
 }
 
-fn detectFileMode(path: []const u8, source: []const u8, explicit_mode: zjs.context.EvalMode) zjs.context.EvalMode {
-    if (explicit_mode == .module) return .module;
-    if (std.mem.endsWith(u8, path, ".mjs")) return .module;
-    return if (sourceLooksLikeModule(source)) .module else .script;
-}
-
-/// Mirrors qjs `JS_DetectModule`: after the shebang, only
-/// the FIRST token decides — `import` not followed by `(` or `.`, or a
-/// leading `export`. A late `export`/`import` no longer promotes the file to
-/// module mode (it is a SyntaxError in script mode, as in qjs), and
-/// `import.meta` / `import(...)` never promote.
-fn sourceLooksLikeModule(source: []const u8) bool {
-    var pos: usize = 0;
-    skipShebang(source, &pos);
-    switch (simple_token.next(source, &pos, false)) {
-        .import_keyword => {
-            const tok = simple_token.next(source, &pos, false);
-            return tok != .dot and tok != .left_paren;
-        },
-        .export_keyword => return true,
-        else => return false,
-    }
-}
-
-/// Mirrors qjs `skip_shebang`.
-fn skipShebang(source: []const u8, pos: *usize) void {
-    if (source.len >= 2 and source[0] == '#' and source[1] == '!') {
-        var index: usize = 2;
-        while (index < source.len and source[index] != '\n' and source[index] != '\r') index += 1;
-        pos.* = index;
-    }
-}
-
-test "zjs detects module mode from extension and first token (qjs JS_DetectModule)" {
-    try std.testing.expectEqual(zjs.context.EvalMode.module, detectFileMode("input.mjs", "console.log(1)", .script));
-    try std.testing.expectEqual(zjs.context.EvalMode.module, detectFileMode("input.js", "import value from './dep.mjs';\nconsole.log(value)", .script));
-    try std.testing.expectEqual(zjs.context.EvalMode.module, detectFileMode("input.js", "export const value = 1;", .script));
-    try std.testing.expectEqual(zjs.context.EvalMode.module, detectFileMode("input.js", "/* leading */ // comment\nimport 'x';", .script));
-    try std.testing.expectEqual(zjs.context.EvalMode.module, detectFileMode("input.js", "#!/usr/bin/env zjs\nimport value from './dep.mjs';", .script));
-    try std.testing.expectEqual(zjs.context.EvalMode.module, detectFileMode("input.js", "\xC2\xA0import 'x';", .script));
-    try std.testing.expectEqual(zjs.context.EvalMode.module, detectFileMode("input.js", "// \xCF\x80\xE2\x80\xA8export const x = 1;", .script));
-    try std.testing.expectEqual(zjs.context.EvalMode.module, detectFileMode("input.js", "// \xCF\x80\xE2\x80\xA9import 'x';", .script));
-    // Only the first token decides (qjs JS_DetectModule quickjs.c):
-    // `import.meta` / `import(...)` never promote, and a late export/import
-    // is a script-mode SyntaxError rather than a silent module promotion.
-    try std.testing.expectEqual(zjs.context.EvalMode.script, detectFileMode("input.js", "console.log(import.meta.url)", .script));
-    try std.testing.expectEqual(zjs.context.EvalMode.script, detectFileMode("input.js", "import('./dep.mjs')", .script));
-    try std.testing.expectEqual(zjs.context.EvalMode.script, detectFileMode("input.js", "import\n('./dep.mjs')", .script));
-    try std.testing.expectEqual(zjs.context.EvalMode.script, detectFileMode("input.js", "import.meta.url", .script));
-    try std.testing.expectEqual(zjs.context.EvalMode.script, detectFileMode("input.js", "const s = 'import x from y';\nimport('./dep.mjs')", .script));
-    try std.testing.expectEqual(zjs.context.EvalMode.script, detectFileMode("input.js", "console.log(1);\nexport const late = 1;", .script));
-    try std.testing.expectEqual(zjs.context.EvalMode.script, detectFileMode("input.js", "// export const x = 1\nconsole.log('ok')", .script));
-    try std.testing.expectEqual(zjs.context.EvalMode.script, detectFileMode("input.js", "importx.meta", .script));
-    try std.testing.expectEqual(zjs.context.EvalMode.script, detectFileMode("input.js", "import\xCF\x80.meta", .script));
-    try std.testing.expectEqual(zjs.context.EvalMode.script, detectFileMode("input.js", "exports.value = 1;", .script));
-}
-
-test "zjs module specifier resolver uses referrer directory" {
-    const resolved = try engine.exec.module.resolveModuleSpecifier(std.testing.allocator, "tests/fixtures/main.mjs", "./dep.mjs");
-    defer std.testing.allocator.free(resolved);
-    try std.testing.expectEqualStrings("tests/fixtures/dep.mjs", resolved);
-    try std.testing.expectError(error.ModuleNotFound, engine.exec.module.resolveModuleSpecifier(std.testing.allocator, "main.mjs", "bare"));
-}
-
-fn printEvaluationError(io: std.Io, ctx: *zjs.JSContext, rt: *zjs.JSRuntime, err: anyerror) !void {
+fn printEvaluationError(io: std.Io, ctx: *zjs.Context, rt: *zjs.Runtime, err: anyerror) !void {
     var stderr_buf: [4096]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
     const stderr = &stderr_writer.interface;
@@ -800,7 +614,7 @@ fn printEvaluationError(io: std.Io, ctx: *zjs.JSContext, rt: *zjs.JSRuntime, err
     try stderr.flush();
 }
 
-fn printExceptionValue(stderr: *std.Io.Writer, ctx: *zjs.JSContext, rt: *zjs.JSRuntime, value: zjs.JSValue) !bool {
+fn printExceptionValue(stderr: *std.Io.Writer, ctx: *zjs.Context, rt: *zjs.Runtime, value: zjs.Value) !bool {
     if (!value.is(.object)) return false;
 
     const header = try ctx.formatException(value, rt.memory.allocator);
@@ -833,7 +647,7 @@ fn printExceptionValue(stderr: *std.Io.Writer, ctx: *zjs.JSContext, rt: *zjs.JSR
 /// must reuse ONE writer: each fresh File.stderr().writer() starts at its own
 /// position 0, so successive reports would overwrite each other when stderr
 /// is redirected to a regular file.
-fn printUnhandledRejectionTo(stderr: *std.Io.Writer, ctx: *zjs.JSContext, rt: *zjs.JSRuntime, value: zjs.JSValue) !void {
+fn printUnhandledRejectionTo(stderr: *std.Io.Writer, ctx: *zjs.Context, rt: *zjs.Runtime, value: zjs.Value) !void {
     try stderr.print("Possibly unhandled promise rejection: ", .{});
     if (value.as(.int)) |int_value| {
         try stderr.print("{d}", .{int_value});
@@ -857,7 +671,7 @@ fn printUnhandledRejectionTo(stderr: *std.Io.Writer, ctx: *zjs.JSContext, rt: *z
 /// Mirrors qjs `js_std_promise_rejection_check` (quickjs-libc.c:4276-4290):
 /// every still-unhandled rejection is reported, in rejection order, before
 /// the process exits with 1.
-fn reportUnhandledRejections(io: std.Io, ctx: *zjs.JSContext, rt: *zjs.JSRuntime) !void {
+fn reportUnhandledRejections(io: std.Io, ctx: *zjs.Context, rt: *zjs.Runtime) !void {
     var stderr_buf: [4096]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
     const stderr = &stderr_writer.interface;
@@ -868,7 +682,7 @@ fn reportUnhandledRejections(io: std.Io, ctx: *zjs.JSContext, rt: *zjs.JSRuntime
     }
 }
 
-fn dumpMemoryUsage(output: *std.Io.Writer, runtime: *zjs.JSRuntime) !void {
+fn dumpMemoryUsage(output: *std.Io.Writer, runtime: *zjs.Runtime) !void {
     try dumpMemorySnapshot(output, runtime.memoryUsage());
 }
 
@@ -893,25 +707,11 @@ fn dumpMemorySnapshot(output: *std.Io.Writer, memory: zjs.RuntimeMemoryUsage) !v
     }
 }
 
-const PerfJsonTimings = struct {
-    total_ns: u64,
-    read_source_ns: u64,
-    runtime_create_ns: u64,
-    setup_ns: u64,
-    include_ns: u64,
-    eval_ns: u64,
-    jobs_ns: u64,
-    zjs: zjs.context.EvalTiming,
-};
-
 fn dumpRequested(
     stdout: *std.Io.Writer,
-    io: std.Io,
-    path: []const u8,
-    runtime: *zjs.JSRuntime,
+    runtime: *zjs.Runtime,
     runtime_options: RuntimeOptions,
     opcode_profile: *zjs.OpcodeProfile,
-    timings: PerfJsonTimings,
 ) !void {
     if (runtime_options.dump_memory) {
         try dumpMemoryUsage(stdout, runtime);
@@ -926,18 +726,12 @@ fn dumpRequested(
         try dumpGcPanels(stdout, runtime, runtime_options);
         try stdout.flush();
     }
-    if (runtime_options.perf_json) {
-        opcode_profile.flushPendingDispatch();
-        const active_profile: ?*const zjs.OpcodeProfile =
-            if (zjs.opcode_profile_build_enabled and runtime_options.profile_opcodes) opcode_profile else null;
-        try dumpPerfJson(io, path, runtime, active_profile, timings);
-    }
 }
 
-fn dumpGcPanels(writer: *std.Io.Writer, runtime: *zjs.JSRuntime, runtime_options: RuntimeOptions) !void {
+fn dumpGcPanels(writer: *std.Io.Writer, runtime: *zjs.Runtime, runtime_options: RuntimeOptions) !void {
     if (runtime_options.gc_gate_settle) {
         try dumpGcDoomedState(writer, "endpoint", runtime);
-        engine.core.runtime.settlePendingDestructionForGateStats(runtime);
+        zjs.core.runtime.settlePendingDestructionForGateStats(runtime);
     }
     try dumpGcStats(writer, runtime.gcStats(), &runtime.gc);
     try dumpAtomAuditStats(writer, runtime);
@@ -950,56 +744,14 @@ fn dumpGcPanels(writer: *std.Io.Writer, runtime: *zjs.JSRuntime, runtime_options
     try dumpGcMarkFootprint(writer, runtime);
     try dumpGcPhaseTotals(writer, &runtime.gc);
     try dumpGcGenerationStats(writer, &runtime.gc);
-    if (comptime engine.core.gc.roots_diag_enabled) {
-        try engine.core.gc_conservative_diag.reportGlobal(writer);
+    if (comptime zjs.core.gc.roots_diag_enabled) {
+        try zjs.core.gc_conservative_diag.reportGlobal(writer);
     }
     try dumpGcDoomedState(
         writer,
         if (runtime_options.gc_gate_settle) "settled" else "endpoint",
         runtime,
     );
-}
-
-fn dumpPerfJson(io: std.Io, path: []const u8, runtime: *zjs.JSRuntime, perf_profile: ?*const zjs.OpcodeProfile, timings: PerfJsonTimings) !void {
-    var stderr_buf: [4096]u8 = undefined;
-    var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buf);
-    const stderr = &stderr_writer.interface;
-    const memory = runtime.memoryUsage();
-
-    try stderr.print("{{\n  \"file\": ", .{});
-    try writeJsonString(stderr, path);
-    try stderr.print(",\n", .{});
-    try dumpPerfJsonMetrics(stderr, memory, timings);
-    try stderr.print(",\n  \"opcode_profile_enabled\": {}", .{perf_profile != null});
-    if (perf_profile) |profile| {
-        try stderr.print(",\n", .{});
-        try dumpPerfJsonOpcodeProfile(stderr, profile);
-    }
-    try stderr.print("\n}}\n", .{});
-    try stderr.flush();
-}
-
-fn dumpPerfJsonMetrics(stderr: *std.Io.Writer, memory: zjs.RuntimeMemoryUsage, timings: PerfJsonTimings) !void {
-    try writeCounterLine(stderr, &.{
-        .{ "  \"total_ns\": ", timings.total_ns },
-        .{ ",\n  \"read_source_ns\": ", timings.read_source_ns },
-        .{ ",\n  \"runtime_create_ns\": ", timings.runtime_create_ns },
-        .{ ",\n  \"setup_ns\": ", timings.setup_ns },
-        .{ ",\n  \"include_ns\": ", timings.include_ns },
-        .{ ",\n  \"eval_ns\": ", timings.eval_ns },
-        .{ ",\n  \"parse_ns\": ", timings.zjs.parse_ns },
-        .{ ",\n  \"finalize_ns\": null,\n  \"parse_ns_includes_finalize\": true,\n  \"vm_run_ns\": ", timings.zjs.vm_run_ns },
-        .{ ",\n  \"promise_jobs_ns\": ", timings.zjs.promise_jobs_ns },
-        .{ ",\n  \"jobs_ns\": ", timings.jobs_ns },
-        .{ ",\n  \"memory\": {\n    \"allocated_bytes\": ", memory.allocated_bytes },
-        .{ ",\n    \"allocation_count\": ", memory.allocation_count },
-        .{ ",\n    \"allocated_bytes_peak\": ", memory.peak_allocated_bytes },
-        .{ ",\n    \"allocation_count_peak\": ", memory.peak_allocation_count },
-        .{ ",\n    \"alloc_calls\": ", memory.alloc_calls },
-        .{ ",\n    \"free_calls\": ", memory.free_calls },
-        .{ ",\n    \"create_calls\": ", memory.create_calls },
-        .{ ",\n    \"destroy_calls\": ", memory.destroy_calls },
-    }, "\n  }");
 }
 
 /// Whether the `OpcodeProfile` counters below are known to have no increment
@@ -1018,76 +770,6 @@ fn dumpPerfJsonMetrics(stderr: *std.Io.Writer, memory: zjs.RuntimeMemoryUsage, t
 /// of this file, which poke the counters by hand and then expect raw values.
 const profile_counters_uninstrumented = zjs.opcode_profile_build_enabled;
 
-fn dumpPerfJsonOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) !void {
-    ensureOpcodeProfileNames();
-
-    var rows: [zjs.OpcodeProfile.opcode_count]OpcodeProfileRow = undefined;
-    const sorted_rows = sortedOpcodeProfileRows(profile, &rows);
-
-    try output.print("  \"opcode_profile\": {{\n", .{});
-    try output.print("    \"opcodes_executed\": {d},\n", .{profile.totalOpcodeCount()});
-    if (comptime profile_counters_uninstrumented) {
-        try output.writeAll("    \"measured_ns\": \"not instrumented\",\n");
-    } else {
-        try output.print("    \"measured_ns\": {d},\n", .{profile.totalOpcodeNanos()});
-    }
-    if (comptime profile_counters_uninstrumented) {
-        try output.writeAll("    \"value_dups\": \"not instrumented\",\n");
-    } else {
-        try output.print("    \"value_dups\": {d},\n", .{profile.value_dup_count});
-    }
-    try output.print("    \"value_frees\": {d},\n", .{profile.value_free_count});
-    try output.print("    \"prop_lookups\": {d},\n", .{profile.prop_lookup_count});
-    if (comptime profile_counters_uninstrumented) {
-        try output.writeAll("    \"global_lookups\": \"not instrumented\",\n");
-    } else {
-        try output.print("    \"global_lookups\": {d},\n", .{profile.global_lookup_count});
-    }
-    try output.print("    \"allocations\": {d},\n", .{profile.alloc_count});
-    if (comptime profile_counters_uninstrumented) {
-        try output.writeAll("    \"call_frames\": \"not instrumented\",\n");
-    } else {
-        try output.print("    \"call_frames\": {d},\n", .{profile.call_frame_count});
-    }
-    try output.writeAll("    \"opcodes\": [");
-    for (sorted_rows, 0..) |row, index| {
-        if (index != 0) try output.writeByte(',');
-        const name = zjs.OpcodeProfile.opcodeName(row.opcode);
-        const display_name = if (name.len == 0) "<invalid>" else name;
-        const avg = if (row.count == 0) 0 else row.nanos / row.count;
-        try output.print("\n      {{\"opcode\": {d}, \"name\": ", .{row.opcode});
-        try writeJsonString(output, display_name);
-        if (comptime profile_counters_uninstrumented) {
-            try output.print(", \"count\": {d}, \"nanos\": \"not instrumented\", \"avg_ns\": \"not instrumented\", \"slow\": \"not instrumented\"}}", .{row.count});
-        } else {
-            try output.print(", \"count\": {d}, \"nanos\": {d}, \"avg_ns\": {d}, \"slow\": {d}}}", .{ row.count, row.nanos, avg, profile.slow_count[row.opcode] });
-        }
-    }
-    if (sorted_rows.len != 0) try output.writeByte('\n');
-    try output.writeAll("    ]\n  }");
-}
-
-fn writeJsonString(output: *std.Io.Writer, bytes: []const u8) !void {
-    try output.writeByte('"');
-    for (bytes) |byte| {
-        switch (byte) {
-            '"' => try output.writeAll("\\\""),
-            '\\' => try output.writeAll("\\\\"),
-            '\n' => try output.writeAll("\\n"),
-            '\r' => try output.writeAll("\\r"),
-            '\t' => try output.writeAll("\\t"),
-            else => {
-                if (byte < 0x20) {
-                    try output.print("\\u{x:0>4}", .{byte});
-                } else {
-                    try output.writeByte(byte);
-                }
-            },
-        }
-    }
-    try output.writeByte('"');
-}
-
 const OpcodeProfileRow = struct {
     opcode: u8,
     count: u64,
@@ -1097,8 +779,8 @@ const OpcodeProfileRow = struct {
 /// Post-run GC counters. Every line here has a maintained write site in the
 /// collector; fields the engine does not instrument are simply absent rather
 /// than printed as zero.
-fn dumpGcSpaceStats(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {
-    const space = engine.core.gc_space;
+fn dumpGcSpaceStats(writer: *std.Io.Writer, registry: *const zjs.core.gc.Registry) !void {
+    const space = zjs.core.gc_space;
     const hist = registry.space_histogram;
     const p50 = hist.percentilePayloadBelowLarge(50);
     const p95 = hist.percentilePayloadBelowLarge(95);
@@ -1121,7 +803,7 @@ fn dumpGcSpaceStats(writer: *std.Io.Writer, registry: *const engine.core.gc.Regi
 /// falls, so it is the peak count of distinct opened blocks); the four
 /// occupancy buckets say whether that peak is live data, thinly-populated
 /// fragmentation, or blocks nothing has reclaimed.
-fn dumpGcBlockCensus(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {
+fn dumpGcBlockCensus(writer: *std.Io.Writer, registry: *const zjs.core.gc.Registry) !void {
     const census = registry.block_heap.censusBlocks();
     try writeCounterLine(writer, &.{
         .{ "gc: block census classed superblocks ", census.classed_superblocks },
@@ -1131,7 +813,7 @@ fn dumpGcBlockCensus(writer: *std.Io.Writer, registry: *const engine.core.gc.Reg
     try writer.writeAll(
         "gc: block census columns cell_bytes blocks cells allocated occ_x1000 empty lt10 lt50 ge50 young decommitted active hot free\n",
     );
-    var total: engine.core.gc_block_heap.BlockCensusRow = .{};
+    var total: zjs.core.gc_block_heap.BlockCensusRow = .{};
     for (census.rows) |row| {
         total.blocks += row.blocks;
         total.cells += row.cells;
@@ -1190,7 +872,7 @@ noinline fn writeCounterLine(writer: *std.Io.Writer, parts: []const struct { []c
 /// Generational counters. `remembered without young` is the one to watch: it
 /// counts owners a minor re-traced that turned out to hold no young child, so
 /// a large share means the write barrier is firing more than it needs to.
-fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *engine.core.gc.Registry) !void {
+fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *zjs.core.gc.Registry) !void {
     const st = registry.generation.stats;
     // Row shape is the `--gc-stats` panel contract. The S4-f trigger census
     // gets its own row below rather than a field here.
@@ -1258,7 +940,7 @@ fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *engine.core.gc.Regis
         .{ "gc: minor young-at-start mean ", mean_young },
         .{ ", max ", st.young_at_start_max },
     }, "\n");
-    if (engine.core.gc.verify_minor) {
+    if (zjs.core.gc.verify_minor) {
         try writeCounterLine(writer, &.{
             .{ "gc: conservative-only young ", st.conservative_only_young },
             .{ " over ", st.minor_collections },
@@ -1294,9 +976,9 @@ fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *engine.core.gc.Regis
         .{ ", T ", cs.envelope_max_threshold_bytes },
         .{ ", B ", cs.envelope_max_begin_bytes },
         .{ ", P ", cs.envelope_max_peak_bytes },
-        .{ ", B/T-x1000000 ", engine.core.gc.incremental.ratioMillionthsCeil(cs.envelope_max_begin_bytes, cs.envelope_max_threshold_bytes) },
-        .{ ", P/T-x1000000 ", engine.core.gc.incremental.ratioMillionthsCeil(cs.envelope_max_peak_bytes, cs.envelope_max_threshold_bytes) },
-        .{ ", P/S-x1000000 ", engine.core.gc.incremental.ratioMillionthsCeil(cs.envelope_max_peak_bytes, cs.envelope_max_start_bytes) },
+        .{ ", B/T-x1000000 ", zjs.core.gc.incremental.ratioMillionthsCeil(cs.envelope_max_begin_bytes, cs.envelope_max_threshold_bytes) },
+        .{ ", P/T-x1000000 ", zjs.core.gc.incremental.ratioMillionthsCeil(cs.envelope_max_peak_bytes, cs.envelope_max_threshold_bytes) },
+        .{ ", P/S-x1000000 ", zjs.core.gc.incremental.ratioMillionthsCeil(cs.envelope_max_peak_bytes, cs.envelope_max_start_bytes) },
         .{ ", forced ", cs.forced_finishes },
     }, "\n");
     try writeCounterLine(writer, &.{
@@ -1317,7 +999,7 @@ fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *engine.core.gc.Regis
     }, " segments\n");
 }
 
-fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {
+fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const zjs.core.gc.Registry) !void {
     const st = registry.block_heap.stats;
     try writeCounterLine(writer, &.{
         .{ "gc: block heap committed ", st.committed_bytes },
@@ -1366,7 +1048,7 @@ fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const engine.core.gc.
     }, "\n");
     try writeCounterLine(writer, &.{
         .{ "gc: block heap decommit checks ", st.decommit_checks },
-        .{ ", released blocks cumulative ", st.decommitted_bytes / @max(engine.core.gc_block_heap.decommit_bytes, 1) },
+        .{ ", released blocks cumulative ", st.decommitted_bytes / @max(zjs.core.gc_block_heap.decommit_bytes, 1) },
         .{ ", current bytes ", st.currentDecommittedBytes() },
         .{ ", max batch bytes ", st.decommit_max_batch_bytes },
     }, "\n");
@@ -1376,7 +1058,7 @@ fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const engine.core.gc.
     }, "\n");
 }
 
-fn dumpGcPhaseTotals(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {
+fn dumpGcPhaseTotals(writer: *std.Io.Writer, registry: *const zjs.core.gc.Registry) !void {
     const ph = registry.incremental.stats;
     // Two finish-side timers added by TGC S0 go on the reconciliation row
     // below so this row keeps its eight fields.
@@ -1394,8 +1076,8 @@ fn dumpGcPhaseTotals(writer: *std.Io.Writer, registry: *const engine.core.gc.Reg
     // the run, so the residuals are what the subphase timers do not cover
     // (the `nowNanos` reads around each pause, and for begin the frontier
     // seeding between clear and retire).
-    const begin_total = ph.total_stw_by_kind[@intFromEnum(engine.core.gc.Registry.SliceKind.begin)];
-    const finish_total = ph.total_stw_by_kind[@intFromEnum(engine.core.gc.Registry.SliceKind.finish)];
+    const begin_total = ph.total_stw_by_kind[@intFromEnum(zjs.core.gc.Registry.SliceKind.begin)];
+    const finish_total = ph.total_stw_by_kind[@intFromEnum(zjs.core.gc.Registry.SliceKind.finish)];
     const begin_sum = ph.phase_begin_clear_ns +| ph.phase_begin_precise_seed_ns +| ph.phase_begin_conservative_seed_ns +| ph.phase_begin_retire_ns;
     const finish_sum = ph.phase_finish_init_ns +| ph.phase_finish_remark_ns +| ph.phase_finish_weak_ns +| ph.phase_finish_condemn_ns +| ph.phase_finish_tail_ns;
     try writeCounterLine(writer, &.{
@@ -1416,11 +1098,11 @@ fn dumpGcPhaseTotals(writer: *std.Io.Writer, registry: *const engine.core.gc.Reg
     }, "\n");
 }
 
-fn dumpGcMarkFootprint(writer: *std.Io.Writer, rt: *const engine.core.JSRuntime) !void {
+fn dumpGcMarkFootprint(writer: *std.Io.Writer, rt: *const zjs.core.JSRuntime) !void {
     const fp = rt.gc_mark_footprint;
     // An all-zero panel reads like "nothing was marked", which is a wrong
     // answer rather than a missing one. Say which it is.
-    if (!engine.core.gc_trace_stw.mark_footprint_census) {
+    if (!zjs.core.gc_trace_stw.mark_footprint_census) {
         try writer.writeAll(
             "gc: marked-set census not run (pass --gc-mark-footprint; it costs a whole-heap walk inside every final remark)\n",
         );
@@ -1434,26 +1116,26 @@ fn dumpGcMarkFootprint(writer: *std.Io.Writer, rt: *const engine.core.JSRuntime)
     // `string` folds the rope kind in (`MarkFootprint.noteMarkedHeader`):
     // the two are one family to every consumer of this panel.
     try writeCounterLine(writer, &.{
-        .{ "gc: marked-set kinds object ", fp.by_kind[@intFromEnum(engine.core.gc.GcKind.object)] },
-        .{ ", function-bytecode ", fp.by_kind[@intFromEnum(engine.core.gc.GcKind.function_bytecode)] },
-        .{ ", var-ref ", fp.by_kind[@intFromEnum(engine.core.gc.GcKind.var_ref)] },
-        .{ ", realm-context ", fp.by_kind[@intFromEnum(engine.core.gc.GcKind.realm_context)] },
-        .{ ", module ", fp.by_kind[@intFromEnum(engine.core.gc.GcKind.module)] },
-        .{ ", shape ", fp.by_kind[@intFromEnum(engine.core.gc.GcKind.shape)] },
-        .{ ", big-int ", fp.by_kind[@intFromEnum(engine.core.gc.GcKind.big_int)] },
-        .{ ", string ", fp.by_kind[@intFromEnum(engine.core.gc.GcKind.string)] },
-        .{ ", storage ", fp.by_kind[@intFromEnum(engine.core.gc.GcKind.property_storage)] +
-            fp.by_kind[@intFromEnum(engine.core.gc.GcKind.array_storage)] +
-            fp.by_kind[@intFromEnum(engine.core.gc.GcKind.payload)] },
+        .{ "gc: marked-set kinds object ", fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.object)] },
+        .{ ", function-bytecode ", fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.function_bytecode)] },
+        .{ ", var-ref ", fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.var_ref)] },
+        .{ ", realm-context ", fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.realm_context)] },
+        .{ ", module ", fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.module)] },
+        .{ ", shape ", fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.shape)] },
+        .{ ", big-int ", fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.big_int)] },
+        .{ ", string ", fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.string)] },
+        .{ ", storage ", fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.property_storage)] +
+            fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.array_storage)] +
+            fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.payload)] },
     }, "\n");
     try writeCounterLine(writer, &.{
-        .{ "gc: marked-set trace classes ordinary-object ", fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.ordinary_object)] },
-        .{ ", fast-array ", fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.fast_array)] },
-        .{ ", bytecode-function ", fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.bytecode_function)] },
-        .{ ", exotic-object ", fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.exotic_object)] },
-        .{ ", non-object ", fp.by_trace_class[@intFromEnum(engine.core.gc_trace_stw.MarkTraceClass.non_object)] },
+        .{ "gc: marked-set trace classes ordinary-object ", fp.by_trace_class[@intFromEnum(zjs.core.gc_trace_stw.MarkTraceClass.ordinary_object)] },
+        .{ ", fast-array ", fp.by_trace_class[@intFromEnum(zjs.core.gc_trace_stw.MarkTraceClass.fast_array)] },
+        .{ ", bytecode-function ", fp.by_trace_class[@intFromEnum(zjs.core.gc_trace_stw.MarkTraceClass.bytecode_function)] },
+        .{ ", exotic-object ", fp.by_trace_class[@intFromEnum(zjs.core.gc_trace_stw.MarkTraceClass.exotic_object)] },
+        .{ ", non-object ", fp.by_trace_class[@intFromEnum(zjs.core.gc_trace_stw.MarkTraceClass.non_object)] },
     }, "\n");
-    for (std.meta.tags(engine.core.gc_trace_stw.MarkStorageComponent)) |component| {
+    for (std.meta.tags(zjs.core.gc_trace_stw.MarkStorageComponent)) |component| {
         const aggregate = fp.storage[@intFromEnum(component)];
         try writer.writeAll("gc: mark storage ");
         try writer.writeAll(@tagName(component));
@@ -1463,7 +1145,7 @@ fn dumpGcMarkFootprint(writer: *std.Io.Writer, rt: *const engine.core.JSRuntime)
             .{ ", touched-cache-lines ", aggregate.touched_cache_lines },
         }, "\n");
     }
-    for (std.meta.tags(engine.core.gc_trace_stw.MarkTraceClass)) |trace_class| {
+    for (std.meta.tags(zjs.core.gc_trace_stw.MarkTraceClass)) |trace_class| {
         const aggregate = fp.storage_by_trace_class[@intFromEnum(trace_class)];
         try writer.writeAll("gc: mark trace class storage ");
         try writer.writeAll(@tagName(trace_class));
@@ -1473,7 +1155,7 @@ fn dumpGcMarkFootprint(writer: *std.Io.Writer, rt: *const engine.core.JSRuntime)
             .{ ", touched-cache-lines ", aggregate.touched_cache_lines },
         }, "\n");
     }
-    for (engine.core.gc_trace_stw.MarkFootprint.inline_limits, 0..) |limit, index| {
+    for (zjs.core.gc_trace_stw.MarkFootprint.inline_limits, 0..) |limit, index| {
         const plain_external = fp.inline_eligible_objects[index] -
             fp.inline_direct_objects[index] -
             fp.inline_tail_grown_external_objects[index];
@@ -1501,7 +1183,7 @@ fn dumpGcMarkFootprint(writer: *std.Io.Writer, rt: *const engine.core.JSRuntime)
     }
 }
 
-fn dumpGcStats(writer: *std.Io.Writer, stats: zjs.GCStats, registry: *const engine.core.gc.Registry) !void {
+fn dumpGcStats(writer: *std.Io.Writer, stats: zjs.GCStats, registry: *const zjs.core.gc.Registry) !void {
     const minors = registry.generation.stats.minor_collections;
     try writeCounterLine(writer, &.{
         .{ "gc: collection entries total ", stats.collections },
@@ -1542,7 +1224,7 @@ fn dumpGcStats(writer: *std.Io.Writer, stats: zjs.GCStats, registry: *const engi
 /// informational mirror (an edge reaching a WeakRef'd shell, which is legal).
 /// `entries` is the dynamic atom table's slot count, so the two are readable
 /// as a rate.
-fn dumpAtomAuditStats(writer: *std.Io.Writer, rt: *const zjs.JSRuntime) !void {
+fn dumpAtomAuditStats(writer: *std.Io.Writer, rt: *const zjs.Runtime) !void {
     try writeCounterLine(writer, &.{
         .{ "gc: atom audit stale-edge ", rt.atoms.atom_audit_stale_edge },
         .{ ", shell-edge ", rt.atoms.atom_audit_shell_edge },
@@ -1550,14 +1232,14 @@ fn dumpAtomAuditStats(writer: *std.Io.Writer, rt: *const zjs.JSRuntime) !void {
     }, "\n");
 }
 
-fn dumpGcDoomedState(writer: *std.Io.Writer, layer: []const u8, rt: *const zjs.JSRuntime) !void {
-    try writeDoomedStateLine(writer, layer, engine.core.gc_trace_stw.doomedStateSnapshot(rt));
+fn dumpGcDoomedState(writer: *std.Io.Writer, layer: []const u8, rt: *const zjs.Runtime) !void {
+    try writeDoomedStateLine(writer, layer, zjs.core.gc_trace_stw.doomedStateSnapshot(rt));
 }
 
 fn writeDoomedStateLine(
     writer: *std.Io.Writer,
     layer: []const u8,
-    state: engine.core.gc_trace_stw.DoomedStateSnapshot,
+    state: zjs.core.gc_trace_stw.DoomedStateSnapshot,
 ) !void {
     try writer.writeAll("gc: ");
     try writer.writeAll(layer);
@@ -1591,7 +1273,7 @@ fn dumpGcPauses(writer: *std.Io.Writer, distribution: ?zjs.GCPauseDistribution) 
         try writer.writeAll("gc: major pauses none\n");
         return;
     };
-    const retained = @min(d.samples, engine.core.gc.pause_sample_capacity);
+    const retained = @min(d.samples, zjs.core.gc.pause_sample_capacity);
     try writeCounterLine(writer, &.{
         .{ "gc: major pause p50 ", d.p50_ns },
         .{ " ns, p95 ", d.p95_ns },
@@ -1665,7 +1347,7 @@ fn dumpOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) 
         try output.print("\nUSING SUB               COUNT\n", .{});
         for (profile.ext0_sub_count, 0..) |c, sub| {
             if (c == 0) continue;
-            const resident = engine.bytecode.opcode.logical.subForm(@intCast(sub));
+            const resident = zjs.bytecode.opcode.logical.subForm(@intCast(sub));
             const name = if (resident) |form| @tagName(form) else "<range>";
             try output.print("{s:<20} {d:>9}  (sub {d})\n", .{ name, c, sub });
         }
@@ -1673,12 +1355,12 @@ fn dumpOpcodeProfile(output: *std.Io.Writer, profile: *const zjs.OpcodeProfile) 
 
     // D12's family rollup: a GENERATED aggregation view over the form
     // counts, never a substitute for per-form rows.
-    var family_counts = std.enums.EnumArray(engine.bytecode.opcode.logical.SemanticFamily, u64).initFill(0);
+    var family_counts = std.enums.EnumArray(zjs.bytecode.opcode.logical.SemanticFamily, u64).initFill(0);
     for (profile.count, 0..) |c, id| {
-        if (c == 0 or id >= engine.bytecode.opcode.op.op_count) continue;
-        if (engine.bytecode.opcode.physical.stateOf(@intCast(id)) != .claimed) continue;
-        const form: engine.bytecode.opcode.logical.LogicalOpcode = @enumFromInt(id);
-        family_counts.getPtr(engine.bytecode.opcode.logical.familyOf(form)).* +|= c;
+        if (c == 0 or id >= zjs.bytecode.opcode.op.op_count) continue;
+        if (zjs.bytecode.opcode.physical.stateOf(@intCast(id)) != .claimed) continue;
+        const form: zjs.bytecode.opcode.logical.LogicalOpcode = @enumFromInt(id);
+        family_counts.getPtr(zjs.bytecode.opcode.logical.familyOf(form)).* +|= c;
     }
     try output.print("\nFAMILY (rollup)         COUNT\n", .{});
     var fam_it = family_counts.iterator();
@@ -1717,59 +1399,136 @@ fn ensureOpcodeProfileNames() void {
     _ = zjs.activateOpcodeProfile(previous);
 }
 
-test "zjs perf json opcode profile includes counters and rows" {
+// Materialize the declared defaults without a 18 KiB .rodata copy of
+// `OpcodeProfile{}`. Every field is zero except `pending_op`, whose type
+// default is the pending-dispatch sentinel.
+fn initOpcodeProfile(profile: *zjs.OpcodeProfile) void {
+    profile.* = std.mem.zeroes(zjs.OpcodeProfile);
+    profile.pending_op = zjs.OpcodeProfile.no_pending_op;
+}
+
+test "zjs args accept eval, file, and module jobs" {
+    const eval_command = try parseArgs(&.{ "--profile-opcodes", "-e", "1" });
+    try std.testing.expectEqualStrings("1", eval_command.source.?);
+    try std.testing.expectEqualStrings(eval_filename, eval_command.path);
+    try std.testing.expectEqual(zjs.Context.EvalMode.script, eval_command.mode);
+    try std.testing.expect(eval_command.options.profile_opcodes);
+
+    const empty_eval = try parseArgs(&.{ "-e", "" });
+    try std.testing.expectEqualStrings("", empty_eval.source.?);
+
+    const file = try parseArgs(&.{ "input.js", "empty_loop" });
+    try std.testing.expectEqualStrings("input.js", file.path);
+    try std.testing.expect(file.source == null);
+    try std.testing.expectEqual(@as(usize, 2), file.script_args.len);
+    try std.testing.expectEqualStrings("empty_loop", file.script_args[1]);
+    try std.testing.expectEqual(zjs.Context.EvalMode.module, file.mode);
+
+    const script = try parseArgs(&.{ "-s", "input.js", "arg" });
+    try std.testing.expectEqualStrings("input.js", script.path);
+    try std.testing.expectEqual(zjs.Context.EvalMode.script, script.mode);
+
+    const module = try parseArgs(&.{ "-m", "input.mjs", "arg" });
+    try std.testing.expectEqualStrings("input.mjs", module.path);
+    try std.testing.expectEqual(zjs.Context.EvalMode.module, module.mode);
+    try std.testing.expectEqual(@as(usize, 2), module.script_args.len);
+    try std.testing.expectEqualStrings("arg", module.script_args[1]);
+}
+
+test "zjs args accept options" {
+    const command = try parseArgs(&.{
+        "--memory-limit",   "7",
+        "--stack-size=9",   "-d",
+        "-T",               "-I",
+        "prelude.js",       "--include=setup.mjs",
+        "--gc-gate-settle", "--",
+        "input.js",         "-d",
+    });
+    try std.testing.expectEqual(@as(?usize, 7 * 1024), command.options.memory_limit);
+    try std.testing.expectEqual(@as(?usize, 9 * 1024), command.options.stack_size);
+    try std.testing.expect(command.options.dump_memory);
+    try std.testing.expect(command.options.trace_memory);
+    try std.testing.expect(command.options.gc_gate_settle);
+    try std.testing.expect(command.options.gc_stats);
+    try std.testing.expectEqual(@as(usize, 2), command.options.include_count);
+    try std.testing.expectEqualStrings("prelude.js", command.options.includes()[0]);
+    try std.testing.expectEqualStrings("setup.mjs", command.options.includes()[1]);
+    try std.testing.expectEqualStrings("input.js", command.path);
+    try std.testing.expectEqualStrings("-d", command.script_args[1]);
+}
+
+test "zjs end of options treats command words as file paths" {
+    for ([_][]const u8{ "-e", "-m", "-s", "-h", "--help", "--dump", "-input.js" }) |path| {
+        const command = try parseArgs(&.{ "--", path, "argument" });
+        try std.testing.expectEqualStrings(path, command.path);
+        try std.testing.expect(command.source == null);
+        try std.testing.expectEqual(zjs.Context.EvalMode.module, command.mode);
+        try std.testing.expectEqualStrings("argument", command.script_args[1]);
+    }
+}
+
+test "zjs args reject usage" {
+    try std.testing.expectError(error.Usage, parseArgs(&.{"-e"}));
+    try std.testing.expectError(error.Usage, parseArgs(&.{"-m"}));
+    try std.testing.expectError(error.Usage, parseArgs(&.{"-s"}));
+    try std.testing.expectError(error.Usage, parseArgs(&.{ "-i", "extra" }));
+    try std.testing.expectError(error.Usage, parseArgs(&.{"--"}));
+    try std.testing.expectError(error.Usage, parseArgs(&.{ "--stack-size", "11" }));
+    try std.testing.expectError(error.Usage, parseArgs(&.{ "--dump=1", "input.js" }));
+    // The shadow observer went with the rc collector (2026-08-29); the flag it
+    // gated must now be an error rather than a silently ignored word.
+    try std.testing.expectError(error.Usage, parseArgs(&.{ "--gc-shadow-check", "-e", "1" }));
+}
+
+test "zjs loadSource keeps inline eval source as script" {
+    var command = try parseArgs(&.{ "-e", "export const x = 1" });
+    const owned = try loadSource(&command, std.testing.allocator, undefined);
+    try std.testing.expect(owned == null);
+    try std.testing.expectEqualStrings("export const x = 1", command.source.?);
+    try std.testing.expectEqual(zjs.Context.EvalMode.script, command.mode);
+}
+
+test "zjs opcode profile dump includes counters and rows" {
     var profile = zjs.OpcodeProfile{};
-    profile.recordOpcode(engine.bytecode.opcode.op.get_var, 17);
-    profile.recordOpcode(engine.bytecode.opcode.op.push_i16, 5);
+    profile.recordOpcode(zjs.bytecode.opcode.op.get_var, 17);
+    profile.recordOpcode(zjs.bytecode.opcode.op.push_i16, 5);
     profile.recordValueDup();
     profile.recordValueFree();
     profile.recordGlobalLookup();
 
     var buffer: [2048]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
-    try dumpPerfJsonOpcodeProfile(&writer, &profile);
-    const json = writer.buffered();
+    try dumpOpcodeProfile(&writer, &profile);
+    const text = writer.buffered();
 
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"opcode_profile\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"opcodes_executed\": 2") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"value_frees\": 1") != null);
-    if (comptime profile_counters_uninstrumented) {
-        try std.testing.expect(std.mem.indexOf(u8, json, "\"value_dups\": \"not instrumented\"") != null);
-        try std.testing.expect(std.mem.indexOf(u8, json, "\"global_lookups\": \"not instrumented\"") != null);
-    } else {
-        try std.testing.expect(std.mem.indexOf(u8, json, "\"value_dups\": 1") != null);
-        try std.testing.expect(std.mem.indexOf(u8, json, "\"global_lookups\": 1") != null);
-    }
-    if (comptime profile_counters_uninstrumented) {
-        try std.testing.expect(std.mem.indexOf(u8, json, "\"measured_ns\": \"not instrumented\"") != null);
-        try std.testing.expect(std.mem.indexOf(u8, json, "\"call_frames\": \"not instrumented\"") != null);
-        try std.testing.expect(std.mem.indexOf(u8, json, "\"nanos\": \"not instrumented\"") != null);
-        try std.testing.expect(std.mem.indexOf(u8, json, "\"avg_ns\": \"not instrumented\"") != null);
-        try std.testing.expect(std.mem.indexOf(u8, json, "\"slow\": \"not instrumented\"") != null);
-    }
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\": \"get_var\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"name\": \"push_i16\"") != null);
-
-    // `allocations` is wired up in every build (JSRuntime.setOpcodeProfile points
-    // the allocator's counter at it), so it is always a real number.
-    try std.testing.expect(std.mem.indexOf(u8, json, "\"allocations\": 0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "ZJS opcode profile") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "opcodes executed: 2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "get_var") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "push_i16") != null);
 }
+
+test "opcode profile initialization preserves every default field" {
+    var profile: zjs.OpcodeProfile = undefined;
+    initOpcodeProfile(&profile);
+    try std.testing.expectEqualDeep(zjs.OpcodeProfile{}, profile);
+}
+
 test "zjs mark footprint serialization preserves populated rows and missing census" {
     // Only the census field is read by this serializer; no collector is run.
-    var rt: engine.core.JSRuntime = undefined;
+    var rt: zjs.core.JSRuntime = undefined;
     rt.gc_mark_footprint = .{ .major_censuses = 2, .marked_headers = 3, .block_headers = 4 };
     const fp = &rt.gc_mark_footprint;
-    fp.by_kind[@intFromEnum(engine.core.gc.GcKind.object)] = 1;
-    fp.by_kind[@intFromEnum(engine.core.gc.GcKind.function_bytecode)] = 2;
-    fp.by_kind[@intFromEnum(engine.core.gc.GcKind.var_ref)] = 3;
-    fp.by_kind[@intFromEnum(engine.core.gc.GcKind.realm_context)] = 4;
-    fp.by_kind[@intFromEnum(engine.core.gc.GcKind.module)] = 5;
-    fp.by_kind[@intFromEnum(engine.core.gc.GcKind.shape)] = 6;
-    fp.by_kind[@intFromEnum(engine.core.gc.GcKind.big_int)] = 7;
-    fp.by_kind[@intFromEnum(engine.core.gc.GcKind.string)] = 8;
-    fp.by_kind[@intFromEnum(engine.core.gc.GcKind.property_storage)] = 9;
-    fp.by_kind[@intFromEnum(engine.core.gc.GcKind.array_storage)] = 10;
-    fp.by_kind[@intFromEnum(engine.core.gc.GcKind.payload)] = 11;
+    fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.object)] = 1;
+    fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.function_bytecode)] = 2;
+    fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.var_ref)] = 3;
+    fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.realm_context)] = 4;
+    fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.module)] = 5;
+    fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.shape)] = 6;
+    fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.big_int)] = 7;
+    fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.string)] = 8;
+    fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.property_storage)] = 9;
+    fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.array_storage)] = 10;
+    fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.payload)] = 11;
     for (&fp.storage, 0..) |*row, i| row.* = .{ .allocation_touches = i + 1, .allocated_bytes = i + 11, .touched_cache_lines = i + 21 };
     for (&fp.storage_by_trace_class, 0..) |*row, i| row.* = .{ .allocation_touches = i + 31, .allocated_bytes = i + 41, .touched_cache_lines = i + 51 };
     for (0..fp.inline_eligible_objects.len) |i| {
@@ -1784,9 +1543,9 @@ test "zjs mark footprint serialization preserves populated rows and missing cens
         fp.inline_ordinary_property_bytes[i] = i + 80;
         fp.inline_ordinary_property_cache_lines[i] = i + 15;
     }
-    const old_census = engine.core.gc_trace_stw.mark_footprint_census;
-    defer engine.core.gc_trace_stw.mark_footprint_census = old_census;
-    engine.core.gc_trace_stw.mark_footprint_census = true;
+    const old_census = zjs.core.gc_trace_stw.mark_footprint_census;
+    defer zjs.core.gc_trace_stw.mark_footprint_census = old_census;
+    zjs.core.gc_trace_stw.mark_footprint_census = true;
     var buffer: [8192]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     try dumpGcMarkFootprint(&writer, &rt);
@@ -1814,19 +1573,19 @@ test "zjs mark footprint serialization preserves populated rows and missing cens
         \\
     ;
     try std.testing.expectEqualStrings(expected, writer.buffered());
-    engine.core.gc_trace_stw.mark_footprint_census = false;
+    zjs.core.gc_trace_stw.mark_footprint_census = false;
     writer = std.Io.Writer.fixed(&buffer);
     try dumpGcMarkFootprint(&writer, &rt);
     try std.testing.expectEqualStrings("gc: marked-set census not run (pass --gc-mark-footprint; it costs a whole-heap walk inside every final remark)\n", writer.buffered());
-    engine.core.gc_trace_stw.mark_footprint_census = true;
+    zjs.core.gc_trace_stw.mark_footprint_census = true;
     var small: [1]u8 = undefined;
     writer = std.Io.Writer.fixed(&small);
     try std.testing.expectError(error.WriteFailed, dumpGcMarkFootprint(&writer, &rt));
 }
 
 test "zjs generation diagnostic lines preserve populated snapshot" {
-    var memory = engine.core.memory.MemoryAccount.init(std.testing.allocator);
-    var registry: engine.core.gc.Registry = .{ .memory = &memory };
+    var memory = zjs.core.memory.MemoryAccount.init(std.testing.allocator);
+    var registry: zjs.core.gc.Registry = .{ .memory = &memory };
     // Position-based fill so every counter prints a distinct value; the
     // minor phase array takes one position per phase.
     comptime var position: usize = 0;
@@ -1834,7 +1593,7 @@ test "zjs generation diagnostic lines preserve populated snapshot" {
         if (@typeInfo(field.type) == .int) {
             @field(registry.generation.stats, field.name) = @intCast(position + 11);
             position += 1;
-        } else if (field.type == std.EnumArray(engine.core.gc.generation.MinorPhase, u64)) {
+        } else if (field.type == std.EnumArray(zjs.core.gc.generation.MinorPhase, u64)) {
             inline for (0..@field(registry.generation.stats, field.name).values.len) |phase_index| {
                 @field(registry.generation.stats, field.name).values[phase_index] = position + 11;
                 position += 1;
@@ -1848,9 +1607,9 @@ test "zjs generation diagnostic lines preserve populated snapshot" {
     }
     var samples = [_]u64{ 7, 2, 5 };
     registry.generation.minor_pause_samples = .{ .items = &samples, .capacity = samples.len };
-    const old_verify = engine.core.gc.verify_minor;
-    defer engine.core.gc.verify_minor = old_verify;
-    engine.core.gc.verify_minor = false;
+    const old_verify = zjs.core.gc.verify_minor;
+    defer zjs.core.gc.verify_minor = old_verify;
+    zjs.core.gc.verify_minor = false;
     var buffer: [8192]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     try dumpGcGenerationStats(&writer, &registry);
@@ -1918,21 +1677,9 @@ test "zjs doomed state line preserves mixed bools and counters" {
     }));
 }
 
-test "zjs counter line handles full unsigned range and writer errors" {
-    var buffer: [128]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&buffer);
-    try writeCounterLine(&writer, &.{ .{ "zero ", 0 }, .{ ", max ", std.math.maxInt(u64) } }, " bytes\n");
-    try std.testing.expectEqualStrings("zero 0, max 18446744073709551615 bytes\n", writer.buffered());
-    // Fail after the first field, then at the trailing suffix.
-    for ([_]usize{ 8, 32 }) |capacity| {
-        writer = std.Io.Writer.fixed(buffer[0..capacity]);
-        try std.testing.expectError(error.WriteFailed, writeCounterLine(&writer, &.{ .{ "zero ", 0 }, .{ ", max ", std.math.maxInt(u64) } }, " bytes\n"));
-    }
-}
-
 test "zjs registry diagnostic panels preserve populated snapshot" {
-    var memory = engine.core.memory.MemoryAccount.init(std.testing.allocator);
-    var registry: engine.core.gc.Registry = .{ .memory = &memory };
+    var memory = zjs.core.memory.MemoryAccount.init(std.testing.allocator);
+    var registry: zjs.core.gc.Registry = .{ .memory = &memory };
     inline for (@typeInfo(@TypeOf(registry.stats)).@"struct".fields, 0..) |field, i| {
         if (@typeInfo(field.type) == .int) @field(registry.stats, field.name) = @intCast(i + 11);
     }
@@ -1988,58 +1735,6 @@ test "zjs registry diagnostic panels preserve populated snapshot" {
     try std.testing.expectEqualStrings(expected, writer.buffered());
 }
 
-test "zjs perf JSON metrics preserve populated fields" {
-    const timings: PerfJsonTimings = .{
-        .total_ns = 1,
-        .read_source_ns = 2,
-        .runtime_create_ns = 3,
-        .setup_ns = 4,
-        .include_ns = 5,
-        .eval_ns = 6,
-        .jobs_ns = 10,
-        .zjs = .{ .parse_ns = 7, .vm_run_ns = 8, .promise_jobs_ns = 9 },
-    };
-    var memory = std.mem.zeroes(zjs.RuntimeMemoryUsage);
-    memory.allocated_bytes = 11;
-    memory.allocation_count = 12;
-    memory.peak_allocated_bytes = 13;
-    memory.peak_allocation_count = 14;
-    memory.alloc_calls = 15;
-    memory.free_calls = 16;
-    memory.create_calls = 17;
-    memory.destroy_calls = 18;
-    var buf: [2048]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&buf);
-    try dumpPerfJsonMetrics(&writer, memory, timings);
-    const expected =
-        \\  "total_ns": 1,
-        \\  "read_source_ns": 2,
-        \\  "runtime_create_ns": 3,
-        \\  "setup_ns": 4,
-        \\  "include_ns": 5,
-        \\  "eval_ns": 6,
-        \\  "parse_ns": 7,
-        \\  "finalize_ns": null,
-        \\  "parse_ns_includes_finalize": true,
-        \\  "vm_run_ns": 8,
-        \\  "promise_jobs_ns": 9,
-        \\  "jobs_ns": 10,
-        \\  "memory": {
-        \\    "allocated_bytes": 11,
-        \\    "allocation_count": 12,
-        \\    "allocated_bytes_peak": 13,
-        \\    "allocation_count_peak": 14,
-        \\    "alloc_calls": 15,
-        \\    "free_calls": 16,
-        \\    "create_calls": 17,
-        \\    "destroy_calls": 18
-        \\  }
-    ;
-    try std.testing.expectEqualStrings(expected, writer.buffered());
-    writer = std.Io.Writer.fixed(buf[0..17]);
-    try std.testing.expectError(error.WriteFailed, dumpPerfJsonMetrics(&writer, memory, timings));
-}
-
 test "zjs memory table preserves widths and populated fields" {
     var memory = std.mem.zeroes(zjs.RuntimeMemoryUsage);
     memory.allocation_count = 123456;
@@ -2075,16 +1770,14 @@ test "zjs memory table preserves widths and populated fields" {
     try std.testing.expectError(error.WriteFailed, dumpMemorySnapshot(&writer, memory));
 }
 
-// Materialize the declared defaults without a 18 KiB .rodata copy of
-// `OpcodeProfile{}`. Every field is zero except `pending_op`, whose type
-// default is the pending-dispatch sentinel.
-fn initOpcodeProfile(profile: *zjs.OpcodeProfile) void {
-    profile.* = std.mem.zeroes(zjs.OpcodeProfile);
-    profile.pending_op = zjs.OpcodeProfile.no_pending_op;
-}
-
-test "opcode profile initialization preserves every default field" {
-    var profile: zjs.OpcodeProfile = undefined;
-    initOpcodeProfile(&profile);
-    try std.testing.expectEqualDeep(zjs.OpcodeProfile{}, profile);
+test "zjs counter line handles full unsigned range and writer errors" {
+    var buffer: [128]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeCounterLine(&writer, &.{ .{ "zero ", 0 }, .{ ", max ", std.math.maxInt(u64) } }, " bytes\n");
+    try std.testing.expectEqualStrings("zero 0, max 18446744073709551615 bytes\n", writer.buffered());
+    // Fail after the first field, then at the trailing suffix.
+    for ([_]usize{ 8, 32 }) |capacity| {
+        writer = std.Io.Writer.fixed(buffer[0..capacity]);
+        try std.testing.expectError(error.WriteFailed, writeCounterLine(&writer, &.{ .{ "zero ", 0 }, .{ ", max ", std.math.maxInt(u64) } }, " bytes\n"));
+    }
 }

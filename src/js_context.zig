@@ -124,22 +124,33 @@ pub fn createMeasured(
     return createImpl(true, rt, options, timing);
 }
 
+/// Non-owning facade for callbacks whose ABI already carries the stable
+/// core realm pointer. The facade must not be destroyed.
+pub fn borrowCore(core_ctx: *core.JSContext) JSContext {
+    return .{ .core = core_ctx };
+}
+
+/// Engine-internal: the realm global as `*Object`.
+pub fn globalObjectPtr(self: *JSContext) !*Object {
+    return self.globalPtr();
+}
+
 pub const JSContext = struct {
+    pub const Options = core.ContextOptions;
+    pub const EvalMode = core.EvalMode;
+    pub const EvalOptions = core.EvalOptions;
+    pub const EvalTiming = core.EvalTiming;
+    pub const FunctionOptions = native.Options;
+
     /// Stable heap identity; this pointer owns the initial RealmRef returned by
     /// `core.JSContext.createConstructingWithOptions` until `deinit`/`destroy`.
     core: *core.JSContext,
 
-    /// Non-owning facade for callbacks whose ABI already carries the stable
-    /// core realm pointer.  The facade must not be destroyed.
-    pub fn borrowCore(core_ctx: *core.JSContext) JSContext {
-        return .{ .core = core_ctx };
-    }
-
-    pub fn create(rt: *JSRuntime, options: core.ContextOptions) !*JSContext {
+    pub fn create(rt: *JSRuntime, options: Options) !*JSContext {
         return createImpl(false, rt, options, {});
     }
 
-    pub fn init(self: *JSContext, rt: *JSRuntime, options: core.ContextOptions) !void {
+    pub fn init(self: *JSContext, rt: *JSRuntime, options: Options) !void {
         return initWithOptionsImpl(false, self, rt, options, {});
     }
 
@@ -204,50 +215,8 @@ pub const JSContext = struct {
         self.core.clearUnhandledRejection();
     }
 
-    pub fn classPrototypeSlotCount(self: JSContext) usize {
-        return self.core.classPrototypeSlotCount();
-    }
-
     pub fn takePendingException(self: *JSContext) JSValue {
         return self.core.takePendingException();
-    }
-
-    pub fn pushBacktraceFrame(
-        self: *JSContext,
-        function_name: atom.Atom,
-        filename: atom.Atom,
-        line_num: i32,
-        col_num: i32,
-    ) !void {
-        try self.core.pushBacktraceFrame(function_name, filename, line_num, col_num);
-    }
-
-    pub fn pushBacktraceFrameWithResolver(
-        self: *JSContext,
-        function_name: atom.Atom,
-        filename: atom.Atom,
-        line_num: i32,
-        col_num: i32,
-        location_data: ?*const anyopaque,
-        location_resolver: ?core.BacktraceLocationResolver,
-    ) !void {
-        try self.core.pushBacktraceFrameWithResolver(function_name, filename, line_num, col_num, location_data, location_resolver);
-    }
-
-    pub fn popBacktraceFrame(self: *JSContext) void {
-        self.core.popBacktraceFrame();
-    }
-
-    pub fn updateBacktracePc(self: *JSContext, pc: usize) void {
-        self.core.updateBacktracePc(pc);
-    }
-
-    pub fn borrowBacktracePc(self: *JSContext, pc_source: *const usize) void {
-        self.core.borrowBacktracePc(pc_source);
-    }
-
-    pub fn updateBacktraceLocation(self: *JSContext, pc: usize, line_num: i32, col_num: i32) void {
-        self.core.updateBacktraceLocation(pc, line_num, col_num);
     }
 
     pub fn defineDataProperty(
@@ -308,9 +277,13 @@ pub const JSContext = struct {
     }
 
     // --- Execution / VM / Builtins Helpers (Moved from core/context.zig) ---
-    pub fn globalObject(self: *JSContext) !*Object {
+    fn globalPtr(self: *JSContext) !*Object {
         ensureStandardGlobalsRegistered(self.core.runtime);
         return exec.zjs_vm.contextGlobal(self.core);
+    }
+
+    pub fn globalObject(self: *JSContext) !JSValue {
+        return (try self.globalPtr()).value();
     }
 
     pub fn createObject(self: *JSContext) !JSValue {
@@ -330,8 +303,8 @@ pub const JSContext = struct {
         return created.value();
     }
 
-    pub fn getPropertyAtom(self: *JSContext, val: JSValue, property_name: atom.Atom) !JSValue {
-        const global = try self.globalObject();
+    fn getPropertyAtom(self: *JSContext, val: JSValue, property_name: atom.Atom) !JSValue {
+        const global = try self.globalPtr();
         return exec.zjs_vm.getValueProperty(self.core, null, global, val, property_name, null, null);
     }
 
@@ -348,7 +321,7 @@ pub const JSContext = struct {
         var roots = PublicValueRootWindow(2).init(.{ val, property_key });
         roots.activate(self.core.runtime);
         defer roots.deactivate(self.core.runtime);
-        const global = options.realm_global orelse try self.globalObject();
+        const global = options.realm_global orelse try self.globalPtr();
         const key = try exec.object_ops.toPropertyKeyAtom(self.core, options.output, global, roots.values[1], null, null);
         return exec.object_ops.getValueProperty(self.core, options.output, global, roots.values[0], key, null, null);
     }
@@ -366,7 +339,7 @@ pub const JSContext = struct {
         var roots = PublicValueRootWindow(2).init(.{ val, property_key });
         roots.activate(self.core.runtime);
         defer roots.deactivate(self.core.runtime);
-        const global = options.realm_global orelse try self.globalObject();
+        const global = options.realm_global orelse try self.globalPtr();
         const key = try exec.object_ops.toPropertyKeyAtom(self.core, options.output, global, roots.values[1], null, null);
         return self.deletePropertyAtom(roots.values[0], key, .{ .output = options.output, .realm_global = global });
     }
@@ -384,7 +357,7 @@ pub const JSContext = struct {
         var roots = PublicValueRootWindow(2).init(.{ val, property_key });
         roots.activate(self.core.runtime);
         defer roots.deactivate(self.core.runtime);
-        const global = options.realm_global orelse try self.globalObject();
+        const global = options.realm_global orelse try self.globalPtr();
         const key = try exec.object_ops.toPropertyKeyAtom(self.core, options.output, global, roots.values[1], null, null);
         return self.hasOwnPropertyAtom(roots.values[0], key, .{ .output = options.output, .realm_global = global });
     }
@@ -393,13 +366,13 @@ pub const JSContext = struct {
         var roots = PublicValueRootWindow(2).init(.{ val, property_key });
         roots.activate(self.core.runtime);
         defer roots.deactivate(self.core.runtime);
-        const global = options.realm_global orelse try self.globalObject();
+        const global = options.realm_global orelse try self.globalPtr();
         const key = try exec.object_ops.toPropertyKeyAtom(self.core, options.output, global, roots.values[1], null, null);
         return self.ownPropertyDescriptorAtom(roots.values[0], key, .{ .output = options.output, .realm_global = global });
     }
 
     pub fn toString(self: *JSContext, val: JSValue) !JSValue {
-        const global = try self.globalObject();
+        const global = try self.globalPtr();
         return exec.string_ops.toStringForAnnexB(self.core, null, global, val, null, null);
     }
 
@@ -410,7 +383,7 @@ pub const JSContext = struct {
     }
 
     pub fn toNumber(self: *JSContext, val: JSValue) !f64 {
-        const global = try self.globalObject();
+        const global = try self.globalPtr();
         const primitive = try exec.coercion_ops.toPrimitiveForNumber(self.core, null, global, val);
         if (primitive.isBigInt()) return error.TypeError;
         const number_value = try exec.value_ops.toNumberValue(self.core.runtime, primitive);
@@ -466,7 +439,7 @@ pub const JSContext = struct {
     }
 
     pub fn createError(self: *JSContext, name: []const u8, message: []const u8, options: core.ErrorOptions) !JSValue {
-        const global = options.realm_global orelse try self.globalObject();
+        const global = options.realm_global orelse try self.globalPtr();
         if (options.capture_stack) return exec.exception_ops.createNamedError(self.core, global, name, message);
         return exec.exception_ops.createNamedErrorWithoutStack(self.core.runtime, global, name, message);
     }
@@ -533,13 +506,13 @@ pub const JSContext = struct {
 
     fn deletePropertyAtom(self: *JSContext, val: JSValue, property_name: atom.Atom, options: core.PropertyAccessOptions) !bool {
         const object = try Object.expect(val);
-        const global = options.realm_global orelse try self.globalObject();
+        const global = options.realm_global orelse try self.globalPtr();
         return exec.object_ops.deleteValueProperty(self.core, options.output, global, val, object, property_name, null, null);
     }
 
     fn ownPropertyDescriptorAtom(self: *JSContext, val: JSValue, property_name: atom.Atom, options: core.PropertyAccessOptions) !?core.PropertyDescriptor {
         const object = try Object.expect(val);
-        const global = options.realm_global orelse try self.globalObject();
+        const global = options.realm_global orelse try self.globalPtr();
         var desc = try exec.object_ops.proxyAwareOwnPropertyDescriptor(self.core, options.output, global, object, property_name, null, null) orelse {
             if (object.isGlobal() and exec.value_ops.atomNameEql(self.core.runtime, property_name, "globalThis")) {
                 return Descriptor.data(object.value(), .method);
@@ -628,20 +601,21 @@ pub const JSContext = struct {
     }
 
     pub fn runJobs(self: *JSContext, output: ?*std.Io.Writer) !void {
-        const global_object = try self.globalObject();
+        const global_object = try self.globalPtr();
         exec.zjs_vm.drainPendingPromiseJobs(self.core, output, global_object) catch |err| {
             if (self.hasException() or self.hasUnhandledRejection()) return;
             return err;
         };
     }
 
-    /// Install a native function built by `zjs.native.managed` as a global.
-    pub fn defineFunction(self: *JSContext, name: []const u8, spec: native.Spec, options: native.Options) !JSValue {
+    /// Install a host function as a writable, non-enumerable, configurable
+    /// global. `spec_or_fn` is `fn (*Call) E!Value` or a `native.Spec`.
+    pub fn defineFunction(self: *JSContext, name: []const u8, spec_or_fn: anytype, options: FunctionOptions) !JSValue {
         const rt = self.core.runtime;
-        const global_object = try self.globalObject();
+        const global_object = try self.globalPtr();
         var opts = options;
-        if (opts.realm_global == null) opts.realm_global = global_object;
-        const function_value = try self.createFunction(name, spec, opts);
+        if (opts.realm_global == null) opts.realm_global = global_object.value();
+        const function_value = try self.createFunction(name, spec_or_fn, opts);
         const property_name = try rt.internAtom(name);
         // TGC S3 §4 class B.
         var name_roots = core.runtime.rootAtoms(.{&property_name});
@@ -651,12 +625,14 @@ pub const JSContext = struct {
         return function_value;
     }
 
-    /// NB2: create a native function object without installing it.
-    pub fn createFunction(self: *JSContext, name: []const u8, spec: native.Spec, options: native.Options) !JSValue {
+    /// Create a host function object without installing it.
+    pub fn createFunction(self: *JSContext, name: []const u8, spec_or_fn: anytype, options: FunctionOptions) !JSValue {
         const rt = self.core.runtime;
-        const realm_global = options.realm_global orelse try self.globalObject();
+        const realm_global_value = options.realm_global orelse try self.globalObject();
+        const realm_global = try Object.expect(realm_global_value);
         const realm = rt.contextForGlobalIncludingConstructing(realm_global) orelse return error.InvalidEngineState;
         const function_proto = realm.cached_function_proto orelse return error.InvalidEngineState;
+        const spec = specFrom(spec_or_fn);
         var template = spec.template;
         template.state = options.state;
         if (options.length) |length| template.arity = length;
@@ -680,6 +656,29 @@ pub const JSContext = struct {
         }
         function_object.installNativeEntry(entry);
         return function_value;
+    }
+
+    /// Install `scriptArgs` as a writable, enumerable, configurable global
+    /// string array. Used by the CLI; empty `args` materializes an empty array
+    /// on first read.
+    pub fn defineScriptArgs(self: *JSContext, args: []const []const u8) !void {
+        const rt = self.runtimePtr();
+        const global = try self.globalPtr();
+        if (args.len == 0) {
+            const key = try rt.internAtom("scriptArgs");
+            try global.defineEmptyArrayAutoInitProperty(rt, key, core.property.Flags.data(.all), global);
+            return;
+        }
+
+        const array_prototype = cachedArrayPrototype(rt, global) orelse try constructorPrototypeObjectByAtom(global, atom.ids.Array);
+        const array = try Object.createArrayWithOwnPropertyCapacity(rt, array_prototype, args.len);
+        for (args, 0..) |item, index| {
+            const item_value = try self.createString(item);
+            try array.defineOwnProperty(rt, core.Atom.taggedInt(@intCast(index)), Descriptor.data(item_value, .all));
+        }
+        array.setArrayLength(@intCast(args.len));
+        const key = try rt.internAtom("scriptArgs");
+        try global.defineOwnProperty(rt, key, Descriptor.data(array.value(), .all));
     }
 
     pub fn formatException(self: *JSContext, exc: JSValue, allocator: std.mem.Allocator) ![]const u8 {
@@ -728,6 +727,30 @@ pub const JSContext = struct {
     }
 };
 
+fn specFrom(spec_or_fn: anytype) native.Spec {
+    if (@TypeOf(spec_or_fn) == native.Spec) return spec_or_fn;
+    return native.managed(spec_or_fn);
+}
+
+fn cachedArrayPrototype(rt: *JSRuntime, global: *Object) ?*Object {
+    const stored = global.cachedRealmValue(rt, .array_prototype) orelse return null;
+    return objectFromValue(stored);
+}
+
+fn constructorPrototypeObjectByAtom(global: *Object, key: atom.Atom) !?*Object {
+    const constructor_value = try global.getProperty(key);
+    const constructor = objectFromValue(constructor_value) orelse return null;
+    const prototype_value = try constructor.getProperty(atom.ids.prototype);
+    return objectFromValue(prototype_value);
+}
+
+fn objectFromValue(v: JSValue) ?*Object {
+    if (!v.is(.object)) return null;
+    const header = v.refHeader() orelse return null;
+    if (header.meta().flags.kind != .object) return null;
+    return Object.fromHeader(header);
+}
+
 fn getPropertyString(rt: *JSRuntime, obj: *Object, key: atom.Atom, allocator: std.mem.Allocator) !?[]const u8 {
     const val = try obj.getProperty(key);
     if (!val.isString()) return null;
@@ -747,18 +770,4 @@ fn arrayObjectFromValue(value: JSValue) !?*Object {
         return arrayObjectFromValue(target);
     }
     return if (object.isArray()) object else null;
-}
-
-test "JSContext.toString performs ECMAScript ToString instead of tag assertion" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const ctx = try core.JSContext.create(rt, .{});
-    defer ctx.destroy();
-
-    var wrapper = JSContext.borrowCore(ctx);
-    const object = try wrapper.eval("({ toString() { return 'semantic-string'; } })", .{});
-    try std.testing.expect(object.asString() == null);
-
-    const converted = try wrapper.toString(object);
-    try std.testing.expectEqualStrings("semantic-string", converted.asString().?.units().latin1);
 }

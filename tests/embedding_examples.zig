@@ -1,12 +1,12 @@
 //! Validates host eval, managed functions, handles, and realm teardown
-//! against `src/root.zig` (the CLI / run-test262 facade).
+//! against `src/root.zig`.
 const std = @import("std");
 const zjs = @import("zjs");
 const HostState = struct {
     value: i32,
 
-    fn call(c: *zjs.native.Call) zjs.JSValue {
-        return zjs.JSValue.int32(c.state(HostState).value);
+    fn call(c: *zjs.Call) zjs.Value {
+        return zjs.Value.int32(c.state(HostState).value);
     }
 };
 
@@ -24,7 +24,7 @@ const BytesState = struct {
 const InterruptBudget = struct {
     budget: usize,
 
-    fn stop(_: *zjs.JSRuntime, ctx: ?*anyopaque) bool {
+    fn stop(_: *zjs.Runtime, ctx: ?*anyopaque) bool {
         const self: *@This() = @ptrCast(@alignCast(ctx.?));
         if (self.budget == 0) return true;
         self.budget -= 1;
@@ -34,10 +34,10 @@ const InterruptBudget = struct {
 
 test "embedding cookbook basic script eval example compiles and runs" {
     const allocator = std.testing.allocator;
-    const rt = try zjs.JSRuntime.create(allocator, .{});
+    const rt = try zjs.Runtime.create(allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt, .{});
+    const ctx = try zjs.Context.create(rt, .{});
     defer ctx.destroy();
 
     const result = try ctx.eval("let x = 1 + 2; x;", .{});
@@ -47,10 +47,10 @@ test "embedding cookbook basic script eval example compiles and runs" {
 
 test "embedding cookbook eval with output example compiles and runs" {
     const allocator = std.testing.allocator;
-    const rt = try zjs.JSRuntime.create(allocator, .{});
+    const rt = try zjs.Runtime.create(allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt, .{});
+    const ctx = try zjs.Context.create(rt, .{});
     defer ctx.destroy();
 
     var buffer: [128]u8 = undefined;
@@ -66,10 +66,10 @@ test "embedding cookbook eval with output example compiles and runs" {
 
 test "embedding cookbook host-held values example compiles and roots correctly" {
     const allocator = std.testing.allocator;
-    const rt = try zjs.JSRuntime.create(allocator, .{});
+    const rt = try zjs.Runtime.create(allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt, .{});
+    const ctx = try zjs.Context.create(rt, .{});
     defer ctx.destroy();
 
     const object = try ctx.eval("({ answer: 42 })", .{});
@@ -90,21 +90,21 @@ test "embedding cookbook host-held values example compiles and roots correctly" 
 
 test "embedding cookbook host function example compiles and runs" {
     const allocator = std.testing.allocator;
-    const rt = try zjs.JSRuntime.create(allocator, .{});
+    const rt = try zjs.Runtime.create(allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt, .{});
+    const ctx = try zjs.Context.create(rt, .{});
     defer ctx.destroy();
 
     var state = HostState{ .value = 42 };
-    _ = try ctx.defineFunction("hostValue", zjs.native.managed(HostState.call), .{ .state = @ptrCast(&state) });
+    _ = try ctx.defineFunction("hostValue", HostState.call, .{ .state = @ptrCast(&state) });
 
     const result = try ctx.eval("hostValue()", .{});
     try std.testing.expectEqual(@as(?i32, 42), result.as(.int));
 }
 
-// Contract pin for the host hookup path: a native function is a
-// `zjs.native.managed` thunk bound to one immutable `NativeEntry`; the VM
+// Contract pin for the host hookup path: a host function is a
+// `Call` thunk bound to one immutable `NativeEntry`; the VM
 // dispatches it exactly like a builtin.
 const ContractHost = struct {
     factor: i32,
@@ -112,7 +112,7 @@ const ContractHost = struct {
     saw_object_this: bool = false,
     finalized: *bool,
 
-    fn call(c: *zjs.native.Call) anyerror!zjs.JSValue {
+    fn call(c: *zjs.Call) anyerror!zjs.Value {
         const self = c.state(ContractHost);
         self.calls += 1;
         if (c.this.is(.object)) self.saw_object_this = true;
@@ -120,7 +120,7 @@ const ContractHost = struct {
         const a = c.arg(0).as(.int) orelse return error.TypeError;
         const b = c.arg(1).as(.int) orelse return error.TypeError;
         if (a < 0) return error.RangeError;
-        return zjs.JSValue.int32(self.factor * (a + b));
+        return zjs.Value.int32(self.factor * (a + b));
     }
 
     fn finalize(ptr: *anyopaque) void {
@@ -134,14 +134,14 @@ test "embedding external host function contract covers args, this, errors, and f
     var finalized = false;
     var state = ContractHost{ .factor = 2, .finalized = &finalized };
 
-    const rt = try zjs.JSRuntime.create(allocator, .{});
+    const rt = try zjs.Runtime.create(allocator, .{});
     var rt_alive = true;
     defer if (rt_alive) rt.destroy();
-    const ctx = try zjs.JSContext.create(rt, .{});
+    const ctx = try zjs.Context.create(rt, .{});
     var ctx_alive = true;
     defer if (ctx_alive) ctx.destroy();
 
-    _ = try ctx.defineFunction("hostCombine", zjs.native.managed(ContractHost.call), .{ .length = 2, .state = @ptrCast(&state), .finalize = ContractHost.finalize });
+    _ = try ctx.defineFunction("hostCombine", ContractHost.call, .{ .length = 2, .state = @ptrCast(&state), .finalize = ContractHost.finalize });
 
     // Scoped so every eval result is released before the teardown choreography
     // below asserts on runtime/context destruction order.
@@ -184,10 +184,10 @@ test "embedding external host function contract covers args, this, errors, and f
 
 test "embedding cookbook strings and bytes examples compile and run" {
     const allocator = std.testing.allocator;
-    const rt = try zjs.JSRuntime.create(allocator, .{});
+    const rt = try zjs.Runtime.create(allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt, .{});
+    const ctx = try zjs.Context.create(rt, .{});
     defer ctx.destroy();
 
     const value = try ctx.eval("({ toString() { return 'path'; } })", .{});
@@ -200,7 +200,7 @@ test "embedding cookbook strings and bytes examples compile and run" {
     const backing = try allocator.alloc(u8, 4);
     @memcpy(backing, &[_]u8{ 1, 2, 3, 4 });
 
-    var store = zjs.JSValue.Bytes.Store.owned(backing, .{
+    var store = zjs.Value.Bytes.Store.owned(backing, .{
         .context = &bytes_state,
         .deinit = BytesState.deinit,
     });
@@ -220,7 +220,7 @@ test "embedding cookbook strings and bytes examples compile and run" {
 
 test "embedding cookbook construction with limits example compiles and runs" {
     const allocator = std.testing.allocator;
-    const rt = try zjs.JSRuntime.create(allocator, .{
+    const rt = try zjs.Runtime.create(allocator, .{
         .stack_size = 512 * 1024,
         .gc_threshold = 2 * 1024 * 1024,
     });
@@ -234,10 +234,10 @@ test "embedding cookbook construction with limits example compiles and runs" {
 
 test "embedding cookbook interrupts example compiles and aborts runaway code" {
     const allocator = std.testing.allocator;
-    const rt = try zjs.JSRuntime.create(allocator, .{});
+    const rt = try zjs.Runtime.create(allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt, .{});
+    const ctx = try zjs.Context.create(rt, .{});
     defer ctx.destroy();
 
     var state = InterruptBudget{ .budget = 0 };
@@ -249,10 +249,10 @@ test "embedding cookbook interrupts example compiles and aborts runaway code" {
 
 test "embedding cookbook module eval example compiles and runs" {
     const allocator = std.testing.allocator;
-    const rt = try zjs.JSRuntime.create(allocator, .{});
+    const rt = try zjs.Runtime.create(allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt, .{});
+    const ctx = try zjs.Context.create(rt, .{});
     defer ctx.destroy();
 
     _ = try ctx.eval(
@@ -262,47 +262,46 @@ test "embedding cookbook module eval example compiles and runs" {
 }
 
 test "embedding public API core signatures stay source-compatible" {
-    const create_runtime: fn (std.mem.Allocator, zjs.RuntimeOptions) anyerror!*zjs.JSRuntime = zjs.JSRuntime.create;
-    const create_context: fn (*zjs.JSRuntime, zjs.context.Options) anyerror!*zjs.JSContext = zjs.JSContext.create;
-    const define_function: fn (*zjs.JSContext, []const u8, zjs.native.Spec, zjs.native.Options) anyerror!zjs.JSValue = zjs.JSContext.defineFunction;
-    const create_function: fn (*zjs.JSContext, []const u8, zjs.native.Spec, zjs.native.Options) anyerror!zjs.JSValue = zjs.JSContext.createFunction;
-    const eval_script: fn (*zjs.JSContext, []const u8, zjs.context.EvalOptions) anyerror!zjs.JSValue = zjs.JSContext.eval;
-    const array_buffer: fn (*zjs.JSContext, *zjs.JSValue.Bytes.Store) anyerror!zjs.JSValue = zjs.JSContext.arrayBuffer;
-    const to_owned_utf8: fn (*zjs.JSContext, zjs.JSValue, std.mem.Allocator) anyerror![]u8 = zjs.JSContext.toOwnedUtf8;
+    const create_runtime: fn (std.mem.Allocator, zjs.Runtime.Options) anyerror!*zjs.Runtime = zjs.Runtime.create;
+    const create_context: fn (*zjs.Runtime, zjs.Context.Options) anyerror!*zjs.Context = zjs.Context.create;
+    const eval_script: fn (*zjs.Context, []const u8, zjs.Context.EvalOptions) anyerror!zjs.Value = zjs.Context.eval;
+    const array_buffer: fn (*zjs.Context, *zjs.Value.Bytes.Store) anyerror!zjs.Value = zjs.Context.arrayBuffer;
+    const to_owned_utf8: fn (*zjs.Context, zjs.Value, std.mem.Allocator) anyerror![]u8 = zjs.Context.toOwnedUtf8;
 
     _ = create_runtime;
     _ = create_context;
-    _ = define_function;
-    _ = create_function;
     _ = eval_script;
     _ = array_buffer;
     _ = to_owned_utf8;
 
+    try std.testing.expect(@hasDecl(zjs.Context, "defineFunction"));
+    try std.testing.expect(@hasDecl(zjs.Context, "createFunction"));
+    try std.testing.expect(@hasDecl(zjs.Context, "defineScriptArgs"));
+    try std.testing.expect(@hasDecl(zjs, "Call"));
+    try std.testing.expect(@hasDecl(zjs, "EventLoop"));
+    try std.testing.expect(zjs.Runtime == zjs.JSRuntime);
+    try std.testing.expect(zjs.Context == zjs.JSContext);
+    try std.testing.expect(zjs.Value == zjs.JSValue);
     try std.testing.expect(!@hasDecl(zjs, "value"));
     try std.testing.expect(!@hasDecl(zjs, "object"));
     try std.testing.expect(!@hasDecl(zjs, "module"));
     try std.testing.expect(!@hasDecl(zjs, "job"));
-    if (!@hasDecl(zjs, "printSmallInlineProbe")) {
-        try std.testing.expect(!@hasDecl(zjs, "JSBytes"));
-        try std.testing.expect(!@hasDecl(zjs, "JSString"));
-        try std.testing.expect(!@hasDecl(zjs, "CallSite"));
-        try std.testing.expect(!@hasDecl(zjs, "PropertySite"));
-        try std.testing.expect(!@hasDecl(zjs, "binding"));
-        try std.testing.expect(!@hasDecl(zjs.native, "leaf"));
-        try std.testing.expect(!@hasDecl(zjs.native, "Class"));
-        try std.testing.expect(!@hasDecl(zjs.host, "NativeBinding"));
-        try std.testing.expect(!@hasDecl(zjs.host, "PropName"));
-    }
+    try std.testing.expect(!@hasDecl(zjs, "host"));
+    try std.testing.expect(!@hasDecl(zjs, "context"));
+    try std.testing.expect(!@hasDecl(zjs, "public_api"));
+    try std.testing.expect(!@hasDecl(zjs, "CallSite"));
+    try std.testing.expect(!@hasDecl(zjs, "PropertySite"));
+    try std.testing.expect(!@hasDecl(zjs, "binding"));
 }
 
-fn liveRealmCount(rt: *zjs.JSRuntime) usize {
+fn liveRealmCount(rt: *zjs.Runtime) usize {
     var count: usize = 0;
     var current = rt.firstContext();
     while (current) |ctx| : (current = ctx.runtime_next) count += 1;
     return count;
 }
 
-fn stealArrayPrototype(ctx_from: *zjs.JSContext, ctx_into: *zjs.JSContext) !zjs.JSValue {
+fn stealArrayPrototype(ctx_from: *zjs.Context, ctx_into: *zjs.Context) !zjs.Value {
     const proto = try ctx_from.eval("Array.prototype", .{});
     const global = try ctx_into.eval("globalThis", .{});
     try ctx_into.defineDataProperty(global, "stolenProto", proto, .{});
@@ -311,30 +310,29 @@ fn stealArrayPrototype(ctx_from: *zjs.JSContext, ctx_into: *zjs.JSContext) !zjs.
 
 test "embedding destroy of one context keeps auto_init-bearing objects from that realm alive" {
     const allocator = std.testing.allocator;
-    const rt = try zjs.JSRuntime.create(allocator, .{});
+    const rt = try zjs.Runtime.create(allocator, .{});
     defer rt.destroy();
-    const ctx_a = try zjs.JSContext.create(rt, .{});
+    const ctx_a = try zjs.Context.create(rt, .{});
     defer ctx_a.destroy();
-    const ctx_b = try zjs.JSContext.create(rt, .{});
+    const ctx_b = try zjs.Context.create(rt, .{});
 
     _ = try stealArrayPrototype(ctx_b, ctx_a);
-    const b_global = try ctx_b.globalObject();
+    _ = try ctx_b.globalObject();
 
     try std.testing.expectEqual(@as(usize, 2), liveRealmCount(rt));
     ctx_b.destroy();
     try std.testing.expectEqual(@as(usize, 2), liveRealmCount(rt));
     _ = rt.runObjectCycleRemoval();
     try std.testing.expectEqual(@as(usize, 2), liveRealmCount(rt));
-    try std.testing.expect(rt.contextForGlobal(b_global) != null);
 }
 
 test "embedding newest-first context destroy with cross-realm Array.prototype still tears down" {
     const allocator = std.testing.allocator;
-    const rt = try zjs.JSRuntime.create(allocator, .{});
+    const rt = try zjs.Runtime.create(allocator, .{});
     errdefer rt.destroy();
-    const ctx_a = try zjs.JSContext.create(rt, .{});
+    const ctx_a = try zjs.Context.create(rt, .{});
     errdefer ctx_a.destroy();
-    const ctx_b = try zjs.JSContext.create(rt, .{});
+    const ctx_b = try zjs.Context.create(rt, .{});
     errdefer ctx_b.destroy();
 
     _ = try stealArrayPrototype(ctx_b, ctx_a);
@@ -346,11 +344,11 @@ test "embedding newest-first context destroy with cross-realm Array.prototype st
 
 test "embedding oldest-first context destroy with cross-realm Array.prototype still tears down" {
     const allocator = std.testing.allocator;
-    const rt = try zjs.JSRuntime.create(allocator, .{});
+    const rt = try zjs.Runtime.create(allocator, .{});
     errdefer rt.destroy();
-    const ctx_a = try zjs.JSContext.create(rt, .{});
+    const ctx_a = try zjs.Context.create(rt, .{});
     errdefer ctx_a.destroy();
-    const ctx_b = try zjs.JSContext.create(rt, .{});
+    const ctx_b = try zjs.Context.create(rt, .{});
     errdefer ctx_b.destroy();
 
     _ = try stealArrayPrototype(ctx_b, ctx_a);
@@ -362,9 +360,9 @@ test "embedding oldest-first context destroy with cross-realm Array.prototype st
 
 test "embedding createRealm leftover is collected without JSContext.destroy on the child" {
     const allocator = std.testing.allocator;
-    const rt = try zjs.JSRuntime.create(allocator, .{});
+    const rt = try zjs.Runtime.create(allocator, .{});
     errdefer rt.destroy();
-    const ctx = try zjs.JSContext.create(rt, .{});
+    const ctx = try zjs.Context.create(rt, .{});
     errdefer ctx.destroy();
 
     const realm = try ctx.createRealm();

@@ -37,14 +37,14 @@
 - **签名**：`pub fn resetMachineTestMetrics() void`。
 - **作用**：把 `Machine` 的测试计数器 `MachineTestMetrics`（machine_inits / entry_chunk_allocations / same_machine_sync_calls / same_machine_async_calls / max_depth）整体清零，让每个用例从干净基线开始断言内联入帧行为。
 - **实现**：先 `if (!builtin.is_test) @compileError("test-only helper")` 把非测试构建挡在编译期，再把 `TestMetricStorage.metrics` 整体赋成默认 `.{}`（五个计数全 0）。`TestMetricStorage` 只在 `builtin.is_test` 时才带 `var metrics`，Release 下是空结构体，所以这个 `@compileError` 同时也是防止引用不存在字段的守卫。
-- **所有权 / 错误 / 调用**：错误：不返回错误；非 `is_test` 构建直接 `@compileError("test-only helper")`。所有权：只把 comptime 静态 `TestMetricStorage.metrics` 归零，不分配、不涉及 GC 根。调用：仅测试树 `src/tests/exec.zig`（25 处，如 `:650`、`:747`、`:821`），生产路径没有调用方。
+- **所有权 / 错误 / 调用**：错误：不返回错误；非 `is_test` 构建直接 `@compileError("test-only helper")`。所有权：只把 comptime 静态 `TestMetricStorage.metrics` 归零，不分配、不涉及 GC 根。调用：仅测试树 `tests/exec.zig`（25 处，如 `:650`、`:747`、`:821`），生产路径没有调用方。
 
 ### `machineTestMetrics` (`src/exec/inline_calls.zig:48`)
 
 - **签名**：`pub fn machineTestMetrics() MachineTestMetrics`。
 - **作用**：读出当前累计的 `Machine` 内联入帧计数快照，供测试断言「走了几次同机同步调用」「开了几块 Entry chunk」「逻辑深度峰值多少」。
 - **实现**：同样以 `if (!builtin.is_test) @compileError("test-only helper")` 拒绝非测试构建，然后按值 `return TestMetricStorage.metrics`——返回的是结构体副本而非指针，调用方之后的计数不会回写到这份快照。
-- **所有权 / 错误 / 调用**：错误：无；非 test 构建同样 `@compileError`。所有权：按值返回计数器快照，调用方不持有任何指针。调用：仅测试树 `src/tests/exec.zig`（27 处断言点），生产路径没有调用方。
+- **所有权 / 错误 / 调用**：错误：无；非 test 构建同样 `@compileError`。所有权：按值返回计数器快照，调用方不持有任何指针。调用：仅测试树 `tests/exec.zig`（27 处断言点），生产路径没有调用方。
 
 ### `recordSameMachineSyncCall` (`src/exec/inline_calls.zig:53`)
 
@@ -1305,7 +1305,7 @@
 - **签名**：`pub fn printProbe() void`。
 - **作用**：进程收尾时按需打印小函数内联的两个探针计数（`probe_prep` = 准备过多少次特化，`probe_take` = 真正命中执行多少次），供调优时看 take 率。原名 `writeProbeFile` 有误导——它不写文件，只打 stderr。
 - **实现**：`std.c.getenv("ZJS_INLINE_PROBE")` 未设置或值为空串直接返回（注释说明 zig 0.16 链接 libc 时没有 `std.posix.getenv`，只能用 `std.c.getenv`）。否则 `std.debug.print` 输出 `prep`、`take` 与整数百分比 `take*100/prep`（`prep == 0` 时打 0，避免除零）。
-- **所有权 / 错误 / 调用**：错误：无；`ZJS_INLINE_PROBE` 未设置或为空串直接返回。所有权：只读 `probe_prep`/`probe_take` 两个全局计数器并打印，不分配、不建根。调用：`src/internal_root.zig` 的 `printSmallInlineProbe` 包装（进程退出时打印探针计数）。
+- **所有权 / 错误 / 调用**：错误：无；`ZJS_INLINE_PROBE` 未设置或为空串直接返回。所有权：只读 `probe_prep`/`probe_take` 两个全局计数器并打印，不分配、不建根。调用：`src/root.zig` 的 `printSmallInlineProbe` 包装（进程退出时打印探针计数）。
 
 ### `decodeCallerState` (`src/exec/small_inline.zig:137`)
 

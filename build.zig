@@ -2,7 +2,6 @@ const std = @import("std");
 const config = @import("build/config.zig");
 const artifacts = @import("build/artifacts.zig");
 const tests_graph = @import("build/tests.zig");
-const perf = @import("build/perf.zig");
 const gates = @import("build/gates.zig");
 
 pub fn build(b: *std.Build) void {
@@ -72,6 +71,5 @@ pub fn build(b: *std.Build) void {
     };
     const engine_artifacts = artifacts.addEngineArtifacts(ctx);
     const test_graph = tests_graph.addTestGraph(ctx, engine_artifacts);
-    perf.addPerfSteps(ctx, engine_artifacts);
     gates.addGates(ctx, engine_artifacts, test_graph);
 }

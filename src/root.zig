@@ -1,27 +1,44 @@
-//! Host facade used by the CLI and `run-test262`.
+//! Engine module imported as `@import("zjs")`.
 //!
-//! Production binaries compile against `src/internal_root.zig` and reach this
-//! module as `public_api`. Downstream `@import("zjs")` uses this file directly.
-//! It re-exports the types those two programs need and the `scriptArgs` helper
-//! the CLI installs; it does not wrap core Object, Buffer borrows, job drain,
-//! or a second value-constructor namespace.
+//! Embedders use `Runtime`, `Context`, `Value`, `Call`, and `EventLoop`.
+//! The same module also re-exports engine layers for the CLI and in-tree
+//! tests. The test262 `$262` host lives in `src/cli/run_test262_host.zig`
+//! and is imported as `test262_host`, not from this module. Cookbook and
+//! embedding examples must stay on the embedder names; they are not a
+//! second object model.
 const std = @import("std");
 const js_context = @import("js_context.zig");
-pub const runtime = @import("event_loop.zig");
-const zjs_core = @import("core/root.zig");
-const zjs_exec = @import("exec/root.zig");
-const CoreObject = zjs_core.Object;
+const event_loop = @import("event_loop.zig");
 
-pub const JSRuntime = zjs_core.JSRuntime;
-pub const GCStats = zjs_core.GCStats;
-pub const GCPauseDistribution = zjs_core.GCPauseDistribution;
-pub const JSContext = js_context.JSContext;
-pub const JSValue = zjs_core.JSValue;
-pub const RuntimeOptions = zjs_core.RuntimeOptions;
-pub const RuntimeMemoryUsage = zjs_core.RuntimeMemoryUsage;
-pub const OpcodeProfile = zjs_core.OpcodeProfile;
-pub const default_stack_size = zjs_core.runtime.default_stack_size;
-pub const default_gc_threshold = zjs_core.runtime.default_gc_threshold;
+pub const native = @import("native.zig");
+/// Monotonic/wall clocks. The CLI roots are their own modules and cannot
+/// reach `src/platform_clock.zig` directly, which is how `zjs.zig` ended up
+/// with an inlined copy of `monotonicNanos`.
+pub const platform_clock = @import("platform_clock.zig");
+
+pub const core = @import("core/root.zig");
+/// Internal type-erased heap. Not part of the public embedder API.
+pub const sort_erased = @import("core/sort_erased.zig");
+pub const parser = @import("parser.zig");
+pub const simple_token = @import("simple_token.zig");
+pub const bytecode = @import("bytecode.zig");
+pub const exec = @import("exec/root.zig");
+pub const libs = @import("libs/root.zig");
+pub const runtime = event_loop;
+pub const compiler = @import("compiler/root.zig");
+pub const Runtime = core.JSRuntime;
+pub const Context = js_context.JSContext;
+pub const Value = core.JSValue;
+pub const Call = native.Call;
+pub const EventLoop = event_loop.EventLoop;
+
+pub const GCStats = core.GCStats;
+pub const GCPauseDistribution = core.GCPauseDistribution;
+pub const RuntimeOptions = core.RuntimeOptions;
+pub const RuntimeMemoryUsage = core.RuntimeMemoryUsage;
+pub const OpcodeProfile = core.OpcodeProfile;
+pub const default_stack_size = core.runtime.default_stack_size;
+pub const default_gc_threshold = core.runtime.default_gc_threshold;
 
 /// True when this binary carries per-opcode profiling scopes
 /// (-Dzjs_enable_opcode_profile / the zjs-profile artifact). The CLI fails
@@ -29,140 +46,104 @@ pub const default_gc_threshold = zjs_core.runtime.default_gc_threshold;
 pub const opcode_profile_build_enabled: bool = @import("build_options").zjs_enable_opcode_profile;
 
 pub fn activateOpcodeProfile(profile: ?*OpcodeProfile) ?*OpcodeProfile {
-    zjs_core.profile.setOpcodeNameProvider(zjs_exec.opcodeName);
-    return zjs_core.profile.activate(profile);
+    core.profile.setOpcodeNameProvider(exec.opcodeName);
+    return core.profile.activate(profile);
 }
 
-pub const native = @import("native.zig");
+pub const RuntimeError = exec.exceptions.RuntimeError;
+pub const HostError = exec.exceptions.HostError;
+pub const JSRuntime = core.JSRuntime;
+pub const JSContext = js_context.JSContext;
+pub const borrowContext = js_context.borrowCore;
+pub const globalObjectPtr = js_context.globalObjectPtr;
+pub const JSValue = core.JSValue;
+pub const Object = core.Object;
+pub const Descriptor = core.Descriptor;
+pub const Atom = core.Atom;
+pub const JSValueHandle = core.JSValueHandle;
+pub const LocalHandle = core.LocalHandle;
+pub const HandleScope = core.HandleScope;
+pub const WeakPersistent = core.WeakPersistent;
+pub const WeakPersistentValue = core.WeakPersistentValue;
+pub const NativePin = core.NativePin;
+pub const JSString = core.JSValue.String;
+pub const JSBytes = core.JSValue.Bytes;
+pub const SharedArrayBufferRef = core.SharedArrayBufferRef;
+pub const GCPolicy = core.GCPolicy;
 
-pub const host = struct {
-    pub fn defineScriptArgs(ctx: *JSContext, args: []const []const u8) !void {
-        try defineStringArrayGlobal(ctx, "scriptArgs", args);
-    }
-};
+pub const EvalOptions = core.context.EvalOptions;
+pub const EvalTiming = core.context.EvalTiming;
+pub const DataPropertyOptions = core.DataPropertyOptions;
 
-pub const context = struct {
-    pub const Options = zjs_core.ContextOptions;
-    pub const EvalMode = zjs_core.EvalMode;
-    pub const EvalOptions = zjs_core.EvalOptions;
-    pub const EvalTiming = zjs_core.EvalTiming;
-};
-
-fn defineStringArrayGlobal(ctx: *JSContext, name: []const u8, items: []const []const u8) !void {
-    const rt = ctx.runtimePtr();
-    const global = try ctx.globalObject();
-    if (items.len == 0) {
-        const key = try rt.internAtom(name);
-        try global.defineEmptyArrayAutoInitProperty(rt, key, zjs_core.property.Flags.data(.all), global);
-        return;
-    }
-
-    const array_prototype = cachedArrayPrototype(rt, global) orelse try constructorPrototypeObjectByAtom(global, zjs_core.atom.ids.Array);
-    const array = try CoreObject.createArrayWithOwnPropertyCapacity(rt, array_prototype, items.len);
-    for (items, 0..) |item, index| {
-        const item_value = try ctx.createString(item);
-        try array.defineOwnProperty(rt, zjs_core.Atom.taggedInt(@intCast(index)), zjs_core.Descriptor.data(item_value, .all));
-    }
-    array.setArrayLength(@intCast(items.len));
-    const key = try rt.internAtom(name);
-    try global.defineOwnProperty(rt, key, zjs_core.Descriptor.data(array.value(), .all));
-}
-
-fn cachedArrayPrototype(rt: *JSRuntime, global: *CoreObject) ?*CoreObject {
-    const stored = global.cachedRealmValue(rt, .array_prototype) orelse return null;
-    return objectFromValue(stored);
-}
-
-fn constructorPrototypeObjectByAtom(global: *CoreObject, key: zjs_core.Atom) !?*CoreObject {
-    const constructor_value = try global.getProperty(key);
-    const constructor = objectFromValue(constructor_value) orelse return null;
-    const prototype_value = try constructor.getProperty(zjs_core.atom.ids.prototype);
-    return objectFromValue(prototype_value);
-}
-
-fn objectFromValue(v: JSValue) ?*CoreObject {
-    if (!v.is(.object)) return null;
-    const header = v.refHeader() orelse return null;
-    if (header.meta().flags.kind != .object) return null;
-    return CoreObject.fromHeader(header);
-}
-
-test "host defineScriptArgs materializes empty array on first read" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const ctx = try JSContext.create(rt, .{});
-    defer ctx.destroy();
-
-    try host.defineScriptArgs(ctx, &.{"stale"});
-    try host.defineScriptArgs(ctx, &.{});
-    try host.defineScriptArgs(ctx, &.{});
-    const result = try ctx.eval(
-        \\var desc = Object.getOwnPropertyDescriptor(globalThis, "scriptArgs");
-        \\desc.writable === true &&
-        \\desc.enumerable === true &&
-        \\desc.configurable === true &&
-        \\Array.isArray(desc.value) &&
-        \\desc.value.length === 0 &&
-        \\Object.getPrototypeOf(scriptArgs) === Array.prototype &&
-        \\(scriptArgs.push("ok"), scriptArgs.length === 1 && scriptArgs[0] === "ok") &&
-        \\delete globalThis.scriptArgs &&
-        \\!("scriptArgs" in globalThis);
-    , .{});
-    try std.testing.expectEqual(true, result.as(.boolean).?);
-}
-
-test "host defineScriptArgs installs string items" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const ctx = try JSContext.create(rt, .{});
-    defer ctx.destroy();
-
-    try host.defineScriptArgs(ctx, &.{ "a.js", "--flag" });
-    const result = try ctx.eval(
-        \\Array.isArray(scriptArgs) &&
-        \\scriptArgs.length === 2 &&
-        \\scriptArgs[0] === "a.js" &&
-        \\scriptArgs[1] === "--flag" &&
-        \\Object.getPrototypeOf(scriptArgs) === Array.prototype;
-    , .{});
-    try std.testing.expectEqual(true, result.as(.boolean).?);
+/// Internal CLI probe. Named for what it does (print to stderr); the exec
+/// helper is unchanged.
+pub fn printSmallInlineProbe() void {
+    exec.small_inline.printProbe();
 }
 
 test {
+    try std.testing.expect(Object == core.Object);
+    try std.testing.expect(@hasDecl(Object, "create"));
+
     _ = js_context;
     _ = native;
+    _ = event_loop;
+    _ = core;
+    _ = parser;
+    _ = simple_token;
+    _ = bytecode;
+    _ = exec;
+    _ = libs;
     _ = runtime;
 }
 
-test "root exposes the CLI and run-test262 surface" {
-    try std.testing.expect(@hasDecl(@This(), "JSRuntime"));
-    try std.testing.expect(@hasDecl(@This(), "JSContext"));
-    try std.testing.expect(@hasDecl(@This(), "JSValue"));
-    try std.testing.expect(@hasDecl(@This(), "native"));
-    try std.testing.expect(@hasDecl(@This(), "runtime"));
-    try std.testing.expect(@hasDecl(@This(), "host"));
-    try std.testing.expect(@hasDecl(host, "defineScriptArgs"));
-    try std.testing.expect(@hasDecl(context, "EvalMode"));
-    try std.testing.expect(@hasDecl(context, "EvalTiming"));
-    try std.testing.expect(@hasDecl(runtime, "EventLoop"));
-    try std.testing.expect(@hasDecl(runtime, "runUntilIdle"));
+test "root exposes the embedder names and engine layers" {
+    try std.testing.expect(@hasDecl(@This(), "Runtime"));
+    try std.testing.expect(@hasDecl(@This(), "Context"));
+    try std.testing.expect(@hasDecl(@This(), "Value"));
+    try std.testing.expect(@hasDecl(@This(), "Call"));
+    try std.testing.expect(@hasDecl(@This(), "EventLoop"));
+    try std.testing.expect(@hasDecl(Context, "EvalMode"));
+    try std.testing.expect(@hasDecl(Context, "EvalTiming"));
+    try std.testing.expect(@hasDecl(Context, "FunctionOptions"));
+    try std.testing.expect(@hasDecl(Context, "defineScriptArgs"));
+    try std.testing.expect(@hasDecl(EventLoop, "runUntilIdle"));
+    try std.testing.expect(@hasDecl(EventLoop, "Options"));
+    try std.testing.expect(@hasDecl(EventLoop, "RunResult"));
 
+    try std.testing.expect(Runtime == JSRuntime);
+    try std.testing.expect(Context == JSContext);
+    try std.testing.expect(Value == JSValue);
+    try std.testing.expect(@hasDecl(@This(), "native"));
+    try std.testing.expect(@hasDecl(@This(), "core"));
+    try std.testing.expect(@hasDecl(@This(), "exec"));
+    try std.testing.expect(@hasDecl(@This(), "parser"));
+    try std.testing.expect(@hasDecl(@This(), "runtime"));
+    try std.testing.expect(!@hasDecl(@This(), "test262_host"));
+
+    try std.testing.expect(!@hasDecl(@This(), "testing"));
+    try std.testing.expect(!@hasDecl(@This(), "public_api"));
+    try std.testing.expect(!@hasDecl(@This(), "host"));
+    try std.testing.expect(!@hasDecl(@This(), "context"));
     try std.testing.expect(!@hasDecl(@This(), "value"));
     try std.testing.expect(!@hasDecl(@This(), "object"));
     try std.testing.expect(!@hasDecl(@This(), "module"));
     try std.testing.expect(!@hasDecl(@This(), "job"));
-    try std.testing.expect(!@hasDecl(@This(), "core"));
-    try std.testing.expect(!@hasDecl(@This(), "exec"));
     try std.testing.expect(!@hasDecl(@This(), "internal"));
-    try std.testing.expect(!@hasDecl(host, "defineArgvGlobals"));
-    try std.testing.expect(!@hasDecl(host, "evalGlobalScriptSource"));
-    try std.testing.expect(!@hasDecl(host, "NativeBinding"));
     try std.testing.expect(!@hasDecl(@This(), "CallSite"));
     try std.testing.expect(!@hasDecl(@This(), "PropertySite"));
-    try std.testing.expect(!@hasDecl(native, "leaf"));
-    try std.testing.expect(!@hasDecl(native, "Class"));
-    try std.testing.expect(!@hasDecl(JSValue, "Scope"));
-    try std.testing.expect(!@hasDecl(@This(), "JSValueHandle"));
-    try std.testing.expect(!@hasDecl(@This(), "JSBytes"));
-    try std.testing.expect(!@hasDecl(@This(), "JSString"));
+    try std.testing.expect(!@hasDecl(Value, "Scope"));
+}
+
+test "zjs.pull_test_modules" {
+    const builtin = @import("builtin");
+    const raw = std.c.getenv("ZJS_TEST_FILTER") orelse return;
+    const filter = std.mem.span(raw);
+    if (filter.len == 0) return;
+    var matched: usize = 0;
+    for (builtin.test_functions) |t| {
+        if (std.mem.endsWith(u8, t.name, "zjs.pull_test_modules")) continue;
+        if (std.mem.indexOf(u8, t.name, filter) != null) matched += 1;
+    }
+    if (matched == 0) return error.TestUnexpectedResult;
 }

@@ -6,37 +6,45 @@ that graph encodes.
 
 ## Compile-root chain
 
-Two roots:
+One engine root:
 
 | Root | Role |
 |---|---|
-| `src/root.zig` | Public embedder facade. |
-| `src/internal_root.zig` | Engine + CLI surface. Adds core `Object`, `Descriptor`, `Atom`. Also the unified Zig test root. |
+| `src/root.zig` | Engine module imported as `zjs`. Embedder names plus layer re-exports for CLI and in-tree tests. |
+| `test_root.zig` | Unified engine Zig-test root. Re-exports `src/root.zig` so one module can see `src/` unit tests and `tests/` integration tests. |
+| `src/cli/tests.zig` | CLI test root. Pulls colocated tests in `zjs.zig` / `run_test262.zig`; `@import("zjs")` is `src/root.zig`. |
 
 The production `zjs` / `run-test262` artifacts compile against
-`internal_root`. The unified `test` step uses the same file as its
-`root_source_file`; `@import("zjs")` in that binary is `internal_root`
-itself. `test-embedding` is the one artifact that compiles the public
-`src/root.zig` module as `zjs`.
+`src/root.zig`. The engine `test` binary uses `test_root.zig` as its
+`root_source_file` and `@import("zjs")` is that module (it re-exports
+`src/root.zig`).
+CLI tests are a separate compile so engine files never import that tree.
+`test-embedding` compiles the same `src/root.zig` module as `zjs`.
 
-Zig unit tests live next to the code they exercise: each package root
-comptime-imports `tests.zig` when `build_options.zjs_unified_test_suite`
-is set (the unified `test` module), plus colocated `test` blocks and
-`src/compiler/tests.zig`. `test-embedding` / `test-oom` leave that flag
-off, so those package test files are not analyzed.
+Zig unit tests live next to the code they exercise: colocated `test`
+blocks plus package `tests.zig` files. `test_root.zig` file-imports
+those package suites and `tests/engine.zig` (public API, runtime/GC,
+VM/eval) when `build_options.zjs_unified_test_suite` is set.
+`test-embedding` / `test-oom` leave that flag off, so those files are
+not analyzed. Parser and bytecode package roots also comptime-import
+their `tests.zig` for the same flag.
 
 ## Remaining test roots
 
-The unified suite (`src/internal_root.zig`) is the only engine-bearing
-compile for Zig unit tests. Focused work uses `test-fast -- '<substring>'`
+The engine suite (`test_root.zig`) is the only engine-bearing compile for
+package Zig unit tests and `tests/` integration tests. Focused work uses `test-fast -- '<substring>'`
 (compile-time `--test-filter` on that root). Do not add a second compile
-root per subsystem.
+root per engine subsystem. Host families (CLI, embedding, OOM)
+are separate compiles, the same shape as `test-embedding`.
+The CLI root file-imports `run_test262_host.zig` so its four colocated
+host tests are collected; importing it only as a dependency module does
+not collect those tests.
 
-Two artifacts still compile a different root:
+Two more artifacts compile a different test file against the same engine:
 
-- `test-embedding` / `check-embedding`: public `src/root.zig` as `zjs`,
-  tests in `tests/embedding_examples.zig`. Does not attest.
-- `test-oom`: `tests/oom.zig` over `internal_root` with the injectable
+- `test-embedding` / `check-embedding`: `src/root.zig` as `zjs`, tests in
+  `tests/embedding_examples.zig`. Does not attest.
+- `test-oom`: `tests/oom.zig` over `src/root.zig` with the injectable
   allocator topology.
 
 ### Independent options (rule C)
@@ -45,11 +53,23 @@ Every engine-bearing module gets its own `addOptions` object when the
 generated file would otherwise be shared as two module roots. One `zig build`
 is one `-Doptimize`; do not pin a second mode inside the graph.
 
-### `src/testing.zig`
+### `tests/harness.zig`
 
-Shared harness (`helpers.*` names). Relative engine imports so package
-`tests.zig` files can use it. In-tree tests may import it; they share that
-one module.
+Integration-test harness (`helpers.*` names), not an engine package.
+`tests/core.zig` and `tests/exec.zig` import it. The work lives under
+`tests/harness/`:
+
+| File | Owns |
+|---|---|
+| `gc.zig` | precise reclaim, weak collections, incremental GC drain |
+| `expect.zig` | string / set assertions |
+| `fixture.zig` | hand-written bytecode and parse-then-run |
+| `test_engine.zig` | one-off `TestEngine`, host probes, scratch dirs |
+| `shared.zig` | process-level shared engine and leak gate |
+
+Package unit tests (`src/parser/tests.zig`, `src/bytecode/tests.zig`)
+only reclaim with a local `runObjectCycleRemoval` helper. They do not
+import this package. The engine module does not export it.
 
 ## Attest matrix
 
@@ -57,11 +77,11 @@ one module.
 |---|---|---|
 | `zjs` / `zjs-profile` / `zjs-size` | `src/cli/zjs.zig` | Follow `-Doptimize` |
 | `run-test262` | `src/cli/run_test262.zig` | Follow `-Doptimize` |
-| unified `test` | `src/internal_root.zig` | Follows `-Doptimize`; Zig default runner, one process; optional `-Dgate-run-cpus` pin |
-| `test-fast -- <substring>` | same root, compile-time `--test-filter` | Missing, empty, or unmatched selection fails. Keeps DWARF. |
+| engine `test` | `test_root.zig` plus `src/cli/tests.zig` | Follows `-Doptimize`; two processes; optional `-Dgate-run-cpus` pin on the engine run |
+| `test-fast -- <substring>` | engine root, compile-time `--test-filter` | Missing, empty, or unmatched selection fails. Keeps DWARF. Engine suite only. |
 | `test-embedding` | public `src/root.zig` | |
 | `test-oom` | `tests/oom.zig` attests `"oom-tests"` | |
-| `test-leak-census` | same root, `tools/leak_census_runner.zig` | Compile-time filter `exec.tests.`; two in-process passes |
+| `test-leak-census` | same root, `tools/leak_census_runner.zig` | Compile-time filter `tests.exec.`; two in-process passes |
 
 ## Filter naming
 
@@ -70,10 +90,10 @@ Zig ORs multiple filters.
 
 | Target | How it selects |
 |---|---|
-| `test-fast -- '<substring>'` | `--test-filter <substring>` plus `zjs.pull_test_modules` |
-| `test-stress` | `--test-filter stress.` and `ZJS_RUN_STRESS=1` |
-| `test` / `test-gc-stress` | full suite; `src/stress.zig` cases `SkipZigTest` unless `ZJS_RUN_STRESS=1` |
-| `test-leak-census` | `--test-filter exec.tests.`; runner repeats twice with `ZJS_LEAK_CENSUS=1` |
+| `test-fast -- '<substring>'` | `--test-filter <substring>` plus `zjs.pull_test_modules` on the engine root. Integration prefixes are `tests.public_api.`, `tests.core.`, `tests.exec.` |
+| `test` | engine suite plus CLI tests |
+| `test-gc-stress` | engine suite under GC diagnostic env |
+| `test-leak-census` | `--test-filter tests.exec.`; runner repeats twice with `ZJS_LEAK_CENSUS=1` |
 | `test-embedding` / `check-embedding` | public-root compile of `tests/embedding_examples.zig`; no name filter |
 
 `test-embedding` uses an independent `zjs` module rooted at
@@ -94,7 +114,7 @@ it is the name the Zig ecosystem and editor tooling already look for.
 
 ## `zig build check`: the compile-error half of the edit loop
 
-`check` compiles the unified test root and stops after semantic analysis.
+`check` compiles the engine and CLI test roots and stops after semantic analysis.
 Nothing consumes its binary, so the build system passes `-fno-emit-bin`:
 no LLVM module, no machine code, no link, no test executed.
 
@@ -116,8 +136,8 @@ whatsoever. **`check` is not a gate and no gate depends on it.**
 
 ## Optional Run-step pinning
 
-The graph's Run steps -- unified tests, gc-stress, the stress tier,
-test262 -- are unpinned by default. Linux-only
+The graph's Run steps -- unified tests, gc-stress, test262 -- are
+unpinned by default. Linux-only
 `taskset` pinning is opt-in: `-Dgate-run-cpus`, else `ZJS_GATE_RUN_CPUS`,
 else `ZJS_BUILD_CPUS`. An empty string leaves them on whatever `zig build`
 got.
@@ -133,8 +153,8 @@ Two build-runner facts decide the shape of a gate (2026-09-06):
   log) so it does not serialise other steps.
 
 The edit loop: `zig build check` (~7 s, sema only) rejects a non-compiling
-edit. `zig build test` then runs the unified suite in one process with
-Zig's default runner. LLVM Debug codegen + link is the compile floor.
+edit. `zig build test` then runs the engine suite and the CLI tests.
+LLVM Debug codegen + link is the compile floor.
 
 ## What CI runs
 
@@ -143,7 +163,7 @@ runs unprompted.
 
 | Workflow | Primary job | Steps it runs |
 |---|---|---|
-| `ci.yml` (push to `main`, pull requests) | `linux-arm64` | ReleaseFast `zjs`, Debug `checkpoint-gate` / `test-stress`, ReleaseFast `test262-check` |
+| `ci.yml` (push to `main`, pull requests) | `linux-arm64` | ReleaseFast `zjs`, Debug `checkpoint-gate`, ReleaseFast `test262-check` |
 | `nightly.yml` (scheduled) | `linux-arm64` | `engine-production-gate -Doptimize=ReleaseFast`, `test -Doptimize=ReleaseSafe`, `test-oom`, `test-leak-census`, and `test -Dzjs_ownership_audit=true` |
 
 `test262-check` is a zero-failure gate — any failed or newly-fixed case fails
@@ -157,7 +177,7 @@ a `notify-failure` job opens (or comments on) one long-lived GitHub issue when
 any nightly job fails.
 
 `-Dzjs_force_gc` is not on either list. It is a diagnostic instrument, in the
-same tier as `perf-benchmark`: run it when a GC-shaped question needs it, not
+same tier as a host `perf stat` session: run it when a GC-shaped question needs it, not
 as a gate.
 
 Performance steps never run in CI; the measurement contract forbids publishing

@@ -23,13 +23,13 @@ fn applyHotLayout(b: *std.Build, target: std.Build.ResolvedTarget, exe: *std.Bui
     }
 }
 
-fn addInternalEngine(
+fn addEngine(
     ctx: config.Ctx,
     options: *std.Build.Step.Options,
     omit_frame_pointer: bool,
 ) *std.Build.Module {
     const mod = ctx.b.createModule(.{
-        .root_source_file = ctx.b.path("src/internal_root.zig"),
+        .root_source_file = ctx.b.path("src/root.zig"),
         .target = ctx.target,
         .optimize = ctx.optimize,
         .link_libc = true,
@@ -89,14 +89,14 @@ pub fn addEngineArtifacts(ctx: config.Ctx) Artifacts {
     });
     engine_mod.addOptions("build_options", ctx.engine_options);
 
-    const internal_mod = addInternalEngine(ctx, ctx.engine_options, omit_frames);
-    const zjs = addCli(ctx, "zjs", "src/cli/zjs.zig", internal_mod, true);
+    const engine = addEngine(ctx, ctx.engine_options, omit_frames);
+    const zjs = addCli(ctx, "zjs", "src/cli/zjs.zig", engine, true);
     addInstallStep(b, "zjs", "Build and install zjs (follows -Doptimize; default Debug)", zjs.install);
     b.getInstallStep().dependOn(&zjs.install.step);
 
     // Second install name so a later `-Doptimize=ReleaseSmall` (or similar)
     // does not overwrite an already-installed `zjs` from a previous invocation.
-    const zjs_size = addCli(ctx, "zjs-size", "src/cli/zjs.zig", internal_mod, true);
+    const zjs_size = addCli(ctx, "zjs-size", "src/cli/zjs.zig", engine, true);
     addInstallStep(b, "zjs-size", "Build zjs-size: same engine as zjs under a second install name (follows -Doptimize)", zjs_size.install);
 
     // Same engine with per-opcode dispatch scopes compiled in.
@@ -104,11 +104,11 @@ pub fn addEngineArtifacts(ctx: config.Ctx) Artifacts {
     var profile_engine_inputs = ctx.engine_inputs;
     profile_engine_inputs.enable_opcode_profile = true;
     const profile_engine_options = config.addEngineOptions(b, profile_engine_inputs);
-    const internal_profile_mod = addInternalEngine(ctx, profile_engine_options, omit_frames);
-    const zjs_profile = addCli(ctx, "zjs-profile", "src/cli/zjs.zig", internal_profile_mod, true);
+    const profile_engine = addEngine(ctx, profile_engine_options, omit_frames);
+    const zjs_profile = addCli(ctx, "zjs-profile", "src/cli/zjs.zig", profile_engine, true);
     addInstallStep(b, "zjs-profile", "Build and install zjs with per-opcode dispatch scopes (follows -Doptimize)", zjs_profile.install);
 
-    const run_test262 = addCli(ctx, "run-test262", "src/cli/run_test262.zig", internal_mod, false);
+    const run_test262 = addCli(ctx, "run-test262", "src/cli/run_test262.zig", engine, false);
     addInstallStep(b, "run-test262", "Build and install run-test262 (follows -Doptimize)", run_test262.install);
 
     return .{

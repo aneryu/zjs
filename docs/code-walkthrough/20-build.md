@@ -10,11 +10,10 @@ Zig 钉 0.16.0。`build.zig` 把图种子钉成 `0`（可用 `-Dzjs_test_seed` �
 
 | 文件 | 职责 |
 | --- | --- |
-| [`build.zig`](../../build.zig) | 读 CLI 选项、算配置签名、组装 `Ctx`，依次调用四个 `add*` |
+| [`build.zig`](../../build.zig) | 读 CLI 选项、算配置签名、组装 `Ctx`，依次调用三个 `add*` |
 | [`build/config.zig`](../../build/config.zig) | `Ctx`、签名字符串、每模块一份 `addOptions`、Debug 强制 LLVM、Run 步 CPU 钉 |
 | [`build/artifacts.zig`](../../build/artifacts.zig) | 引擎模块与 CLI 产物：`zjs` / `zjs-size` / `zjs-profile` / `run-test262` |
 | [`build/tests.zig`](../../build/tests.zig) | 统一套件、`check`、smoke、OOM、embedding、leak-census |
-| [`build/perf.zig`](../../build/perf.zig) | `perf-benchmark`；**不是**门禁 |
 | [`build/gates.zig`](../../build/gates.zig) | `quick-gate` / `checkpoint-gate` / `engine-production-gate`、test262 |
 
 调用顺序（`build` 末尾）：
@@ -22,7 +21,6 @@ Zig 钉 0.16.0。`build.zig` 把图种子钉成 `0`（可用 `-Dzjs_test_seed` �
 ```
 artifacts.addEngineArtifacts(ctx)
 tests.addTestGraph(ctx, artifacts)
-perf.addPerfSteps(ctx, artifacts)
 gates.addGates(ctx, artifacts, test_graph)
 ```
 
@@ -64,16 +62,16 @@ gates.addGates(ctx, artifacts, test_graph)
 ### `build` (`build.zig:8`)
 
 - **签名**：`pub fn build(b: *std.Build) void`。
-- **作用**：读构建选项、钉图种子、装配 `Ctx`，再把产物/测试/perf/门禁挂进同一张图。
+- **作用**：读构建选项、钉图种子、装配 `Ctx`，再把产物/测试/门禁挂进同一张图。
 - **实现**：
   1. `standardTargetOptions` / `standardOptimizeOption`。
   2. `-Dzjs_test_seed`（默认 0）写入 `b.graph.random_seed`，抵消 Zig CLI 随机 `--seed` 对缓存的破坏。
   3. 开关：`zjs_enable_opcode_profile`、`zjs_compiler_layout`（只允许 `short`/`plain`，否则 `exit(1)`）、`zjs_oom_coverage`、`zjs_force_gc`、`zjs_ownership_audit`、`zjs_gc_roots_diag`。
   4. 一份 `addEngineOptions`。所有 CLI 与测试跟随这次的 `-Doptimize`。
-  5. 填 `Ctx.gate_run_cpus = config.gateRunCpus(b)`，依次 `addEngineArtifacts` / `addTestGraph` / `addPerfSteps` / `addGates`。
+  5. 填 `Ctx.gate_run_cpus = config.gateRunCpus(b)`，依次 `addEngineArtifacts` / `addTestGraph` / `addGates`。
 - **所有权 / 错误 / 调用**：不返回 error；非法 layout / 畸形签名 `std.process.exit(1)`。调用方是 Zig 构建 runner。不分配引擎堆。
 
-注册的顶层步骤全部由四个 `add*` 发出，见下列各节。`b.getInstallStep()` 依赖 `zjs` 的 install。
+注册的顶层步骤全部由三个 `add*` 发出，见下列各节。`b.getInstallStep()` 依赖 `zjs` 的 install。
 
 ---
 
@@ -91,7 +89,7 @@ gates.addGates(ctx, artifacts, test_graph)
 - **签名**：`pub fn runArtifactOnCpus(b: *std.Build, cpus: []const u8, exe: *std.Build.Step.Compile) *std.Build.Step.Run`。
 - **作用**：Linux 上用 `taskset -c <cpus>` 包一层 Run；空列表或非 Linux 退回 `addRunArtifact`。
 - **实现**：`addSystemCommand(.{ "taskset", "-c", cpus })` 然后 `addArtifactArg(exe)`，step 名 `run {exe} (cpus …)`。
-- **所有权 / 错误 / 调用**：`addTestGraph` 的统一/gc-stress/stress/fast 以及 `addGates` 的 test262 执行使用。放在 `config.zig` 是为了打断 `tests.zig` ↔ `gates.zig` 的互相 `@import`。
+- **所有权 / 错误 / 调用**：`addTestGraph` 的统一/gc-stress/fast 以及 `addGates` 的 test262 执行使用。放在 `config.zig` 是为了打断 `tests.zig` ↔ `gates.zig` 的互相 `@import`。
 
 ### `EngineOptionInputs.withOomInjection` (`build/config.zig:64`)
 
@@ -114,6 +112,13 @@ gates.addGates(ctx, artifacts, test_graph)
 - **实现**：`if (compile.root_module.optimize == .Debug) compile.use_llvm = true;`。
 - **所有权 / 错误 / 调用**：每个引擎 Compile 步创建后立刻调用。无错误。
 
+### `addTest262Host` (`build/config.zig:107`)
+
+- **签名**：`pub fn addTest262Host(ctx: Ctx, engine: *std.Build.Module) *std.Build.Module`。
+- **作用**：给 `run-test262` 和需要 `$262` 的测试编译单独建宿主模块。引擎不 path-import `src/cli/`。
+- **实现**：根是 `src/cli/run_test262_host.zig`，`@import("zjs")` 接到传入的 engine。每个 engine 实例一份，类型才对得上。
+- **所有权 / 错误 / 调用**：`addEngineArtifacts` 接到 `run-test262`；`addTestGraph` 接到 unified / host_engine / embedding / OOM。
+
 ---
 
 ## `build/artifacts.zig`
@@ -135,10 +140,10 @@ gates.addGates(ctx, artifacts, test_graph)
 - **实现**：其它目标不挂链接脚本。
 - **所有权 / 错误 / 调用**：仅 `addCli(..., hot_layout=true)`：`zjs` / `zjs-size` / `zjs-profile`。
 
-### `addInternalEngine` (`build/artifacts.zig:26`)
+### `addEngine` (`build/artifacts.zig:26`)
 
-- **签名**：`fn addInternalEngine(ctx: config.Ctx, options: *std.Build.Step.Options, omit_frame_pointer: bool) *std.Build.Module`。
-- **作用**：建一份 `src/internal_root.zig` 引擎模块并挂上该产物自己的 options。优化模式一律 `ctx.optimize`。
+- **签名**：`fn addEngine(ctx: config.Ctx, options: *std.Build.Step.Options, omit_frame_pointer: bool) *std.Build.Module`。
+- **作用**：建一份 `src/root.zig` 引擎模块并挂上该产物自己的 options。优化模式一律 `ctx.optimize`。
 - **实现**：`createModule` + `addOptions("build_options", options)`。
 - **所有权 / 错误 / 调用**：模块由构建图持有。`addEngineArtifacts` 调两次（主引擎、profile）。
 
@@ -169,12 +174,12 @@ gates.addGates(ctx, artifacts, test_graph)
 - **作用**：创建全部引擎承载 CLI/模块，并注册安装步骤。全部跟随 `-Doptimize`。
 - **实现**：按产物分述——
   1. **`zjs` 模块**（`src/root.zig`）。`addModule`，不进返回值。
-  2. **`internal_mod`**：`internal_root`，`omit_frame_pointer` 见上。
+  2. **`engine`**：`src/root.zig`，`omit_frame_pointer` 见上。
   3. **`zjs` exe**：CLI import 上述模块，热布局。步骤 `zjs`；默认 `install` 依赖它。
   4. **`zjs-size`**：同一引擎模块的第二安装名，避免后续 `ReleaseSmall` 覆盖已装的 `zjs`。步骤 `zjs-size`。
   5. **`zjs-profile`**：同一优化模式，但 `enable_opcode_profile=true`。步骤 `zjs-profile`。
-  6. **`run-test262`**：import `internal_mod`。步骤 `run-test262`。
-- **所有权 / 错误 / 调用**：返回的指针由构建图持有。`addTestGraph` / `addPerfSteps` / `addGates` 消费。非法配置在 `build` 里已退出。
+  6. **`run-test262`**：import `engine`。步骤 `run-test262`。
+- **所有权 / 错误 / 调用**：返回的指针由构建图持有。`addTestGraph` / `addGates` 消费。非法配置在 `build` 里已退出。
 
 **本函数注册的步骤**：`zjs`、`zjs-size`、`zjs-profile`、`run-test262`；并让默认 install 依赖 `zjs`。
 
@@ -184,12 +189,11 @@ gates.addGates(ctx, artifacts, test_graph)
 
 ### `TestGraph` (`build/tests.zig:5`)
 
-`addTestGraph` 的返回形状，六个 `*std.Build.Step`：
+`addTestGraph` 的返回形状，五个 `*std.Build.Step`：
 
 | 字段 | 步骤 | 说明 |
 | --- | --- | --- |
 | `test_step` | `test` | 统一套件 |
-| `stress_step` | `test-stress` | 长跑压力层。**刻意不挂在 `test_step` 下**：按 `docs/verification-policy.md`，每次改动的收口只跑 `zig build test`，压力层的时间成本归 production / CI / merge-batch 门 |
 | `gc_stress_step` | `test-gc-stress` | 同一套件在全部 GC 诊断开关下再跑一遍，约 1 分钟，所以能搭 checkpoint-gate |
 | `smoke_step` | `smoke` | 当前 `-Doptimize` 下的 `zjs` + `zjs-profile` |
 | `embedding_step` | `test-embedding` | 公共 API 嵌入示例 |
@@ -200,12 +204,17 @@ gates.addGates(ctx, artifacts, test_graph)
 - **签名**：`fn addZjsTest(ctx: build_config.Ctx, name: []const u8, root_module: *std.Build.Module, filters: []const []const u8) *std.Build.Step.Compile`。
 - **作用**：一份 Debug 强制 LLVM 的 `addTest`，使用 Zig 默认 test runner。
 - **实现**：`ctx.b.addTest` + `forceLlvmBackendOnDebug`。不设 `test_runner`。
-- **所有权 / 错误 / 调用**：统一套件、smoke、embedding / check-embedding、oom、`check` 都走这里。`test-fast` / `test-stress` / `test-leak-census` 传入非空 `filters`。只有 `test-leak-census` 在返回后改挂 `tools/leak_census_runner.zig`。
+- **所有权 / 错误 / 调用**：统一套件、smoke、embedding / check-embedding、oom、`check` 都走这里。`test-fast` / `test-leak-census` 传入非空 `filters`。只有 `test-leak-census` 在返回后改挂 `tools/leak_census_runner.zig`。
 
-### `runUnifiedTests` (`build/tests.zig:36`)
+### `addEngineModule` (`build/tests.zig`)
 
-- **签名**：`fn runUnifiedTests(ctx: build_config.Ctx, exe: *std.Build.Step.Compile, gc_stress: bool) *std.Build.Step.Run`。
-- **作用**：给统一测试二进制挂一个 Run 步。
+- **作用**：建一份 `src/root.zig` 引擎模块。`unified=true` 时打开 `zjs_unified_test_suite`，给包 `tests.zig` 用。
+- **调用**：引擎套件一份（再 `addImport("zjs", 自己)`）；CLI 共享一份不作自我 import 的宿主模块。
+
+### `runEngineTests` (`build/tests.zig`)
+
+- **签名**：`fn runEngineTests(ctx: build_config.Ctx, exe: *std.Build.Step.Compile, gc_stress: bool) *std.Build.Step.Run`。
+- **作用**：给引擎测试二进制挂一个 Run 步。
 - **实现**：`runArtifactOnCpus`。`gc_stress` 时加 `ZJS_GC_STRESS=1`、`ZJS_GC_VERIFY_MINOR=fatal`、`ZJS_MINOR_AUDIT=fatal`。
 - **所有权 / 错误 / 调用**：`test` 与 `test-gc-stress` 各调一次；`test-fast` 在有子串时也走这里。
 
@@ -222,14 +231,14 @@ gates.addGates(ctx, artifacts, test_graph)
 - **作用**：挂上编辑循环、checkpoint、夜间仪器要用的全部测试 Compile/Run 步。
 - **实现**：按注册的步骤分述——
 
-#### 统一套件 `test` / `test-fast` / `test-gc-stress` / `test-stress`
+#### 引擎套件 `test` / `test-fast` / `test-gc-stress`
 
-- 根 `src/internal_root.zig`，跟随 `-Doptimize`，自己的 options。Zig 默认 test runner，单进程。
-- `-Dtest-filter`：另编一份带 DWARF 的诊断选择。
+- 引擎根 `test_root.zig`（`@import("zjs")` 是自己，re-export `src/root.zig`），跟随 `-Doptimize`，自己的 options。
+- CLI 测试根 `src/cli/tests.zig`，引擎作独立 `zjs` 模块。挂在无 filter 的 `test` 下。
+- `-Dtest-filter`：另编一份带 DWARF 的引擎诊断选择；此时不跑 CLI。
 - `-Dtest-strip` 默认：全量 true、filter 时 false。
-- `test-fast`：编译期 `--test-filter`，来自 `b.args`，另加 `zjs.pull_test_modules` 让空匹配失败；无子串则 `addFail`。
-- `test-gc-stress`：同一二进制，GC 诊断环境。checkpoint 依赖。stress 测试靠 `SkipZigTest` 自己退出。
-- `test-stress`：同一根、编译期 filter `stress.`，`ZJS_RUN_STRESS=1`。merge/production 依赖。
+- `test-fast`：编译期 `--test-filter`，来自 `b.args`，另加 `zjs.pull_test_modules` 让空匹配失败；无子串则 `addFail`。只选引擎套件。
+- `test-gc-stress`：引擎二进制，GC 诊断环境。checkpoint 依赖。
 
 #### smoke
 
@@ -237,27 +246,15 @@ gates.addGates(ctx, artifacts, test_graph)
 
 #### leak-census / embedding / oom / check
 
-- `test-leak-census`：同一根，编译期 filter `exec.tests.` + `zjs.leak_census.anchor`，`tools/leak_census_runner.zig` 跑两遍，`ZJS_LEAK_CENSUS=1`。夜间仪器，不是 checkpoint 依赖。
+- `test-leak-census`：同一根，编译期 filter `tests.exec.` + `zjs.pull_test_modules`，`tools/leak_census_runner.zig` 跑两遍，`ZJS_LEAK_CENSUS=1`。夜间仪器，不是 checkpoint 依赖。
 - `test-embedding`：独立公共 `src/root.zig` 模块（不 attest）+ `tests/embedding_examples.zig`，跟随 `-Doptimize`。engine-production-gate 依赖。options 模块引擎与测试根共享（内容相同则 Zig 只生成一个文件，一个文件只能做一个模块根）。
 - `check-embedding`：同一 `root_module`，sema-only。checkpoint 用它代替第二次引擎编译。
-- `test-oom`：`internal_root` + `withOomInjection(true)`，根 `tests/oom.zig`。跟随 `-Doptimize`。夜间。
-- `check`：与统一套件共享 `unified_tests.root_module`，sema-only。**不是门禁**。见 [`docs/testing-graph.md`](../testing-graph.md)。
+- `test-oom`：`src/root.zig` + `withOomInjection(true)`，根 `tests/oom.zig`。跟随 `-Doptimize`。夜间。
+- `check`：sema-only 编引擎、CLI 两个测试根。**不是门禁**。见 [`docs/testing-graph.md`](../testing-graph.md)。
 
 - **所有权 / 错误 / 调用**：返回 `TestGraph`。`test-fast` 空子串在配置期 `addFail`。
 
-**本函数注册的步骤**：`test`、`test-fast`、`test-gc-stress`、`test-stress`、`smoke`、`test-leak-census`、`test-embedding`、`check-embedding`、`test-oom`、`check`。
-
----
-
-## `build/perf.zig`
-
-### `addPerfSteps` (`build/perf.zig:4`)
-
-- **签名**：`pub fn addPerfSteps(ctx: config.Ctx, artifacts: artifacts_mod.Artifacts) void`。
-- **作用**：挂本地诊断入口。明确隔离于所有验证门禁。
-- **实现**：注册以下步骤——
-  - `perf-benchmark`：当前 `zjs --perf-json tests/perf/microbench.js`。
-- **所有权 / 错误 / 调用**：不返回。失败由各 Run 步非零退出。无门禁 `dependOn` 这些步骤。
+**本函数注册的步骤**：`test`、`test-fast`、`test-gc-stress`、`smoke`、`test-leak-census`、`test-embedding`、`check-embedding`、`test-oom`、`check`。
 
 ---
 
@@ -278,8 +275,8 @@ Gate 聚合：
 | 步骤 | 依赖 |
 | --- | --- |
 | `quick-gate` | `smoke` |
-| `checkpoint-gate` | `test` + `test-gc-stress` + `smoke` + `check-embedding`。不跑 test262 / OOM / stress |
-| `engine-production-gate` | `test` + stress + **smoke** + **test-embedding** 全跑 + test262。发布调用传 `-Doptimize=ReleaseFast`。 |
+| `checkpoint-gate` | `test` + `test-gc-stress` + `smoke` + `check-embedding`。不跑 test262 / OOM |
+| `engine-production-gate` | `test` + **smoke** + **test-embedding** 全跑 + test262。发布调用传 `-Doptimize=ReleaseFast`。 |
 
 - **所有权 / 错误 / 调用**：不返回。mise 以 `-j32` 启动这些 gate，避免 runner 默认 `cpu_count-1` 把互不依赖的编译内联到主线程。失败即步骤失败。
 
@@ -289,7 +286,7 @@ Gate 聚合：
 
 ## 覆盖核对
 
-- 清单函数数: 18（`build.zig` 1 + `build/artifacts.zig` 6 + `build/config.zig` 5 + `build/gates.zig` 1 + `build/perf.zig` 1 + `build/tests.zig` 4）
-- 本文标题覆盖的 `fn`：`build`、`gateRunCpus`、`runArtifactOnCpus`、`withOomInjection`、`addEngineOptions`、`forceLlvmBackendOnDebug`、`applyHotLayout`、`addInternalEngine`、`addCli`、`addInstallStep`、`omitFramePointer`、`addEngineArtifacts`、`addZjsTest`、`runUnifiedTests`、`addSmokeStep`、`addTestGraph`、`addPerfSteps`、`addGates`（18）
+- 清单函数数: 17（`build.zig` 1 + `build/artifacts.zig` 6 + `build/config.zig` 5 + `build/gates.zig` 1 + `build/tests.zig` 4）
+- 本文标题覆盖的 `fn`：`build`、`gateRunCpus`、`runArtifactOnCpus`、`withOomInjection`、`addEngineOptions`、`forceLlvmBackendOnDebug`、`applyHotLayout`、`addEngine`、`addCli`、`addInstallStep`、`omitFramePointer`、`addEngineArtifacts`、`addZjsTest`、`addEngineModule`、`runEngineTests`、`addSmokeStep`、`addTestGraph`、`addGates`（18）
 - 无函数文件：无
 - 未覆盖: 无

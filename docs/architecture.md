@@ -12,8 +12,7 @@ reference shapes, matching QuickJS’s own monoliths.
 ## Layers
 
 ```
-embedder  →  src/root.zig  →  src/js_context.zig + src/native.zig  →  src/core/
-CLI/tests →  src/internal_root.zig
+embedder / CLI / tests  →  src/root.zig  →  src/js_context.zig + src/native.zig  →  src/core/
 compile   →  src/parser.zig  →  src/compiler/  →  src/bytecode/
 execute   →  src/exec/  (VM, builtins, modules, promises)
 host      →  src/event_loop.zig
@@ -25,27 +24,28 @@ the event loop.
 `src/` companions sit beside those layers:
 
 - `event_loop.zig`: host timers, fd/signal handlers, and job draining
-  (`zjs.runtime`).
-- `js_context.zig`: host `JSContext` facade (eval, calls, properties).
-- `native.zig`: `zjs.native.managed` host-function thunks.
+  (`zjs.EventLoop`).
+- `js_context.zig`: host `Context` facade (eval, calls, properties).
+- `native.zig`: host-function thunks used by `Context.defineFunction`.
 - `simple_token.zig`: parser token kinds for QuickJS `simple_next_token`
   lookahead; used by `parser.zig` and the CLI.
 
 ## Public entry — `src/root.zig`
 
-Embedders import `zjs`. The host surface is `JSRuntime`, `JSContext`,
-`JSValue`, `zjs.native.managed` (host functions), `zjs.host.defineScriptArgs`
-(CLI `scriptArgs`), `zjs.context` eval options, and `zjs.runtime` (the host
-event loop). Handle types come from `JSRuntime` methods; byte stores from
-`JSValue.Bytes`. Contract: [public-api-contract.md](public-api-contract.md).
+Embedders import `zjs`. The host surface is `Runtime`, `Context`,
+`Value`, `Call`, `Context.defineFunction` (host functions),
+`Context.defineScriptArgs` (CLI `scriptArgs`), nested eval options on
+`Context`, and `EventLoop`. Handle types come from `Runtime` methods; byte
+stores from `Value.Bytes`. Contract: [public-api-contract.md](public-api-contract.md).
 Examples: [embedding-cookbook.md](embedding-cookbook.md).
 
-`src/internal_root.zig` aggregates CLI, test262, and in-repo tests. It is not
-the public embedding contract.
+The same file is the CLI, test262, and in-tree test compile root. Embedders
+stay on `Runtime` / `Context` / `Value` / `Call` / `EventLoop`; in-tree hosts
+also use the layer re-exports (`core`, `exec`, `parser`).
 
-`src/js_context.zig` is the host `JSContext` facade (eval, calls, properties,
+`src/js_context.zig` is the host `Context` facade (eval, calls, properties,
 native-function install). `src/native.zig` builds comptime thunks over
-`NativeEntry` via `managed`. Neither file may import CLI.
+`NativeEntry`. Neither file may import CLI.
 
 ## Core — `src/core/`
 
@@ -220,15 +220,15 @@ nine `perf-*-profile` steps with exact opcode pins, and
 
 The leftover `src/runtime/` directory is gone. Host policy that must stay
 out of core lives in this companion file: timers, fd/signal handlers, and
-job draining. `zjs.runtime` re-exports it (`EventLoop`, `runUntilIdle`).
+job draining. `zjs.EventLoop` is the public type (`runUntilIdle`, `drain`).
 
 Atomics waiter cleanup, module file graphs, and ArrayBuffer detach live in
 `src/exec/`. The dynamic plugin loader and its `zjs.ffi` ABI were deleted
-2026-09-06. Host functions register through `zjs.native`
-(`JSContext.defineFunction` / `createFunction`): each registration is one
+2026-09-06. Host functions register through `Context.defineFunction` /
+`createFunction`: each registration is one
 immutable `NativeEntry` (`src/core/native_entry.zig`) that the VM dispatches
 exactly like a builtin (`src/exec/vm_native.zig`); native -> JS goes through
-`JSContext.callFunction`.
+`Context.callFunction`.
 
 ## Libraries, CLI, tests
 
@@ -241,20 +241,28 @@ exactly like a builtin (`src/exec/vm_native.zig`); native -> JS goes through
   `run_test262_source.zig` owns harness caching, local source overrides, and
   source assembly. `run_test262_reporter.zig` owns synchronized
   stderr, failure buckets, directory summaries, and report files
-- `src/test262_host.zig`: Test262 globals (`$262`) and the `$262.agent`
-  coordinator. It lives in the engine tree because both `run-test262` and
-  the in-tree test helpers use it; the CLI only wraps it.
-- The unified Zig test binary has two modules: the engine (`zjs`, root
-  `src/internal_root.zig`, the same shape the CLI links) and the test root
-  `src/unified_tests.zig`, which adds the stress and CLI test families.
-  Engine files never import `src/cli/` or `src/stress.zig`; that rule is
-  what keeps the CLI executable, whose root is `src/cli/zjs.zig`, free of a
-  module clash.
+- `src/cli/run_test262_host.zig`: Test262 globals (`$262`) and the
+  `$262.agent` coordinator. It is a `run-test262` module
+  (`@import("test262_host")`), not an engine export. Test compiles of
+  the engine add the same module so `TestEngine` can install harness
+  globals without putting the host file in the engine module.
+- Zig tests use two compile roots so engine files never path-import
+  `src/cli/` (that would clash with the CLI executable, whose root is
+  `src/cli/zjs.zig`): `test_root.zig` is the engine suite (re-exports
+  `src/root.zig` so one module sees `src/` and `tests/`);
+  `src/cli/tests.zig` pulls the colocated CLI tests and imports the
+  engine as `zjs`. Test compiles add `@import("test262_host")` so
+  `TestEngine` can install `$262` without exporting the host from the
+  engine.
 - Zig unit tests sit next to the code they exercise: package `tests.zig`
-  (`src/core/tests.zig`, `src/exec/tests.zig`, `src/parser/tests.zig`,
-  `src/bytecode/tests.zig`, `src/compiler/tests.zig`) plus colocated
-  `test` blocks
-- `tests/`: public-root embedding examples, CLI smoke, OOM-injection, plus
+  (`src/parser/tests.zig`, `src/bytecode/tests.zig`,
+  `src/compiler/tests.zig`) plus colocated `test` blocks
+- Integration-test harness: `tests/harness.zig` plus `tests/harness/`
+  (`gc`, `expect`, `fixture`, `test_engine`, `shared`). Used by
+  `tests/core.zig` and `tests/exec.zig`. Unit tests next to `src/` do
+  not import it.
+- `tests/`: engine integration (public API, runtime/GC, VM/eval),
+  public-root embedding, CLI smoke, OOM-injection, plus
   `tests/fixtures/` (test262 harness and override fixtures)
 
 Layering rules: [api-boundary.md](api-boundary.md).
@@ -422,7 +430,7 @@ Opcode profiling (after the D0 fix):
   wrapping them would double-count.
 - The default build's table is entry-for-entry equal to the unwrapped
   table; `--profile-opcodes` fail-closes on a non-profiling binary (exit
-  2); `--perf-json` emits `opcode_profile_enabled` explicitly.
+  2).
 
 Not implemented:
 

@@ -936,7 +936,7 @@ const ValueSliceRoot = array_ops.ValueSliceRoot;
 
 // The `reflect construct roots argument list while resolving prototype` test,
 // the `host global bootstrap ...` test, and the matching `engine eval host
-// globals ...` test in `zjs_vm.zig` were relocated to `src/tests/exec.zig`
+// globals ...` test in `zjs_vm.zig` were relocated to `tests/exec.zig`
 // during Phase 6b-3 STEP 7B. They build a bare `core.JSRuntime` and install the
 // standard globals, which now flows through `rt.installStandardGlobals` and so
 // needs the standard-global installer registered first; the bootstrap-integration

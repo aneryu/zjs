@@ -9,7 +9,7 @@
   ],
   "protocol": {
     "cold_cache": "copy the tracked tree to a scratch dir; zig build zjs; strip -o img zig-out/bin/zjs; md5sum img",
-    "incremental_converged": "touch src/internal_root.zig; zig build zjs; strip -o img zig-out/bin/zjs; md5sum img",
+    "incremental_converged": "touch src/root.zig; zig build zjs; strip -o img zig-out/bin/zjs; md5sum img",
     "sampling": "Repeat the incremental build at least 3x per source. One build proves nothing: the basin choice varies run to run."
   },
   "notes": [
