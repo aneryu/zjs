@@ -100,7 +100,7 @@
 - **签名**：`pub inline fn newTargetValue(self: *const Frame) JSValue`。
 - **作用**：`aliases_function` 时就是 `current_function`，否则读冷盒或 undefined。
 - **实现**：两臂：`ownership.new_target == .aliases_function` 时直接返回热字段 `current_function`——`new F()` 的常见情形里 `new.target` 就是被调用的构造器本身，于是不必为它分配冷盒；否则有冷盒就读 `c.new_target`，没有则返回 undefined（普通函数调用没有 `new.target`）。注释强调返回值是 BORROWED，与 `current_function` 一样：每个读者要么只测试它，要么把它交给会自行 dup 的 callee（对齐 qjs `OP_special_object NEW_TARGET` 在 push 处 dup，quickjs.c:17984）。
-- **所有权 / 错误 / 调用**：错误：无。所有权：`aliases_function` 时直接复用热字段 `current_function`（省一次 cold 分配），否则从 `FrameCold` 读；返回借用的 `JSValue`。调用：`src/exec/vm_call.zig:868`、`:926`、`:943`，`src/exec/vm_literal.zig:449`（`specialObject` 的 subtype 3 臂，即 `OP_special_object NEW_TARGET`），`src/exec/eval_ops.zig:535`。
+- **所有权 / 错误 / 调用**：错误：无。所有权：`aliases_function` 时直接复用热字段 `current_function`（省一次 cold 分配），否则从 `FrameCold` 读；返回借用的 `JSValue`。调用：`src/exec/vm_opcodes.zig:868`、`:926`、`:943`，`src/exec/vm_opcodes.zig:449`（`specialObject` 的 subtype 3 臂，即 `OP_special_object NEW_TARGET`），`src/exec/eval_entry.zig:535`。
 
 ### `Frame.takeConstructorNewTarget` (`src/exec/frame.zig:279`)
 
@@ -114,7 +114,7 @@
 - **签名**：`pub inline fn originalArgs(self: *const Frame) []JSValue`。
 - **作用**：冷盒里的调用参数快照，没有则空切片。
 - **实现**：`return if (self.cold) |c| c.original_args else &.{}`：没有冷盒就意味着这帧不需要原始实参快照（sloppy + 简单形参用 mapped arguments 直接读活的 `frame.args`），返回空切片。
-- **所有权 / 错误 / 调用**：错误：无；没有 cold 就返回空切片。所有权：返回借用窗口，存储归 `FrameCold.original_args`（随帧 slab 一起回收）。调用：`src/exec/vm_call.zig:938`、`src/exec/object_ops.zig:2314`-`:2315`，以及本文件 `:777`、`:791` 的存储重叠断言。
+- **所有权 / 错误 / 调用**：错误：无；没有 cold 就返回空切片。所有权：返回借用窗口，存储归 `FrameCold.original_args`（随帧 slab 一起回收）。调用：`src/exec/vm_opcodes.zig:938`、`src/exec/object_ops.zig:2314`-`:2315`，以及本文件 `:777`、`:791` 的存储重叠断言。
 
 ### `Frame.init` (`src/exec/frame.zig:291`)
 
@@ -198,7 +198,7 @@
 - **签名**：`pub fn allocOwnedStorage(self: *Frame, account: *memory.MemoryAccount, count: usize) ![]JSValue`。
 - **作用**：heap 分配并 install；已有 owned 存储则拒绝以免泄漏第二块。
 - **实现**：先 `account.alloc(JSValue, count)` 分配。随后一道防重检查：如果本帧已经持有一块自有 storage（`ownership.storage == .owned` 且 `storage_values.len != 0`），就把刚分配的这块 `free` 掉并返回 `error.OutOfMemory`——注释说明不接收预切窗口的动态增长路径本来就罕见，与其悄悄泄漏第二块 backing，不如把所有权规则摆明。检查通过才 `installOwnedStorage(values)` 装上并返回切片。
-- **所有权 / 错误 / 调用**：错误：`error.OutOfMemory`——分配成功但发现帧已经持有一块 owned storage 时，会把刚拿到的内存 free 掉再返回 OOM（防止泄漏旧块）。所有权：分配自 `MemoryAccount`，随即 `installOwnedStorage` 把释放义务记到帧上。调用：`src/exec/vm_call.zig:278`、`:389`，本文件 `:473`（实参窗口）、`:494`（original_args 快照）、`:661`（open var-ref 槽）。
+- **所有权 / 错误 / 调用**：错误：`error.OutOfMemory`——分配成功但发现帧已经持有一块 owned storage 时，会把刚拿到的内存 free 掉再返回 OOM（防止泄漏旧块）。所有权：分配自 `MemoryAccount`，随即 `installOwnedStorage` 把释放义务记到帧上。调用：`src/exec/vm_opcodes.zig:278`、`:389`，本文件 `:473`（实参窗口）、`:494`（original_args 快照）、`:661`（open var-ref 槽）。
 
 ### `Frame.deinit` (`src/exec/frame.zig:468`)
 
@@ -219,7 +219,7 @@
 - **签名**：`pub fn releaseOwnedStorage(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void`。
 - **作用**：关 open var-ref、清空窗口、free owned backing。
 - **实现**：先 `closeOpenVarRefs`，记下 `storage_values` 与其 ownership，然后把 locals/args/var_refs/open_var_refs/storage_values 全清空、`ownership.var_refs` 复位成 `.owned`、`ownership.storage` 复位成 `.borrowed`；有冷盒就 `releaseColdStorage` 丢掉指向该 backing 的 `original_args`（保留冷盒与其 new-target 绑定）；最后只有原来是 `.owned` 且非空才 `account.free`。
-- **所有权 / 错误 / 调用**：错误：无。所有权：比 `deinitInlineCall` 更彻底——先关 open var-ref，再把 locals/args/var_refs/open_var_refs/storage 全部清成空切片并把 `ownership.storage` 退回 `.borrowed`（便于帧被复用），cold 走 `releaseColdStorage`，最后才 free 取下来的旧 owned 块。调用：`src/exec/vm_call.zig:268` 的 `errdefer`（storage 未转移时回滚）与本文件 `:530`。
+- **所有权 / 错误 / 调用**：错误：无。所有权：比 `deinitInlineCall` 更彻底——先关 open var-ref，再把 locals/args/var_refs/open_var_refs/storage 全部清成空切片并把 `ownership.storage` 退回 `.borrowed`（便于帧被复用），cold 走 `releaseColdStorage`，最后才 free 取下来的旧 owned 块。调用：`src/exec/vm_opcodes.zig:268` 的 `errdefer`（storage 未转移时回滚）与本文件 `:530`。
 
 ### `Frame.closeOpenVarRefs` (`src/exec/frame.zig:504`)
 
@@ -247,7 +247,7 @@
 - **签名**：`pub fn closeLocalBinding(self: *Frame, rt: anytype, local_idx: usize) !void`。
 - **作用**：按 local 的 open binding index 关闭对应 cell。
 - **实现**：`local_idx` 越出 `locals` 或 `varDefs()` 即 `error.InvalidBytecode`；该 local 没有 open binding index 则什么都不做直接返回；否则把 `open_var_refs` 包成 `open_bindings.Table` 调 `close(rt, binding_idx)`。
-- **所有权 / 错误 / 调用**：错误：`error.InvalidBytecode`（局部索引越界）或 `Table.close` 的错误；局部没有对应 open binding 时直接返回。所有权：关闭单个绑定，把值搬进堆 cell。调用：`src/exec/vm_property_locals.zig:111` 与 `:271`（`close_loc` 语义的两处）。
+- **所有权 / 错误 / 调用**：错误：`error.InvalidBytecode`（局部索引越界）或 `Table.close` 的错误；局部没有对应 open binding 时直接返回。所有权：关闭单个绑定，把值搬进堆 cell。调用：`src/exec/vm_property.zig:111` 与 `:271`（`close_loc` 语义的两处）。
 
 ### `Frame.closeParameterEnvironmentVarRefs` (`src/exec/frame.zig:572`)
 
@@ -346,28 +346,28 @@
 - **签名**：`pub inline fn stackLimit(self: *const Stack) usize`。
 - **作用**：从 packed policy 取出槽上限。
 - **实现**：`@intCast(self.policy.limit)`。`policy` 是把 62 位的槽上限与两个 backing 归属标志打包进一个字的 packed struct——注释说明 62 位上限远超任何可寻址的 JSValue 缓冲，而这么排省掉了布尔字段原本带来的六字节尾填充。
-- **所有权 / 错误 / 调用**：错误：无。所有权：只读 `policy.limit`（62 位打包字段）。调用：`src/exec/vm_gen_async.zig:47`、`:48`、`:55`（挂起栈扩容前的上限核算）；其余同名命中是 `JSContext.stackLimit`。
+- **所有权 / 错误 / 调用**：错误：无。所有权：只读 `policy.limit`（62 位打包字段）。调用：`src/exec/vm_opcodes.zig:47`、`:48`、`:55`（挂起栈扩容前的上限核算）；其余同名命中是 `JSContext.stackLimit`。
 
 ### `Stack.isArenaWindow` (`src/exec/stack.zig:102`)
 
 - **签名**：`pub inline fn isArenaWindow(self: *const Stack) bool`。
 - **作用**：backing 是否借自 arena。
 - **实现**：读 `self.policy.arena_window` 这一位。为真表示 backing 是 VM 栈 arena 上切出来的窗口，`deinit` 不得 free 它，回收靠 arena 水位回滚。
-- **所有权 / 错误 / 调用**：错误：无。所有权：只读 `policy.arena_window` 位。调用：`src/exec/inline_calls.zig:597`（`canUseSimpleTeardown`）与 `:668`/`:697`/`:719` 三处叶 teardown 断言，以及 `src/exec/vm_gen_async.zig:205`、`:301` 的反向断言。
+- **所有权 / 错误 / 调用**：错误：无。所有权：只读 `policy.arena_window` 位。调用：`src/exec/inline_calls.zig:597`（`canUseSimpleTeardown`）与 `:668`/`:697`/`:719` 三处叶 teardown 断言，以及 `src/exec/vm_opcodes.zig:205`、`:301` 的反向断言。
 
 ### `Stack.setArenaWindow` (`src/exec/stack.zig:106`)
 
 - **签名**：`pub inline fn setArenaWindow(self: *Stack, value: bool) void`。
 - **作用**：改 arena 标志。
 - **实现**：写 `self.policy.arena_window = value` 一位。与 `resident_window` 相互独立——两者都为假时 backing 才是本 Stack 自有、需要 `free` 的堆块。
-- **所有权 / 错误 / 调用**：错误：无。所有权：只改策略位——挂起 generator 时要把栈从「arena 窗口」改判为独立 backing，免得 watermark 回滚踩到它。调用：`src/exec/vm_gen_async.zig:73`、`:252`、`:292`。
+- **所有权 / 错误 / 调用**：错误：无。所有权：只改策略位——挂起 generator 时要把栈从「arena 窗口」改判为独立 backing，免得 watermark 回滚踩到它。调用：`src/exec/vm_opcodes.zig:73`、`:252`、`:292`。
 
 ### `Stack.setResidentWindow` (`src/exec/stack.zig:110`)
 
 - **签名**：`pub inline fn setResidentWindow(self: *Stack, value: bool) void`。
 - **作用**：改 resident 标志。
 - **实现**：写 `self.policy.resident_window = value` 一位。resident 窗口表示 backing 由常驻结构（如挂起的 generator）retain 着，`deinit` 同样不得释放。
-- **所有权 / 错误 / 调用**：错误：无。所有权：只改策略位，标记 backing 是可转移的驻留存储（由 `GeneratorExecutionState` 持有）。调用：`src/exec/vm_gen_async.zig:74`、`:253`、`:293`。
+- **所有权 / 错误 / 调用**：错误：无。所有权：只改策略位，标记 backing 是可转移的驻留存储（由 `GeneratorExecutionState` 持有）。调用：`src/exec/vm_opcodes.zig:74`、`:253`、`:293`。
 
 ### `Stack.topPtr` (`src/exec/stack.zig:114`)
 
@@ -402,7 +402,7 @@
 - **签名**：`pub inline fn liveValues(self: *const Stack) []JSValue`。
 - **作用**：`values[0..len]`。
 - **实现**：`self.values[0..self.len()]`——活前缀切片，即这条栈当前拥有其中 JSValue 的那一段。GC 的精确遍历与 `deinit` 的清槽都只看这一段。
-- **所有权 / 错误 / 调用**：错误：无。所有权：返回借用切片 `values[0..len()]`；注意它不含 `pending_call_region` 那段。调用：`src/exec/active_invocation_trace.zig:103`（精确根扫描）、`src/exec/vm_gen_async.zig:130`/`:163`、`src/exec/vm_control.zig:39`、`src/exec/function_ops.zig:547`，以及本文件 `:200`、`:283`。
+- **所有权 / 错误 / 调用**：错误：无。所有权：返回借用切片 `values[0..len()]`；注意它不含 `pending_call_region` 那段。调用：`src/exec/inline_calls.zig:103`（精确根扫描）、`src/exec/vm_opcodes.zig:130`/`:163`、`src/exec/vm_opcodes.zig:39`、`src/exec/function_ops.zig:547`，以及本文件 `:200`、`:283`。
 
 ### `Stack.backingValues` (`src/exec/stack.zig:161`)
 
@@ -416,7 +416,7 @@
 - **签名**：`pub inline fn setLen(self: *Stack, new_len: usize) void`。
 - **作用**：按槽数改 top。
 - **实现**：断言 `new_len <= capacity`，再把 `top_ptr` 置成 `values + new_len`。
-- **所有权 / 错误 / 调用**：错误：无（`assert(new_len <= capacity)`）。所有权：直接把 `top_ptr` 设成 `values + new_len`——截断时被丢弃的槽不做任何释放（VM 值不计引用计数）。调用：`src/exec/` 下 29 处，如 `src/exec/vm_call.zig:731`/`:736`、`src/exec/tailcall_dispatch.zig:1338`。
+- **所有权 / 错误 / 调用**：错误：无（`assert(new_len <= capacity)`）。所有权：直接把 `top_ptr` 设成 `values + new_len`——截断时被丢弃的槽不做任何释放（VM 值不计引用计数）。调用：`src/exec/` 下 29 处，如 `src/exec/vm_opcodes.zig:731`/`:736`、`src/exec/tailcall_dispatch.zig:1338`。
 
 ### `Stack.setTopPtr` (`src/exec/stack.zig:173`)
 
@@ -430,14 +430,14 @@
 - **签名**：`pub inline fn installBacking(self: *Stack, live_values: []JSValue, backing_capacity: usize) void`。
 - **作用**：generator 所有权移交：装上已有活前缀与 capacity。
 - **实现**：断言 `live_values.len <= backing_capacity`，把 `values` 指向 `live_values.ptr`、`top_ptr` 指到其末尾、`capacity` 记成 backing 容量。只在 generator 的所有权移交缝用。
-- **所有权 / 错误 / 调用**：错误：无（`assert` 活值不超过新 backing 容量）。所有权：把 Stack 指向别处的 backing（挂起 generator 的驻留存储），Stack 自身不接管释放义务——释放归 `SuspendedStackStorage`。调用：`src/exec/vm_gen_async.zig:251`、`:291`（resume 时装回驻留栈）。
+- **所有权 / 错误 / 调用**：错误：无（`assert` 活值不超过新 backing 容量）。所有权：把 Stack 指向别处的 backing（挂起 generator 的驻留存储），Stack 自身不接管释放义务——释放归 `SuspendedStackStorage`。调用：`src/exec/vm_opcodes.zig:251`、`:291`（resume 时装回驻留栈）。
 
 ### `Stack.clearBacking` (`src/exec/stack.zig:192`)
 
 - **签名**：`pub inline fn clearBacking(self: *Stack) void`。
 - **作用**：丢掉借用视图，两端回到哨兵。
 - **实现**：三行：`values` 与 `top_ptr` 都指回 `emptyPtr()` 哨兵，`capacity = 0`。不 free 也不清槽——所有权已经移交别处（generator 挂起）或由调用方另行处置，这里只是让本 Stack 松手。
-- **所有权 / 错误 / 调用**：错误：无。所有权：把 `values`/`top_ptr` 指向不可解引用的对齐哨兵、容量清零，切断与原 backing 的关系（所有权已转移给挂起状态），避免误 free。调用：`src/exec/vm_gen_async.zig:72` 与本文件 `:205`。
+- **所有权 / 错误 / 调用**：错误：无。所有权：把 `values`/`top_ptr` 指向不可解引用的对齐哨兵、容量清零，切断与原 backing 的关系（所有权已转移给挂起状态），避免误 free。调用：`src/exec/vm_opcodes.zig:72` 与本文件 `:205`。
 
 ### `Stack.deinit` (`src/exec/stack.zig:209`)
 
@@ -451,14 +451,14 @@
 - **签名**：`pub fn push(self: *Stack, value: JSValue) !void`。
 - **作用**：reserve 1 后写入并推进 top。
 - **实现**：三行：`reserveAdditional(1)` 先确保有一格（可能扩容或撞 `stackLimit` 报 `error.StackOverflow`），然后 `top_ptr[0] = value` 写入、`top_ptr += 1` 推进。
-- **所有权 / 错误 / 调用**：错误：`error.OutOfMemory`/超限——`reserveAdditional(1)` 在需要扩容时向 `MemoryAccount` 要或撞 `stackLimit`。所有权：按「借用值」语义压栈（当前实现与 `pushOwned` 同构，因为 VM 值不计引用计数）。调用：`src/exec/` 下约 40 处，如 `src/exec/vm_property_locals.zig:126`、`src/exec/iterator_ops.zig:86`、`src/exec/object_ops.zig:3908`；`gc.zig` 等处的 `push` 是别的容器。
+- **所有权 / 错误 / 调用**：错误：`error.OutOfMemory`/超限——`reserveAdditional(1)` 在需要扩容时向 `MemoryAccount` 要或撞 `stackLimit`。所有权：按「借用值」语义压栈（当前实现与 `pushOwned` 同构，因为 VM 值不计引用计数）。调用：`src/exec/` 下约 40 处，如 `src/exec/vm_property.zig:126`、`src/exec/iterator_ops.zig:86`、`src/exec/object_ops.zig:3908`；`gc.zig` 等处的 `push` 是别的容器。
 
 ### `Stack.pushOwned` (`src/exec/stack.zig:223`)
 
 - **签名**：`pub const pushOwned = push;`（即 `pub fn pushOwned(self: *Stack, value: JSValue) !void`）。
 - **作用**：`push` 的记号性别名。
 - **实现**：一行别名，**不是**第二个函数体。tracing GC 之后 VM 值不计引用计数，「借用/自有」在实现上没有任何差别，两个名字只把调用点的约定写进代码；此前的逐字复制已折叠成别名。
-- **所有权 / 错误 / 调用**：错误：同 `push`，来自 `reserveAdditional`。所有权：语义上压入一个「已归栈所有」的新值（如刚算出的结果），运行时行为与 `push` 完全一致。调用：`src/exec/vm_arith.zig:71`、`:111`、`:138` 等算术结果回压点，以及 `src/exec/iterator_ops.zig:81`、`:91` 等，共 70 余处。
+- **所有权 / 错误 / 调用**：错误：同 `push`，来自 `reserveAdditional`。所有权：语义上压入一个「已归栈所有」的新值（如刚算出的结果），运行时行为与 `push` 完全一致。调用：`src/exec/vm_opcodes.zig:71`、`:111`、`:138` 等算术结果回压点，以及 `src/exec/iterator_ops.zig:81`、`:91` 等，共 70 余处。
 
 ### `Stack.pushAssumeCapacity` (`src/exec/stack.zig:235`)
 
@@ -479,21 +479,21 @@
 - **签名**：`pub fn pop(self: *Stack) !JSValue`。
 - **作用**：弹出一层。
 - **实现**：`top_ptr == values` 表示空栈，返回 `error.StackUnderflow`；否则 `top_ptr -= 1` 再读 `top_ptr[0]` 返回。刻意**不**把弹出的槽写成 undefined——值的所有权随返回值移交调用方，而该槽位于活前缀之上，下一次 push 会覆盖它。
-- **所有权 / 错误 / 调用**：错误：`error.StackUnderflow`（空栈）。所有权：值交给调用方，槽不清空——`top_ptr` 退一格即可，收集器只看活前缀。调用：`src/exec/` 下约 189 处操作数出栈，如 `src/exec/vm_property_field.zig:67`、`:238`；`src/core/` 的同名命中属别的容器。
+- **所有权 / 错误 / 调用**：错误：`error.StackUnderflow`（空栈）。所有权：值交给调用方，槽不清空——`top_ptr` 退一格即可，收集器只看活前缀。调用：`src/exec/` 下约 189 处操作数出栈，如 `src/exec/vm_property.zig:67`、`:238`；`src/core/` 的同名命中属别的容器。
 
 ### `Stack.peek` (`src/exec/stack.zig:250`)
 
 - **签名**：`pub fn peek(self: Stack) ?JSValue`。
 - **作用**：看栈顶，空则 null。
 - **实现**：`top_ptr == values` 返回 null，否则读 `(top_ptr - 1)[0]`。不改 `top_ptr`，值仍归栈所有。注意形参是 `self: Stack`（按值），所以这是一个纯读访问器。
-- **所有权 / 错误 / 调用**：错误：无；空栈返回 null（调用方通常翻成 `error.StackUnderflow`）。所有权：返回栈顶值的副本，槽仍在栈上。调用：`src/exec/` 下 11 处，如 `src/exec/object_ops.zig:4279`、`src/exec/vm_literal.zig:216`（`json_ops.zig` 里的同名命中是 JSON 解析自己的栈）。
+- **所有权 / 错误 / 调用**：错误：无；空栈返回 null（调用方通常翻成 `error.StackUnderflow`）。所有权：返回栈顶值的副本，槽仍在栈上。调用：`src/exec/` 下 11 处，如 `src/exec/object_ops.zig:4279`、`src/exec/vm_opcodes.zig:216`（`json_ops.zig` 里的同名命中是 JSON 解析自己的栈）。
 
 ### `Stack.peekBorrowed` (`src/exec/stack.zig:246`)
 
 - **签名**：`pub const peekBorrowed = peek;`（即 `pub fn peekBorrowed(self: Stack) ?JSValue`）。
 - **作用**：`peek` 的记号性别名（借用语义）。
 - **实现**：一行别名；名字上的 `Borrowed` 只是提醒调用方不得把这个值当成额外一份所有权转交出去。
-- **所有权 / 错误 / 调用**：错误：无；空栈返回 null。所有权：与 `peek` 行为相同，命名上强调返回值是借用的。调用：`src/exec/vm_literal.zig:149`、`src/exec/iterator_ops.zig:343`、`src/exec/vm_call.zig:890`、`src/exec/vm_value.zig:272`、`src/exec/slot_ops.zig:71`、`:118`。
+- **所有权 / 错误 / 调用**：错误：无；空栈返回 null。所有权：与 `peek` 行为相同，命名上强调返回值是借用的。调用：`src/exec/vm_opcodes.zig:149`、`src/exec/iterator_ops.zig:343`、`src/exec/vm_opcodes.zig:890`、`src/exec/vm_opcodes.zig:272`、`src/exec/property_ops.zig:71`、`:118`。
 
 ### `Stack.reserveAdditional` (`src/exec/stack.zig:258`)
 

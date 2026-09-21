@@ -6,14 +6,14 @@
 
 无公开类型。私有构造走 `Object.createRegExpFromShape`。
 
-### `constructCompiledLiteralInRealm` (`src/exec/vm_regexp.zig:15`)
+### `constructCompiledLiteralInRealm` (`src/exec/vm_opcodes.zig:15`)
 
 - **签名**：`fn constructCompiledLiteralInRealm( rt: *core.JSRuntime, global: *core.Object, source: core.JSValue, compiled_value: core.JSValue, ) !core.JSValue`。
 - **作用**：服务 `op.regexp`：校验编译字节码字符串，在当前 realm 的固定 shape 上装配 RegExp 对象。
 - **实现**：`compiled_value` 必须是非宽、非空的窄字符串，否则 `TypeError`。`contextForGlobal` 取 realm，`regexp_shape` 缺失也是 `TypeError`。把 `source` 与 compiled 放进 `rootValues` 窗口（构造可能 GC）。`createRegExpFromShape`；失败 `destroyFromHeader`。然后 `setRegexpSource` / `setRegexpCompiledBytecodeString`，返回 `object.value()`。
 - **所有权 / 错误 / 调用**：调用方拥有 `source`/`compiled`；本函数把它们写进对象。根窗口覆盖分配。错误：`TypeError`、OOM。仅 `pushLiteral` 调用。
 
-### `pushLiteral` (`src/exec/vm_regexp.zig:40`)
+### `pushLiteral` (`src/exec/vm_opcodes.zig:40`)
 
 - **签名**：`pub noinline fn pushLiteral( ctx: *core.JSContext, stack: *stack_mod.Stack, global: *core.Object, ) !void`。
 - **作用**：`op.regexp` 的栈适配器：弹出 compiled 与 pattern，压入新 RegExp。

@@ -326,7 +326,7 @@ ASCII 谓词给 lexer/parser/regexp；非 ASCII 标识符走 `ID_Start`/`ID_Cont
 - **签名**：`pub fn isCased(c: u21) bool`。
 - **作用**：是否 cased。
 - **实现**：case 表命中或 `Cased1` 表。
-- **所有权 / 错误 / 调用**：不分配、无 error：只读 comptime 生成的 `unicode_prop_Cased1_*` 表与 case 表。调用方仅 `src/exec/string_builtin_ops.zig:1646,1655`（`String.prototype.toLocaleLowerCase` 的 Final_Sigma 上下文判定）。
+- **所有权 / 错误 / 调用**：不分配、无 error：只读 comptime 生成的 `unicode_prop_Cased1_*` 表与 case 表。调用方仅 `src/exec/string_ops.zig:1646,1655`（`String.prototype.toLocaleLowerCase` 的 Final_Sigma 上下文判定）。
 
 ### `isCaseIgnorable` (`src/libs/unicode.zig:1369`)
 
@@ -361,7 +361,7 @@ ASCII 谓词给 lexer/parser/regexp；非 ASCII 标识符走 `ID_Start`/`ID_Cont
 - **签名**：`pub fn isEcmaWhitespaceOrLineTerminatorUnit(unit: u16) bool`。
 - **作用**：代码单元版。
 - **实现**：转码点。
-- **所有权 / 错误 / 调用**：不分配、无 error：纯范围比较。调用方 `src/core/regexp.zig:222,223`（`\s`/`\S` 类）、`src/exec/regexp_ops.zig:905`、`src/exec/string_builtin_ops.zig:2273`（trim）。
+- **所有权 / 错误 / 调用**：不分配、无 error：纯范围比较。调用方 `src/core/regexp.zig:222,223`（`\s`/`\S` 类）、`src/exec/regexp_ops.zig:905`、`src/exec/string_ops.zig:2273`（trim）。
 
 ### `isAsciiWhitespaceByte` (`src/libs/unicode.zig:1392`)
 
@@ -571,14 +571,14 @@ ASCII 谓词给 lexer/parser/regexp；非 ASCII 标识符走 `ID_Start`/`ID_Cont
 - **签名**：`pub fn isHighSurrogateCodePoint(cp: u21) bool`。
 - **作用**：U+D800–DBFF。
 - **实现**：范围。
-- **所有权 / 错误 / 调用**：不分配、无 error。调用方本文件 `isHighSurrogateUnit`（:262）、`isSurrogateCodePoint`（:278），以及经 `src/exec/string_ops.zig:2690` 转发给 `src/exec/regexp_fastpath.zig:863`。
+- **所有权 / 错误 / 调用**：不分配、无 error。调用方本文件 `isHighSurrogateUnit`（:262）、`isSurrogateCodePoint`（:278），以及经 `src/exec/string_ops.zig:2690` 转发给 `src/exec/regexp_ops.zig:863`。
 
 ### `isLowSurrogateCodePoint` (`src/libs/unicode.zig:1524`)
 
 - **签名**：`pub fn isLowSurrogateCodePoint(cp: u21) bool`。
 - **作用**：U+DC00–DFFF。
 - **实现**：范围。
-- **所有权 / 错误 / 调用**：不分配、无 error。调用方本文件 `isLowSurrogateUnit`（:266）、`isSurrogateCodePoint`（:278），以及经 `src/exec/string_ops.zig:2694` 转发给 `src/exec/regexp_fastpath.zig:866`。
+- **所有权 / 错误 / 调用**：不分配、无 error。调用方本文件 `isLowSurrogateUnit`（:266）、`isSurrogateCodePoint`（:278），以及经 `src/exec/string_ops.zig:2694` 转发给 `src/exec/regexp_ops.zig:866`。
 
 ### `isSurrogateCodePoint` (`src/libs/unicode.zig:1528`)
 

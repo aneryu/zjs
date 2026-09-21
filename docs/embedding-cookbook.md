@@ -12,16 +12,16 @@ The examples below are covered by `tests/embedding_examples.zig`.
 const std = @import("std");
 const zjs = @import("zjs");
 
-const rt = try zjs.JSRuntime.create(allocator, .{});
+const rt = try zjs.Runtime.create(allocator, .{});
 defer rt.destroy();
 
-const ctx = try zjs.JSContext.create(rt, .{});
+const ctx = try zjs.Context.create(rt, .{});
 defer ctx.destroy();
 
 const result = try ctx.eval("let x = 1 + 2; x;", .{});
 ```
 
-A returned `JSValue` is a plain value; there is no release call. It stays
+A returned `Value` is a plain value; there is no release call. It stays
 alive while it is reachable from a rooted place, and a local on the host's
 own stack is one (the collector scans the native stack conservatively). See
 Rooting Rules below for everything that is not a stack local.
@@ -50,12 +50,12 @@ state.
 ```zig
 const object = try ctx.eval("({ answer: 42 })", .{});
 
-var scope: zjs.value.Scope = rt.enterHandleScope();
+var scope = rt.enterHandleScope();
 defer scope.deinit();
 
-const local: zjs.value.Local = try scope.localDup(object);
+const local = try scope.localDup(object);
 
-var persistent: zjs.value.Persistent = try rt.createPersistentValue(local.get());
+var persistent = try rt.createPersistentValue(local.get());
 defer persistent.deinit();
 
 scope.deinit();
@@ -63,13 +63,13 @@ scope.deinit();
 const answer = try ctx.getProperty(persistent.get(), "answer");
 ```
 
-Do not store raw `JSValue` fields in long-lived host state unless they are
+Do not store raw `Value` fields in long-lived host state unless they are
 protected by a persistent handle or another documented public root.
 
 ## Native Functions
 
-A native function is a plain Zig function; `zjs.native.managed` wraps it at
-comptime into the thunk the VM dispatches like a builtin. `state` is an
+A native function is a plain Zig function. `Context.defineFunction` wraps it
+at comptime into the thunk the VM dispatches like a builtin. `state` is an
 opaque pointer the function reads back with `call.state(T)`; `finalize` is
 the ownership hand-off for that state and runs once when the runtime is
 destroyed.
@@ -81,7 +81,7 @@ const Combiner = struct {
     saw_object_this: bool = false,
     finalized: *bool,
 
-    fn call(c: *zjs.native.Call) anyerror!zjs.JSValue {
+    fn call(c: *zjs.Call) anyerror!zjs.Value {
         const self = c.state(Combiner);
         self.calls += 1;
         if (c.this.is(.object)) self.saw_object_this = true;
@@ -89,7 +89,7 @@ const Combiner = struct {
         const a = c.arg(0).as(.int) orelse return error.TypeError;
         const b = c.arg(1).as(.int) orelse return error.TypeError;
         if (a < 0) return error.RangeError;
-        return zjs.JSValue.int32(self.factor * (a + b));
+        return zjs.Value.int32(self.factor * (a + b));
     }
 
     fn finalize(ptr: *anyopaque) void {
@@ -100,7 +100,7 @@ const Combiner = struct {
 
 var finalized = false;
 var state = Combiner{ .factor = 2, .finalized = &finalized };
-_ = try ctx.defineFunction("hostCombine", zjs.native.managed(Combiner.call), .{
+_ = try ctx.defineFunction("hostCombine", Combiner.call, .{
     .length = 2,
     .state = @ptrCast(&state),
     .finalize = Combiner.finalize,
@@ -124,7 +124,7 @@ What the example relies on:
   (`c.throwTypeError("...")` / `c.throwError(name, message)` install the
   exception and return it); `OutOfMemory`, `Interrupted`, `Timeout`,
   `StackOverflow` are engine sentinels; any other error name becomes
-  `Error: <name>`. A function that returns plain `JSValue` cannot fail.
+  `Error: <name>`. A function that returns plain `Value` cannot fail.
 - `defineFunction` installs the function on the global as a writable,
   non-enumerable, configurable property and returns it. `createFunction`
   builds the same function object without installing it -- attach it
@@ -144,11 +144,11 @@ on the context until `takePendingException`.
 
 ```zig
 const add_one = try ctx.eval("(function (x) { return x + 1; })", .{});
-const result = try ctx.callFunction(add_one, &.{zjs.JSValue.int32(41)}, .{});
+const result = try ctx.callFunction(add_one, &.{zjs.Value.int32(41)}, .{});
 ```
 
 `callFunction` borrows `args` and the receiver for the duration of the call;
-the result is a plain `JSValue`. Host -> JS -> native -> JS recursion uses
+the result is a plain `Value`. Host -> JS -> native -> JS recursion uses
 the C stack and is bounded by the runtime's native stack limit.
 
 Repeated property reads go through `ctx.getProperty(obj, "field")`.
@@ -157,20 +157,20 @@ Repeated property reads go through `ctx.getProperty(obj, "field")`.
 
 The collector is a tracing, non-moving collector with a conservative scan of
 the host's native stack (native-boundary contract C2). The rules for a host
-holding `JSValue`s are:
+holding `Value`s are:
 
-- **Native stack memory is scanned.** A `JSValue` in a local, in a stack
+- **Native stack memory is scanned.** A `Value` in a local, in a stack
   array passed as `args`, or held in a local after `eval` / `callFunction`
   returns is alive for as long as it is there. Arguments
   a native function receives (`c.argv`, `c.this`) are the VM's operand
   window and stay alive for the whole call; values the function creates are
   covered while they sit in its locals.
-- **Heap memory is not scanned.** A `JSValue` array the host allocates on
+- **Heap memory is not scanned.** A `Value` array the host allocates on
   the heap (an `ArrayList` of callbacks, a struct field, a slice handed to
   `callFunction` from heap storage) must be pinned before anything can run
   GC -- and any call into the engine can. Pin each element in a
-  `zjs.value.Persistent`, or keep the values in a JS Array that is itself
-  held by one `Persistent`.
+  persistent handle (`rt.createPersistentValue`), or keep the values in a JS
+  Array that is itself held by one persistent handle.
 - **Cross-call retention uses `Persistent`.** A callback stored for a later
   tick, a cached object, host object state, or anything referenced from a
   native function's `state` goes into a `Persistent` (or a `Weak` when the
@@ -192,7 +192,7 @@ const text = try ctx.toOwnedUtf8(value, allocator);
 defer allocator.free(text);
 ```
 
-Use `zjs.value.Bytes.Store` for ArrayBuffer backing memory that should be
+Use `zjs.Value.Bytes.Store` for ArrayBuffer backing memory that should be
 transferred to the engine without copying.
 
 ```zig
@@ -209,7 +209,7 @@ var bytes_state = BytesState{ .allocator = allocator };
 const backing = try allocator.alloc(u8, 4);
 @memcpy(backing, &[_]u8{ 1, 2, 3, 4 });
 
-var store = zjs.value.Bytes.Store.owned(backing, .{
+var store = zjs.Value.Bytes.Store.owned(backing, .{
     .context = &bytes_state,
     .deinit = BytesState.deinit,
 });
@@ -230,7 +230,7 @@ teardown), not when the host's last reference goes away.
 ## Construction With Limits
 
 ```zig
-const rt = try zjs.JSRuntime.create(allocator, .{
+const rt = try zjs.Runtime.create(allocator, .{
     .stack_size = 512 * 1024,
     .gc_threshold = 2 * 1024 * 1024,
 });
@@ -248,7 +248,7 @@ They are not a hostile-code sandbox.
 const State = struct {
     budget: usize,
 
-    fn stop(_: *zjs.JSRuntime, ctx: ?*anyopaque) bool {
+    fn stop(_: *zjs.Runtime, ctx: ?*anyopaque) bool {
         const self: *@This() = @ptrCast(@alignCast(ctx.?));
         if (self.budget == 0) return true;
         self.budget -= 1;

@@ -11,7 +11,7 @@
 //! and constructor dispatch around quickjs.c.
 
 const std = @import("std");
-const iterator_slots = @import("iterator_slots.zig");
+const iterator_slots = @import("iterator_ops.zig");
 const function_ops = @import("function_ops.zig");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
@@ -28,14 +28,14 @@ const iterator_ops = @import("iterator_ops.zig");
 const inline_calls = @import("inline_calls.zig");
 const property_ops = @import("property_ops.zig");
 const zjs_vm = @import("zjs_vm.zig");
-const vm_call = @import("vm_call.zig");
+const vm_call = @import("vm_opcodes.zig");
 const stack_mod = @import("stack.zig");
 const value_ops = @import("value_ops.zig");
 const HostError = exceptions.HostError;
 const op = bytecode.opcode.op;
 const runWithCallEnv = zjs_vm.runWithCallEnv;
 const runWithCallEnvAfterInterruptPoll = zjs_vm.runWithCallEnvAfterInterruptPoll;
-const exceptions = @import("exceptions.zig");
+const exceptions = @import("exception_ops.zig");
 
 const string_ops = @import("string_ops.zig");
 
@@ -43,20 +43,20 @@ const array_ops = @import("array_ops.zig");
 
 const promise_ops = @import("promise_ops.zig");
 
-const async_generator = @import("async_generator.zig");
+const async_generator = @import("promise_ops.zig");
 
 const object_ops = @import("object_ops.zig");
 
-// --- for-in/for-of iterator helpers moved to forof_ops.zig ---
-const forof_ops = @import("forof_ops.zig");
+// --- for-in/for-of iterator helpers moved to iterator_ops.zig ---
+const forof_ops = @import("iterator_ops.zig");
 
-const coercion_ops = @import("coercion_ops.zig");
+const coercion_ops = @import("value_ops.zig");
 
 // --- Builtin glue moved to builtin_glue.zig ---
 const builtin_glue = @import("builtin_glue.zig");
 
 // --- Local/arg/var-ref slot ops moved to slot_ops.zig ---
-const slot_ops = @import("slot_ops.zig");
+const slot_ops = @import("property_ops.zig");
 
 // --- Direct eval execution moved to eval_ops.zig ---
 
@@ -1000,7 +1000,10 @@ noinline fn callNativeCallableObject(
         args,
         caller_function,
         caller_frame,
-    );
+    ) catch |err| {
+        try builtin_dispatch.materializeRuntimeError(view.realm, view.global, err);
+        return err;
+    };
 }
 
 fn callValueOrBytecodeDispatch(
@@ -1501,15 +1504,15 @@ test "callValueOrBytecodeRoot roots inline args before bytecode frame allocation
 }
 
 // --- Class instance initialization moved to class_init_ops.zig ---
-const class_init_ops = @import("class_init_ops.zig");
+const class_init_ops = @import("function_ops.zig");
 
 const disposable_ops = @import("disposable_ops.zig");
 
 // --- Error stack ops moved to error_stack_ops.zig ---
-const error_stack_ops = @import("error_stack_ops.zig");
+const error_stack_ops = @import("exception_ops.zig");
 
 // --- RegExp fast paths moved to regexp_fastpath.zig ---
-const regexp_fastpath = @import("regexp_fastpath.zig");
+const regexp_fastpath = @import("regexp_ops.zig");
 
 pub const RegExpCapture = struct {
     start: usize,
@@ -2166,6 +2169,34 @@ fn constructValueOrBytecodeWithNewTargetMode(
 }
 
 fn constructValueOrBytecodeWithNewTargetAfterInterruptPoll(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    func: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+    new_target: core.JSValue,
+    copy_argv: bool,
+) HostError!core.JSValue {
+    if (object_ops.callableObjectFromValue(func)) |function_object| {
+        if (function_object.class_id == core.class.ids.c_function and try isConstructorLike(ctx, func)) {
+            // Rejecting a non-constructor stays in the caller environment.
+            // Like V8's InvokeFunctionWithNewTarget, enter the callee context
+            // before running the native constructor, including argument coercion.
+            // Argument expressions have already been evaluated by the caller.
+            // Bound functions and proxies forward before selecting this view.
+            const view = try builtin_dispatch.finalCallableRealmView(ctx, function_object);
+            return constructValueOrBytecodeInEnvironment(view.realm, output, view.global, func, args, caller_function, caller_frame, new_target, copy_argv) catch |err| {
+                try builtin_dispatch.materializeRuntimeError(view.realm, view.global, err);
+                return err;
+            };
+        }
+    }
+    return constructValueOrBytecodeInEnvironment(ctx, output, global, func, args, caller_function, caller_frame, new_target, copy_argv);
+}
+
+fn constructValueOrBytecodeInEnvironment(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
@@ -3670,7 +3701,7 @@ fn callFunctionBytecodeModeStateAfterInterruptPoll(
     defer if (generator_state) |generator| generator.finalizeGeneratorExecutionCompletion(ctx.runtime);
     defer nested_stack.deinit(ctx.runtime);
     // Async-generator bodies return their raw suspension/completion value to
-    // the queue machine (exec/async_generator.zig execBody) — no promise
+    // the queue machine (exec/promise_ops.zig execBody) — no promise
     // wrapping here (qjs async_func_resume returns the raw value/ret code,
     // quickjs.c).
     return runWithCallEnvAfterInterruptPoll(.{

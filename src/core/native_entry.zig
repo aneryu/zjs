@@ -61,7 +61,7 @@ pub const Flags = packed struct(u8) {
     /// Phase A2 sets it for every legacy entry; A4 strips it by census.
     needs_env: bool = false,
     /// Function.prototype.call/apply-style transparent forwarding: the VM's
-    /// native arms skip `vm_native.dispatch` and, for a same-Realm bytecode
+    /// native arms skip `vm_native.dispatchNativeCall` and, for a same-Realm bytecode
     /// target, rewrite the operand window into an ordinary method call
     /// (§5.4; `op_call_method` selects the call / apply body by target
     /// identity, `function_ops.call_entry_target` / `apply_entry_target`).

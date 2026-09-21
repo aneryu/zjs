@@ -1,45 +1,12 @@
-# 01 — 公共 API 旁路与内部根
+# 01 — 公共 API 旁路
 
-`src/root.zig` 旁边的内部编译根与平台时钟。嵌入方不从这些文件进引擎；CLI 与仓内测试会碰到它们。
-
----
-
-## `src/internal_root.zig`
-
-内部编译根：`src/root.zig` ⊂ `src/internal_root.zig`。CLI 和统一 Zig 单测都对着这个文件编。
-
-### 类型与 re-export
-
-| 名字 | 含义 |
-| --- | --- |
-| `public_api` | 公共 `root.zig` 模块，用来对照「内部多暴露了什么」。 |
-| `native` | `src/native.zig`。 |
-| `platform_clock` | 单调/墙上时钟。CLI 自己的模块图碰不到 `src/platform_clock.zig`，所以从这里转口。 |
-| `RuntimeError` / `HostError` | `exec.exceptions` 的 error set。 |
-| `JSRuntime` / `JSContext` / `JSValue` | 与公共门面同一批类型；`JSContext` 来自 `js_context.zig`。 |
-| `Object` | **core** `Object`，不是门面 `zjs.object.Object`（后者是 opaque）。文件级 test 断言它等于 `core.Object`、带 `create`，而 opaque 类型没有 `create`。 |
-| `Descriptor` / `Atom` / `NativePin` / `GCPolicy` / `GCStats` | core 类型；公共 root **不**导出 `Atom` / `NativePin`。 |
-| `JSValueHandle` / `LocalHandle` / `HandleScope` / `WeakPersistent` / `WeakPersistentValue` | 句柄族。公共拼写走 `zjs.value.*`。 |
-| `JSString` / `JSBytes` | 内部拼写；门面走 `zjs.value.String`。 |
-| `EvalOptions` / `EvalTiming` / `DataPropertyOptions` | 选项类型。 |
-| `RuntimeMemoryUsage` | core 内存用量记录，包含账户统计和按类别估算的字节字段。 |
-| `core` / `parser` / `simple_token` / `bytecode` / `exec` / `libs` / `runtime` / `compiler` | 整层模块。公共 root 故意没有这些。 |
-| `sort_erased` | 类型擦除堆，非嵌入 API。 |
-
-文件级 `test` 块：确认内部 `Object` 有 `create`，而 `public_api.object.Object` 没有；再把各层模块拉进编译。
-
-### `printSmallInlineProbe` (`src/internal_root.zig:54`)
-
-- **签名**：`pub fn printSmallInlineProbe() void`。
-- **作用**：按环境开关输出 small-inline 探测计数，供内部 CLI 使用。
-- **实现**：调用 exec.small_inline.printProbe；当前助手仅在 ZJS_INLINE_PROBE 存在且非空时通过 std.debug.print 输出 prep、take 和整数百分比，不将变量内容当作文件路径，也不写独立探测文件。公共 embedder root 不导出此名。
-- **所有权 / 错误 / 调用**：本包装只转发，不返回 I/O 错误；是否启用、写往何处及失败处理由 exec 助手决定，不能由这个 void 包装推断所有写入都成功。
+`src/root.zig` 旁边的平台时钟。嵌入方不从这些文件进引擎；CLI 会碰到它们。
 
 ---
 
 ## `src/platform_clock.zig`
 
-跨平台单调钟 / 墙上钟。CLI 根模块到不了这个文件（`zjs.zig` 曾内联一份 `monotonicNanos`），内部根把它转口出去。
+跨平台单调钟 / 墙上钟。CLI 根模块到不了这个文件（`zjs.zig` 曾内联一份 `monotonicNanos`），引擎根把它转口出去。
 
 ### `io` (`src/platform_clock.zig:3`)
 

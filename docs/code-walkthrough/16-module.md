@@ -1,6 +1,6 @@
 # 16 — 模块安装、链接、图求值、dynamic import
 
-覆盖 `src/exec/module.zig`（registry、链接、namespace、合成模块）与 `src/exec/module_graph.zig`（宿主加载、TLA 调度、`import()` job）。记录身份在 `core/module.zig`；本文件是链接器与求值器。
+覆盖 `src/exec/module.zig`（registry、链接、namespace、合成模块）与 `src/exec/module.zig`（宿主加载、TLA 调度、`import()` job）。记录身份在 `core/module.zig`；本文件是链接器与求值器。
 
 对照：resolver/linker `quickjs.c:30525-30836`，evaluator `quickjs.c:31423-31563`，`js_dynamic_import` `quickjs.c:31037-31169`。
 
@@ -458,532 +458,532 @@
 
 ---
 
-### `ContinuationRoots.traceRoots` (`src/exec/module_graph.zig:63`)
+### `ContinuationRoots.traceRoots` (`src/exec/module.zig:63`)
 
 - **签名**：`fn traceRoots(context: *anyopaque, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void`。
 - **作用**：扫每个 continuation 的 realm header + continuation/awaited 值。
 - **实现**：`realm.borrow()` 后 `constHeader`。
 - **所有权 / 错误 / 调用**：RootProvider。TLA 挂起发生在 `runJobs` 之前，所以根必须在 install 时登记。
 
-### `ContinuationRoots.provider` (`src/exec/module_graph.zig:72`)
+### `ContinuationRoots.provider` (`src/exec/module.zig:72`)
 
 - **签名**：`fn provider(self: *ContinuationRoots) core.runtime.RootProvider`。
 - **作用**：拼 `{ context, trace }`。
 - **实现**：指针转换。
 - **所有权 / 错误 / 调用**：activate/deactivate。
 
-### `ContinuationRoots.activate` (`src/exec/module_graph.zig:76`)
+### `ContinuationRoots.activate` (`src/exec/module.zig:76`)
 
 - **签名**：`inline fn activate(self: *ContinuationRoots) !void`。
 - **作用**：`registerRootProvider`。value_root_frames 关闭则空。
 - **实现**：`registered=true`。
 - **所有权 / 错误 / 调用**：`DynamicImportState.activateRoots`、host-hooks 求值器。
 
-### `ContinuationRoots.deactivate` (`src/exec/module_graph.zig:82`)
+### `ContinuationRoots.deactivate` (`src/exec/module.zig:82`)
 
 - **签名**：`fn deactivate(self: *ContinuationRoots) void`。
 - **作用**：unregister。未登记则 no-op。
 - **实现**：清 `registered`。
 - **所有权 / 错误 / 调用**：必须在列表析构前；静态图求值用 `DynamicImportScope.deinit`，不能只靠 State.deinit。
 
-### `WaiterRoots.traceRoots` (`src/exec/module_graph.zig:97`)
+### `WaiterRoots.traceRoots` (`src/exec/module.zig:97`)
 
 - **签名**：`fn traceRoots(context: *anyopaque, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void`。
 - **作用**：扫 waiter 的 realm + resolve/reject。
 - **实现**：同 ContinuationRoots。
 - **所有权 / 错误 / 调用**：evaluating 模块上的 import() 能力。
 
-### `WaiterRoots.provider` (`src/exec/module_graph.zig:106`)
+### `WaiterRoots.provider` (`src/exec/module.zig:106`)
 
 - **签名**：`fn provider(self: *WaiterRoots) core.runtime.RootProvider`。
 - **作用**：waiter 列表的 provider。
 - **实现**：指针。
 - **所有权 / 错误 / 调用**：activate。
 
-### `WaiterRoots.activate` (`src/exec/module_graph.zig:110`)
+### `WaiterRoots.activate` (`src/exec/module.zig:110`)
 
 - **签名**：`inline fn activate(self: *WaiterRoots) !void`。
 - **作用**：登记 waiter 根。
 - **实现**：同 ContinuationRoots。
 - **所有权 / 错误 / 调用**：成对 deactivate。
 
-### `WaiterRoots.deactivate` (`src/exec/module_graph.zig:116`)
+### `WaiterRoots.deactivate` (`src/exec/module.zig:116`)
 
 - **签名**：`fn deactivate(self: *WaiterRoots) void`。
 - **作用**：撤销 waiter 根。
 - **实现**：未登记则 no-op；`unregisterRootProvider` 后清 `registered`；`value_root_frames` 关闭时整体编译掉。
 - **所有权 / 错误 / 调用**：Scope.deinit。
 
-### `ModuleContinuation.replaceAwaited` (`src/exec/module_graph.zig:139`)
+### `ModuleContinuation.replaceAwaited` (`src/exec/module.zig:139`)
 
 - **签名**：`fn replaceAwaited(self: *ModuleContinuation, _: *core.JSRuntime, replacement: core.JSValue) void`。
 - **作用**：把 awaited 换成内部 reaction promise。
 - **实现**：赋值。runtime 未用（旧 rc dup 已删）。
 - **所有权 / 错误 / 调用**：`prepareModuleContinuationAwait`。
 
-### `ModuleEvaluationWaiter.deinit` (`src/exec/module_graph.zig:150`)
+### `ModuleEvaluationWaiter.deinit` (`src/exec/module.zig:150`)
 
 - **签名**：`fn deinit(self: *ModuleEvaluationWaiter, _: *core.JSRuntime, allocator: std.mem.Allocator) void`。
 - **作用**：free path，放 RealmRef。
 - **实现**：不释放 JSValue（由 waiter 根/调用方负责至 settle）。
 - **所有权 / 错误 / 调用**：settle 成功移除、`freeModuleEvaluationWaiters`。
 
-### `importLoaderTypeFromAttributes` (`src/exec/module_graph.zig:166`)
+### `importLoaderTypeFromAttributes` (`src/exec/module.zig:166`)
 
 - **签名**：`fn importLoaderTypeFromAttributes(ctx: *core.JSContext, attributes: core.JSValue) ImportLoaderType`。
 - **作用**：从校验过的 attributes 对象读 `type` 字符串（qjs `js_module_test_json`）。
 - **实现**：非对象 → none。自有 data `type` 必须是字符串；`json`/`text`，其它忽略。
 - **所有权 / 错误 / 调用**：appendRawString 失败当 none。dynamic import job。
 
-### `DynamicImportState.continuationList` (`src/exec/module_graph.zig:206`)
+### `DynamicImportState.continuationList` (`src/exec/module.zig:206`)
 
 - **签名**：`fn continuationList(self: *DynamicImportState) *std.ArrayList(ModuleContinuation)`。
 - **作用**：外部列表或 state 自有列表。
 - **实现**：`continuations orelse &owned_continuations`。
 - **所有权 / 错误 / 调用**：静态图求值传入外部列表。
 
-### `DynamicImportState.waiterList` (`src/exec/module_graph.zig:210`)
+### `DynamicImportState.waiterList` (`src/exec/module.zig:210`)
 
 - **签名**：`fn waiterList(self: *DynamicImportState) *std.ArrayList(ModuleEvaluationWaiter)`。
 - **作用**：对称 waiter。
 - **实现**：`waiters orelse &owned_waiters`。
 - **所有权 / 错误 / 调用**：create/settle waiter。
 
-### `DynamicImportState.runJobs` (`src/exec/module_graph.zig:217`)
+### `DynamicImportState.runJobs` (`src/exec/module.zig:217`)
 
 - **签名**：`pub fn runJobs(self: *DynamicImportState, facade_context: *core.JSContext) !void`。
 - **作用**：脚本模式 dynamic import：用 state 自有列表排 TLA+FIFO。
 - **实现**：`drainModuleJobLoop`。已有 JS 异常/未处理拒绝则吞掉返回错误。
 - **所有权 / 错误 / 调用**：CLI 长寿命 state。
 
-### `DynamicImportState.activateRoots` (`src/exec/module_graph.zig:235`)
+### `DynamicImportState.activateRoots` (`src/exec/module.zig:235`)
 
 - **签名**：`fn activateRoots(self: *DynamicImportState) !void`。
 - **作用**：把当前 list 指针填进两个 Roots 并 activate。
 - **实现**：已 active return。continuation 失败则 errdefer deactivate。
 - **所有权 / 错误 / 调用**：`installDynamicImport`。外部列表在 scope 存活期间由这些 provider 独根。
 
-### `DynamicImportState.deactivateRoots` (`src/exec/module_graph.zig:246`)
+### `DynamicImportState.deactivateRoots` (`src/exec/module.zig:246`)
 
 - **签名**：`fn deactivateRoots(self: *DynamicImportState) void`。
 - **作用**：成对撤销。
 - **实现**：waiter 先、continuation 后。
 - **所有权 / 错误 / 调用**：State.deinit 与 Scope.deinit。
 
-### `DynamicImportState.deinit` (`src/exec/module_graph.zig:256`)
+### `DynamicImportState.deinit` (`src/exec/module.zig:256`)
 
 - **签名**：`pub fn deinit(self: *DynamicImportState) void`。
 - **作用**：只释放 **state 自有** 调度数据。
 - **实现**：deactivate + free owned lists。外部列表由调用方管。
 - **所有权 / 错误 / 调用**：静态图求值**不**调这个，避免 double-free。
 
-### `DynamicImportState.load` (`src/exec/module_graph.zig:262`)
+### `DynamicImportState.load` (`src/exec/module.zig:262`)
 
 - **签名**：`fn load( userdata: ?*anyopaque, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, referrer_path: []const u8, specifier: []const u8, ) core.context.DynamicImportError!core.JSValue`。
 - **作用**：安装到 Runtime 的文件加载回调。
 - **实现**：`evalDynamicImportModule`；有 pending 异常 → `JSException`（qjs job 把 exception 变成 reject）。
 - **所有权 / 错误 / 调用**：`pending_import_type` 由 job 线程局部设置。
 
-### `activeDynamicImportState` (`src/exec/module_graph.zig:289`)
+### `activeDynamicImportState` (`src/exec/module.zig:289`)
 
 - **签名**：`fn activeDynamicImportState(context: *core.JSContext) ?*DynamicImportState`。
 - **作用**：当前 loader 是否本文件的 State.load。
 - **实现**：callback 指针比较 + userdata。
 - **所有权 / 错误 / 调用**：waiter settle。host-hooks 加载器返回 null。
 
-### `createModuleEvaluationWaiter` (`src/exec/module_graph.zig:296`)
+### `createModuleEvaluationWaiter` (`src/exec/module.zig:296`)
 
 - **签名**：`fn createModuleEvaluationWaiter( state: *DynamicImportState, context: *core.JSContext, global: *core.Object, path: []const u8, ) !core.JSValue`。
 - **作用**：模块正在 evaluating（TLA）时，import() 拿到共享评价 Promise。
 - **实现**：`promise.withResolvers`；dup path；retain realm；append waiter；返回 promise。
 - **所有权 / 错误 / 调用**：`evalDynamicImportModule` evaluating 臂。
 
-### `settleModuleEvaluationWaiters` (`src/exec/module_graph.zig:327`)
+### `settleModuleEvaluationWaiters` (`src/exec/module.zig:327`)
 
 - **签名**：`fn settleModuleEvaluationWaiters( context: *core.JSContext, output: ?*std.Io.Writer, path: []const u8, rejected: bool, reason: ?core.JSValue, ) !void`。
 - **作用**：兑现/拒绝所有等该 path 的 waiter。
 - **实现**：无 State 则 return。成功时 `moduleNamespaceValue`。同 context+path 的 waiter `Call(resolve|reject)` 后 orderedRemove+deinit。
 - **所有权 / 错误 / 调用**：`drainOneModuleContinuation` 的 completed+settle_waiters。
 
-### `takeRecordedModuleEvaluationRejection` (`src/exec/module_graph.zig:372`)
+### `takeRecordedModuleEvaluationRejection` (`src/exec/module.zig:372`)
 
 - **签名**：`fn takeRecordedModuleEvaluationRejection( runtime: *core.JSRuntime, context: *core.JSContext, path: []const u8, ) !?core.JSValue`。
 - **作用**：errored record 的原因：pending exception 或 `eval_exception`。
 - **实现**：非 errored → null。
 - **所有权 / 错误 / 调用**：deferred start / resume 失败时把原因变成 completed 节点。
 
-### `moduleDependencyRejection` (`src/exec/module_graph.zig:389`)
+### `moduleDependencyRejection` (`src/exec/module.zig:389`)
 
 - **签名**：`fn moduleDependencyRejection( context: *core.JSContext, path: []const u8, ) !?core.JSValue`。
 - **作用**：依赖图上是否已有 errored 模块的 eval_exception。
 - **实现**：root 模块名；`visited` atom 列表 + `rootAtomList`；`recordDependencyRejection`。
 - **所有权 / 错误 / 调用**：`startPreloadedFileModuleStep` 在跑体前复制失败。
 
-### `recordDependencyRejection` (`src/exec/module_graph.zig:410`)
+### `recordDependencyRejection` (`src/exec/module.zig:410`)
 
 - **签名**：`fn recordDependencyRejection( context: *core.JSContext, record: *const core.module.ModuleRecord, visited: *std.ArrayList(core.Atom), ) !?core.JSValue`。
 - **作用**：DFS 请求边，遇 `.errored` 返回其 exception。
 - **实现**：atom 去环。
 - **所有权 / 错误 / 调用**：后序求值会跳过已 evaluated，单靠 status 分不出 evaluated 与 errored。
 
-### `recordModuleEvaluationRejection` (`src/exec/module_graph.zig:435`)
+### `recordModuleEvaluationRejection` (`src/exec/module.zig:435`)
 
 - **签名**：`fn recordModuleEvaluationRejection( context: *core.JSContext, path: []const u8, reason: core.JSValue, ) !void`。
 - **作用**：标 errored，首次写入 `eval_exception`。
 - **实现**：已有 exception 不覆盖。
 - **所有权 / 错误 / 调用**：依赖失败传播。
 
-### `createModuleAwaitReactionPromise` (`src/exec/module_graph.zig:451`)
+### `createModuleAwaitReactionPromise` (`src/exec/module.zig:451`)
 
 - **签名**：`pub fn createModuleAwaitReactionPromise( runtime: *core.JSRuntime, context: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, awaited: core.JSValue, ) !core.JSValue`。
 - **作用**：把 TLA awaited 值 `Promise.resolve` 再接到 withResolvers，得到内部 reaction promise。
 - **实现**：`performPromiseThen(awaited_promise, resolve, reject, undefined, undefined)`。
 - **所有权 / 错误 / 调用**：兑现发生在 reaction job 里，resume 抢在下一 job 前（对齐 qjs）。
 
-### `DynamicImportHostState.load` (`src/exec/module_graph.zig:498`)
+### `DynamicImportHostState.load` (`src/exec/module.zig:498`)
 
 - **签名**：`fn load( userdata: ?*anyopaque, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, referrer_path: []const u8, specifier: []const u8, ) core.context.DynamicImportError!core.JSValue`。
 - **作用**：宿主钩子版 dynamic import 回调。
 - **实现**：`evalDynamicImportModuleWithHostHooks`；异常 → JSException；其它 `dynamicImportHostError`。
 - **所有权 / 错误 / 调用**：`evalFileModuleGraphWithHostHooks` 安装。
 
-### `evaluateImportCall` (`src/exec/module_graph.zig:535`)
+### `evaluateImportCall` (`src/exec/module.zig:535`)
 
 - **签名**：`pub fn evaluateImportCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, prototype: ?*core.Object, referrer_path: []const u8, specifier: core.JSValue, options: core.JSValue, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, ) exec.exceptions.HostError!core.JSValue`。
 - **作用**：`import(specifier, options)` 运行时（specifier 已 ToString）。
 - **实现**：options undefined 跳过。非对象 → rejected TypeError。Get `with`；有则必须对象，`buildImportAttributes`。失败全部变成 **rejected promise** 而非抛（qjs `exception:` 标签）。然后 enqueue job。
 - **所有权 / 错误 / 调用**：VM `OP_import`。返回 pending promise。
 
-### `buildImportAttributes` (`src/exec/module_graph.zig:579`)
+### `buildImportAttributes` (`src/exec/module.zig:579`)
 
 - **签名**：`fn buildImportAttributes( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, attributes_obj: core.JSValue, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, ) exec.exceptions.HostError!core.JSValue`。
 - **作用**：null 原型 attributes 对象：可枚举字符串键，值必须是 String。
 - **实现**：`objectRestOwnKeys`（proxy ownKeys 可抛）。跳过 symbol、不可枚举。非字符串值 `throwTypeErrorMessage("module attribute values must be strings")`。Define C_W_E。
 - **所有权 / 错误 / 调用**：调用方拥有返回对象。Get 结果不转移所有权。
 
-### `rejectedImportTypeError` (`src/exec/module_graph.zig:626`)
+### `rejectedImportTypeError` (`src/exec/module.zig:626`)
 
 - **签名**：`fn rejectedImportTypeError( ctx: *core.JSContext, global: *core.Object, prototype: ?*core.Object, message: []const u8, ) exec.exceptions.HostError!core.JSValue`。
 - **作用**：造 TypeError 并 `rejectedWithPrototype`。
 - **实现**：不 throw 到 ctx。
 - **所有权 / 错误 / 调用**：options 校验。
 
-### `rejectedImportRuntimeError` (`src/exec/module_graph.zig:639`)
+### `rejectedImportRuntimeError` (`src/exec/module.zig:639`)
 
 - **签名**：`fn rejectedImportRuntimeError( ctx: *core.JSContext, global: *core.Object, prototype: ?*core.Object, err: exec.exceptions.HostError, ) exec.exceptions.HostError!core.JSValue`。
 - **作用**：OOM/ProcessExit/StackOverflow 原样；其它映射成 rejected promise。
 - **实现**：`rejectedPromiseForRuntimeError`。
 - **所有权 / 错误 / 调用**：Get `with` / 建 attributes 失败。
 
-### `enqueueDynamicImportJob` (`src/exec/module_graph.zig:658`)
+### `enqueueDynamicImportJob` (`src/exec/module.zig:658`)
 
 - **签名**：`pub fn enqueueDynamicImportJob( ctx: *core.JSContext, global: *core.Object, prototype: ?*core.Object, referrer_path: []const u8, specifier: core.JSValue, ) !core.JSValue`。
 - **作用**：无 attributes 的 import()。
 - **实现**：attributes=`undefined`。
 - **所有权 / 错误 / 调用**：测试/无 options 路径。
 
-### `enqueueDynamicImportJobWithAttributes` (`src/exec/module_graph.zig:668`)
+### `enqueueDynamicImportJobWithAttributes` (`src/exec/module.zig:668`)
 
 - **签名**：`fn enqueueDynamicImportJobWithAttributes( ctx: *core.JSContext, global: *core.Object, prototype: ?*core.Object, referrer_path: []const u8, specifier: core.JSValue, attributes: core.JSValue, ) exec.exceptions.HostError!core.JSValue`。
 - **作用**：withResolvers + 把 resolve/reject/basename/specifier/attributes 送进 typed FIFO。
 - **实现**：basename 字符串化 referrer。`enqueueDynamicImport(..., dynamicImportJobRun, ...)`。返回 pending promise。不能同步 `LoadModule`（qjs 注释：会在 `js_evaluate_module` 里意外递归）。
 - **所有权 / 错误 / 调用**：job 拥有 attributes 引用。
 
-### `dynamicImportJobRun` (`src/exec/module_graph.zig:707`)
+### `dynamicImportJobRun` (`src/exec/module.zig:707`)
 
 - **签名**：`fn dynamicImportJobRun( ctx: *core.JSContext, output: ?*std.Io.Writer, payload: *const jobs_mod.DynamicImportPayload, ) core.errors.RuntimeError!core.JSValue`。
 - **作用**：`js_dynamic_import_job`：跑 loader，settle import() 能力。
 - **实现**：字符串化 basename/specifier。把 `importLoaderTypeFromAttributes` 写入 State.pending_import_type（defer 恢复，防重入图排水串味）。调 Runtime dynamic import callback。成功对象若是 Promise（TLA 共享评价）→ `performPromiseThen` 接到 import capability；否则 `Call(resolve, namespace)`。失败（除 OOM/exit/overflow）`dynamicImportRejectionValue` + `Call(reject)`。
 - **所有权 / 错误 / 调用**：`drainOnePendingJob` `.dynamic_import`。
 
-### `dynamicImportRejectionValue` (`src/exec/module_graph.zig:790`)
+### `dynamicImportRejectionValue` (`src/exec/module.zig:790`)
 
 - **签名**：`fn dynamicImportRejectionValue( ctx: *core.JSContext, global: *core.Object, err: anyerror, specifier: []const u8, ) !core.JSValue`。
 - **作用**：reject 原因：pending 异常原样；unsupported → TypeError；ModuleNotFound/FileNotFound → 加载器 ReferenceError 形状；否则 sentinel 或 `Error(errorName)`。
 - **实现**：`takeException` 优先。
 - **所有权 / 错误 / 调用**：job 失败臂。
 
-### `DynamicImportScope.deinit` (`src/exec/module_graph.zig:828`)
+### `DynamicImportScope.deinit` (`src/exec/module.zig:828`)
 
 - **签名**：`pub fn deinit(self: *DynamicImportScope) void`。
 - **作用**：卸 loader **并** deactivateRoots。静态图求值只走这里，不走 State.deinit。
 - **实现**：曾把 activate 放 install、deactivate 只放 State.deinit，外部列表的 provider 活过栈帧，下次 GC 踩毒指针。
 - **所有权 / 错误 / 调用**：`defer dynamic_import_scope.deinit()`。
 
-### `installDynamicImport` (`src/exec/module_graph.zig:834`)
+### `installDynamicImport` (`src/exec/module.zig:834`)
 
 - **签名**：`pub fn installDynamicImport(state: *DynamicImportState) !DynamicImportScope`。
 - **作用**：activateRoots + 安装 `State.load`。
 - **实现**：返回 `{ loader, state }`。
 - **所有权 / 错误 / 调用**：文件图求值、CLI。
 
-### `runJobs` (`src/exec/module_graph.zig:842`)
+### `runJobs` (`src/exec/module.zig:842`)
 
 - **签名**：`fn runJobs(runtime: *core.JSRuntime, context: *core.JSContext, output: ?*std.Io.Writer) !void`。
 - **作用**：只排 Promise FIFO（host-hooks 路径没有共享 TLA 列表给 dynamic import）。
 - **实现**：`zjs_vm.drainPendingPromiseJobs`；已有异常则吞。
 - **所有权 / 错误 / 调用**：`evalFileModuleGraphWithHostHooks` 结尾。与 `DynamicImportState.runJobs` 同名不同层。
 
-### `evalFileModuleGraphWithOutput` (`src/exec/module_graph.zig:851`)
+### `evalFileModuleGraphWithOutput` (`src/exec/module.zig:851`)
 
 - **签名**：`pub fn evalFileModuleGraphWithOutput( runtime: *core.JSRuntime, context: *core.JSContext, source_text: []const u8, output: *std.Io.Writer, filename: []const u8, io: std.Io, allocator: std.mem.Allocator, max_source_size: usize, ) !core.JSValue`。
 - **作用**：CLI/文件入口：preload → link 根 → 后序求值 → TLA drain → job loop。
 - **实现**：`call_depth==0` 时 `updateNativeStackTop`。resolve 文件名。preload 后序。根 `import_meta_main=true`。合成模块读盘 init。`linkModule` 失败 `throwModuleLinkError`。`rebuildPendingModuleEvalPostorder`。装 DynamicImportState（外部 continuations/waiters）。依赖：有活动 async 依赖则 deferred start，否则 start+handle。根同样。`drainModuleContinuations` 得 keep_result。最后 `drainModuleJobLoop`（dynamic import 可能又往同一列表丢 TLA）。
 - **所有权 / 错误 / 调用**：未处理拒绝 → `UnhandledPromiseRejection`。
 
-### `preloadedModuleNeedsEvaluation` (`src/exec/module_graph.zig:942`)
+### `preloadedModuleNeedsEvaluation` (`src/exec/module.zig:942`)
 
 - **签名**：`fn preloadedModuleNeedsEvaluation(context: *core.JSContext, path: []const u8) bool`。
 - **作用**：后序循环的门：已 evaluated/evaluating/errored 不重跑（qjs `js_inner_module_evaluation`）。
 - **实现**：intern 失败当 true。find 失败当 true。
 - **所有权 / 错误 / 调用**：动态 import 可能在两步之间已经跑过某依赖。
 
-### `evalFileModuleGraphWithHostHooks` (`src/exec/module_graph.zig:953`)
+### `evalFileModuleGraphWithHostHooks` (`src/exec/module.zig:953`)
 
 - **签名**：`pub fn evalFileModuleGraphWithHostHooks( runtime: *core.JSRuntime, context: *core.JSContext, source_text: []const u8, output: *std.Io.Writer, filename: []const u8, host_hooks: HostHooks, allocator: std.mem.Allocator, ) !core.JSValue`。
 - **作用**：同样的图求值，加载走 HostHooks。
 - **实现**：preloadWithHostHooks；link；装 `DynamicImportHostState.load`（不是文件 State）。自己 activate ContinuationRoots。结尾 `runJobs` 排同步完成根入队的 import job。
 - **所有权 / 错误 / 调用**：无 WaiterRoots（host 路径用局部 continuations drain 依赖）。
 
-### `initializeSyntheticFileModules` (`src/exec/module_graph.zig:1037`)
+### `initializeSyntheticFileModules` (`src/exec/module.zig:1037`)
 
 - **签名**：`fn initializeSyntheticFileModules( runtime: *core.JSRuntime, context: *core.JSContext, io: std.Io, allocator: std.mem.Allocator, max_source_size: usize, ) !void`。
 - **作用**：registry 里每个合成 record 读源文件并 `initializeSyntheticFileModule`。
 - **实现**：FileNotFound → throwCouldNotLoadModule。其它 host 错误 throwHostError。
 - **所有权 / 错误 / 调用**：link 前，让 wiring 看见 default cell。
 
-### `evalPreloadedFileModuleStep` (`src/exec/module_graph.zig:1069`)
+### `evalPreloadedFileModuleStep` (`src/exec/module.zig:1069`)
 
 - **签名**：`fn evalPreloadedFileModuleStep( runtime: *core.JSRuntime, context: *core.JSContext, output: ?*std.Io.Writer, filename: []const u8, continuation_value: ?core.JSValue, resume_value: ?core.JSValue, ) !ModuleEvalStep`。
 - **作用**：一次模块体：合成直接 evaluated；源模块造/复用 generator continuation 调 `runModuleEvaluationStep`。
 - **实现**：status=evaluating；errdefer 变 errored 并缓存 `current_exception`。挂起 → `.suspended`；否则 `.completed` 且 evaluated。
 - **所有权 / 错误 / 调用**：`moduleResolutionError` 把 Missing/Ambiguous 映射成 SyntaxError。
 
-### `startPreloadedFileModuleStep` (`src/exec/module_graph.zig:1136`)
+### `startPreloadedFileModuleStep` (`src/exec/module.zig:1136`)
 
 - **签名**：`fn startPreloadedFileModuleStep( runtime: *core.JSRuntime, context: *core.JSContext, output: ?*std.Io.Writer, filename: []const u8, ) !ModuleEvalStep`。
 - **作用**：开跑前把已终结的依赖失败抄到本 record。
 - **实现**：有 `moduleDependencyRejection` → record + throwValue + JSException。否则 `evalPreloadedFileModuleStep(null,null)`。
 - **所有权 / 错误 / 调用**：后序与 deferred start。
 
-### `appendModuleEvalStepRetainingOnError` (`src/exec/module_graph.zig:1155`)
+### `appendModuleEvalStepRetainingOnError` (`src/exec/module.zig:1155`)
 
 - **签名**：`fn appendModuleEvalStepRetainingOnError( context: *core.JSContext, allocator: std.mem.Allocator, continuations: *std.ArrayList(ModuleContinuation), step: ModuleEvalStep, filename: []const u8, keep_result: bool, ) !void`。
 - **作用**：所有 fallible alloc 成功后才转移 JSValue 所有权。
 - **实现**：completed 且 keep_result → 已完成节点（awaited=value）。suspended → 未完成节点。completed 且 !keep_result 丢弃值。
 - **所有权 / 错误 / 调用**：path dup + RealmRef.retain；失败 errdefer 放掉。
 
-### `enqueueDeferredModuleStart` (`src/exec/module_graph.zig:1198`)
+### `enqueueDeferredModuleStart` (`src/exec/module.zig:1198`)
 
 - **签名**：`fn enqueueDeferredModuleStart( context: *core.JSContext, allocator: std.mem.Allocator, continuations: *std.ArrayList(ModuleContinuation), filename: []const u8, keep_result: bool, ) !void`。
 - **作用**：依赖还在 TLA 上：占位 continuation，`deferred_start=true`，status=evaluating。
 - **实现**：空 continuation/awaited。
 - **所有权 / 错误 / 调用**：GatherAvailableAncestors：依赖兑现的同一 job 里把 ready 置位再 start。
 
-### `drainModuleContinuations` (`src/exec/module_graph.zig:1228`)
+### `drainModuleContinuations` (`src/exec/module.zig:1228`)
 
 - **签名**：`fn drainModuleContinuations( runtime: *core.JSRuntime, context: *core.JSContext, output: ?*std.Io.Writer, allocator: std.mem.Allocator, continuations: *std.ArrayList(ModuleContinuation), ) !core.JSValue`。
 - **作用**：直到列表空，保留 keep_result 的完成值。
 - **实现**：stalled 且没有 host 事件 → `throwModuleHostStall` unreachable。
 - **所有权 / 错误 / 调用**：根模块 TLA。
 
-### `drainModuleContinuationsForDependencies` (`src/exec/module_graph.zig:1257`)
+### `drainModuleContinuationsForDependencies` (`src/exec/module.zig:1257`)
 
 - **签名**：`fn drainModuleContinuationsForDependencies( runtime: *core.JSRuntime, context: *core.JSContext, output: ?*std.Io.Writer, allocator: std.mem.Allocator, continuations: *std.ArrayList(ModuleContinuation), filename: []const u8, ) !void`。
 - **作用**：host-hooks 路径：在跑 filename 前排空它的活动 async 依赖。
 - **实现**：循环直到 `!hasActiveAsyncDependency`；再检查依赖 rejection。
 - **所有权 / 错误 / 调用**：`evalDynamicImportModuleWithHostHooks`。
 
-### `drainModuleJobLoop` (`src/exec/module_graph.zig:1285`)
+### `drainModuleJobLoop` (`src/exec/module.zig:1285`)
 
 - **签名**：`fn drainModuleJobLoop( runtime: *core.JSRuntime, context: *core.JSContext, output: ?*std.Io.Writer, allocator: std.mem.Allocator, continuations: *std.ArrayList(ModuleContinuation), ) !void`。
 - **作用**：一条 TLA 工作 ↔ 一条 FIFO/host 事件，直到两边都静。
 - **实现**：有 continuation 则 `drainOneScheduledModuleWork`；progressed/value continue。否则 `drainOneModuleQueuedOrHostJob`。
 - **所有权 / 错误 / 调用**：文件图求值结尾、`DynamicImportState.runJobs`。
 
-### `drainOneModuleQueuedOrHostJob` (`src/exec/module_graph.zig:1306`)
+### `drainOneModuleQueuedOrHostJob` (`src/exec/module.zig:1306`)
 
 - **签名**：`fn drainOneModuleQueuedOrHostJob( runtime: *core.JSRuntime, context: *core.JSContext, output: ?*std.Io.Writer, ) !bool`。
 - **作用**：一条 Promise job，空则一条 host 事件。
 - **实现**：`.exception` → JSException。
 - **所有权 / 错误 / 调用**：runtime 未用。
 
-### `drainOneModuleHostEvent` (`src/exec/module_graph.zig:1321`)
+### `drainOneModuleHostEvent` (`src/exec/module.zig:1321`)
 
 - **签名**：`fn drainOneModuleHostEvent(context: *core.JSContext, output: ?*std.Io.Writer) !bool`。
 - **作用**：signal / rw / timer / atomics 各试一次。
 - **实现**：任一 true。atomics 不阻塞（`false`）。
 - **所有权 / 错误 / 调用**：TLA stall 时泵宿主。
 
-### `prepareModuleContinuationAwait` (`src/exec/module_graph.zig:1335`)
+### `prepareModuleContinuationAwait` (`src/exec/module.zig:1335`)
 
 - **签名**：`fn prepareModuleContinuationAwait( runtime: *core.JSRuntime, output: ?*std.Io.Writer, continuations: *const std.ArrayList(ModuleContinuation), continuation: *ModuleContinuation, ) !void`。
 - **作用**：规范化 awaited、看 promise 是否已 settle，置 `ready`。
 - **实现**：completed/ready 跳过。deferred_start：无活动 async 依赖则 ready。否则首次 `createModuleAwaitReactionPromise`。promise 无 result return；rejected 则 `markHandled`；有 result → ready。
 - **所有权 / 错误 / 调用**：每个 drain tick 对所有条目调用。
 
-### `nextReadyModuleContinuation` (`src/exec/module_graph.zig:1370`)
+### `nextReadyModuleContinuation` (`src/exec/module.zig:1370`)
 
 - **签名**：`fn nextReadyModuleContinuation(continuations: *const std.ArrayList(ModuleContinuation)) ?usize`。
 - **作用**：FIFO 里第一个 completed 或 ready 的下标。
 - **实现**：线性扫。
 - **所有权 / 错误 / 调用**：与 Promise reaction 一样一次一项。
 
-### `drainOneScheduledModuleWork` (`src/exec/module_graph.zig:1378`)
+### `drainOneScheduledModuleWork` (`src/exec/module.zig:1378`)
 
 - **签名**：`fn drainOneScheduledModuleWork( runtime: *core.JSRuntime, context: *core.JSContext, output: ?*std.Io.Writer, allocator: std.mem.Allocator, continuations: *std.ArrayList(ModuleContinuation), ) !ModuleDrainResult`。
 - **作用**：先 prepare 全部；有 ready 则 drain 该 continuation；否则一条 Promise job；再否则 stalled。
 - **实现**：`nextReadyModuleContinuation` 已经同时接受 completed 与 ready 两种状态，两者也都走同一个 `drainOneModuleContinuation`，所以原先那条单独判 `continuation.completed` 的分支（与其后的通用分支逐字相同）已删。
 - **所有权 / 错误 / 调用**：job exception → JSException。
 
-### `reinsertRemovedModuleStep` (`src/exec/module_graph.zig:1414`)
+### `reinsertRemovedModuleStep` (`src/exec/module.zig:1414`)
 
 - **签名**：`fn reinsertRemovedModuleStep( _: *core.JSRuntime, continuations: *std.ArrayList(ModuleContinuation), index: usize, current: ModuleContinuation, step: ModuleEvalStep, completion_rejected: bool, ) !void`。
 - **作用**：列表仍有该槽容量：按 step 重写节点，`insertAssumeCapacity` 保持 FIFO。
 - **实现**：清 deferred/normalized/ready；completed 清 continuation。
 - **所有权 / 错误 / 调用**：无分配；OOM 安全。
 
-### `retainRemovedModuleStep` (`src/exec/module_graph.zig:1451`)
+### `retainRemovedModuleStep` (`src/exec/module.zig:1451`)
 
 - **签名**：`fn retainRemovedModuleStep( runtime: *core.JSRuntime, allocator: std.mem.Allocator, continuations: *std.ArrayList(ModuleContinuation), index: usize, current: ModuleContinuation, step: ModuleEvalStep, completion_rejected: bool, ) !void`。
 - **作用**：resume 之后的新 step 必须可重试：completed 原地重插；suspended 先 append（新 path），失败则原地恢复旧节点。
 - **实现**：append 成功则 free 旧 path/realm，把尾节点搬回原 index。
 - **所有权 / 错误 / 调用**：`drainOneModuleContinuation` 在从列表取出之后。
 
-### `drainOneModuleContinuation` (`src/exec/module_graph.zig:1501`)
+### `drainOneModuleContinuation` (`src/exec/module.zig:1501`)
 
 - **签名**：`fn drainOneModuleContinuation( runtime: *core.JSRuntime, output: ?*std.Io.Writer, allocator: std.mem.Allocator, continuations: *std.ArrayList(ModuleContinuation), index: usize, ) !?core.JSValue`。
 - **作用**：取出一条：完成则 settle waiter 并可能返回 keep_result；deferred 则 start；否则用 promise result resume 模块体。
 - **实现**：orderedRemove 后条目离开 ContinuationRoots，故本帧 `ValueRootFrame` 根住 continuation+awaited。errdefer 按 `restore_current` 插回。completed：settle_waiters 后 free path；rejected+keep_result → throw。deferred：start 失败若有 cached rejection 则 retain 为 completed rejected。resume：无 result → host stall unreachable。`setGeneratorResumeCompletionType` 0/2。失败同样缓存。成功 retain 新 step。未处理拒绝 → UnhandledPromiseRejection。
 - **所有权 / 错误 / 调用**：OOM/ProcessExit 不吞，restore 原节点。
 
-### `hasActiveAsyncDependency` (`src/exec/module_graph.zig:1625`)
+### `hasActiveAsyncDependency` (`src/exec/module.zig:1625`)
 
 - **签名**：`fn hasActiveAsyncDependency( context: *core.JSContext, continuations: *const std.ArrayList(ModuleContinuation), filename: []const u8, ) !bool`。
 - **作用**：filename 的依赖是否仍有未完成 continuation。
 - **实现**：atom visited 根；`recordHasActiveAsyncDependency`。
 - **所有权 / 错误 / 调用**：后序跳过、deferred start、prepare deferred ready。
 
-### `recordHasActiveAsyncDependency` (`src/exec/module_graph.zig:1646`)
+### `recordHasActiveAsyncDependency` (`src/exec/module.zig:1646`)
 
 - **签名**：`fn recordHasActiveAsyncDependency( context: *core.JSContext, continuations: *const std.ArrayList(ModuleContinuation), record: *const core.module.ModuleRecord, ignored_path: []const u8, visited: *std.ArrayList(core.Atom), ) !bool`。
 - **作用**：请求边：同 realm 且 path 匹配未完成 continuation（忽略自身 path），或递归依赖。
 - **实现**：atom 去环。
 - **所有权 / 错误 / 调用**：ignored_path 避免把自己的占位算进去。
 
-### `freeModuleContinuations` (`src/exec/module_graph.zig:1671`)
+### `freeModuleContinuations` (`src/exec/module.zig:1671`)
 
 - **签名**：`fn freeModuleContinuations( _: *core.JSRuntime, allocator: std.mem.Allocator, continuations: *std.ArrayList(ModuleContinuation), ) void`。
 - **作用**：free 每条 path、deinit realm、deinit 列表。
 - **实现**：不显式 free JSValue。
 - **所有权 / 错误 / 调用**：求值器 defer。
 
-### `freeModuleEvaluationWaiters` (`src/exec/module_graph.zig:1683`)
+### `freeModuleEvaluationWaiters` (`src/exec/module.zig:1683`)
 
 - **签名**：`fn freeModuleEvaluationWaiters( runtime: *core.JSRuntime, allocator: std.mem.Allocator, waiters: *std.ArrayList(ModuleEvaluationWaiter), ) void`。
 - **作用**：逐个 waiter.deinit + 列表 deinit。
 - **实现**：runtime 传给 waiter.deinit（未用）。
 - **所有权 / 错误 / 调用**：求值器 defer。
 
-### `moduleResolutionError` (`src/exec/module_graph.zig:1692`)
+### `moduleResolutionError` (`src/exec/module.zig:1692`)
 
 - **签名**：`pub fn moduleResolutionError(err: anytype) (@TypeOf(err) || error{SyntaxError})`。
 - **作用**：链接的 MissingExport/AmbiguousExport 对用户是 SyntaxError。
 - **实现**：其它错误原样。
 - **所有权 / 错误 / 调用**：link 失败返回、eval step catch。
 
-### `evalDynamicImportModule` (`src/exec/module_graph.zig:1699`)
+### `evalDynamicImportModule` (`src/exec/module.zig:1699`)
 
 - **签名**：`fn evalDynamicImportModule( state: *DynamicImportState, context: *core.JSContext, output: ?*std.Io.Writer, referrer_path: []const u8, specifier: []const u8, import_type: ImportLoaderType, ) !core.JSValue`。
 - **作用**：文件加载器：解析、preload 缺失图、link、后序求值、返回 namespace 或 waiter promise。
 - **实现**：空 referrer / 解析失败 → throwCouldNotLoadModule。`.json` 后缀或 type json/text → 合成 registry 名。已 errored → 重抛缓存；evaluated → namespace；evaluating → waiter。合成读盘 init；否则 init 全 registry 合成。link。后序只跑 `moduleNeedsEvaluation` 的源模块。结束后仍非 evaluated → waiter。
 - **所有权 / 错误 / 调用**：`State.load`。skip-existing preload 保活绑定。
 
-### `throwCachedModuleEvalException` (`src/exec/module_graph.zig:1876`)
+### `throwCachedModuleEvalException` (`src/exec/module.zig:1876`)
 
 - **签名**：`fn throwCachedModuleEvalException( runtime: *core.JSRuntime, context: *core.JSContext, record: *core.module.ModuleRecord, ) error{JSException}`。
 - **作用**：重抛 `eval_exception`（qjs DupValue + throw）。
 - **实现**：有则 `throwValue`；总返回 JSException。
 - **所有权 / 错误 / 调用**：不重跑函数体。
 
-### `throwModuleLinkError` (`src/exec/module_graph.zig:1890`)
+### `throwModuleLinkError` (`src/exec/module.zig:1890`)
 
 - **签名**：`pub fn throwModuleLinkError( runtime: *core.JSRuntime, context: *core.JSContext, filename: []const u8, err: anyerror, diagnostic: ?*const exec.module.LinkDiagnostic, ) !void`。
 - **作用**：qjs 形 SyntaxError：`Could not find export 'x' in module 'y'` / `export 'x' ... is ambiguous` / 否则 `could not link module`。
 - **实现**：只格式第一条诊断。
 - **所有权 / 错误 / 调用**：图求值与 dynamic import link 失败。
 
-### `evalDynamicImportModuleWithHostHooks` (`src/exec/module_graph.zig:1918`)
+### `evalDynamicImportModuleWithHostHooks` (`src/exec/module.zig:1918`)
 
 - **签名**：`fn evalDynamicImportModuleWithHostHooks( runtime: *core.JSRuntime, context: *core.JSContext, output: ?*std.Io.Writer, host_hooks: HostHooks, referrer_path: []const u8, specifier: []const u8, allocator: std.mem.Allocator, ) !core.JSValue`。
 - **作用**：resolve+load 钩子版：preload 该子图、link、按依赖 drain TLA、求值、返回 namespace。
 - **实现**：空 referrer → ModuleNotFound。`wrapSourceByKind`。局部 continuations + ContinuationRoots。每路径先 `drainModuleContinuationsForDependencies`。
 - **所有权 / 错误 / 调用**：`HostState.load`。loaded.owned 控制 source free。
 
-### `moduleNeedsEvaluation` (`src/exec/module_graph.zig:2002`)
+### `moduleNeedsEvaluation` (`src/exec/module.zig:2002`)
 
 - **签名**：`fn moduleNeedsEvaluation(record: *const core.module.ModuleRecord) bool`。
 - **作用**：unlinked/linked 才需要跑体。
 - **实现**：linking/evaluating/evaluated/errored 为假。
 - **所有权 / 错误 / 调用**：注意 unlinked 在 link 失败回滚后仍为真；调用方应已 link。
 
-### `dynamicImportHostError` (`src/exec/module_graph.zig:2009`)
+### `dynamicImportHostError` (`src/exec/module.zig:2009`)
 
 - **签名**：`fn dynamicImportHostError(err: anyerror) core.context.DynamicImportError`。
 - **作用**：把任意错误收成加载器错误集。
 - **实现**：文件/包错误 → ModuleNotFound；未知 → Unexpected。
 - **所有权 / 错误 / 调用**：HostState.load。
 
-### `appendPendingModuleEvalPostorder` (`src/exec/module_graph.zig:2024`)
+### `appendPendingModuleEvalPostorder` (`src/exec/module.zig:2024`)
 
 - **签名**：`fn appendPendingModuleEvalPostorder( context: *core.JSContext, allocator: std.mem.Allocator, module_name: core.Atom, seen: *std.ArrayList(core.Atom), postorder: *std.ArrayList([]const u8), ) !void`。
 - **作用**：从当前 registry 边重建「仍需求值」的后序。
 - **实现**：atom seen 去环；先递归请求，再若 `moduleNeedsEvaluation` 则 dup 路径。
 - **所有权 / 错误 / 调用**：动态 import 时部分模块可能已 evaluated。
 
-### `rebuildPendingModuleEvalPostorder` (`src/exec/module_graph.zig:2051`)
+### `rebuildPendingModuleEvalPostorder` (`src/exec/module.zig:2051`)
 
 - **签名**：`fn rebuildPendingModuleEvalPostorder( context: *core.JSContext, allocator: std.mem.Allocator, root_module_name: core.Atom, postorder: *std.ArrayList([]const u8), ) !void`。
 - **作用**：丢掉 preload 后序，按 live 图重填。
 - **实现**：free 旧 path，`clearRetainingCapacity`。
 - **所有权 / 错误 / 调用**：link 之后、求值之前。
 
-### `preloadFileModuleGraphWithHostHooks` (`src/exec/module_graph.zig:2075`)
+### `preloadFileModuleGraphWithHostHooks` (`src/exec/module.zig:2075`)
 
 - **签名**：`fn preloadFileModuleGraphWithHostHooks( allocator: std.mem.Allocator, runtime: *core.JSRuntime, context: *core.JSContext, host_hooks: HostHooks, root_source: []const u8, root_path: []const u8, postorder: *std.ArrayList([]const u8), ) !void`。
 - **作用**：宿主钩子路径的图预加载入口：建 `seen` 列表后跑递归体。
 - **实现**：本地建 `seen`（`defer` 逐条 free）再调 `preloadFileModuleGraphWithHostHooksInner`。原先只为传 `skip_existing` 的 `...Mode` 中间层已折叠进来：跳过已加载模块不是可选模式，由 Inner 里「requests 已 resolved 的 record 早退」实现。
 - **所有权 / 错误 / 调用**：`seen` 的路径本函数建本函数释放。宿主图求值入口。
 
-### `trackedPathContains` (`src/exec/module_graph.zig:2101`)
+### `trackedPathContains` (`src/exec/module.zig:2101`)
 
 - **签名**：`fn trackedPathContains(paths: *const std.ArrayList([]const u8), path: []const u8) bool`。
 - **作用**：seen 去重。
 - **实现**：`mem.eql`。
 - **所有权 / 错误 / 调用**：Inner 开头与加载依赖前。
 
-### `validateHostResolvedRecord` (`src/exec/module_graph.zig:2108`)
+### `validateHostResolvedRecord` (`src/exec/module.zig:2108`)
 
 - **签名**：`fn validateHostResolvedRecord( context: *core.JSContext, record: *core.module.ModuleRecord, module_name: core.Atom, resolved_atoms: []const core.Atom, ) !void`。
 - **作用**：重入后仍在的 record 必须与本次 resolve 形状一致。
 - **实现**：registry、名字、每条 request.module_name。
 - **所有权 / 错误 / 调用**：`ForeignModuleRecord` / `InvalidBytecode`。
 
-### `validateHostRequestDependency` (`src/exec/module_graph.zig:2122`)
+### `validateHostRequestDependency` (`src/exec/module.zig:2122`)
 
 - **签名**：`fn validateHostRequestDependency( context: *core.JSContext, record: *core.module.ModuleRecord, request_index: usize, ) !void`。
 - **作用**：边必须指向 canonical find(module_name)。
 - **实现**：缺 module、registry 不一致、名字不一致、非 canonical → 错。
 - **所有权 / 错误 / 调用**：setRequestModule 前后。
 
-### `preloadFileModuleGraphWithHostHooksInner` (`src/exec/module_graph.zig:2136`)
+### `preloadFileModuleGraphWithHostHooksInner` (`src/exec/module.zig:2136`)
 
 - **签名**：`fn preloadFileModuleGraphWithHostHooksInner( allocator: std.mem.Allocator, runtime: *core.JSRuntime, context: *core.JSContext, host_hooks: HostHooks, source_text: []const u8, path: []const u8, seen: *std.ArrayList([]const u8), postorder: *std.ArrayList([]const u8), ) !void`。
 - **作用**：宿主 resolve 每个请求、load 源、递归、安装 resolved artifact。
 - **实现**：跳过已加载模块由「已 resolved 的 record 早退」实现（原先那个从不读的 `skip_existing` 形参已整链删除）。compile；syntax 抛。对每个请求 `host_hooks.resolveModule`，intern path 为 atom（root 只扫已写前缀）。resolve 钩子可重入并完成同一 record：之后 find 或 `installResolvedModuleArtifact`。`validateHostResolvedRecord`。已 resolved return。对未完成依赖 load+`wrapSourceByKind` 递归。`setRequestModuleNoFail` + validate。mark resolved，postorder append。
 - **所有权 / 错误 / 调用**：resolved specifier/path 在 defer 里 free。重入完成合法，API 幂等。
 
-### `wrapSourceByKind` (`src/exec/module_graph.zig:2303`)
+### `wrapSourceByKind` (`src/exec/module.zig:2303`)
 
 - **签名**：`fn wrapSourceByKind( allocator: std.mem.Allocator, kind: HostHooks.ModuleKind, source: []const u8, path: []const u8, allocated: *bool, ) ![]const u8`。
 - **作用**：把非 ESM 源包成可 parse 的模块文本。
@@ -992,6 +992,6 @@
 
 ## 覆盖核对
 
-- 清单函数数: 136（`src/exec/module.zig` 60 + `src/exec/module_graph.zig` 76）
+- 清单函数数: 136（`src/exec/module.zig` 60 + `src/exec/module.zig` 76）
 - 本文标题覆盖: 136
 - 未覆盖: 无

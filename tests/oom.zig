@@ -551,7 +551,7 @@ fn runSnippet(allocator: std.mem.Allocator, snippet: Snippet) !void {
     errdefer if (ctx_owned) ctx.destroy();
     var waiters_cleaned = false;
     errdefer if (!waiters_cleaned) zjs.exec.atomics_ops.cleanupAtomicsWaitersForContext(ctx);
-    var wrapper = BindingContext.borrowCore(ctx);
+    var wrapper = zjs.borrowContext(ctx);
 
     const value = wrapper.eval(snippet.source, .{
         .mode = snippet.mode,
@@ -720,7 +720,7 @@ fn runEsmGraphLink(allocator: std.mem.Allocator) !void {
     const ctx = try core.JSContext.create(rt, .{});
     var ctx_owned = true;
     errdefer if (ctx_owned) ctx.destroy();
-    var wrapper = BindingContext.borrowCore(ctx);
+    var wrapper = zjs.borrowContext(ctx);
 
     var sink: u8 = 0;
     var output = std.Io.Writer.fixed(@as(*[1]u8, &sink));
@@ -934,7 +934,7 @@ fn runRecoveryAttempt(injector: *OneShotFailingAllocator, snippet: Snippet) !voi
             break :attempt;
         };
         defer ctx.destroy();
-        var wrapper = BindingContext.borrowCore(ctx);
+        var wrapper = zjs.borrowContext(ctx);
 
         if (wrapper.eval(snippet.source, .{ .mode = snippet.mode, .filename = corpus_filename })) |_| {} else |err| switch (err) {
             error.OutOfMemory => {},
@@ -1094,7 +1094,7 @@ fn runContextGlobalRetryAttempt(fail_index: usize) !bool {
             else => return err,
         }
 
-        var wrapper = BindingContext.borrowCore(ctx);
+        var wrapper = zjs.borrowContext(ctx);
         const canary = try wrapper.eval(
             \\(function (a) {
             \\  return Object.getPrototypeOf(arguments) === Object.prototype &&
@@ -1419,7 +1419,7 @@ test "oom cell injection: the hook is reached and a refusal is honoured" {
         defer rt.destroy();
         const ctx = try core.JSContext.create(rt, .{});
         defer ctx.destroy();
-        var wrapper = BindingContext.borrowCore(ctx);
+        var wrapper = zjs.borrowContext(ctx);
         _ = try wrapper.eval(alloc_source, .{ .filename = corpus_filename });
         try std.testing.expect(never.questions > 0);
         try std.testing.expect(!never.fired);
@@ -1439,7 +1439,7 @@ test "oom cell injection: the hook is reached and a refusal is honoured" {
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
-    var wrapper = BindingContext.borrowCore(ctx);
+    var wrapper = zjs.borrowContext(ctx);
     if (wrapper.eval(alloc_source, .{ .filename = corpus_filename })) |_| {} else |err| switch (err) {
         error.OutOfMemory => {},
         error.JSException => {

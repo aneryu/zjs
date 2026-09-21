@@ -24,7 +24,7 @@
 //! only positional-arg index coercion (`toIndexUsize`, primitive-only) and run no
 //! user code. The `*ConstructArgs` family (ArrayBuffer / SharedArrayBuffer) reads
 //! the `maxByteLength` option off a user object, so it stays one level up in exec
-//! (`exec/typed_array_construct.zig`). The `*MethodId` / `*FromRecordId` /
+//! (`exec/buffer_ops.zig`). The `*MethodId` / `*FromRecordId` /
 //! `*NameFromRecordId` name machinery and its method-id enums live in
 //! `core/host_function.zig` (`builtin_method_ids` + `builtin_method_id_lookup`);
 //! `exec/buffer_ops.zig` re-exports both. The record dispatch table is owned by
@@ -318,7 +318,7 @@ pub fn detachArrayBuffer(rt: *JSRuntime, buffer_value: JSValue) !JSValue {
 // perform a `Get(options, ...)` property lookup, so they run no user code and
 // stay pure core. The `*ConstructArgs` family (ArrayBuffer / SharedArrayBuffer),
 // which reads the `maxByteLength` option off a user object, stays one level up
-// in exec (`exec/typed_array_construct.zig`).
+// in exec (`exec/buffer_ops.zig`).
 
 pub fn typedArrayClassIdForKind(kind: Kind) ?class.ClassId {
     return switch (kind) {

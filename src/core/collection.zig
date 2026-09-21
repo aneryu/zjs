@@ -15,8 +15,8 @@
 //! The collection native method bodies (`exec/collection_ops.zig`) call these
 //! backend entry points directly; the VM Map-fusion fast paths
 //! (`mapSetLatin1PrefixInt32Range` / `mapGetLatin1PrefixIntValue`, consumed by
-//! `exec/vm_property_locals.zig`) and the WeakMap test-support mutator
-//! (`setWeakMapEntry`, consumed by `exec/closure.zig`) live here too.
+//! `exec/vm_property.zig`) and the WeakMap test-support mutator
+//! (`setWeakMapEntry`, consumed by `exec/call.zig`) live here too.
 
 const std = @import("std");
 

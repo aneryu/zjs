@@ -7,8 +7,9 @@
 //! read/write handlers, signals, timers, and poll loop at
 //! quickjs-libc.c:2014-2175 and quickjs-libc.c:2422-2627.
 //!
-//! This file is the `zjs.runtime` module. It must not grow into an Engine
-//! facade or re-export exec helpers.
+//! This file is the public `zjs.EventLoop` type. It must not grow into an
+//! Engine facade or re-export exec helpers. The in-tree engine root still
+//! re-exports this module as `runtime`.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -112,6 +113,9 @@ fn HostList(comptime T: type) type {
 }
 
 pub const EventLoop = struct {
+    pub const Options = EventLoopOptions;
+    pub const RunResult = EventLoopRunResult;
+
     context: *core.JSContext,
     realm: core.RealmRef,
     output: ?*std.Io.Writer = null,
@@ -121,6 +125,14 @@ pub const EventLoop = struct {
     next_timer_id: i64 = 1,
     exit_code: ?u8 = null,
     installed: bool = false,
+
+    /// One-shot helper: create, install, drain jobs, then deinit.
+    pub fn runUntilIdle(context: *js_context.JSContext, options: Options) !RunResult {
+        var loop = init(context, options);
+        loop.install();
+        defer loop.deinit();
+        return loop.drain();
+    }
 
     pub inline fn init(context: *js_context.JSContext, options: EventLoopOptions) EventLoop {
         return initCore(context.core, options);
@@ -154,7 +166,7 @@ pub const EventLoop = struct {
         self.realm.deinit();
     }
 
-    pub fn runUntilIdle(self: *EventLoop) !EventLoopRunResult {
+    pub fn drain(self: *EventLoop) !EventLoopRunResult {
         const global = try self.context.globalObject();
         exec.zjs_vm.drainPendingPromiseJobs(self.context, self.output, global) catch |err| {
             if (!self.context.hasException() and !self.context.hasUnhandledRejection()) return err;
@@ -437,10 +449,7 @@ pub const EventLoop = struct {
 };
 
 pub fn runUntilIdle(context: *js_context.JSContext, options: EventLoopOptions) !EventLoopRunResult {
-    var loop = EventLoop.init(context, options);
-    loop.install();
-    defer loop.deinit();
-    return loop.runUntilIdle();
+    return EventLoop.runUntilIdle(context, options);
 }
 
 const Timer = struct {
@@ -619,7 +628,7 @@ test "runtime.EventLoop drains queued JS callbacks" {
 
     try exec.call_runtime.enqueuePendingMicrotask(ctx.core, callback);
 
-    const result = try loop.runUntilIdle();
+    const result = try loop.drain();
     try std.testing.expect(!result.hasPendingError());
 
     const hit = try ctx.eval("globalThis.__zjs_runtime_event_loop_hit;", .{});
@@ -837,7 +846,7 @@ test "runtime.EventLoop roots one-shot function bytecode timer callback after de
 
     const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     const ctx = try js_context.JSContext.create(rt, .{});
-    const global = try ctx.globalObject();
+    const global = try js_context.globalObjectPtr(ctx);
     defer {
         ctx.destroy();
         rt.destroy();

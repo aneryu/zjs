@@ -918,7 +918,7 @@ DoomedCounts保存dead及其中finalizing数量。BlockCensusRow保存class尺�
 - **签名**：`pub fn setReuseSequenceForTest(self: *Heap, cell: [*]u8, sequence: u32) void`。
 - **作用**：测试专用地把一个 cell 的 generation 序号直接改写成指定值。
 - **实现**：非 test 构建 @compileError("test-only helper")；comptime 断言 block_generation_enabled；fromCellTrusted 取 block，cellIndex 必须命中（`.?`），把 generationFor 槽写成 sequence。
-- **所有权 / 错误 / 调用**：只改 generation 侧表，不动 alloc 位、lifecycle 或 header，也不分配。src/tests/core.zig 用它把序号顶到 maxInt(u32)，以覆盖 reserveCellGeneration 的代次耗尽分支。
+- **所有权 / 错误 / 调用**：只改 generation 侧表，不动 alloc 位、lifecycle 或 header，也不分配。tests/core.zig 用它把序号顶到 maxInt(u32)，以覆盖 reserveCellGeneration 的代次耗尽分支。
 
 ### `Heap.forEachOwnedIdentity` (`src/core/gc_block_heap.zig:1721`)
 

@@ -11,7 +11,7 @@ size-screen / 场锁 / 强制 PMU ABBA;验证摊销仍从批内扩到批间)。�
 粒度;昂贵验证在合并批边界跑一次,失败才用批内 commit 二分定位。
 
 正确性由测试与批门禁裁决。性能与体积不再有预注册通过线、场锁或快筛
-仪器;本地 `perf` / `--gc-stats` / `zig build perf-benchmark` 只是诊断。
+仪器;本地 `perf` / `--gc-stats` 只是诊断。
 
 ## 每次改动(implementer 侧)必须做的
 
@@ -45,7 +45,7 @@ GC safety net。每合并批仍只跑一轮批门禁。
 
 1. 合并载荷审查(`git log trunk..candidate`,合并 commit = 合并其全部祖先);
 2. 批门禁一轮:`mise run batch-gate` =
-   Debug `checkpoint-gate` + `test-stress`，再单独
+   Debug `checkpoint-gate`，再单独
    `zig build test262-check -Doptimize=ReleaseFast`
    (与 CI linux-arm64 同一组步骤,不含已退役的 `gate-smoke` /
    `merge-gate`)。发布门仍是 `mise run production-gate`
@@ -57,6 +57,8 @@ GC safety net。每合并批仍只跑一轮批门禁。
 
 - **rc 中立性检查全套**(.text 对比、双变体单测、rc 语义论证)——rc 收集器
   已退役(2026-08-29),无对象;
+- **`test-stress` / `src/stress.zig`**——独有钉子已进引擎套件;默认预算深展开
+  与 50 万次 limb 随机扫已退役;
 - 每次改动跑 test262(移至批门禁 / CI);
 - 每断言两次构建的注入验证;
 - 全负载矩阵的指令筛选;

@@ -11082,7 +11082,7 @@ fn indexKeyLessThan(_: void, lhs: IndexKey, rhs: IndexKey) bool {
 // `ownEntriesArray` builds the result array for the bare-runtime
 // Object.keys/values/entries fallback. Relocated to engine core in Phase 6b-3
 // STEP 2 (it is a pure property-iteration constructor with no exec/VM deps);
-// `exec/object_builtin_ops.zig` re-exports `EntriesMode`/`ownEntriesArray`
+// `exec/object_ops.zig` re-exports `EntriesMode`/`ownEntriesArray`
 // unchanged for Object native records.
 
 /// Selects which projection `ownEntriesArray` produces.
@@ -11179,7 +11179,7 @@ pub fn ownEntriesArray(rt: *JSRuntime, value: JSValue, mode: EntriesMode, protot
 // touches only core string/object/function primitives (no exec/VM deps and no
 // realm/global state). The produced iterator's `next` carries the
 // `(.string, iterator_next)` native id, so the actual `next` body still
-// dispatches through the record table into `exec/string_builtin_ops.zig`.
+// dispatches through the record table into `exec/string_ops.zig`.
 
 /// Extract the primitive string value from a string or String-wrapper receiver.
 fn stringIteratorPrimitiveValue(value: JSValue) !JSValue {

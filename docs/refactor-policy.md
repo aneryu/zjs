@@ -25,5 +25,5 @@ to price it does not.
    gate; `zig build test` and the merge batch are the merge authority.
 3. Pure test-harness and build-graph splits have no layout risk.
 
-Local `zig build perf-benchmark` and `perf stat` remain available as
-diagnostics. They do not adjudicate merges.
+Local `perf stat` remains available as a diagnostic. It does not
+adjudicate merges.

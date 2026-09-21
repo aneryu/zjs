@@ -17,9 +17,9 @@ const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
 const value_ops = @import("value_ops.zig");
 const call_runtime = @import("call_runtime.zig");
-const coercion_ops = @import("coercion_ops.zig");
+const coercion_ops = @import("value_ops.zig");
 const exception_ops = @import("exception_ops.zig");
-const exceptions = @import("exceptions.zig");
+const exceptions = @import("exception_ops.zig");
 const object_ops = @import("object_ops.zig");
 const string_ops = @import("string_ops.zig");
 

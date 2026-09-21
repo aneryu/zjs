@@ -319,17 +319,19 @@ fails. Changing the substring is a new compile (the engine objects usually
 cache). `-Dtest-filter=<substring>` on `zig build test` is the same kind of
 compile-time selection on the close-out binary. Also run the JS fixture or
 `run-test262 -d` / `-f` slice that directly reproduces the changed behavior.
-Area selection is a name substring (`test-fast -- 'exec.tests.'` matches
-the `src/exec/tests.zig` family); do not add a second compile root per
+Area selection is a Zig 0.16 fully-qualified-name substring
+(`test-fast -- 'tests.exec.'` matches `tests/exec.zig`;
+`src.compiler.tests.` matches compiler unit tests). Titles that contain
+`:` are not reliable filters. Do not add a second compile root per
 subsystem.
 
 Run `mise run quick-gate` for CLI/runtime glue that targeted tests do not
 exercise. `quick-gate` does not compile the separate test262 runner.
 
-`zig build test` compiles the unified suite and runs it with Zig's default
-test runner, one process. Long-running `src/stress.zig` cases `SkipZigTest`
-unless `ZJS_RUN_STRESS=1`. `-Dtest-filter=<substring>` is a separately
-compiled diagnostic selection.
+`zig build test` compiles the engine suite (`test_root.zig`) and the CLI
+tests (`src/cli/tests.zig`) and runs them with Zig's default test runner.
+`-Dtest-filter=<substring>` is a separately compiled diagnostic selection
+of the engine suite.
 The full run builds the test binary without debug info (`-Dtest-strip`
 defaults to true; a `-Dtest-filter` or `test-fast` run keeps DWARF so a red
 can be diagnosed with a symbolised trace, and `-Dtest-strip=false` forces
@@ -349,13 +351,7 @@ mise run checkpoint-gate
 This includes the unified Debug suite, its gc-stress rerun, Debug CLI
 smoke, and the sema-only public-root check (`check-embedding`); measured
 2026-09-06 at 33 s after an engine edit on the big-core build pool. Default
-`zig build` is Debug, so this does not compile ReleaseFast `zjs`. It also
-excludes the long-running stress tier (`zig build test-stress`: stack
-exhaustion and bigint kernel sweeps in `src/stress.zig`, a
-compile-time filtered run of the same root with `ZJS_RUN_STRESS=1`) — that
-tier runs on the merge gate, the engine-production gate and primary-platform
-CI (docs/verification-policy.md). Run `test-stress` locally when a change
-touches stack unwinding, call teardown, or the bigint division kernels. Add
+`zig build` is Debug, so this does not compile ReleaseFast `zjs`. Add
 the relevant focused test262 directory or file set; do not run `quick-gate`
 first because checkpoint already supersedes it.
 
@@ -368,9 +364,9 @@ backstop, not the first line.
 evidence, or CI gates:
 
 ```bash
-mise run batch-gate        # Debug checkpoint-gate + test-stress, then ReleaseFast test262-check (same set as CI linux-arm64)
+mise run batch-gate        # Debug checkpoint-gate, then ReleaseFast test262-check (same set as CI linux-arm64)
 mise run production-gate   # engine-production-gate -Doptimize=ReleaseFast
-zig build test test-stress -Doptimize=ReleaseSafe --summary all
+zig build test -Doptimize=ReleaseSafe --summary all
 ```
 
 **Instrumentation tiers.** `zig build test-oom --summary all` (allocator / OOM
@@ -384,7 +380,7 @@ is the cheap feedback — but a missed local run is now caught rather than lost.
 reach for it when GC timing is the thing you are debugging.
 
 There is no remaining size-screen or measurement-contract gate. Local
-`zig build perf-benchmark` and `perf stat` are diagnostics only.
+`perf stat` is a diagnostic only.
 
 ### B.7 Durable Lessons
 

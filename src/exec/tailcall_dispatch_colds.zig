@@ -8,7 +8,7 @@
 const std = @import("std");
 const bytecode = @import("../bytecode.zig");
 const dispatch = @import("tailcall_dispatch.zig");
-const HostError = @import("exceptions.zig").HostError;
+const HostError = @import("exception_ops.zig").HostError;
 
 const Vm = dispatch.Vm;
 const Handler = dispatch.Handler;
@@ -17,28 +17,28 @@ const cold = dispatch.cold;
 const coldOp = dispatch.coldOp;
 const op = bytecode.opcode.op;
 
-const vm_value = @import("vm_value.zig");
-const vm_arith = @import("vm_arith.zig");
-const vm_control = @import("vm_control.zig");
-const vm_call = @import("vm_call.zig");
+const vm_value = @import("vm_opcodes.zig");
+const vm_arith = @import("vm_opcodes.zig");
+const vm_control = @import("vm_opcodes.zig");
+const vm_call = @import("vm_opcodes.zig");
 const object_ops = @import("object_ops.zig");
 const exception_ops = @import("exception_ops.zig");
-const vm_literal = @import("vm_literal.zig");
+const vm_literal = @import("vm_opcodes.zig");
 const iterator_ops = @import("iterator_ops.zig");
-const vm_regexp = @import("vm_regexp.zig");
-const vm_eval_module = @import("vm_eval_module.zig");
-const vm_property_locals = @import("vm_property_locals.zig");
-const vm_property_ref = @import("vm_property_ref.zig");
-const vm_property_globals = @import("vm_property_globals.zig");
-const vm_property_field = @import("vm_property_field.zig");
-const vm_property_private = @import("vm_property_private.zig");
-const using_ops = @import("using_ops.zig");
+const vm_regexp = @import("vm_opcodes.zig");
+const vm_eval_module = @import("vm_opcodes.zig");
+const vm_property_locals = @import("vm_property.zig");
+const vm_property_ref = @import("vm_property.zig");
+const vm_property_globals = @import("vm_property.zig");
+const vm_property_field = @import("vm_property.zig");
+const vm_property_private = @import("vm_property.zig");
+const using_ops = @import("vm_opcodes.zig");
 
 // ---- Shared handlers (op groups sharing helper+args) ----
 pub const h_varref = coldOp(vm_property_locals.varRefVm);
 pub const h_checkedloc = coldOp(vm_property_locals.checkedLocVm);
 pub const h_loc = coldOp(vm_property_locals.loc);
-pub const h_arg = coldOp(vm_property_locals.arg);
+pub const h_arg = coldOp(vm_property_locals.getArg);
 pub const h_get_arg_short = coldOp(vm_property_locals.getArgShort);
 pub const h_binary = coldOp(vm_arith.binaryVm);
 pub const h_unary = coldOp(vm_arith.unaryVm);
@@ -195,7 +195,7 @@ pub fn buildTable(s: SpecialHandlers, comptime fast: bool) BuiltTable {
     t[op.get_length] = cold(vm_literal.getLength);
 
     // --- literals / class ---
-    t[op.object] = cold(vm_literal.object);
+    t[op.object] = cold(vm_literal.objectLiteral);
     t[op.object_slots2] = cold(vm_literal.objectReserved2);
     t[op.array_from] = cold(vm_literal.arrayFrom);
     t[op.define_field] = cold(vm_literal.defineField);

@@ -3108,18 +3108,6 @@ pub const Registry = struct {
         self.hot.barrier_gate = expectedBarrierGate();
     }
 
-    /// The only writer of the marking phase flag.
-    ///
-    /// Publishing the flag and republishing the derived gate is ONE
-    /// transaction. A bare `major_marking_active` store would leave the
-    /// barrier taking steady-state exits while a major is marking -- i.e.
-    /// dropping shades -- so the raw store must not be spelled anywhere else.
-    ///
-    /// What ENFORCES that is `barrierOwnerSkips`'s C1 assert, not review: a
-    /// bare store leaves the gate stale and the next barrier call panics.
-    /// Injection-verified at `beginIncrementalCycle`'s publication, which is
-    /// the one whose window really contains mutator stores.
-
     /// JSC's two-step barrier fast path (AssemblyHelpers.h:1438-1445): load the
     /// owner's state, test it against the phase-owned gate, done. True means
     /// this store owes the collector nothing.

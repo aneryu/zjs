@@ -2,41 +2,51 @@
 
 本册讲测试**编译根**、共享夹具和中小测试文件。大文件按源码体积拆到 `20-tests-core.md` / `20-tests-parser.md` / `20-tests-exec.md` / `20-tests-builtins.md`。
 
-约定见 [`docs/testing-graph.md`](../testing-graph.md)：统一套件根是 `src/internal_root.zig`；测试跟文件走（各包 `tests.zig`，外加 colocated `test` 块）；共享夹具是 `src/testing.zig`。嵌入/smoke/OOM 在仓库根 `tests/`。每产物独立 `addOptions`。
+约定见 [`docs/testing-graph.md`](../testing-graph.md)：引擎套件根是 `test_root.zig`（re-export `src/root.zig`）；CLI 测试根是 `src/cli/tests.zig`。单元测试跟实现走（各包 `tests.zig`，外加 colocated `test` 块）；集成测试在仓库根 `tests/`（`engine.zig` 拉取 `core.zig` / `exec.zig` / `public_api.zig`，外加 embedding / smoke / OOM）。集成夹具是 `tests/harness.zig` + `tests/harness/`。每产物独立 `addOptions`。
 
-聚焦选择走 `test-fast -- '<子串>'`（编译期 `--test-filter`），不要再为每个子系统加编译根。`test-embedding` / `check-embedding` 直接以 `tests/embedding_examples.zig` 为根、公共 `src/root.zig` 为 `zjs`。`test-leak-census` 同一根，编译期 filter `exec.tests.`，`tools/leak_census_runner.zig` 跑两遍。
+聚焦选择走 `test-fast -- '<子串>'`（编译期 `--test-filter`），不要再为每个子系统加编译根。`test-embedding` / `check-embedding` 直接以 `tests/embedding_examples.zig` 为根、公共 `src/root.zig` 为 `zjs`。`test-leak-census` 同一根，编译期 filter `tests.exec.`，`tools/leak_census_runner.zig` 跑两遍。
 
-### `makeFixture` (`src/testing.zig:77`)
+### `makeFixture` (`tests/harness/fixture.zig:48`)
 
 - **签名**：`pub fn makeFixture(rt: *core.JSRuntime, realm: ?*core.JSContext, spec: FixtureSpec) !*Fixture`。
 - **作用**：用一段手写的最终形态字节码造一个已发布、已扎根的 `FunctionBytecode`，是执行手写指令流的测试夹具形态；替代了 2026-09-20 之前的可变 `Bytecode` + `LegacyExecutionAdapter`。
 - **实现**：`stack_size` 缺省由 stack_size pass 计算；`FunctionBytecode.createFixture` 建 packed 记录，填 cpool 与 `.global` 闭包行（`get_var i` 引用的全局名），`publishFixtureNoFail` 交给 GC，再用 `rootValues` 扎根。
 - **所有权 / 错误 / 调用**：返回堆上的 `Fixture`，`release` 撤根并释放句柄；产物本身由 GC 回收。
 
-### `runFixture` (`src/testing.zig:114`)
+### `runFixture` (`tests/harness/fixture.zig:85`)
 
 - **签名**：`pub fn runFixture(rt: *core.JSRuntime, ctx: *core.JSContext, fb: *const engine.bytecode.FunctionBytecode) !core.JSValue`。
 - **作用**：在装了裸宿主全局的新 VM 上把夹具当脚本根运行。
 - **所有权 / 错误 / 调用**：VM 随调用创建销毁；错误即执行错误。
 
-### `Fixture.release` (`src/testing.zig:53`)
+### `Fixture.release` (`tests/harness/fixture.zig:24`)
 
 - **签名**：`pub fn release(self: *Fixture, rt: *core.JSRuntime) void`。
 - **作用**：撤掉夹具的根并释放句柄。
 
-### `vm_helpers.runLoweredRoot` (`src/testing.zig:822`)
+### `vm_helpers.runLoweredRoot` (`tests/harness/fixture.zig:137`)
 
 - **签名**：`fn runLoweredRoot(rt: *core.JSRuntime, ctx: *core.JSContext, fd: *engine.bytecode.FunctionDef) !core.JSValue`。
 - **作用**：把解析好的根 `FunctionDef` 经 `createFunctionBytecode` 终结成规范 FunctionBytecode 并作为脚本根运行；两个 `parse*AndRunWithTopLevelChildren` 助手共用。
 - **所有权 / 错误 / 调用**：产物 GC 拥有，运行期间用 `rootValues` 扎根。
 
-## `src/internal_root.zig` — 统一套件根
+## `src/root.zig` — 引擎编译根
 
-生产 CLI 和 `zig build test` 共用这一文件。测试块 `refAllDecls` 各层测试文件，并 `refAllDeclsRecursive` 公共面。不再有第三层 overlay。
+生产 CLI、`run-test262` 和引擎 Zig 单测共用这一文件。文件级 test 块把各层模块拉进编译。CLI 测试把它当 `zjs` 模块 import，不再经镜像层。
 
-## `src/testing.zig` — 统一套件共享夹具
+## `tests/harness.zig` — 集成测试夹具（barrel）
 
-统一套件的共享 harness。历史上是 `exec.zig` 的 `helpers` 命名空间，所以调用点仍写 `helpers.foo`。相对路径导入引擎。in-tree 测试可以导入本文件。
+这是 `tests/core.zig` / `tests/exec.zig` 的夹具，不是引擎包。`src/root.zig` 不再导出 `zjs.testing`。工作按职责在 `tests/harness/`：
+
+| 文件 | 职责 |
+| --- | --- |
+| `gc.zig` | `reclaimNow`、弱集合插入、`finishGcCycles`、`objectFromValue` |
+| `expect.zig` | 字符串 / Set 断言 |
+| `fixture.zig` | 手写字节码夹具、`vm_helpers` parse-then-run |
+| `test_engine.zig` | 一次性 `TestEngine`、host probe、scratch dir |
+| `shared.zig` | 进程级共享 Runtime 与 leak-census 门 |
+
+调用点仍写 `helpers.foo`（`tests/core.zig` / `tests/exec.zig` 的 `@import("harness.zig")`）。包内单测只用本地 `runObjectCycleRemoval`。
 
 ### 类型
 
@@ -53,357 +63,378 @@
 
 ### 函数（清单 56）
 
-### `evalTypeScriptChecked` (`src/tests/helpers.zig:23`)
+### `evalTypeScriptChecked` (`tests/harness/test_engine.zig:19`)
 
 - **签名**：`pub fn evalTypeScriptChecked(engine_instance: *TestEngine, source: []const u8, options: EvalOptions) RuntimeError!core.JSValue`。
 - **作用**：所有 TypeScript 执行测试的唯一入口，转给 `TestEngine.evalWithOptions`（语法擦除，不是类型检查）。
 - **实现**：Every TypeScript execution test goes through here.。关键调用：`engine_instance.evalWithOptions`。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。返回 `RuntimeError!core.JSValue`，由测试 `try`/`expectError` 消费。
 
-### `registerStandardGlobalsBare` (`src/tests/helpers.zig:31`)
+### `registerStandardGlobalsBare` (`tests/harness/test_engine.zig:27`)
 
 - **签名**：`pub fn registerStandardGlobalsBare(rt: *core.JSRuntime) void`。
 - **作用**：给绕过宿主门面、直接 `JSRuntime.create` 的测试安装标准全局；与 installer 容量不变量绑在一起，幂等。
 - **实现**：Install the standard + host globals on a bare `core.JSRuntime` global for tests that build a runtime directly (bypassing the `js_context` create that wires the installer). The deep setup interface keeps the installer callback and its capacity invariant together. Idempotent.。关键调用：`engine.exec.standard_globals.configureRuntime`。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。无独立 error set 时失败以断言或 panic 终止测试。
 
-### `installHostGlobalsBare` (`src/tests/helpers.zig:35`)
+### `installHostGlobalsBare` (`tests/harness/test_engine.zig:31`)
 
 - **签名**：`pub fn installHostGlobalsBare(rt: *core.JSRuntime, global: *core.Object) !void`。
 - **作用**：先 `configureRuntime`，再 `installHostGlobals` 把宿主 print 等装到给定 global。
 - **实现**：热路径用 `try` 传播分配/引擎错误。关键调用：`registerStandardGlobalsBare`、`exec_call.installHostGlobals`。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。返回 `!void`，由测试 `try`/`expectError` 消费。
 
-### `reclaimNow` (`src/tests/helpers.zig:93`)
+### `reclaimNow` (`tests/harness/gc.zig:17`)
 
 - **签名**：`pub fn reclaimNow(rt: *core.JSRuntime) void`。
 - **作用**：跑 `runObjectCycleRemoval`（declared_only）。测试仍持有的对象必须出现在 root frame，缺根会失败而不是靠 conservative 碰巧活。
 - **实现**：Reclaim whatever the test has made unreachable.  The scan is `declared_only` (via `runObjectCycleRemoval`), so anything the test still holds must be named in a `rootValues`/`rootObjects` frame. That is deliberate: it is the precise-scan discipline that makes these tests deterministic, and it is what turns a missing root into a test failure rather than into a conservative-scan accident.。主动触发/轮询 GC，断言存活集。关键调用：`rt.runObjectCycleRemoval`。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。无独立 error set 时失败以断言或 panic 终止测试。
 
-### `objectFromValue` (`src/tests/helpers.zig:97`)
+### `objectFromValue` (`tests/harness/gc.zig:21`)
 
 - **签名**：`pub fn objectFromValue(value: core.JSValue) *core.Object`。
 - **作用**：从 `JSValue` 取出 `*Object`；测试约定值一定是对象。
 - **实现**：关键调用：`objectFromValue`、`core.value_semantics.objectFromValue`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `expectActiveSetStrings` (`src/tests/helpers.zig:101`)
+### `expectActiveSetStrings` (`tests/harness/expect.zig:7`)
 
 - **签名**：`pub fn expectActiveSetStrings(object: *core.Object, comptime expected: []const []const u8) !void`。
 - **作用**：遍历 collection 的 active 槽，按序比对 key 的字符串字节。
 - **实现**：含循环。热路径用 `try` 传播分配/引擎错误。关键调用：`object.collectionEntriesSlot`、`std.testing.expect`、`expectStringValueBytes`、`std.testing.expectEqual`。
 - **所有权 / 错误 / 调用**：返回 `!void`，由测试 `try`/`expectError` 消费。
 
-### `expectStringValueBytes` (`src/tests/helpers.zig:112`)
+### `expectStringValueBytes` (`tests/harness/expect.zig:18`)
 
 - **签名**：`pub fn expectStringValueBytes(value: core.JSValue, expected: []const u8) !void`。
 - **作用**：断言值为 String：latin1 直接比字节，utf16 则逐 unit 等于 Latin-1 码点。
 - **实现**：主体是 `switch` 分发。含循环。热路径用 `try` 传播分配/引擎错误。关键调用：`std.testing.expect`、`value.isString`、`value.asStringBody`、`string.resolveData`、`std.testing.expectEqualStrings`。
 - **所有权 / 错误 / 调用**：返回 `!void`，由测试 `try`/`expectError` 消费。
 
-### `expectPrints` (`src/tests/helpers.zig:126`)
+### `expectPrints` (`tests/harness/shared.zig:35`)
 
 - **签名**：`pub fn expectPrints(source: []const u8, expected: []const u8) !void`。
 - **作用**：共享引擎 `evalWithOutput`，结果须 undefined，stdout 精确等于 expected。
 - **实现**：热路径用 `try` 传播分配/引擎错误。`defer` 释放本次成功路径上的临时资源。复用进程级共享 `TestEngine`。关键调用：`sharedTestEngine`、`endSharedTest`、`std.Io.Writer`、`js.evalWithOutput`、`std.testing.expect`。
 - **所有权 / 错误 / 调用**：用进程级共享 `TestEngine`，`defer endSharedTest()` 负责清异常/未处理 rejection、排空 job、还原全局 shape，因此调用方无需自建引擎。返回 `!void`，由测试 `try`/`expectError` 消费。
 
-### `countJob` (`src/tests/helpers.zig:140`)
+### `countJob` (`tests/harness/test_engine.zig:38`)
 
 - **签名**：`pub fn countJob(_: *core.JSContext, _: []const core.JSValue) core.JSValue`。
 - **作用**：job 探针：忽略参数，`job_counter += 1`，返回 undefined。
 - **实现**：关键调用：`core.JSValue.undefinedValue`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `countJobArgs` (`src/tests/helpers.zig:145`)
+### `countJobArgs` (`tests/harness/test_engine.zig:43`)
 
 - **签名**：`pub fn countJobArgs(ctx: *core.JSContext, args: []const core.JSValue) core.JSValue`。
 - **作用**：把每个 int32 参数累加进 `job_counter`，返回 argc。
 - **实现**：含循环。关键调用：`arg.asInt32`、`core.JSValue.int32`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `ExceptionInfo.deinit` (`src/tests/helpers.zig:212`)
+### `ExceptionInfo.deinit` (`tests/harness/test_engine.zig:58`)
 
 - **签名**：`pub fn deinit(self: *ExceptionInfo) void`。
 - **作用**：释放异常句柄。
 - **实现**：关键调用：`deinit`、`self.value.deinit`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `ExceptionInfo.getMessage` (`src/tests/helpers.zig:216`)
+### `ExceptionInfo.getMessage` (`tests/harness/test_engine.zig:62`)
 
 - **签名**：`pub fn getMessage(self: ExceptionInfo, allocator: std.mem.Allocator) ![]const u8`。
 - **作用**：从 Error 对象读 name/message 拼串；否则 `appendValueString`。调用方释放返回切片。
 - **实现**：热路径用 `try` 传播分配/引擎错误。`errdefer` 回滚本次失败路径上的分配。`defer` 释放本次成功路径上的临时资源。关键调用：`self.value.get`、`value.isObject`、`value.refHeader`、`core.Object.fromHeader`、`getPropertyString`。显式 `return error.InvalidEngineState`。
 - **所有权 / 错误 / 调用**：测试分配器或调用方传入的 `Allocator` 负责非 GC 堆。失败路径靠 `errdefer` 对称释放。返回 `![]const u8`，由测试 `try`/`expectError` 消费。
 
-### `getPropertyString` (`src/tests/helpers.zig:247`)
+### `getPropertyString` (`tests/harness/test_engine.zig:93`)
 
 - **签名**：`fn getPropertyString(rt: *core.JSRuntime, obj: *core.Object, name: []const u8, allocator: std.mem.Allocator) !?[]const u8`。
 - **作用**：intern 属性名、`getProperty`，非 String 返回 null，否则 `appendRawString` 后 dupe 到调用方分配器。
 - **实现**：热路径用 `try` 传播分配/引擎错误。`defer` 释放本次成功路径上的临时资源。关键调用：`rt.internAtom`、`obj.getProperty`、`val.isString`、`std.ArrayList`、`temp_list.deinit`。
 - **所有权 / 错误 / 调用**：测试分配器或调用方传入的 `Allocator` 负责非 GC 堆。堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。返回 `!?[]const u8`，由测试 `try`/`expectError` 消费。
 
-### `TestEngine.init` (`src/tests/helpers.zig:274`)
+### `TestEngine.init` (`tests/harness/test_engine.zig:118`)
 
 - **签名**：`pub fn init(allocator: std.mem.Allocator) !TestEngine`。
 - **作用**：默认 options 调 `initWithOptions`。
 - **实现**：关键调用：`initWithOptions`。
 - **所有权 / 错误 / 调用**：测试分配器或调用方传入的 `Allocator` 负责非 GC 堆。返回 `!TestEngine`，由测试 `try`/`expectError` 消费。
 
-### `TestEngine.initWithOptions` (`src/tests/helpers.zig:278`)
+### `TestEngine.initWithOptions` (`tests/harness/test_engine.zig:122`)
 
 - **签名**：`pub fn initWithOptions(options: EngineOptions) !TestEngine`。
 - **作用**：创建 Runtime（limit/GC 阈值/栈）、装标准全局、native 栈×4、创建 Context、堆分配 EventLoop 并 install。
 - **实现**：热路径用 `try` 传播分配/引擎错误。`errdefer` 回滚本次失败路径上的分配。直接构造 `JSRuntime`（绕过共享引擎）。关键调用：`core.JSRuntime.create`、`rt.destroy`、`registerStandardGlobalsBare`、`rt.setNativeStackSize`、`core.JSContext.create`。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。失败路径靠 `errdefer` 对称释放。返回 `!TestEngine`，由测试 `try`/`expectError` 消费。
 
-### `TestEngine.deinit` (`src/tests/helpers.zig:302`)
+### `TestEngine.deinit` (`tests/harness/test_engine.zig:146`)
 
 - **签名**：`pub fn deinit(self: *TestEngine) void`。
 - **作用**：runJobs、EventLoop.deinit、cleanupTest262Agents、cleanupAtomicsWaiters、destroy context/runtime。
 - **实现**：关键调用：`deinit`、`zjs.JSContext.borrowCore`、`wrapper.runJobs`、`self.event_loop.deinit`、`self.allocator.destroy`、`@import`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `TestEngine.eval` (`src/tests/helpers.zig:314`)
+### `TestEngine.eval` (`tests/harness/test_engine.zig:157`)
 
 - **签名**：`pub fn eval(self: *TestEngine, source_text: []const u8) RuntimeError!core.JSValue`。
 - **作用**：script 模式 `evalMode`。
 - **实现**：关键调用：`self.evalMode`。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。返回 `RuntimeError!core.JSValue`，由测试 `try`/`expectError` 消费。
 
-### `TestEngine.evalModule` (`src/tests/helpers.zig:318`)
+### `TestEngine.evalModule` (`tests/harness/test_engine.zig:161`)
 
 - **签名**：`pub fn evalModule(self: *TestEngine, source_text: []const u8) RuntimeError!core.JSValue`。
 - **作用**：module 模式 `evalMode`。
 - **实现**：关键调用：`self.evalMode`。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。返回 `RuntimeError!core.JSValue`，由测试 `try`/`expectError` 消费。
 
-### `TestEngine.evalMode` (`src/tests/helpers.zig:322`)
+### `TestEngine.evalMode` (`tests/harness/test_engine.zig:165`)
 
 - **签名**：`pub fn evalMode(self: *TestEngine, source_text: []const u8, mode: core.EvalMode) RuntimeError!core.JSValue`。
 - **作用**：把 mode 塞进 `evalWithOptions`。
 - **实现**：关键调用：`self.evalWithOptions`。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。返回 `RuntimeError!core.JSValue`，由测试 `try`/`expectError` 消费。
 
-### `TestEngine.ensureTest262GlobalsInstalled` (`src/tests/helpers.zig:326`)
+### `TestEngine.ensureTest262GlobalsInstalled` (`tests/harness/test_engine.zig:169`)
 
 - **签名**：`pub fn ensureTest262GlobalsInstalled(self: *TestEngine) !void`。
 - **作用**：若尚无 global，经 `contextGlobal` + `installTest262Globals` 装 `$262`。
 - **实现**：热路径用 `try` 传播分配/引擎错误。关键调用：`engine.exec.zjs_vm.contextGlobal`、`@import`、`zjs.JSContext.borrowCore`、`run_test262.installTest262Globals`。
 - **所有权 / 错误 / 调用**：返回 `!void`，由测试 `try`/`expectError` 消费。
 
-### `TestEngine.evalWithOptions` (`src/tests/helpers.zig:335`)
+### `TestEngine.evalWithOptions` (`tests/harness/test_engine.zig:177`)
 
 - **签名**：`pub fn evalWithOptions(self: *TestEngine, source_text: []const u8, options: EvalOptions) RuntimeError!core.JSValue`。
 - **作用**：确保 test262 全局后 `borrowCore.eval`；`MissingExport`/`AmbiguousExport` 折成 `SyntaxError`。
 - **实现**：关键调用：`self.ensureTest262GlobalsInstalled`、`@errorCast`、`zjs.JSContext.borrowCore`、`wrapper.eval`、`std.mem.eql`。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。返回 `RuntimeError!core.JSValue`，由测试 `try`/`expectError` 消费。
 
-### `TestEngine.createPersistentValue` (`src/tests/helpers.zig:353`)
+### `TestEngine.createPersistentValue` (`tests/harness/test_engine.zig:194`)
 
 - **签名**：`pub fn createPersistentValue(self: *TestEngine, value: core.JSValue) !core.JSValueHandle`。
 - **作用**：Runtime 上建 persistent handle。
 - **实现**：关键调用：`createPersistentValue`、`self.runtime.createPersistentValue`。
 - **所有权 / 错误 / 调用**：返回 `!core.JSValueHandle`，由测试 `try`/`expectError` 消费。
 
-### `TestEngine.evalWithOutput` (`src/tests/helpers.zig:357`)
+### `TestEngine.evalWithOutput` (`tests/harness/test_engine.zig:198`)
 
 - **签名**：`pub fn evalWithOutput(self: *TestEngine, source_text: []const u8, output: *std.Io.Writer) RuntimeError!core.JSValue`。
 - **作用**：带 `output` writer 的 eval。
 - **实现**：关键调用：`self.evalWithOptions`。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。返回 `RuntimeError!core.JSValue`，由测试 `try`/`expectError` 消费。
 
-### `TestEngine.evalFileWithOutputMode` (`src/tests/helpers.zig:361`)
+### `TestEngine.evalFileWithOutputMode` (`tests/harness/test_engine.zig:202`)
 
 - **签名**：`pub fn evalFileWithOutputMode(self: *TestEngine, source_text: []const u8, output: *std.Io.Writer, mode: core.EvalMode, filename: []const u8) RuntimeError!core.JSValue`。
 - **作用**：指定 mode 与 filename。
 - **实现**：关键调用：`self.evalWithOptions`。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。返回 `RuntimeError!core.JSValue`，由测试 `try`/`expectError` 消费。
 
-### `TestEngine.evalFileWithOutputModeStrict` (`src/tests/helpers.zig:365`)
+### `TestEngine.evalFileWithOutputModeStrict` (`tests/harness/test_engine.zig:206`)
 
 - **签名**：`pub fn evalFileWithOutputModeStrict(self: *TestEngine, source_text: []const u8, output: *std.Io.Writer, mode: core.EvalMode, filename: []const u8, strict: bool) RuntimeError!core.JSValue`。
 - **作用**：parse+runtime 同时严格。
 - **实现**：关键调用：`self.evalWithOptions`。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。返回 `RuntimeError!core.JSValue`，由测试 `try`/`expectError` 消费。
 
-### `TestEngine.evalFileWithOutputModeRuntimeStrict` (`src/tests/helpers.zig:369`)
+### `TestEngine.evalFileWithOutputModeRuntimeStrict` (`tests/harness/test_engine.zig:210`)
 
 - **签名**：`pub fn evalFileWithOutputModeRuntimeStrict(self: *TestEngine, source_text: []const u8, output: *std.Io.Writer, mode: core.EvalMode, filename: []const u8, runtime_strict: bool) RuntimeError!core.JSValue`。
 - **作用**：只开 runtime strict。
 - **实现**：关键调用：`self.evalWithOptions`。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。返回 `RuntimeError!core.JSValue`，由测试 `try`/`expectError` 消费。
 
-### `TestEngine.evalFileModuleGraphWithHostHooks` (`src/tests/helpers.zig:373`)
+### `TestEngine.evalFileModuleGraphWithHostHooks` (`tests/harness/test_engine.zig:214`)
 
 - **签名**：`pub fn evalFileModuleGraphWithHostHooks( self: *TestEngine, source_text: []const u8, output: *std.Io.Writer, filename: []const u8, host_hooks: module_graph.HostHooks, allocator: std.mem.Allocator, ) !core.JSValue`。
 - **作用**：转 `module_graph.evalFileModuleGraphWithHostHooks`。
 - **实现**：热路径用 `try` 传播分配/引擎错误。关键调用：`evalFileModuleGraphWithHostHooks`、`self.ensureTest262GlobalsInstalled`、`module_graph.evalFileModuleGraphWithHostHooks`。
 - **所有权 / 错误 / 调用**：测试分配器或调用方传入的 `Allocator` 负责非 GC 堆。返回 `!core.JSValue`，由测试 `try`/`expectError` 消费。
 
-### `TestEngine.evalFileModuleGraphWithOutput` (`src/tests/helpers.zig:385`)
+### `TestEngine.evalFileModuleGraphWithOutput` (`tests/harness/test_engine.zig:226`)
 
 - **签名**：`pub fn evalFileModuleGraphWithOutput( self: *TestEngine, source_text: []const u8, output: *std.Io.Writer, filename: []const u8, io: std.Io, allocator: std.mem.Allocator, max_source_size: usize, ) !core.JSValue`。
 - **作用**：转 `module_graph.evalFileModuleGraphWithOutput`。
 - **实现**：热路径用 `try` 传播分配/引擎错误。关键调用：`evalFileModuleGraphWithOutput`、`self.ensureTest262GlobalsInstalled`、`module_graph.evalFileModuleGraphWithOutput`。
 - **所有权 / 错误 / 调用**：测试分配器或调用方传入的 `Allocator` 负责非 GC 堆。返回 `!core.JSValue`，由测试 `try`/`expectError` 消费。
 
-### `TestEngine.runJobs` (`src/tests/helpers.zig:398`)
+### `TestEngine.runJobs` (`tests/harness/test_engine.zig:239`)
 
 - **签名**：`pub fn runJobs(self: *TestEngine) !void`。
 - **作用**：`borrowCore.runJobs(null)` 排空 Promise job。
 - **实现**：热路径用 `try` 传播分配/引擎错误。关键调用：`runJobs`、`zjs.JSContext.borrowCore`、`wrapper.runJobs`。
 - **所有权 / 错误 / 调用**：返回 `!void`，由测试 `try`/`expectError` 消费。
 
-### `TestEngine.installLegacyProbeEntry` (`src/tests/helpers.zig:403`)
+### `TestEngine.installLegacyProbeEntry` (`tests/harness/test_engine.zig:244`)
 
 - **签名**：`pub fn installLegacyProbeEntry(rt: *core.JSRuntime, function_object: *core.Object, ptr: *anyopaque, call: core.host_function.ExternalCallFn) !void`。
 - **作用**：堆上 `LegacyProbeState`，register finalizer，alloc NativeEntry，install 到函数对象。
 - **实现**：热路径用 `try` 传播分配/引擎错误。`errdefer` 回滚本次失败路径上的分配。关键调用：`rt.memory.create`、`rt.memory.destroy`、`rt.registerNativeEntryFinalizer`、`rt.allocNativeEntry`、`core.NativeEntry.code`。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。失败路径靠 `errdefer` 对称释放。返回 `!void`，由测试 `try`/`expectError` 消费。
 
-### `TestEngine.createExternalHostFunctionValue` (`src/tests/helpers.zig:419`)
+### `TestEngine.createExternalHostFunctionValue` (`tests/harness/test_engine.zig:260`)
 
 - **签名**：`pub fn createExternalHostFunctionValue( self: *TestEngine, name: []const u8, length: i32, ptr: *anyopaque, call: core.host_function.ExternalCallFn, finalizer: ?core.host_function.ExternalFinalizer, ) !core.JSValue`。
 - **作用**：造 native 函数对象并把 legacy 探针装成 managed NativeEntry。
 - **实现**：Test-probe adapter: the legacy `(ptr, ExternalCall)` probe shape is kept for the existing tests, but the function is an ordinary NB2 `NativeEntry` (managed thunk + heap state), not a registry record.。热路径用 `try` 传播分配/引擎错误。`errdefer` 回滚本次失败路径上的分配。关键调用：`self.runtime.memory.create`、`self.runtime.memory.destroy`、`self.runtime.registerNativeEntryFinalizer`、`self.runtime.allocNativeEntry`、`core.NativeEntry.code`。
 - **所有权 / 错误 / 调用**：失败路径靠 `errdefer` 对称释放。返回 `!core.JSValue`，由测试 `try`/`expectError` 消费。
 
-### `TestEngine.defineGlobalExternalHostFunction` (`src/tests/helpers.zig:443`)
+### `TestEngine.defineGlobalExternalHostFunction` (`tests/harness/test_engine.zig:284`)
 
 - **签名**：`pub fn defineGlobalExternalHostFunction( self: *TestEngine, name: []const u8, length: i32, ptr: *anyopaque, call: core.host_function.ExternalCallFn, finalizer: ?core.host_function.ExternalFinalizer, ) !void`。
 - **作用**：在 global 上 defineOwnProperty 上述函数。
 - **实现**：热路径用 `try` 传播分配/引擎错误。关键调用：`engine.exec.zjs_vm.contextGlobal`、`self.createExternalHostFunctionValue`、`self.runtime.internAtom`、`global_object.defineOwnProperty`、`core.Descriptor.data`。
 - **所有权 / 错误 / 调用**：返回 `!void`，由测试 `try`/`expectError` 消费。
 
-### `TestEngine.takeException` (`src/tests/helpers.zig:458`)
+### `TestEngine.takeException` (`tests/harness/test_engine.zig:299`)
 
 - **签名**：`pub fn takeException(self: *TestEngine) core.JSValue`。
 - **作用**：取走 pending exception。
 - **实现**：关键调用：`self.context.takePendingException`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `TestEngine.takeExceptionInfo` (`src/tests/helpers.zig:462`)
+### `TestEngine.takeExceptionInfo` (`tests/harness/test_engine.zig:303`)
 
 - **签名**：`pub fn takeExceptionInfo(self: *TestEngine) !ExceptionInfo`。
 - **作用**：包成带 handle 的 `ExceptionInfo`。
 - **实现**：热路径用 `try` 传播分配/引擎错误。关键调用：`core.JSValueHandle.init`、`self.takeException`。
 - **所有权 / 错误 / 调用**：返回 `!ExceptionInfo`，由测试 `try`/`expectError` 消费。
 
-### `moduleResolutionError` (`src/tests/helpers.zig:469`)
+### `moduleResolutionError` (`tests/harness/test_engine.zig:310`)
 
 - **签名**：`fn moduleResolutionError(err: anytype) (@TypeOf(err) || error{SyntaxError})`。
 - **作用**：模块图的 Missing/AmbiguousExport 映射为 SyntaxError，其余原样。
 - **实现**：主体是 `switch` 分发。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `sharedTestEngine` (`src/tests/helpers.zig:506`)
+### `leakCensusEnabled` (`tests/harness/shared.zig:74`)
+
+- **签名**：`fn leakCensusEnabled() bool`。
+- **作用**：`ZJS_LEAK_CENSUS` 在环境里时打开 `endSharedTest` 的 census 打印。
+- **实现**：`std.c.getenv`。
+- **所有权 / 错误 / 调用**：只读环境变量；无分配。
+
+### `runnerPass` (`tests/harness/shared.zig:78`)
+
+- **签名**：`fn runnerPass() usize`。
+- **作用**：读测试 runner 根上的当前 pass（leak-census 第二遍才开门）。
+- **实现**：`@hasDecl(root, "zjs_test_runner_current_pass")`，没有则 0。
+- **所有权 / 错误 / 调用**：无分配。
+
+### `runnerTestName` (`tests/harness/shared.zig:83`)
+
+- **签名**：`fn runnerTestName() []const u8`。
+- **作用**：读 runner 根上的当前测试名，给 leak-census 打印和 panic 用。
+- **实现**：`zjs_test_runner_current_name_ptr` / `_len`；没有则空串。
+- **所有权 / 错误 / 调用**：返回的切片借自 runner 根；无分配。
+
+### `sharedTestEngine` (`tests/harness/shared.zig:90`)
 
 - **签名**：`pub fn sharedTestEngine() *TestEngine`。
 - **作用**：进程级单例 TestEngine：首次建、空 eval 快照全局、注册 atexit。
 - **实现**：首次调用时 `TestEngine.init(std.heap.page_allocator)`，跑一次空 `eval(";")` 逼出 `installHostGlobals`，清掉残留异常/未处理 rejection，然后把 global 的 `shape_ref.prop_count`/`hash`/`deletedPropCount` 与属性槽、VARREF 状态（值/is_lexical/is_const/is_deletable）快照到 `page_allocator` 数组；再 `runObjectCycleRemoval` 并记下 allocation_count/allocated_bytes/modules.count 基线，最后注册 atexit teardown。关键调用：`TestEngine.init`、`eng.eval`、`eng.context.takeException`、`g.propertyEntries`、`g.propFlagsAt`、`eng.runtime.runObjectCycleRemoval`、`registerSharedEngineProcessTeardown`。
 - **所有权 / 错误 / 调用**：共享引擎走 `page_allocator`，寿命跨单测。无独立 error set 时失败以断言或 panic 终止测试。
 
-### `registerSharedEngineProcessTeardown` (`src/tests/helpers.zig:567`)
+### `registerSharedEngineProcessTeardown` (`tests/harness/shared.zig:151`)
 
 - **签名**：`fn registerSharedEngineProcessTeardown() void`。
 - **作用**：一次性 `atexit(sharedEngineProcessTeardown)`。
 - **实现**：关键调用：`atexit`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `sharedEngineProcessTeardown` (`src/tests/helpers.zig:573`)
+### `sharedEngineProcessTeardown` (`tests/harness/shared.zig:157`)
 
 - **签名**：`fn sharedEngineProcessTeardown() callconv(.c) void`。
 - **作用**：C 调用约定，转 `deinitSharedTestEngine`。
 - **实现**：关键调用：`callconv`、`deinitSharedTestEngine`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。C 调用约定：给 native thunk / atexit 用。
 
-### `deinitSharedTestEngine` (`src/tests/helpers.zig:582`)
+### `deinitSharedTestEngine` (`tests/harness/shared.zig:166`)
 
 - **签名**：`pub fn deinitSharedTestEngine() void`。
 - **作用**：释放快照占用的 page_allocator 存储，destroy 宿主主 context/runtime。
 - **实现**：取走 `shared_engine_storage` 里的引擎、把全局置 null 后再 `deinit`，避免 teardown 期间其它路径再拿到半死的共享引擎。关键调用：`releaseSharedEngineBaselineSnapshot`、`owned.deinit`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `releaseSharedEngineBaselineSnapshot` (`src/tests/helpers.zig:593`)
+### `releaseSharedEngineBaselineSnapshot` (`tests/harness/shared.zig:177`)
 
 - **签名**：`fn releaseSharedEngineBaselineSnapshot() void`。
 - **作用**：page_allocator.free 三块快照数组，计数归零。
 - **实现**：三个 `if (opt) |slice|` 依次 free 并置 null。关键调用：`std.heap.page_allocator`。原先还带一个从不读的 `*core.JSRuntime` 形参和一圈 `for (baseline_shape_props) |_| {}` 空循环（rc 时代逐项 release 的残骸），两者都已删。
 - **所有权 / 错误 / 调用**：共享引擎走 `page_allocator`，寿命跨单测。堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。无独立 error set 时失败以断言或 panic 终止测试。
 
-### `endSharedTest` (`src/tests/helpers.zig:612`)
+### `endSharedTest` (`tests/harness/shared.zig:196`)
 
 - **签名**：`pub fn endSharedTest() void`。
 - **作用**：复位共享引擎；leak-census 时打印 delta；pass≥1 且模块数未增则分配数不得超过 baseline+8。
 - **实现**：关键调用：`resetSharedEngineAfterTest`、`std.debug.print`、`std.math.add`、`std.math.maxInt`、`std.debug.panic`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `resetSharedEngineAfterTest` (`src/tests/helpers.zig:666`)
+### `resetSharedEngineAfterTest` (`tests/harness/shared.zig:251`)
 
 - **签名**：`fn resetSharedEngineAfterTest(eng: *TestEngine) void`。
 - **作用**：清异常/rejection、排空 job、清 atomics waiter、丢掉 lexicals、关 trigger_gc 后按快照重建全局属性与 shape，再环回收。
 - **实现**：线性复位序列，其中排空 job 用 `while (true) switch (drainOnePendingJob(...))`（`.empty`/`.exception` 跳出）。属性还原期间把 `memory.trigger_gc_fn/ctx` 暂存置 null 并 `defer` 复原，使 slot 与 shape flags 的多步互换对 GC 原子。主动触发/轮询 GC，断言存活集。关键调用：`eng.context.hasException`、`eng.context.takeException`、`eng.context.hasUnhandledRejection`、`eng.context.takeUnhandledRejection`、`engine.exec.promise_ops.drainOnePendingJob`、`engine.exec.zjs_vm.cleanupAtomicsWaitersForContext`、`global.reserveOwnPropertyCapacity`、`eng.runtime.shapes.restorePropertyLayout`、`eng.runtime.runObjectCycleRemoval`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `vm_helpers.parseAndRunWithTopLevelChildren` (`src/tests/helpers.zig:752`)
+### `vm_helpers.parseAndRunWithTopLevelChildren` (`tests/harness/fixture.zig:123`)
 
 - **签名**：`pub fn parseAndRunWithTopLevelChildren(rt: *core.JSRuntime, ctx: *core.JSContext, src: []const u8) !core.JSValue`。
 - **作用**：parseExpr + return，finalize，root cpool，跑 VM。
 - **实现**：热路径用 `try` 传播分配/引擎错误。`defer` 释放本次成功路径上的临时资源。关键调用：`rt.internAtom`、`engine.bytecode.Bytecode.init`、`function.deinit`、`QjsLexer.init`、`ParseState.initWithRuntime`。
 - **所有权 / 错误 / 调用**：测试分配器或调用方传入的 `Allocator` 负责非 GC 堆。堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。返回 `!core.JSValue`，由测试 `try`/`expectError` 消费。
 
-### `vm_helpers.parseStmtAndRunWithTopLevelChildren` (`src/tests/helpers.zig:772`)
+### `vm_helpers.parseStmtAndRunWithTopLevelChildren` (`tests/harness/fixture.zig:146`)
 
 - **签名**：`pub fn parseStmtAndRunWithTopLevelChildren(rt: *core.JSRuntime, ctx: *core.JSContext, src: []const u8) !core.JSValue`。
 - **作用**：按 script eval 发射（completion capture，不是 direct-eval 声明放置），parse 到 EOF，finalize 后跑。
 - **实现**：含循环（`while` 解析到 `TOK_EOF`）。热路径用 `try` 传播分配/引擎错误。`defer` 释放本次成功路径上的临时资源。关键调用：`rt.internAtom`、`engine.bytecode.Bytecode.init`、`function.deinit`、`QjsLexer.init`、`ParseState.initWithRuntime`、`state.beginProgramEmission`、`state.enableReturnCompletion`、`parser_core.parseStatementOrDecl`、`state.finalizeEvalReturn`。
 - **所有权 / 错误 / 调用**：测试分配器或调用方传入的 `Allocator` 负责非 GC 堆。堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。返回 `!core.JSValue`，由测试 `try`/`expectError` 消费。
 
-### `appendWeakCollectionEntry` (`src/tests/helpers.zig:804`)
+### `appendWeakCollectionEntry` (`tests/harness/gc.zig:25`)
 
 - **签名**：`pub fn appendWeakCollectionEntry(rt: *core.JSRuntime, collection: *core.Object, key: *core.Object, value: core.JSValue) !void`。
 - **作用**：对象键转 `key.value()` 再插入。
 - **实现**：关键调用：`appendWeakCollectionEntryForValue`、`key.value`。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。返回 `!void`，由测试 `try`/`expectError` 消费。
 
-### `appendWeakCollectionEntryForValue` (`src/tests/helpers.zig:811`)
+### `appendWeakCollectionEntryForValue` (`tests/harness/gc.zig:32`)
 
 - **签名**：`pub fn appendWeakCollectionEntryForValue(rt: *core.JSRuntime, collection: *core.Object, key: core.JSValue, value: core.JSValue) !void`。
 - **作用**：weakIdentityFromValue、retain、ensure 容量、写条目；holder 注册可回滚。
 - **实现**：Same insertion, for weak keys that are not objects (symbols). The weak collection stores an identity, not a pointer, so the object entry point is just this one with `key.value()` already applied.。热路径用 `try` 传播分配/引擎错误。`errdefer` 回滚本次失败路径上的分配。关键调用：`core.Object.weakIdentityFromValue`、`rt.retainWeakIdentity`、`rt.releaseWeakIdentity`、`collection.weakCollectionEntriesSlot`、`rt.borrowedReferenceHolderRegistered`。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。失败路径靠 `errdefer` 对称释放。返回 `!void`，由测试 `try`/`expectError` 消费。
 
-### `finishGcCycles` (`src/tests/helpers.zig:835`)
+### `finishGcCycles` (`tests/harness/gc.zig:56`)
 
 - **签名**：`pub fn finishGcCycles(rt: anytype) void`。
 - **作用**：轮询 `pollGC(.safepoint)` 直到增量标记与 morgue 都空，上限 1e5。
 - **实现**：Drive an open incremental major cycle to completion. Threshold-triggered collections under the tracer begin a cycle and finish it at a later poll; tests that assert on freed counts after a crossing call this to reach the poll where the result lands.。含循环。主动触发/轮询 GC，断言存活集。关键调用：`rt.gc.incremental.markingActive`、`std.debug.assert`、`rt.pollGC`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `createTailOpcodeFixture` (`src/tests/helpers.zig:846`)
+### `createTailOpcodeFixture` (`tests/harness/fixture.zig:95`)
 
 - **签名**：`pub fn createTailOpcodeFixture( js: *TestEngine, name_bytes: []const u8, code: []const u8, stack_size: u16, ) !core.JSValue`。
-- **作用**：`FunctionBytecode.createFixture` + publish，再 `createRootBytecodeFunctionObject`；exec 与 stress 共用。
-- **实现**：Publishes a hand-assembled bytecode function fixture on the runtime and returns a rooted function object for it. Shared by the exec suite and the stress tier raw tail-call test.。热路径用 `try` 传播分配/引擎错误。关键调用：`js.runtime.internAtom`、`zjs.bytecode.FunctionBytecode.createFixture`、`fb.publishFixtureNoFail`、`engine.exec.zjs_vm.contextGlobal`、`zjs.exec.object_ops.createRootBytecodeFunctionObject`。
+- **作用**：`FunctionBytecode.createFixture` + publish，再 `createRootBytecodeFunctionObject`；exec 的 raw tail-call opcode 测试用。
+- **实现**：Publishes a hand-assembled bytecode function fixture on the runtime and returns a rooted function object for it. Shared by the exec suite's raw tail-call opcode test.。热路径用 `try` 传播分配/引擎错误。关键调用：`js.runtime.internAtom`、`zjs.bytecode.FunctionBytecode.createFixture`、`fb.publishFixtureNoFail`、`engine.exec.zjs_vm.contextGlobal`、`zjs.exec.object_ops.createRootBytecodeFunctionObject`。
 - **所有权 / 错误 / 调用**：返回 `!core.JSValue`，由测试 `try`/`expectError` 消费。
 
-### `LegacyProbeState.finalize` (`src/tests/helpers.zig:881`)
+### `LegacyProbeState.finalize` (`tests/harness/test_engine.zig:325`)
 
 - **签名**：`pub fn finalize(raw: *anyopaque) void`。
 - **作用**：可选 ExternalFinalizer，然后 destroy 自身。
 - **实现**：关键调用：`self.runtime.memory.destroy`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `LegacyProbeState.thunk` (`src/tests/helpers.zig:887`)
+### `LegacyProbeState.thunk` (`tests/harness/test_engine.zig:331`)
 
 - **签名**：`pub fn thunk( ctx: *core.JSContext, this_value: core.JSValue, argv: [*]const core.JSValue, argc: u32, entry: *const core.NativeEntry, func_obj: ?*core.Object, ) callconv(.c) core.JSValue`。
 - **作用**：C ABI：调 legacy ExternalCall，宿主 error → JS 值。
 - **实现**：关键调用：`callconv`、`engine.exec.builtin_dispatch.hostErrorToValue`、`self.call`、`engine.exec.builtin_dispatch.vmCallerView`、`engine.exec.builtin_dispatch.embedderErrorToValue`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。C 调用约定：给 native thunk / atexit 用。
 
-### `scratchDirForProcess` (`src/tests/helpers.zig:911`)
+### `scratchDirForProcess` (`tests/harness/test_engine.zig:355`)
 
 - **签名**：`pub fn scratchDirForProcess(comptime base: []const u8) []const u8`。
 - **作用**：目录名带 pid，避免同一次构建里 Debug 与 gc-stress 抢同一 scratch。
@@ -432,11 +463,11 @@
 - **实现**：关键调用：`std.Io.Dir`、`openFile`、`file.close`、`std.fmt.bufPrint`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
-### `perfOpcodeCount` (`src/tests/smoke_test.zig:37`)
+### `profileOpcodeCount` (`tests/smoke_test.zig:37`)
 
-- **签名**：`fn perfOpcodeCount(stderr: []const u8) !u64`。
-- **作用**：从 `--perf-json` 写到 stderr 的 JSON 里抠出 `"opcodes_executed": ` 后面的十进制数字；找不到键或键后没有数字都返回 `error.MissingOpcodeCount`。
-- **实现**：含循环。热路径用 `try` 传播分配/引擎错误。关键调用：`perfOpcodeCount`、`std.mem.indexOf`、`std.ascii.isDigit`、`std.fmt.parseInt`。显式 `return error.MissingOpcodeCount`。
+- **签名**：`fn profileOpcodeCount(stdout: []const u8) !u64`。
+- **作用**：从 `--profile-opcodes` 打到 stdout 的表里抠出 `opcodes executed: ` 后面的十进制数字；找不到键或键后没有数字都返回 `error.MissingOpcodeCount`。
+- **实现**：含循环。热路径用 `try` 传播分配/引擎错误。关键调用：`profileOpcodeCount`、`std.mem.indexOf`、`std.ascii.isDigit`、`std.fmt.parseInt`。显式 `return error.MissingOpcodeCount`。
 - **所有权 / 错误 / 调用**：返回 `!u64`，由测试 `try`/`expectError` 消费。
 
 ### `parseBlockCensusRow` (`src/tests/smoke_test.zig:476`)
@@ -475,58 +506,6 @@
 - **作用**：钉住场景「CLI nonempty block census rows reconcile with totals」。
 - **实现**：拉起已安装的 `zjs`/`zjs-profile` 子进程，断言 exit / stdout / stderr。断言 14 处 `std.testing.expect*`。约 14 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：子进程 stdout/stderr 由 `std.testing.allocator` 释放；不持有引擎堆。
-
-## `src/tests/stress.zig` — 长时 stress 层
-
-不进每改动的 `zig build test`（测试里 `skipUnlessStress`），由 `test-stress` / production-gate 以编译期 filter + `ZJS_RUN_STRESS=1` 跑。
-
-文件头：Long-running stress tier: deep-recursion stack exhaustion and randomized bigint kernel sweeps. These were the five slowest tests in the tree (~47s of a ~53s unified run, 2026-08-29) and are separated so checkpoint-gate and the per-change `zig build test` close-out (see docs/verification-policy.md) keep fast feedback. Coverage is unchanged at the outer tiers: the engine-production gate, primary-platform CI, and the per-merge-batch gate run this file through `test-stress`; the ReleaseSafe phase close should invoke `zig build test test-stress -Doptimize=ReleaseSafe`.
-
-### 函数（清单 1）
-
-### `referenceSubMul` (`src/tests/stress.zig:180`)
-
-- **签名**：`fn referenceSubMul( numerator: []engine.libs.bigint.Limb, divisor: []const engine.libs.bigint.Limb, qhat: engine.libs.bigint.Limb, ) bool`。
-- **作用**：Independent reference for `subMulAt`, written from the definition rather than from the kernel's formulation: compute `numerator - divisor * qhat` with an explicit per-limb signed borrow in `i128`, which shares no arithmetic shape with the fused wrapping chain under test.。
-- **实现**：Independent reference for `subMulAt`, written from the definition rather than from the kernel's formulation: compute `numerator - divisor * qhat` with an explicit per-limb signed borrow in `i128`, which shares no arithmetic shape with the fused wrapping chain under test.。含循环。关键调用：`referenceSubMul`、`std.math.maxInt`。
-- **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
-
-### 测试块（5）
-
-### `test "raw tail call opcodes share the bounded tail-chain stack contract"` (`src/tests/stress.zig:19`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「raw tail call opcodes share the bounded tail-chain stack contract」。
-- **实现**：独立 `helpers.TestEngine.init(std.testing.allocator)`，`defer deinit`。脚本/输入：`function __w2InvokeRaw(fn) { return 1 + fn(); } function __w2ExpectRaw(label, fn) {     try { __w2InvokeRaw(fn); print(label + ":missing"); `。约 5 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：`TestEngine.deinit` 排空 job、清 atomics waiter、销毁 context/runtime。测试分配器查泄漏。
-
-### `test "sloppy tail recursion still overflows like QuickJS"` (`src/tests/stress.zig:87`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「sloppy tail recursion still overflows like QuickJS」。
-- **实现**：取 `helpers.sharedTestEngine()`，`defer endSharedTest()` 复位全局与泄漏门。脚本/输入：`function f(n) { if (n <= 0) return 0; return f(n - 1); } var threw = false; try { f(200000); } catch (e) {   threw = e instanceof InternalEr`。约 1 个 Zig expect、1 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：共享 Runtime 由 `endSharedTest` 清异常、排空 job、还原全局 shape；泄漏门在 census 第二遍开火。失败以 `error.Test*` 冒泡。
-
-### `test "missing-argument abrupt teardown releases supplied args and pads exactly once"` (`src/tests/stress.zig:102`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「missing-argument abrupt teardown releases supplied args and pads exactly once」。
-- **实现**：取 `helpers.sharedTestEngine()`，`defer endSharedTest()` 复位全局与泄漏门。强制 major / 环回收后比对 `liveCount` 或对象身份。脚本/输入：`function padThrow(a, b) { return a.x + null.missing + String(b); } function strictPadThrow(a, b) { "use strict"; return a.x + null.missing +`；`exercisePaddedLeafThrow()`。约 1 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：共享 Runtime 由 `endSharedTest` 清异常、排空 job、还原全局 shape；泄漏门在 census 第二遍开火。失败以 `error.Test*` 冒泡。
-
-### `test "strict arrow tails stay constant while method recursion exhausts the logical stack budget"` (`src/tests/stress.zig:143`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「strict arrow tails stay constant while method recursion exhausts the logical stack budget」。
-- **实现**：经 `helpers.expectPrints` 对比 `print` 输出。脚本/输入：`"use strict"; function expectStackOverflow(run) {   try {     run();     print("missing overflow");   } catch (error) {     print(error.name`。
-- **所有权 / 错误 / 调用**：`helpers.expectPrints` 内部就是 `sharedTestEngine()` + `defer endSharedTest()`（`src/tests/helpers.zig:126-136`），所以本例跑在进程级共享 Runtime 上：异常/未处理 rejection 的清理、job 排空、全局 shape 还原都由 `endSharedTest`（helpers.zig:615）负责；输出不符即测试失败。
-
-### `test "fused multiply-subtract matches the reference limb for limb"` (`src/tests/stress.zig:207`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「fused multiply-subtract matches the reference limb for limb」。
-- **实现**：两段扫描：先对 nb∈[2,33) × 7 种 limb 花样 × 7 个 qhat（0/1/2/255/maxInt/maxInt-1/1<<63）穷举，再做 500,000 次随机宽度 2..16、divisor 顶 limb 置最高位的随机 sweep；每次都把同一输入分别喂给 `bigint.subMulAt` 与 `referenceSubMul`，比对返回的下溢标志与整条 limb 切片。断言 4 处 `std.testing.expect*`。约 4 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
 ## `src/tests/gc_stress.zig` — 确定性 GC 压力
 
@@ -2186,9 +2165,9 @@
 
 大文件目录：
 
-- [`20-tests-core.md`](20-tests-core.md) — `src/tests/core.zig`
+- [`20-tests-core.md`](20-tests-core.md) — `tests/core.zig`
 - [`20-tests-parser.md`](20-tests-parser.md) — `src/tests/parser.zig`
-- [`20-tests-exec.md`](20-tests-exec.md) — `src/tests/exec.zig`
+- [`20-tests-exec.md`](20-tests-exec.md) — `tests/exec.zig`
 - [`20-tests-builtins.md`](20-tests-builtins.md) — `src/tests/builtins.zig`
 
 ## 覆盖核对

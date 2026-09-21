@@ -1917,3 +1917,74 @@ test "toFloat64 rounds to nearest even and overflows to infinity" {
     try std.testing.expectEqual(@as(f64, 9007199254740992), (BigInt{ .limbs = &one, .allocator = allocator }).toFloat64());
     try std.testing.expectEqual(@as(f64, 0), (BigInt{ .allocator = allocator }).toFloat64());
 }
+
+/// Independent reference for `subMulAt`, written from the definition rather
+/// than from the kernel's formulation: compute `numerator - divisor * qhat`
+/// with an explicit per-limb signed borrow in `i128`, which shares no
+/// arithmetic shape with the fused wrapping chain under test.
+fn referenceSubMul(numerator: []Limb, divisor: []const Limb, qhat: Limb) bool {
+    var borrow: i128 = 0;
+    for (divisor, 0..) |limb, i| {
+        const product: u128 = @as(u128, limb) * @as(u128, qhat);
+        var value: i128 = @as(i128, numerator[i]) - @as(i128, @intCast(product & std.math.maxInt(Limb))) - borrow;
+        borrow = @intCast(product >> 64);
+        while (value < 0) {
+            value += @as(i128, 1) << 64;
+            borrow += 1;
+        }
+        numerator[i] = @intCast(value);
+    }
+    var top: i128 = @as(i128, numerator[divisor.len]) - borrow;
+    var negative = false;
+    while (top < 0) {
+        top += @as(i128, 1) << 64;
+        negative = true;
+    }
+    numerator[divisor.len] = @intCast(@as(u128, @intCast(top)) & std.math.maxInt(Limb));
+    return negative;
+}
+
+test "fused multiply-subtract matches the reference limb for limb" {
+    const alloc = std.testing.allocator;
+
+    // The kernel's borrow is a full limb rather than a 0/1 flag, so the
+    // fused wrapping chain and a definitional i128 computation must agree
+    // on every limb and on the underflow flag.
+    var prng = std.Random.DefaultPrng.init(0x604D3);
+    const random = prng.random();
+
+    const qhats = [_]Limb{ 0, 1, 2, 255, std.math.maxInt(Limb), std.math.maxInt(Limb) - 1, @as(Limb, 1) << 63 };
+    for (2..33) |nb| {
+        const divisor = try alloc.alloc(Limb, nb);
+        defer alloc.free(divisor);
+        const under_test = try alloc.alloc(Limb, nb + 1);
+        defer alloc.free(under_test);
+        const reference = try alloc.alloc(Limb, nb + 1);
+        defer alloc.free(reference);
+
+        for (0..7) |pattern| {
+            for (qhats) |qhat| {
+                for (divisor, 0..) |*l, i| l.* = switch (pattern) {
+                    0 => 0,
+                    1 => std.math.maxInt(Limb),
+                    2 => if (i % 2 == 0) 0xAAAA_AAAA_AAAA_AAAA else 0x5555_5555_5555_5555,
+                    3 => if (i == nb - 1) std.math.maxInt(Limb) else 0,
+                    4 => 1,
+                    5 => @as(Limb, 1) << 63,
+                    else => random.int(Limb),
+                };
+                for (under_test, 0..) |*l, i| l.* = switch (pattern) {
+                    0 => std.math.maxInt(Limb),
+                    1 => 0,
+                    3 => if (i == 0) std.math.maxInt(Limb) else 0,
+                    else => random.int(Limb),
+                };
+                @memcpy(reference, under_test);
+                const got = subMulAt(under_test, divisor, qhat);
+                const want = referenceSubMul(reference, divisor, qhat);
+                try std.testing.expectEqual(want, got);
+                try std.testing.expectEqualSlices(Limb, reference, under_test);
+            }
+        }
+    }
+}

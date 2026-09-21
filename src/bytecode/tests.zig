@@ -8,7 +8,10 @@ const compiler = zjs.compiler;
 const frame_mod = zjs.exec.frame;
 const parser = zjs.parser;
 const parser_tests = @import("../parser/tests.zig");
-const helpers = @import("../testing.zig");
+
+fn reclaimNow(rt: *core.JSRuntime) void {
+    _ = rt.runObjectCycleRemoval();
+}
 
 test "bytecode owns its code and a module record its metadata" {
     const rt = try core.JSRuntime.create(std.testing.allocator, .{});
@@ -73,7 +76,7 @@ test "script or module metadata owns each bytecode transfer" {
     // only balances when the FB is torn down -- which the tracer defers to a
     // collection. Nothing names the FB from here on, so the collection reaches
     // it; `function` and `fd` are native-stack carriers the sweep never visits.
-    helpers.reclaimNow(rt);
+    reclaimNow(rt);
 
     fd.deinit(rt);
     fd_alive = false;
@@ -1289,7 +1292,7 @@ test "parent finalization failure releases its published child realm owner" {
     // cpool release that orphans it, so under the tracer the drop lands in the
     // collection. The realm survives it as a live host handle on the runtime's
     // context list; the orphaned child is named by nothing and is reclaimed.
-    helpers.reclaimNow(rt);
+    reclaimNow(rt);
 }
 
 test "parent finalization moves an existing child FunctionBytecode cpool owner without rc churn" {
@@ -1336,9 +1339,9 @@ test "parent finalization moves an existing child FunctionBytecode cpool owner w
         defer child_frame.deactivate(rt);
 
         parent_alive = false;
-        helpers.reclaimNow(rt);
+        reclaimNow(rt);
     }
-    helpers.reclaimNow(rt);
+    reclaimNow(rt);
 }
 
 // ---- F10.1b: FunctionDef-driven local-slot lowering ----
@@ -2580,7 +2583,7 @@ test "createFunctionBytecode accounts large finalized payload in large space" {
     // The tracer defers FB teardown to a collection. `fd` handed its owners to
     // the FB and holds no heap bytes of its own, so the cold live-object census
     // is expected to reach zero here.
-    helpers.reclaimNow(rt);
+    reclaimNow(rt);
     const after_free = rt.gcStats();
     try std.testing.expectEqual(@as(usize, 0), after_free.total_allocated_bytes);
     // High-water: survives the free rather than echoing live-now.
@@ -2881,7 +2884,7 @@ test "four-ledger phase-boundary ownership accounting compile-only" {
         // whose atom owners are released by their teardown rather than by the
         // artifact release that orphans them. Under the tracer that teardown is
         // this collection, and only after it does the atom table balance.
-        helpers.reclaimNow(rt);
+        reclaimNow(rt);
         var terminal = try window.sample(.final);
         ownership.setBuilderCommitted(&terminal, 0);
         try ownership.expectTerminal(terminal);

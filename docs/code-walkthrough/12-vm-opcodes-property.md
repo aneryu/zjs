@@ -64,7 +64,7 @@
 - **签名**：`fn functionHasDynamicScopeBindings(function: *const bytecode.FunctionBytecode, frame: *const frame_mod.Frame) bool`。
 - **作用**：有 var-ref 名表或活着的 `frame.var_refs` 即视为动态作用域。
 - **实现**：非 legacy 且 `frame.var_refs` 非空时才 assert `var_refs.len == closureVar().len`。返回 `varRefNamesLen()!=0 or var_refs.len!=0`。
-- **所有权 / 错误 / 调用**：纯读 `*const` 借用的 function/frame，不分配、不建根、无 error set；Debug 下的 `assert` 是不变量检查，不构成错误路径。文件私有，唯一调用方 `functionFrameBindingShadowsGlobal`（`src/exec/vm_property.zig:137`），后者再服务全局属性快路径 `src/exec/vm_property.zig:89` 与 `src/exec/vm_property_globals.zig:380`。返回 true 表示「放弃全局快路径」，是保守方向。
+- **所有权 / 错误 / 调用**：纯读 `*const` 借用的 function/frame，不分配、不建根、无 error set；Debug 下的 `assert` 是不变量检查，不构成错误路径。文件私有，唯一调用方 `functionFrameBindingShadowsGlobal`（`src/exec/vm_property.zig:137`），后者再服务全局属性快路径 `src/exec/vm_property.zig:89` 与 `src/exec/vm_property.zig:380`。返回 true 表示「放弃全局快路径」，是保守方向。
 
 ### `functionLocalOrArgBindingShadowsGlobal` (`src/exec/vm_property.zig:126`)
 

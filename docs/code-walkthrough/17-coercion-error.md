@@ -4,33 +4,33 @@
 
 
 
-## `src/exec/primitive_ops.zig` — 包装类型与 Symbol 静态
+## `src/exec/value_ops.zig` — 包装类型与 Symbol 静态
 
 `.primitive` id = `class_tag * 10 + method`（1 Number … 5 String）。方法 1/2 是 toString/valueOf，3 是构造器当函数，4/5 是 Symbol description / @@toPrimitive；6+ 是 BigInt.asIntN/asUintN、Symbol.for/keyFor。
 
 
-### `toString` (`src/exec/primitive_ops.zig:20`)
+### `toString` (`src/exec/value_ops.zig:20`)
 
 - **签名**：`pub fn toString(value: bool) []const u8`。
 - **作用**：布尔到 `"true"` / `"false"` 切片（静态字面量）。
 - **实现**：`if (value) "true" else "false"`。
 - **所有权 / 错误 / 调用**：返回静态字符串，无分配。
 
-### `primitiveId` (`src/exec/primitive_ops.zig:40`)
+### `primitiveId` (`src/exec/value_ops.zig:40`)
 
 - **签名**：`fn primitiveId(comptime tag: Tag, comptime method: u32) u32`。
 - **作用**：编码 `.primitive` 记录 id：`tag * 10 + method`。
 - **实现**：class tag 1..5 对应 Number..String。
-- **所有权 / 错误 / 调用**：无：comptime 纯算术，不分配、无 error set。调用方全在本文件的静态表构造（`src/exec/primitive_ops.zig:50-64` 的 `primitiveEntry`、`:88`/`:89`/`:102`/`:103` 的 id 常量）。
+- **所有权 / 错误 / 调用**：无：comptime 纯算术，不分配、无 error set。调用方全在本文件的静态表构造（`src/exec/value_ops.zig:50-64` 的 `primitiveEntry`、`:88`/`:89`/`:102`/`:103` 的 id 常量）。
 
-### `primitiveEntry` (`src/exec/primitive_ops.zig:110`)
+### `primitiveEntry` (`src/exec/value_ops.zig:110`)
 
 - **签名**：`fn primitiveEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry`。
 - **作用**：comptime 帮手，为 `.primitive` domain 的**实例侧**记录生成 `InternalEntry`：Boolean/BigInt/String 原型的 `toString` + `valueOf`、Number 原型的 `valueOf`（它的 `toString` 在 `.number` domain）、Symbol 原型的 `toString`/`valueOf`/`get description`/`[Symbol.toPrimitive]`，以及 `Boolean(x)` / `Symbol(x)` 这种把包装构造器当普通函数调用的条目。
 - **实现**：`.id` 与 `.magic` 都取传入 id，`cproto` 固定 `.generic_magic`，`native_function` 是 `genericMagicFunction(&primitiveCall)`。
 - **所有权 / 错误 / 调用**：只在 comptime 求值，产物是静态表项，无运行期分配；`name` 是字符串字面量。
 
-### `primitiveCall` (`src/exec/primitive_ops.zig:124`)
+### `primitiveCall` (`src/exec/value_ops.zig:124`)
 
 - **签名**：`pub fn primitiveCall( native_ctx: *core.JSContext, native_this: core.JSValue, native_args: []const core.JSValue, native_magic: i32, ) HostError!core.JSValue`。
 - **作用**：`.primitive` 原型方法共享 handler：转到 `object_ops.primitivePrototypeMethod`。
@@ -38,14 +38,14 @@
 - **所有权 / 错误 / 调用**：`this`/`args` 借用，返回值归 GC。三处错误：无活跃 native environment（`nativeCall` 返回 null）与拿不到 `func_obj` 都返 `error.TypeError`，`callableRealm` 在 `callable_realm == null` 时返 `error.InvalidBuiltinRegistry`（`src/exec/builtin_dispatch.zig:327`）；其余错误由 `object_ops.primitivePrototypeMethod` 透传。调用方是 `boolean_entries` / `shared_entries` / `symbol_entries` 三张表经 `primitiveEntry` 挂上的 `genericMagicFunction`。
 
 
-### `primitiveStaticEntry` (`src/exec/primitive_ops.zig:147`)
+### `primitiveStaticEntry` (`src/exec/value_ops.zig:147`)
 
 - **签名**：`fn primitiveStaticEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry`。
 - **作用**：同上的**静态方法**版本，只用于四条构造器静态：`BigInt.asIntN` / `BigInt.asUintN` 与 `Symbol.for` / `Symbol.keyFor`（id 从 6 起，与原型方法的 id 段错开）。
 - **实现**：同 `primitiveEntry`，但 `native_function` 挂 `genericMagicFunction(&primitiveStaticCall)`。
 - **所有权 / 错误 / 调用**：只在 comptime 求值，产物是静态表项，无运行期分配。
 
-### `primitiveStaticCall` (`src/exec/primitive_ops.zig:163`)
+### `primitiveStaticCall` (`src/exec/value_ops.zig:163`)
 
 - **签名**：`fn primitiveStaticCall( native_ctx: *core.JSContext, native_this: core.JSValue, native_args: []const core.JSValue, native_magic: i32, ) HostError!core.JSValue`。
 - **作用**：包装类型构造器静态方法（id 6+）：asIntN/asUintN、Symbol.for/keyFor。
@@ -54,134 +54,134 @@
 
 
 
-## `src/exec/coercion_ops.zig` — ToPrimitive / ToLength / ToUint32
+## `src/exec/value_ops.zig` — ToPrimitive / ToLength / ToUint32
 
 `toPrimitiveForAdditionFree` 消费对象（对照 `JS_ToPrimitiveFree`）；非对象热路径零 dup。ToLength：int/float 走 `fastToLengthIndex`，其余 ToNumber 后夹到 0..2^53-1。BigInt 在 ToNumber 路径抛 `"cannot convert bigint to number"`。
 
 
-### `toPrimitiveForAdditionFree` (`src/exec/coercion_ops.zig:26`)
+### `toPrimitiveForAdditionFree` (`src/exec/value_ops.zig:26`)
 
 - **签名**：`pub inline fn toPrimitiveForAdditionFree( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue, ) !core.JSValue`。
 - **作用**：ToPrimitive（default hint），对照 `JS_ToPrimitiveFree`（名字沿用 qjs；tracing GC 下没有所有权转移，也不 free）。
 - **实现**：非对象（加法热路径的 int/float）直接原样返回；只有对象落到 outlined 的 `toPrimitiveForAdditionObject`。
-- **所有权 / 错误 / 调用**：借用入参、返回值归 GC。本身不产生错误：所有错误来自对象臂的 `toPrimitiveForAdditionObject`，其 TypeError 已由 `throwTypeErrorMessage` 挂成 pending exception，上层只见哨兵。7 处调用全在 `src/exec/vm_arith.zig`（`:539`、`:542`、`:590`、`:656` 等加法/比较慢路径）。
+- **所有权 / 错误 / 调用**：借用入参、返回值归 GC。本身不产生错误：所有错误来自对象臂的 `toPrimitiveForAdditionObject`，其 TypeError 已由 `throwTypeErrorMessage` 挂成 pending exception，上层只见哨兵。7 处调用全在 `src/exec/vm_opcodes.zig`（`:539`、`:542`、`:590`、`:656` 等加法/比较慢路径）。
 
 
-### `toPrimitiveForAddition` (`src/exec/coercion_ops.zig:40`)
+### `toPrimitiveForAddition` (`src/exec/value_ops.zig:40`)
 
 - **签名**：`pub const toPrimitiveForAddition = toPrimitiveForAdditionFree;`。
 - **作用**：`toPrimitiveForAdditionFree` 的别名。摘除引用计数后两者逐字相同（`Free` 后缀只是 rc 时代「消费入参」的拼写），保留第二个名字是因为它在各自调用点读起来更准确。
 - **实现**：无独立函数体。
-- **所有权 / 错误 / 调用**：完全等同被别名者。6 处调用全在 `src/exec/vm_arith.zig`（`:61`、`:62`、`:822`、`:826` 等）。
+- **所有权 / 错误 / 调用**：完全等同被别名者。6 处调用全在 `src/exec/vm_opcodes.zig`（`:61`、`:62`、`:822`、`:826` 等）。
 
 
-### `toPrimitiveForAdditionObject` (`src/exec/coercion_ops.zig:42`)
+### `toPrimitiveForAdditionObject` (`src/exec/value_ops.zig:42`)
 
 - **签名**：`fn toPrimitiveForAdditionObject( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue, ) !core.JSValue`。
 - **作用**：对象的 ToPrimitive（default hint）：先试 `Symbol.toPrimitive`，再退回 valueOf/toString。
 - **实现**：`Symbol.toPrimitive` atom 取不到就直接 `toOrdinaryPrimitive`。取到的方法非 undefined/null 时：不可调用也照样报 TypeError `"not a function"`（quickjs.c:11096 JS_CallFree），可调用则以 hint 字符串 `"default"` 调用，返回值仍是对象 → TypeError `"toPrimitive"`（quickjs.c:11104）。方法是 undefined/null 则走 `toOrdinaryPrimitive`。
-- **所有权 / 错误 / 调用**：分配一个 hint 字符串 `"default"`（`value_ops.createStringValue`，GC 管理，不手动释放）；`getValueProperty` / `callValueOrBytecodeSyncInternal` 会重入 JS，期间任何值都靠 GC 根而非本函数保活。两处 TypeError 走 `throwTypeErrorMessage`：Error 对象在那里就已挂到 `ctx`（pending exception），返回的 `error.TypeError` 只是哨兵，上层不必再 materialize。调用方只有本文件 `toPrimitiveForAdditionFree`（`src/exec/coercion_ops.zig:34`），树内无其它调用方。
+- **所有权 / 错误 / 调用**：分配一个 hint 字符串 `"default"`（`value_ops.createStringValue`，GC 管理，不手动释放）；`getValueProperty` / `callValueOrBytecodeSyncInternal` 会重入 JS，期间任何值都靠 GC 根而非本函数保活。两处 TypeError 走 `throwTypeErrorMessage`：Error 对象在那里就已挂到 `ctx`（pending exception），返回的 `error.TypeError` 只是哨兵，上层不必再 materialize。调用方只有本文件 `toPrimitiveForAdditionFree`（`src/exec/value_ops.zig:34`），树内无其它调用方。
 
-### `toPrimitiveForNumber` (`src/exec/coercion_ops.zig:66`)
+### `toPrimitiveForNumber` (`src/exec/value_ops.zig:66`)
 
 - **签名**：`pub fn toPrimitiveForNumber( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue, ) !core.JSValue`。
 - **作用**：ToPrimitive（number hint），借用入参。
 - **实现**：非对象直接返回。其余与 `toPrimitiveForAdditionObject` 同形：hint 字符串是 `"number"`，兜底走 `toOrdinaryPrimitiveNumber`；非 callable 的 `Symbol.toPrimitive` 报 `"not a function"`（quickjs.c:11096），返回对象报 `"toPrimitive"`（quickjs.c:11104）。
-- **所有权 / 错误 / 调用**：hint 字符串 `"number"` 由 `value_ops.createStringValue` 新建，GC 管理；返回的原始值同样归 GC，调用方不释放。TypeError 由 `throwTypeErrorMessage` 就地挂 pending exception 并返回 `error.TypeError` 哨兵；属性读与方法调用的错误原样透传。全树 54 处调用，典型如 `src/exec/vm_arith.zig:65`
+- **所有权 / 错误 / 调用**：hint 字符串 `"number"` 由 `value_ops.createStringValue` 新建，GC 管理；返回的原始值同样归 GC，调用方不释放。TypeError 由 `throwTypeErrorMessage` 就地挂 pending exception 并返回 `error.TypeError` 哨兵；属性读与方法调用的错误原样透传。全树 54 处调用，典型如 `src/exec/vm_opcodes.zig:65`
 、`src/exec/iterator_ops.zig:2508`、`src/js_context.zig:418`。
 
-### `toOrdinaryPrimitive` (`src/exec/coercion_ops.zig:91`)
+### `toOrdinaryPrimitive` (`src/exec/value_ops.zig:91`)
 
 - **签名**：`pub fn toOrdinaryPrimitive( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue, ) !core.JSValue`。
 - **作用**：OrdinaryToPrimitive（default/string 路径）：valueOf → toString。
 - **实现**：依次 `callObjectToPrimitiveMethod(valueOf)`、`(toString)`，谁先返回原始值就用谁；都没有则 TypeError `"toPrimitive"`（quickjs.c:11131）。
 - **所有权 / 错误 / 调用**：本身不分配：两次 `callObjectToPrimitiveMethod` 返回的原始值归 GC。兜底的 `throwTypeErrorMessage(ctx, global, "toPrimitive")` 已把 Error 挂到 `ctx`，返回 `error.TypeError` 哨兵。调用方只有本文件的 `toPrimitiveForAdditionObject`（`:54`、`:69`），树内无外部调用方。
 
-### `toOrdinaryPrimitiveNumber` (`src/exec/coercion_ops.zig:103`)
+### `toOrdinaryPrimitiveNumber` (`src/exec/value_ops.zig:103`)
 
 - **签名**：`pub fn toOrdinaryPrimitiveNumber( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue, ) !core.JSValue`。
 - **作用**：OrdinaryToPrimitive 的 number-hint 孪生体。
 - **实现**：函数体与 `toOrdinaryPrimitive` 完全相同（valueOf → toString → TypeError `"toPrimitive"`，quickjs.c:11131）；number hint 下 qjs 的顺序本就是 valueOf 在前。
 - **所有权 / 错误 / 调用**：与 `toOrdinaryPrimitive` 同：不分配，TypeError 由 `throwTypeErrorMessage` 就地挂 pending exception 后返回哨兵。调用方只有本文件 `toPrimitiveForNumber`（`:79`、`:94`），树内无外部调用方。
 
-### `valueTruthy` (`src/exec/coercion_ops.zig:115`)
+### `valueTruthy` (`src/exec/value_ops.zig:115`)
 
 - **签名**：`pub fn valueTruthy(value: core.JSValue) bool`。
 - **作用**：ToBoolean。
 - **实现**：直接转调 `value_ops.isTruthy`。
-- **所有权 / 错误 / 调用**：无：纯转调 `value_ops.isTruthy`，不分配、无 error set。全树 47 处调用，典型如 `src/exec/iterator_ops.zig:413`、`src/exec/object_builtin_ops.zig:972`、`src/exec/object_builtin_ops.zig:1071`。
+- **所有权 / 错误 / 调用**：无：纯转调 `value_ops.isTruthy`，不分配、无 error set。全树 47 处调用，典型如 `src/exec/iterator_ops.zig:413`、`src/exec/object_ops.zig:972`、`src/exec/object_ops.zig:1071`。
 
-### `toUint16CodeUnit` (`src/exec/coercion_ops.zig:119`)
+### `toUint16CodeUnit` (`src/exec/value_ops.zig:119`)
 
 - **签名**：`pub fn toUint16CodeUnit(number: f64) u16`。
 - **作用**：ToUint16：把 double 折成一个 UTF-16 code unit。
 - **实现**：NaN、非有限或 0 → 0；否则向零取整（负数用 `-@floor(@abs(n))`）后对 65536 取模。
 - **所有权 / 错误 / 调用**：无：纯浮点算术，不分配、无 error set。唯一调用方是 `String.fromCharCode` 的 code-unit 填充循环（`src/exec/string_ops.zig:845`）。
 
-### `toLengthIndex` (`src/exec/coercion_ops.zig:126`)
+### `toLengthIndex` (`src/exec/value_ops.zig:126`)
 
 - **签名**：`pub fn toLengthIndex(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue) !usize`。
 - **作用**：ToLength，并把结果当 usize 下标返回。
 - **实现**：栈上开 `index`，转调 `toLengthIndexInto` 后返回。
 - **所有权 / 错误 / 调用**：`index` 是栈上出参，无堆分配；实际工作在 `toLengthIndexInto`。错误全部来自慢路径：BigInt 在 `toLengthNumber` 被 `throwTypeErrorMessage` 就地挂成 TypeError（返回 `error.TypeError` 哨兵），其余是 ToPrimitive 重入 JS 的透传错误。全树 38 处调用，典型如 `src/exec/object_ops.zig:1906`、`src/exec/string_ops.zig:784`、`src/exec/iterator_ops.zig:1130`。
 
-### `toLengthIndexInto` (`src/exec/coercion_ops.zig:135`)
+### `toLengthIndexInto` (`src/exec/value_ops.zig:135`)
 
 - **签名**：`noinline fn toLengthIndexInto(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue, index: *usize) !void`。
 - **作用**：QJS `JS_ToLengthFree` 形状：整数状态 + 出参写转换后的 length，避免 `!usize` 的 16 字节结果槽绕过 tag switch。
 - **实现**：`fastToLengthIndex` 命中则写 `index.*` 返回。否则 `toLengthIndexSlow`（ToPrimitive/ToNumber）。对照 `JS_ToInt64SatFree`：整数/浮点标签直接处理，object/Symbol/BigInt 留在可观察慢路径。
 - **所有权 / 错误 / 调用**：不拥有 `value`。`toLengthIndex` 是唯一包装。慢路径 TypeError 已由 `throwTypeErrorMessage` 挂消息。
 
-### `toLengthIndexSlow` (`src/exec/coercion_ops.zig:149`)
+### `toLengthIndexSlow` (`src/exec/value_ops.zig:149`)
 
 - **签名**：`pub fn toLengthIndexSlow(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue) !usize`。
 - **作用**：ToLength 的可观察一半：已经排除数值 tag 的调用方从这里进。
 - **实现**：`toLengthNumber` 之后，≥ `maxInt(usize)` 就夹到 `maxInt(usize)`，否则 `@intFromFloat`。
 - **所有权 / 错误 / 调用**：可观察路径：ToPrimitive/ToNumber 会跑用户代码；BigInt 的 TypeError 由 `toLengthNumber` 挂消息。
 
-### `toLengthNumber` (`src/exec/coercion_ops.zig:155`)
+### `toLengthNumber` (`src/exec/value_ops.zig:155`)
 
 - **签名**：`pub fn toLengthNumber(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue) !f64`。
 - **作用**：ToLength 的 double 形态（0 ≤ len ≤ 2^53-1）。
 - **实现**：`toPrimitiveForNumber` 后若是 BigInt，抛 TypeError `"cannot convert bigint to number"`（quickjs.c:12959）；再 `value_ops.toNumberValue`，取不出数值按 NaN 处理：NaN 或 ≤0 → 0，≥ 9007199254740991 夹到该上限，其余 `@floor`。
 - **所有权 / 错误 / 调用**：不拥有 `value`；BigInt 分支先 `throwTypeErrorMessage` 挂上消息再返回 `error.TypeError`。
 
-### `fastToLengthIndex` (`src/exec/coercion_ops.zig:170`)
+### `fastToLengthIndex` (`src/exec/value_ops.zig:170`)
 
 - **签名**：`pub fn fastToLengthIndex(value: core.JSValue) ?usize`。
 - **作用**：ToLength 的无副作用快路径：只吃 int32 / float64 两种 tag。
 - **实现**：int32：≤0 → 0，否则直接 `@intCast`。float64：NaN 或 ≤0 → 0，≥ 9007199254740991 先夹到该上限再 `@floor`，超过 `maxInt(usize)` 夹住。其他 tag 返回 null，交给慢路径。
-- **所有权 / 错误 / 调用**：无：只读 tag 的纯函数，不分配、无 error set，失败用 `null` 而不是错误。调用方是本文件 `toLengthIndexInto`（`:145`）与 `src/exec/regexp_fastpath.zig:671`。
+- **所有权 / 错误 / 调用**：无：只读 tag 的纯函数，不分配、无 error set，失败用 `null` 而不是错误。调用方是本文件 `toLengthIndexInto`（`:145`）与 `src/exec/regexp_ops.zig:671`。
 
-### `toUint32Number` (`src/exec/coercion_ops.zig:185`)
+### `toUint32Number` (`src/exec/value_ops.zig:185`)
 
 - **签名**：`pub fn toUint32Number(number: f64) u32`。
 - **作用**：ToUint32 的数值部分。
 - **实现**：NaN、非有限或 0 → 0；否则向零取整后对 2^32 取模。
 - **所有权 / 错误 / 调用**：无：纯浮点取模，不分配、无 error set。8 处调用，典型如 `src/exec/math_ops.zig:473`（`Math.imul`）、`src/exec/math_ops.zig:330`、`src/exec/string_ops.zig:950`。
 
-### `uint32NumberValue` (`src/exec/coercion_ops.zig:192`)
+### `uint32NumberValue` (`src/exec/value_ops.zig:192`)
 
 - **签名**：`pub fn uint32NumberValue(value: u32) core.JSValue`。
 - **作用**：把 u32 装箱成 JSValue。
 - **实现**：≤ `maxInt(i32)` 走 `int32`，否则 `float64`。
 - **所有权 / 错误 / 调用**：无：按范围选 int32 还是 float64 立即数 tag，不分配、无 error set。三处调用全在 `src/exec/string_ops.zig`（`:950`、`:1053`、`:2321`）。
 
-### `coerceOptionalNumberMethodArgument` (`src/exec/coercion_ops.zig:197`)
+### `coerceOptionalNumberMethodArgument` (`src/exec/value_ops.zig:197`)
 
 - **签名**：`pub fn coerceOptionalNumberMethodArgument( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, preserve_undefined: bool, ) !?core.JSValue`。
 - **作用**：可选数值参数的 ToNumber：给只在「确实传了参数」时才转换的内建方法用。
 - **实现**：`args.len == 0` 返回 null；`preserve_undefined` 且首参是 undefined 也返回 null。否则 `toPrimitiveForNumber`，是 BigInt 就抛 TypeError `"cannot convert bigint to number"`（quickjs.c:12959），其余 `value_ops.toNumberValue`。
 - **所有权 / 错误 / 调用**：返回的 JSValue 由调用方拥有；`toPrimitiveForNumber` 会跑用户代码，TypeError 已由 `throwTypeErrorMessage` 挂好消息再以 error 上抛。
 
-### `primitiveWrapperStoredValue` (`src/exec/coercion_ops.zig:218`)
+### `primitiveWrapperStoredValue` (`src/exec/value_ops.zig:218`)
 
 - **签名**：`pub fn primitiveWrapperStoredValue(rt: *core.JSRuntime, value: core.JSValue) ?core.JSValue`。
 - **作用**：取包装对象里存着的那个原始值。
 - **实现**：非对象或 `expectObject` 失败返回 null；只认 `number` / `boolean` / `big_int` / `symbol` 四个 class（String 包装不在内），命中才取 `object.objectData()`，取不到也返回 null。
 - **所有权 / 错误 / 调用**：返回的是包装对象内部槽里的**借用**值（`object.objectData()`），不建根，调用方不得释放；`rt` 参数未使用（只为保持跨文件调用点统一的 `(rt, value)` 形状，函数头注释已写明）。无 error set：`property_ops.expectObject` 的失败被 `catch return null` 吞掉，非包装类一律 `null`。调用方 `src/exec/json_ops.zig:2432`（把 `null` 转成 `error.TypeError`）；`src/exec/construct.zig:749` 另有一份同名的文件私有副本。
 
-### `toNumberForDateMethod` (`src/exec/coercion_ops.zig:232`)
+### `toNumberForDateMethod` (`src/exec/value_ops.zig:232`)
 
 - **签名**：`pub fn toNumberForDateMethod( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !core.JSValue`。
 - **作用**：Date 方法参数的 ToNumber：对象先 ToPrimitive(number)，BigInt 一律 TypeError。
@@ -200,7 +200,7 @@
 - **签名**：`pub fn binary(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !core.JSValue`。
 - **作用**：二元运算的通用体：`op` 是字节码 opcode，覆盖加减乘除模幂与位运算。
 - **实现**：`add` 且任一侧是字符串 → `stringAdd`。任一侧 Symbol → TypeError。有 BigInt：两侧都得是 BigInt，否则 TypeError，然后 `binaryBigInt`。移位/按位（shl/sar/shr/and/xor/or）两侧 `toInt32`，移位量取 `& 31`，`shr` 按 u32 逻辑右移再 `numberToValue`。剩下的算术走 `binaryNumber`。函数尾是 `unreachable`：生产 opcode 已被上面各臂穷尽。
-- **所有权 / 错误 / 调用**：入参借用；字符串/BigInt 结果是新建的 GC 值（tracing GC 管理，调用方不释放），数值结果是立即数。本文件只拿 `*core.JSRuntime`、没有 realm，所以 `error.TypeError`（Symbol 操作数、BigInt 与非 BigInt 混用、BigInt 的 `shr`）是**裸哨兵**，没有 pending exception，靠调用方的 `builtin_dispatch.materializeRuntimeError`（`src/exec/builtin_dispatch.zig:457`）按 `runtimeErrorInfo` 渲染成 JS Error；BigInt 臂还会原样上浮 `error.DivisionByZero` / `error.NegativeExponent` / `error.BigIntTooLarge`。10 处调用全在 `src/exec/vm_arith.zig`（`:56`、`:63`、`:69`、`:70` 与 `:564` 起的 inc/dec-add 臂），另有 4 处单测。
+- **所有权 / 错误 / 调用**：入参借用；字符串/BigInt 结果是新建的 GC 值（tracing GC 管理，调用方不释放），数值结果是立即数。本文件只拿 `*core.JSRuntime`、没有 realm，所以 `error.TypeError`（Symbol 操作数、BigInt 与非 BigInt 混用、BigInt 的 `shr`）是**裸哨兵**，没有 pending exception，靠调用方的 `builtin_dispatch.materializeRuntimeError`（`src/exec/builtin_dispatch.zig:457`）按 `runtimeErrorInfo` 渲染成 JS Error；BigInt 臂还会原样上浮 `error.DivisionByZero` / `error.NegativeExponent` / `error.BigIntTooLarge`。10 处调用全在 `src/exec/vm_opcodes.zig`（`:56`、`:63`、`:69`、`:70` 与 `:564` 起的 inc/dec-add 臂），另有 4 处单测。
 
 
 ### `compare` (`src/exec/value_ops.zig:57`)
@@ -208,7 +208,7 @@
 - **签名**：`pub fn compare(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !core.JSValue`。
 - **作用**：关系比较 lt/lte/gt/gte 的通用体。
 - **实现**：双字符串：同一值直接 0，否则 `compareStringValues`（返回 null 时 TypeError），按 op 取符号。任一侧 BigInt：`compareBigIntRelational`，得 null（不可比，例如 NaN/undefined）一律返回 false。其余：两侧能取数值就取，否则 `toIntegerOrInfinity`，再按 op 做 f64 比较。
-- **所有权 / 错误 / 调用**：不分配 JS 值（结果是 bool 立即数）；BigInt 关系比较的临时 `bignum.BigInt` 在 `compareBigIntRelational` 那一层就地释放。`error.TypeError`（字符串体不可比、BigInt 与 Symbol/对象混比）是裸哨兵，由调用方 materialize。5 处调用：`src/exec/vm_arith.zig:135`、`:228`、`:231`，以及 `Array.prototype.sort` 默认比较器的 `src/exec/array_ops.zig:5614`、`:5616`。
+- **所有权 / 错误 / 调用**：不分配 JS 值（结果是 bool 立即数）；BigInt 关系比较的临时 `bignum.BigInt` 在 `compareBigIntRelational` 那一层就地释放。`error.TypeError`（字符串体不可比、BigInt 与 Symbol/对象混比）是裸哨兵，由调用方 materialize。5 处调用：`src/exec/vm_opcodes.zig:135`、`:228`、`:231`，以及 `Array.prototype.sort` 默认比较器的 `src/exec/array_ops.zig:5614`、`:5616`。
 
 
 ### `compareBigIntRelational` (`src/exec/value_ops.zig:92`)
@@ -244,7 +244,7 @@
 - **签名**：`pub fn bigIntEqualsNumber(rt: *core.JSRuntime, bigint_value: core.JSValue, number: f64) !bool`。
 - **作用**：BigInt 与 double 是否相等（NaN/±∞ 一律 false）。
 - **实现**：`compareBigIntToNumber` 返回 null 就 false，否则判 `.eq`。
-- **所有权 / 错误 / 调用**：自身不分配，临时 BigInt 全在 `compareBigIntToNumber` 内释放；无法比较（NaN）折成 `false`，错误只有 OOM。调用方是松散相等的 BigInt×Number 臂：`src/exec/vm_arith.zig:815`、`:819`。
+- **所有权 / 错误 / 调用**：自身不分配，临时 BigInt 全在 `compareBigIntToNumber` 内释放；无法比较（NaN）折成 `false`，错误只有 OOM。调用方是松散相等的 BigInt×Number 臂：`src/exec/vm_opcodes.zig:815`、`:819`。
 
 ### `truncatedFiniteNumberToBigInt` (`src/exec/value_ops.zig:158`)
 
@@ -272,14 +272,14 @@
 - **签名**：`pub fn strictEqual(a: core.JSValue, b: core.JSValue) core.JSValue`。
 - **作用**：`===` 的装箱版。
 - **实现**：`core.JSValue.boolean(valuesEqual(a, b))`。
-- **所有权 / 错误 / 调用**：无：转调 `valuesEqual` 后返回 bool 立即数，不分配、无 error set。5 处调用，典型 `src/exec/vm_arith.zig:128`、`:212`、`:779`。
+- **所有权 / 错误 / 调用**：无：转调 `valuesEqual` 后返回 bool 立即数，不分配、无 error set。5 处调用，典型 `src/exec/vm_opcodes.zig:128`、`:212`、`:779`。
 
 ### `strictNotEqual` (`src/exec/value_ops.zig:201`)
 
 - **签名**：`pub fn strictNotEqual(a: core.JSValue, b: core.JSValue) core.JSValue`。
 - **作用**：`!==` 的装箱版。
 - **实现**：`core.JSValue.boolean(!valuesEqual(a, b))`。
-- **所有权 / 错误 / 调用**：无：`valuesEqual` 取反后的 bool 立即数，不分配、无 error set。调用方 `src/exec/vm_arith.zig:129`、`:213`。
+- **所有权 / 错误 / 调用**：无：`valuesEqual` 取反后的 bool 立即数，不分配、无 error set。调用方 `src/exec/vm_opcodes.zig:129`、`:213`。
 
 ### `length` (`src/exec/value_ops.zig:205`)
 
@@ -293,7 +293,7 @@
 - **签名**：`pub fn unary(rt: *core.JSRuntime, op: u8, value: core.JSValue) !core.JSValue`。
 - **作用**：一元运算：not/neg/to_number/inc/dec（含 post_ 变体）。
 - **实现**：`not` 且非 BigInt：`toInt32` 后按位取反。float64 tag 直接算并 `numberToValue`。BigInt：`to_number` 是 TypeError；先试 `shortBigIntUnary` 的 short 快路径，否则 clone 后按 op 做 neg（置符号，0 不带负号）/ ±1（`bignum.subAlloc`/`addAlloc`）/ `bitNot`，结果 `createBigIntValue`。其余值先 `toNumberValue` 再算；最后一段整数臂用 `toInt32`。
-- **所有权 / 错误 / 调用**：数值臂只产立即数；BigInt 臂在堆上克隆并做加减/取反，中间 `bignum.BigInt` 全部 `defer deinit()`，结果经 `createBigIntValue` 拷进 GC 堆。`to_number` 作用于 BigInt 返回裸 `error.TypeError` 哨兵，其余错误是 OOM 与 `toIntegerOrInfinity` 的透传。6 处调用，全在 `src/exec/vm_arith.zig`（`:261`、`:263`、`:292`、`:339`、`:401`、`:483`）。
+- **所有权 / 错误 / 调用**：数值臂只产立即数；BigInt 臂在堆上克隆并做加减/取反，中间 `bignum.BigInt` 全部 `defer deinit()`，结果经 `createBigIntValue` 拷进 GC 堆。`to_number` 作用于 BigInt 返回裸 `error.TypeError` 哨兵，其余错误是 OOM 与 `toIntegerOrInfinity` 的透传。6 处调用，全在 `src/exec/vm_opcodes.zig`（`:261`、`:263`、`:292`、`:339`、`:401`、`:483`）。
 
 
 ### `toStringValue` (`src/exec/value_ops.zig:305`)
@@ -322,7 +322,7 @@
 - **签名**：`pub fn toNumberValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue`。
 - **作用**：无 realm 的 ToNumber（已是原始值的那一半）。
 - **实现**：Symbol → TypeError；BigInt → TypeError（qjs `JS_ToNumberHintFree` quickjs.c:12955-12959：纯 ToNumber 下 BigInt 抛错，ToNumeric 语义由调用方先转）。数值归一，bool → 1/0，null → 0。字符串（恒为扁平）直接按 `resolveData()` 分臂：latin1 先试 `fastStringToInt32`，否则 `parseJsNumberLatin1`（0x80-0xFF 是单个码点而非 UTF-8 前导字节）；utf16 走 `appendRawString` + `parseJsNumber`。其余（含对象、undefined）返回 NaN。
-- **所有权 / 错误 / 调用**：返回立即数，不新建 JS 值；latin1 臂零分配，UTF-16 臂有 `std.ArrayList(u8)` 局部缓冲 `defer deinit()`。Symbol 与 BigInt 返回**裸** `error.TypeError` 哨兵——本文件没有 realm，`"cannot convert bigint to number"` 那条消息是 exec 调用方（如 `src/exec/coercion_ops.zig:165`）自己抛的。45 处调用，典型 `src/exec/coercion_ops.zig:168`、`src/exec/string_ops.zig:755`、`src/exec/string_ops.zig:843`。
+- **所有权 / 错误 / 调用**：返回立即数，不新建 JS 值；latin1 臂零分配，UTF-16 臂有 `std.ArrayList(u8)` 局部缓冲 `defer deinit()`。Symbol 与 BigInt 返回**裸** `error.TypeError` 哨兵——本文件没有 realm，`"cannot convert bigint to number"` 那条消息是 exec 调用方（如 `src/exec/value_ops.zig:165`）自己抛的。45 处调用，典型 `src/exec/value_ops.zig:168`、`src/exec/string_ops.zig:755`、`src/exec/string_ops.zig:843`。
 
 ### `asN` (`src/exec/value_ops.zig:383`)
 
@@ -336,7 +336,7 @@
 - **签名**：`pub fn numberToValue(value: f64) core.JSValue`。
 - **作用**：double 结果装箱：能精确回落 int32 就用 int32。
 - **实现**：值落在 i32 范围内、`@intFromFloat` 往返相等且不是 -0 才走 `int32`，否则 `float64`。
-- **所有权 / 错误 / 调用**：无：只做 tag 规范化（可精确表示且非 -0 就 int32，否则 float64），不分配、无 error set。全树 45 处调用，典型 `src/exec/vm_arith.zig:249`、`src/native.zig:595`、`src/exec/builtin_glue.zig:61`。
+- **所有权 / 错误 / 调用**：无：只做 tag 规范化（可精确表示且非 -0 就 int32，否则 float64），不分配、无 error set。全树 45 处调用，典型 `src/exec/vm_opcodes.zig:249`、`src/native.zig:595`、`src/exec/builtin_glue.zig:61`。
 
 ### `createStringValue` (`src/exec/value_ops.zig:427`)
 
@@ -373,21 +373,21 @@
 - **签名**：`pub fn createBigIntValue(rt: *core.JSRuntime, value: bignum.BigInt) !core.JSValue`。
 - **作用**：**借用** 一个 `bignum.BigInt` 并装箱（调用方仍需自己 deinit）。
 - **实现**：short 适配同上，否则 `createFromBigInt` 复制一份到堆。
-- **所有权 / 错误 / 调用**：与 `createBigIntOwned` 相反：**不消费**入参，`createFromBigInt` 复制 limbs，调用方仍要 `deinit` 自己那份 `bignum.BigInt`；返回的 GC BigInt（或 short 立即数）归 GC。错误只有 OOM。6 处调用，典型 `src/exec/vm_arith.zig:796`、`src/exec/atomics_ops.zig:1070`、`src/exec/builtin_glue.zig:88`。
+- **所有权 / 错误 / 调用**：与 `createBigIntOwned` 相反：**不消费**入参，`createFromBigInt` 复制 limbs，调用方仍要 `deinit` 自己那份 `bignum.BigInt`；返回的 GC BigInt（或 short 立即数）归 GC。错误只有 OOM。6 处调用，典型 `src/exec/vm_opcodes.zig:796`、`src/exec/atomics_ops.zig:1070`、`src/exec/builtin_glue.zig:88`。
 
 ### `bigIntToNumber` (`src/exec/value_ops.zig:502`)
 
 - **签名**：`pub fn bigIntToNumber(rt: *core.JSRuntime, value: core.JSValue) !f64`。
 - **作用**：BigInt → double（ToNumeric 侧调用方用）。
 - **实现**：short bigint 直接 `@floatFromInt`；否则 clone 出临时 BigInt，`BigInt.toFloat64` 从 limb 一次就近偶舍入（qjs `js_bigint_to_float64`）；临时 BigInt 在函数内释放。
-- **所有权 / 错误 / 调用**：`cloneBigIntValue` 的 `bignum.BigInt` `defer deinit()`。错误只有 OOM。7 处调用，典型 `src/exec/builtin_glue.zig:61`、`src/exec/class_init_ops.zig:140`、`src/exec/reflect_ops.zig:102`。
+- **所有权 / 错误 / 调用**：`cloneBigIntValue` 的 `bignum.BigInt` `defer deinit()`。错误只有 OOM。7 处调用，典型 `src/exec/builtin_glue.zig:61`、`src/exec/function_ops.zig:140`、`src/exec/reflect_ops.zig:102`。
 
 ### `toIntegerOrInfinity` (`src/exec/value_ops.zig:509`)
 
 - **签名**：`pub fn toIntegerOrInfinity(rt: *core.JSRuntime, value: core.JSValue) !f64`。
 - **作用**：ToNumber 的 f64 形态（**不做截断**，取整由调用方负责）。
 - **实现**：已是数值直接返回；BigInt → TypeError（qjs `JS_ToNumberHintFree` quickjs.c:12955-12959）；bool → 1/0；null → 0；undefined → NaN；其余（字符串/对象）`appendValueString` 后 `parseJsNumber`。
-- **所有权 / 错误 / 调用**：返回 f64，不产生 JS 值；字符串/对象臂的 `std.ArrayList(u8)` `defer deinit()`。BigInt 返回裸 `error.TypeError` 哨兵，其余错误来自 `appendValueString`（`AppendStringError`）。7 处调用，典型 `src/root.zig:119`、`src/exec/string_builtin_ops.zig:878`、`src/exec/reflect_ops.zig:104`。
+- **所有权 / 错误 / 调用**：返回 f64，不产生 JS 值；字符串/对象臂的 `std.ArrayList(u8)` `defer deinit()`。BigInt 返回裸 `error.TypeError` 哨兵，其余错误来自 `appendValueString`（`AppendStringError`）。7 处调用，典型 `src/root.zig:119`、`src/exec/string_ops.zig:878`、`src/exec/reflect_ops.zig:104`。
 
 ### `toIndexUsize` (`src/exec/value_ops.zig:524`)
 
@@ -423,14 +423,14 @@
 - **作用**：ToBoolean：判断值的真假（`undefined`/`null`/`false`/`0`/`NaN`/空串为假）。
 
 - **实现**：转调 `core.value_semantics.toBoolean`。
-- **所有权 / 错误 / 调用**：无：转调 `core.value_semantics.toBoolean` 的只读谓词，不分配、无 error set。16 处调用，典型 `src/exec/vm_control.zig:85`、`src/exec/coercion_ops.zig:122`、`src/root.zig:123`。
+- **所有权 / 错误 / 调用**：无：转调 `core.value_semantics.toBoolean` 的只读谓词，不分配、无 error set。16 处调用，典型 `src/exec/vm_opcodes.zig:85`、`src/exec/value_ops.zig:122`、`src/root.zig:123`。
 
 ### `isFunctionObject` (`src/exec/value_ops.zig:577`)
 
 - **签名**：`pub fn isFunctionObject(value: core.JSValue) bool`。
 - **作用**：谓词：该值是否是可调用的函数对象。
 - **实现**：非对象/无 header → false；有 `proxyTarget()` 转 `proxyTargetIsFunction`；否则认这些 class：`c_function`、任意 bytecode function class、`bound_function`、`c_function_data`、async-resume class、`c_closure`。
-- **所有权 / 错误 / 调用**：无：只读 class_id 与 proxy target 的谓词，不分配、无 error set。调用方 `proxyTargetIsFunction`（同文件）与 `src/exec/reflect_ops.zig:217`（`value_ops.typeOf` 已删，`typeof` 走 `src/exec/vm_value.zig` 的同名 helper）。
+- **所有权 / 错误 / 调用**：无：只读 class_id 与 proxy target 的谓词，不分配、无 error set。调用方 `proxyTargetIsFunction`（同文件）与 `src/exec/reflect_ops.zig:217`（`value_ops.typeOf` 已删，`typeof` 走 `src/exec/vm_opcodes.zig` 的同名 helper）。
 
 ### `proxyTargetIsFunction` (`src/exec/value_ops.zig:590`)
 
@@ -451,7 +451,7 @@
 - **签名**：`pub fn appendRawString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void`。
 - **作用**：把一个字符串 JSValue 的内容以 UTF-8 追加到调用方的字节缓冲，是引擎内 `JS_ToCStringLen2` 的等价出口（atom 驻留、数字解析、栈文本拼装、主机/FS 边界共用这一份编码）。
 - **实现**：转调 `core.string.appendValueUtf8`：ASCII latin1 原样拷，latin1 0x80-0xFF 展成两字节 UTF-8，UTF-16 按代理对合并编码（qjs `JS_ToCStringLen2` quickjs.c:4458）。latin1 高位字节**不能**裸写，下游一律按 UTF-8 解读。该名字也在嵌入 API（`src/root.zig`）中公开。
-- **所有权 / 错误 / 调用**：只往调用方拥有的 `std.ArrayList(u8)` 追加，缓冲的分配/释放全归调用方，本函数不建根也不产生 JS 值。error set 是 `core.string.appendValueUtf8` 的 `RuntimeError`（OOM、编码类）裸哨兵。42 处调用，典型 `src/exec/error_stack_ops.zig:140`、`src/exec/exception_ops.zig:459`、`src/js_context.zig:824`。
+- **所有权 / 错误 / 调用**：只往调用方拥有的 `std.ArrayList(u8)` 追加，缓冲的分配/释放全归调用方，本函数不建根也不产生 JS 值。error set 是 `core.string.appendValueUtf8` 的 `RuntimeError`（OOM、编码类）裸哨兵。42 处调用，典型 `src/exec/exception_ops.zig:140`、`src/exec/exception_ops.zig:459`、`src/js_context.zig:824`。
 
 
 ### `formatFiniteNumberAssumeCapacity` (`src/exec/value_ops.zig:635`)
@@ -481,7 +481,7 @@
 - **签名**：`pub fn shortBigIntBinary(op: u8, lhs: i64, rhs: i64) ?core.JSValue`。
 - **作用**：short BigInt 的二元快路径，装不下返回 null。
 - **实现**：add/sub/mul 走带溢出检查的 `shortBigIntAdd/Sub/Mul`；and/xor/or 直接对 i64 位运算后装箱；其他 op（div/mod/pow/移位）返回 null。
-- **所有权 / 错误 / 调用**：无：纯 i64 运算派发，不分配、无 error set；溢出或放不进 short bigint 时返回 `null`，由调用方退回堆路径。调用方 `binaryBigInt`（`:682`）与 `src/exec/vm_arith.zig:49`
+- **所有权 / 错误 / 调用**：无：纯 i64 运算派发，不分配、无 error set；溢出或放不进 short bigint 时返回 `null`，由调用方退回堆路径。调用方 `binaryBigInt`（`:682`）与 `src/exec/vm_opcodes.zig:49`
 、`:528`、`:649`。
 
 ### `shortBigIntUnary` (`src/exec/value_ops.zig:747`)
@@ -489,7 +489,7 @@
 - **签名**：`pub fn shortBigIntUnary(op: u8, value: i64) ?core.JSValue`。
 - **作用**：short BigInt 的一元快路径，装不下返回 null。
 - **实现**：neg = `0 - value`，inc/dec 走 `shortBigIntAdd/Sub(±1)`，not 直接 `~value` 装箱；其他 op 返回 null。
-- **所有权 / 错误 / 调用**：无：一元版的纯 i64 派发，不分配、无 error set，放不下返回 `null`。调用方 `unary`（`:249`）与 `src/exec/vm_arith.zig:256`、`:330`、`:389`、`:467` 四处。
+- **所有权 / 错误 / 调用**：无：一元版的纯 i64 派发，不分配、无 error set，放不下返回 `null`。调用方 `unary`（`:249`）与 `src/exec/vm_opcodes.zig:256`、`:330`、`:389`、`:467` 四处。
 
 
 ### `shortBigIntAdd` (`src/exec/value_ops.zig:757`)
@@ -640,7 +640,7 @@
 - **作用**：判断值是否带 [[IsHTMLDDA]]（`document.all` 这类在 `typeof`/ToBoolean/松散相等里伪装成 undefined 的对象）。
 
 - **实现**：转调 `core.value_semantics.isHTMLDDA`（`document.all` 那类 [[IsHTMLDDA]] 值）。
-- **所有权 / 错误 / 调用**：无：`core.value_semantics.isHTMLDDA` 的只读谓词包装，不分配、无 error set。8 处调用，典型 `src/exec/vm_arith.zig:781`、`src/exec/vm_value.zig:188`、`:212`。
+- **所有权 / 错误 / 调用**：无：`core.value_semantics.isHTMLDDA` 的只读谓词包装，不分配、无 error set。8 处调用，典型 `src/exec/vm_opcodes.zig:781`、`src/exec/vm_opcodes.zig:188`、`:212`。
 
 ### `compareStringValues` (`src/exec/value_ops.zig:1145`)
 
@@ -678,157 +678,157 @@
 - **所有权 / 错误 / 调用**：只往调用方拥有的 `std.ArrayList(u8)` 追加，缓冲归调用方；本文件钉的策略是 `.{ .symbol = .describe }`（Symbol 写描述而不是抛 TypeError），这是它与带 realm 的 ToString 的唯一语义差别。error set `AppendStringError` = `core.errors.RuntimeError`，裸哨兵。8 处调用，典型 `src/root.zig:104`、`src/exec/property_ops.zig:79`、`src/exec/object_ops.zig:3874`。
 
 
-## `src/exec/error_ops.zig` — Error 记录缝
+## `src/exec/exception_ops.zig` — Error 记录缝
 
 `.error_object`：`toString`、stack getter/setter、`captureStackTrace`。构造器不走这张表。`errorCall` 校验 `Error.captureStackTrace` 的 receiver 是名为 Error 的可调用对象。
 
 
-### `errorEntry` (`src/exec/error_ops.zig:42`)
+### `errorEntry` (`src/exec/exception_ops.zig:42`)
 
 - **签名**：`fn errorEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry`。
 - **作用**：comptime 帮手，为 `.error_object` domain 的四条记录——`Error.prototype.toString`、`stack` 的 getter 与 setter、静态 `Error.captureStackTrace`——各生成一行 `InternalEntry`。
 - **实现**：`.id` 与 `.magic` 都取传入 id，`cproto` 固定 `.generic_magic`，`native_function` 是 `genericMagicFunction(&errorCall)`。表里四条：`toString`、`get stack`、`set stack`、`captureStackTrace`。
 - **所有权 / 错误 / 调用**：只在 comptime 求值（表本身是 `errorEntries:` 块），产物是静态表项，无运行期分配。
 
-### `errorCall` (`src/exec/error_ops.zig:53`)
+### `errorCall` (`src/exec/exception_ops.zig:53`)
 
 - **签名**：`fn errorCall( native_ctx: *core.JSContext, native_this: core.JSValue, native_args: []const core.JSValue, native_magic: i32, ) HostError!core.JSValue`。
 - **作用**：上面四条记录共用的 native 函数体：还原执行环境后按记录 id 分派，并承担 `Error.captureStackTrace` 的 receiver 校验（必须是名为 `Error` 的可调用对象）。
 - **实现**：`nativeCall` + `callableRealm` 之后按 id 分派。`capture_stack_trace` 先校验 receiver：`call.thisObject` 取到对象、`isCallableValue(this_value)`、`constructorNameEqlLocal(receiver, "Error")`，三者任一不成立都是 TypeError，然后进 `error_stack_ops.errorCaptureStackTrace`。其余：`to_string` → `string_ops.errorToStringCall`；`stack_getter` → `errorStackGetter`；`stack_setter` 需要 `host_call.func_obj`（缺则 TypeError）再进 `errorStackSetter`；未知 id → TypeError。
-- **所有权 / 错误 / 调用**：`this_value` / `args` 借用，返回值归 GC。`nativeCall` 认不出调用形态时返回 `null` → 裸 `error.TypeError`；`capture_stack_trace` 的三道校验（非对象 receiver、不可调用、构造器名不是 `Error`）与 `else` 分支同样是**裸**哨兵，没有 pending exception，由 native seam 的 `builtin_dispatch.materializeRuntimeError` 渲染；被转发的 `errorStackGetter` / `errorStackSetter` / `errorCaptureStackTrace` / `errorToStringCall` 则可能已经挂好 pending exception。realm 由 `callableRealm(host_call)` 原子选定，之后所有下游都用 `realm.global`。没有直接调用方：它经 `internal_entries` 的 `genericMagicFunction(&errorCall)`（`src/exec/error_ops.zig:49`）由 `.error_object` 记录表分发。
+- **所有权 / 错误 / 调用**：`this_value` / `args` 借用，返回值归 GC。`nativeCall` 认不出调用形态时返回 `null` → 裸 `error.TypeError`；`capture_stack_trace` 的三道校验（非对象 receiver、不可调用、构造器名不是 `Error`）与 `else` 分支同样是**裸**哨兵，没有 pending exception，由 native seam 的 `builtin_dispatch.materializeRuntimeError` 渲染；被转发的 `errorStackGetter` / `errorStackSetter` / `errorCaptureStackTrace` / `errorToStringCall` 则可能已经挂好 pending exception。realm 由 `callableRealm(host_call)` 原子选定，之后所有下游都用 `realm.global`。没有直接调用方：它经 `internal_entries` 的 `genericMagicFunction(&errorCall)`（`src/exec/exception_ops.zig:49`）由 `.error_object` 记录表分发。
 
 
-## `src/exec/error_stack_ops.zig` — stack 捕获与 CallSite
+## `src/exec/exception_ops.zig` — stack 捕获与 CallSite
 
 对照 `build_backtrace`（quickjs.c:7553-7658）。`Error.prepareStackTrace` 若可调用则用之，并用 `formatting_error_stack` 防重入。顶层脚本帧名字==文件名时渲染 `"<eval>"`。
 
 
-### `captureErrorStack` (`src/exec/error_stack_ops.zig:28`)
+### `captureErrorStack` (`src/exec/exception_ops.zig:28`)
 
 - **签名**：`pub fn captureErrorStack(ctx: *core.JSContext, global: *core.Object, instance: *core.Object) !void`。
 - **作用**：在 Error 实例上捕获当前 VM 回溯，存成 CallSite 数组槽（格式化留到读 `stack` 时）。
 - **实现**：`buildCallSiteArray(ctx, global, null)` 后 `instance.setErrorStackSites`。
-- **所有权 / 错误 / 调用**：`buildCallSiteArray` 新建的 CallSite 数组立刻交给 `instance.setErrorStackSites` 存进 Error 的 ordinary payload，由 payload 拥有；该 setter 内部会打 `rt.gc.generationalBarrier`（Error 可能已被 minor 提升，sites 是新生代子对象），本函数自己不建根。错误是数组构造与 payload 分配的 OOM 透传（裸哨兵）。4 处调用：`attachStackToErrorValue`（`src/exec/error_stack_ops.zig:41`）与 `src/exec/object_ops.zig:735`、`:828`、`:934` 的 Error 实例构造点。
+- **所有权 / 错误 / 调用**：`buildCallSiteArray` 新建的 CallSite 数组立刻交给 `instance.setErrorStackSites` 存进 Error 的 ordinary payload，由 payload 拥有；该 setter 内部会打 `rt.gc.generationalBarrier`（Error 可能已被 minor 提升，sites 是新生代子对象），本函数自己不建根。错误是数组构造与 payload 分配的 OOM 透传（裸哨兵）。4 处调用：`attachStackToErrorValue`（`src/exec/exception_ops.zig:41`）与 `src/exec/object_ops.zig:735`、`:828`、`:934` 的 Error 实例构造点。
 
-### `attachStackToErrorValue` (`src/exec/error_stack_ops.zig:38`)
+### `attachStackToErrorValue` (`src/exec/exception_ops.zig:38`)
 
 - **签名**：`pub fn attachStackToErrorValue(ctx: *core.JSContext, global: *core.Object, value: core.JSValue) !void`。
 - **作用**：值层面的栈捕获：值是对象才挂 CallSite，原始值直接忽略。
 - **实现**：`expectObject` 失败就 `return`（不报错），否则转 `captureErrorStack`。这是 `exception_ops` 各构造原语在「构造时抓栈」的接缝（对照 qjs `JS_ThrowError2` 里的 `build_backtrace`）。
 - **所有权 / 错误 / 调用**：非对象值被 `property_ops.expectObject(...) catch return` 静默忽略（不是错误，也不是 no-op 以外的语义）；对象走 `captureErrorStack`，sites 数组的所有权与写屏障都在那里处理。错误只有透传。3 处调用，全在 `src/exec/exception_ops.zig`：`:33`（`createNamedError`）、`:97`、`:291`（`promiseAggregateError`）。
 
-### `buildErrorStackValue` (`src/exec/error_stack_ops.zig:43`)
+### `buildErrorStackValue` (`src/exec/exception_ops.zig:43`)
 
 - **签名**：`pub fn buildErrorStackValue(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, error_value: core.JSValue, skip_name: ?[]const u8) !core.JSValue`。
 - **作用**：产出 `Error.prototype.stack` 的值：优先交给用户的 `Error.prepareStackTrace`，否则用内建文本格式。
 - **实现**：`ctx.runtime.formatting_error_stack` 已置位（重入）时直接走 `buildErrorStackStringValue`。否则若 `errorPrepareStackTrace` 拿到可调用的 hook：先 `buildCallSiteArray(skip_name)`，置 `formatting_error_stack`（`defer` 复位）后 `callValueOrBytecodeRoot(undefined, prepare, {error_value, sites})`。hook 抛错时：命中 pending exception 就 `takeException` 并返回 null 值；否则清异常，`runtimeErrorInfo(err) != null` 也返回 null 值，其余 error 上抛。没有 hook 就回落内建文本。
 - **所有权 / 错误 / 调用**：返回新建的 GC 字符串，或用户 `Error.prepareStackTrace` 钩子的返回值（同样归 GC）。`ctx.runtime.formatting_error_stack` 是重入闸：置位 + `defer` 复位，防止钩子里再读 `.stack` 无限递归。钩子抛错时的错误处理是本函数的要点：pending exception 与 err 匹配就 `takeException()` **吞掉**并返回 `null` 值；否则 `clearException()` 后凡是 `runtimeErrorInfo` 认识的引擎 sentinel 也折成 `null` 值，只有它不认识的错误才上浮。调用方 `errorStackGetter`（`:254`）与 `errorCaptureStackTrace`（`:342`）。
 
-### `formatCapturedErrorStackValue` (`src/exec/error_stack_ops.zig:63`)
+### `formatCapturedErrorStackValue` (`src/exec/exception_ops.zig:63`)
 
 - **签名**：`pub fn formatCapturedErrorStackValue( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, error_value: core.JSValue, sites_value: core.JSValue, site_count: usize, ) !core.JSValue`。
 - **作用**：已经抓好 CallSite 数组的 Error 读 `stack` 时的格式化入口。
 - **实现**：与 `buildErrorStackValue` 同形，只是不再重新采集：重入或无 hook 时走 `formatCapturedErrorStackStringValue(sites_value, site_count)`，有 hook 时把现成的 sites 数组传给它，错误处理（pending exception → null 值）也一致。
-- **所有权 / 错误 / 调用**：「已有 sites」版本：`sites_value` 是从 Error payload 借来的数组，不 dup 不建根；返回新建的 GC 字符串或钩子结果。与 `buildErrorStackValue` 共用同一套 `formatting_error_stack` 防递归与「把钩子异常吞成 `null` 值」的错误策略。唯一调用方 `errorStackGetter`（`src/exec/error_stack_ops.zig:250`）。
+- **所有权 / 错误 / 调用**：「已有 sites」版本：`sites_value` 是从 Error payload 借来的数组，不 dup 不建根；返回新建的 GC 字符串或钩子结果。与 `buildErrorStackValue` 共用同一套 `formatting_error_stack` 防递归与「把钩子异常吞成 `null` 值」的错误策略。唯一调用方 `errorStackGetter`（`src/exec/exception_ops.zig:250`）。
 
-### `throwParseSyntaxError` (`src/exec/error_stack_ops.zig:98`)
+### `throwParseSyntaxError` (`src/exec/exception_ops.zig:98`)
 
 - **签名**：`pub fn throwParseSyntaxError( ctx: *core.JSContext, global: *core.Object, filename: []const u8, line: u32, col: u32, message: []const u8, ) !core.JSValue`。
 - **作用**：解析/编译期报错的统一出口：按 `filename:line:col` 造一个栈已经铺好的 `SyntaxError`，挂进 pending exception，并返回 `error.SyntaxError` 哨兵。
 - **实现**：line/col 用 `std.math.cast` 转 i32，溢出饱和成 `maxInt(i32)`；`createNamedErrorWithoutStack("SyntaxError", message)` 建对象，`defineParseErrorSurface` 铺开 fileName/lineNumber/columnNumber 与预建 stack，然后 `ctx.throwValue(error_value)` 并返回 `error.SyntaxError` 这个哨兵（对照 qjs `build_backtrace` 的 filename 分支，quickjs.c:7553-7570：编译错误的栈在抛出时就建好）。
-- **所有权 / 错误 / 调用**：`createNamedErrorWithoutStack` 建出的 Error 归 GC（注释里「构造失败就 free」在 tracing GC 下退化成交给 GC）；`ctx.throwValue(error_value)` 之后异常槽是它的根。返回的 `error.SyntaxError` 是**已挂 pending exception** 的哨兵，调用方不必再 materialize；`defineParseErrorSurface` 失败则在挂异常之前原样上浮。5 处调用：`src/exec/eval_ops.zig:441`、`src/exec/eval_entry.zig:127`、`src/exec/function_ops.zig:500`，另有 `call_runtime.zig:3371`、`call.zig:2496` 两处。
+- **所有权 / 错误 / 调用**：`createNamedErrorWithoutStack` 建出的 Error 归 GC（注释里「构造失败就 free」在 tracing GC 下退化成交给 GC）；`ctx.throwValue(error_value)` 之后异常槽是它的根。返回的 `error.SyntaxError` 是**已挂 pending exception** 的哨兵，调用方不必再 materialize；`defineParseErrorSurface` 失败则在挂异常之前原样上浮。5 处调用：`src/exec/eval_entry.zig:441`、`src/exec/eval_entry.zig:127`、`src/exec/function_ops.zig:500`，另有 `call_runtime.zig:3371`、`call.zig:2496` 两处。
 
-### `defineParseErrorSurface` (`src/exec/error_stack_ops.zig:120`)
+### `defineParseErrorSurface` (`src/exec/exception_ops.zig:120`)
 
 - **签名**：`fn defineParseErrorSurface( ctx: *core.JSContext, global: *core.Object, error_value: core.JSValue, filename: []const u8, line_num: i32, col_num: i32, ) !void`。
 - **作用**：给上面那个 `SyntaxError` 对象补齐可观察表面：三个 own 属性 `fileName` / `lineNumber` / `columnNumber`，外加一条预先渲染好、直接写进 error 的 stack 槽的栈文本（编译错误没有真实调用帧可在读 `stack` 时回溯）。
 - **实现**：`expectObject` 失败直接返回。三个 own 数据属性 `fileName` / `lineNumber` / `columnNumber` 都以 (writable=true, enumerable=false, configurable=true) 定义。再把 `"    at {file}:{line}:{col}\n"` 打进临时缓冲，接上 `buildErrorStackStringValue` 的默认帧文本，`createStringValue` 后 `instance.setErrorStack`，于是惰性 `stack` 访问器原样返回它。
-- **所有权 / 错误 / 调用**：新建两个 GC 字符串（fileName 与最终 stack），分别由属性槽和 `setErrorStack` 的 payload 持有；`setErrorStack` 内部打 generational barrier（TGC S2 之后字符串体也是 tracer cell）。`std.ArrayList(u8)` 是真正的局部缓冲，`defer bytes.deinit` 释放。非对象 `error_value` 被 `catch return` 忽略。此时 Error 还没进异常槽，所有错误都是裸哨兵向上传。文件私有，唯一调用方 `throwParseSyntaxError`（`src/exec/error_stack_ops.zig:114`）。
+- **所有权 / 错误 / 调用**：新建两个 GC 字符串（fileName 与最终 stack），分别由属性槽和 `setErrorStack` 的 payload 持有；`setErrorStack` 内部打 generational barrier（TGC S2 之后字符串体也是 tracer cell）。`std.ArrayList(u8)` 是真正的局部缓冲，`defer bytes.deinit` 释放。非对象 `error_value` 被 `catch return` 忽略。此时 Error 还没进异常槽，所有错误都是裸哨兵向上传。文件私有，唯一调用方 `throwParseSyntaxError`（`src/exec/exception_ops.zig:114`）。
 
-### `errorPrepareStackTrace` (`src/exec/error_stack_ops.zig:144`)
+### `errorPrepareStackTrace` (`src/exec/exception_ops.zig:144`)
 
 - **签名**：`fn errorPrepareStackTrace(global: *core.Object) !?core.JSValue`（文件私有）。
 - **作用**：取 `Error.prepareStackTrace` hook，不可调用（或 `Error` 不是对象）时返回 null。
 - **实现**：`global.getProperty(Error)` → `expectObject`（失败 null）→ `getProperty(prepareStackTrace)` → `isCallableValue` 过滤。
 - **所有权 / 错误 / 调用**：两次 `getProperty` 都是不触发 accessor 的普通读，返回的 `prepare` 是**借用**值，调用方在 `formatting_error_stack` 窗口内立即用掉。`Error` 不是对象或钩子不可调用时返回 `null` 而不是错误；错误只有 `getProperty` 自身的透传（如未初始化 var_ref 的 `error.ReferenceError`）。文件私有，调用方 `buildErrorStackValue`（`:47`）与 `formatCapturedErrorStackValue`（`:74`）。
 
-### `backtraceFunctionNameEql` (`src/exec/error_stack_ops.zig:156`)
+### `backtraceFunctionNameEql` (`src/exec/exception_ops.zig:156`)
 
 - **签名**：`pub fn backtraceFunctionNameEql(ctx: *core.JSContext, entry: core.BacktraceFrame, expected: []const u8) bool`。
 - **作用**：回溯帧的显示名是否等于给定字符串。
 - **实现**：`std.mem.eql(u8, callSiteFunctionName(ctx, entry), expected)`，因此比的是渲染后的名字（含 `<anonymous>` / `<eval>` 映射）。
 - **所有权 / 错误 / 调用**：无：比对 `callSiteFunctionName` 返回的借用切片，不分配、无 error set。2 处调用，都是栈格式化时跳过 `captureStackTrace` 指定的起始帧：`src/exec/string_ops.zig:677`、`src/exec/array_ops.zig:289`。
 
-### `callSiteFunctionName` (`src/exec/error_stack_ops.zig:168`)
+### `callSiteFunctionName` (`src/exec/exception_ops.zig:168`)
 
 - **签名**：`pub fn callSiteFunctionName(ctx: *core.JSContext, entry: core.BacktraceFrame) []const u8`。
 - **作用**：回溯帧的显示名（对照 qjs build_backtrace，quickjs.c:7580-7586）。
 - **实现**：从 atom 表取函数名与文件名：名字为空 → `"<anonymous>"`；名字与文件名相同 → `"<eval>"`（zjs 顶层字节码的 name 就是 filename，qjs 那边是编译器把顶层命名成 `JS_ATOM__eval_`，quickjs.c:37252）；否则原名。
-- **所有权 / 错误 / 调用**：返回的是 atom 表里的**借用**名字切片，或静态字面量 `"<anonymous>"` / `"<eval>"`；调用方不得释放，也不能跨 atom 表变动继续持有。不分配、无 error set。文件内唯一调用方 `backtraceFunctionNameEql`（`src/exec/error_stack_ops.zig:158`）。
+- **所有权 / 错误 / 调用**：返回的是 atom 表里的**借用**名字切片，或静态字面量 `"<anonymous>"` / `"<eval>"`；调用方不得释放，也不能跨 atom 表变动继续持有。不分配、无 error set。文件内唯一调用方 `backtraceFunctionNameEql`（`src/exec/exception_ops.zig:158`）。
 
-### `callSiteFunctionNameValue` (`src/exec/error_stack_ops.zig:176`)
+### `callSiteFunctionNameValue` (`src/exec/exception_ops.zig:176`)
 
 - **签名**：`pub fn callSiteFunctionNameValue(ctx: *core.JSContext, entry: core.BacktraceFrame) !core.JSValue`。
 - **作用**：同 `callSiteFunctionName`，但产出 CallSite 用的 JS 值。
 - **实现**：名字为空返回 **null 值**（不是 `"<anonymous>"`）；名字等于文件名返回字符串 `"<eval>"`；否则把原名铸成字符串。
 - **所有权 / 错误 / 调用**：与上面的切片版不同，这里**新建** GC 字符串（`"<eval>"` 或函数名），匿名帧返回 `null` 值；返回值归 GC，错误只有 OOM。唯一调用方 `src/exec/object_ops.zig:983`（构造 CallSite 对象的 functionName 槽）。
 
-### `errorStackTraceLimit` (`src/exec/error_stack_ops.zig:184`)
+### `errorStackTraceLimit` (`src/exec/exception_ops.zig:184`)
 
 - **签名**：`pub fn errorStackTraceLimit(_: *core.JSRuntime, global: *core.Object) usize`。
 - **作用**：读 `Error.stackTraceLimit`，决定回溯最多收几帧。
 - **实现**：默认 10：`Error` 不是 own 数据对象、或没有 own `stackTraceLimit` 都取 10；值是 undefined/null → 0；取不出数值 → 10；非有限或 ≤0 → 0；否则 `@floor` 并在超过 `maxInt(usize)` 时夹住。`rt` 参数未使用。
 - **所有权 / 错误 / 调用**：runtime 参数未使用。只读 `Error.stackTraceLimit` 的**自有数据属性借用值**（`getOwnDataObjectBorrowed` + `getOwnDataPropertyValue`：不走原型链、不触发 accessor、不重入 JS），缺省 10。不分配、无 error set——非数值/不可用一律折成 10 或 0。2 处调用：`src/exec/string_ops.zig:666`、`src/exec/array_ops.zig:279`。
 
-### `appendBacktraceFunctionName` (`src/exec/error_stack_ops.zig:197`)
+### `appendBacktraceFunctionName` (`src/exec/exception_ops.zig:197`)
 
 - **签名**：`pub fn appendBacktraceFunctionName( ctx: *core.JSContext, bytes: *std.ArrayList(u8), function_name: core.Atom, filename: core.Atom, ) !void`。
 - **作用**：拼装 `error.stack` 文本时写出一帧的函数名，数据来自帧记录里的两个 atom；匿名帧和顶层 script/eval 帧在这里归一成 `<anonymous>` / `<eval>`。
 - **实现**：与 `callSiteFunctionName` 同一套映射，只是直接往缓冲里写：空名写 `"<anonymous>"`，名字等于文件名写 `"<eval>"`，否则写原名。
 - **所有权 / 错误 / 调用**：只往调用方缓冲里 append，缓冲归调用方（`string_ops.zig:684` 的 backtrace 渲染）；error 只有 `OutOfMemory`。
 
-### `appendCallSiteFunctionName` (`src/exec/error_stack_ops.zig:215`)
+### `appendCallSiteFunctionName` (`src/exec/exception_ops.zig:215`)
 
 - **签名**：`pub fn appendCallSiteFunctionName(rt: *core.JSRuntime, bytes: *std.ArrayList(u8), site: *core.Object) !void`。
 - **作用**：同样写一帧的函数名，但取自 CallSite 对象的内部槽——即 `Error.prepareStackTrace` 把帧暴露成 CallSite 之后的那条渲染路径。
 - **实现**：`site.callSiteFunctionName()` 取不到、或取到的不是字符串，都写 `"<anonymous>"`；否则 `value_ops.appendRawString` 写进缓冲。
 - **所有权 / 错误 / 调用**：只往调用方缓冲里 append（调用点 `string_ops.zig:712`）；`site` 借用，不改内部槽；error 只有 `OutOfMemory`。
 
-### `appendCallSiteFileName` (`src/exec/error_stack_ops.zig:227`)
+### `appendCallSiteFileName` (`src/exec/exception_ops.zig:227`)
 
 - **签名**：`pub fn appendCallSiteFileName(rt: *core.JSRuntime, bytes: *std.ArrayList(u8), site: *core.Object) !void`。
 - **作用**：从 CallSite 对象的内部槽取源文件名写进缓冲，是上一条的文件名对应项（调用点把它写进单独的 `filename_bytes` 缓冲再拼进帧行）。
 - **实现**：`site.callSiteFile()` 取不到、或取到的不是字符串，都写 `"<anonymous>"`；否则 `value_ops.appendRawString`。
 - **所有权 / 错误 / 调用**：只往调用方缓冲里 append（调用点 `string_ops.zig:721`）；`site` 借用；error 只有 `OutOfMemory`。
 
-### `errorStackGetter` (`src/exec/error_stack_ops.zig:239`)
+### `errorStackGetter` (`src/exec/exception_ops.zig:239`)
 
 - **签名**：`pub fn errorStackGetter( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, ) !core.JSValue`。
 - **作用**：`Error.prototype.stack` 的 getter：惰性把捕获的 CallSite 格式化成字符串并缓存。
 - **实现**：this 不是对象 → TypeError；class 不是 `error_` → 返回 undefined（不报错）。已有 `errorStack()` 直接返回缓存。有 `errorStackSites()` 就 `formatCapturedErrorStackValue`（传 `errorStackSiteCount()`）并 `setErrorStack` 缓存。两者都没有才现场 `buildErrorStackValue`（不缓存）。
-- **所有权 / 错误 / 调用**：命中缓存时返回 payload 里的**借用**值（`object.errorStack()`）；否则新建字符串（`formatCapturedErrorStackValue` / `buildErrorStackValue`），并用 `setErrorStack` 写回 payload（带 generational barrier）后返回同一个值。非对象 this 是裸 `error.TypeError`；非 `error_` class 返回 `undefined` 而不抛。2 处调用：`src/exec/error_ops.zig:79`（stack getter 记录）与 `src/exec/print_inspector.zig:424`（inspector 用 `catch break :blk null` 吞掉这里的错误）。
+- **所有权 / 错误 / 调用**：命中缓存时返回 payload 里的**借用**值（`object.errorStack()`）；否则新建字符串（`formatCapturedErrorStackValue` / `buildErrorStackValue`），并用 `setErrorStack` 写回 payload（带 generational barrier）后返回同一个值。非对象 this 是裸 `error.TypeError`；非 `error_` class 返回 `undefined` 而不抛。2 处调用：`src/exec/exception_ops.zig:79`（stack getter 记录）与 `src/exec/call.zig:424`（inspector 用 `catch break :blk null` 吞掉这里的错误）。
 
-### `errorStackSetter` (`src/exec/error_stack_ops.zig:256`)
+### `errorStackSetter` (`src/exec/exception_ops.zig:256`)
 
 - **签名**：`pub fn errorStackSetter( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, function_object: *core.Object, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !core.JSValue`。
 - **作用**：`Error.prototype.stack` 的 setter：把访问器覆盖成 own 数据属性，同时兼容 Proxy 与用户自定义 setter。
 - **实现**：this 不是对象 → TypeError；值不是字符串 → TypeError；this 恰好是 realm 的 `Error.prototype` → TypeError。取 `stack` 的 proxy-aware own descriptor：不存在就新建 (writable, enumerable, configurable) 全真的数据属性（proxy 走 `proxyDefineOwnProperty`，普通对象 `defineOwnProperty`，`ReadOnly`/`NotExtensible`/`IncompatibleDescriptor` 折成 TypeError、`InvalidLength` 折成 RangeError）。已有 descriptor：若它是访问器且 setter 就是本函数对象（`isErrorStackSetterValue`），先试 `proxySetTrapForErrorStackSetter`，否则 `defineErrorStackDataProperty` 落成数据属性。receiver 是 proxy 则走 `proxySetValueProperty`（返回 false → TypeError）。剩下按 kind：访问器且 setter 为 undefined → TypeError，否则调用用户 setter；数据属性不可写 → TypeError，否则 `defineErrorStackDataProperty`。
-- **所有权 / 错误 / 调用**：不新建值：写入的是借用的 `args[0]` 字符串，最终由属性槽（`defineErrorStackDataProperty`）或 proxy set trap 接管。错误面很宽且全部是裸哨兵 `error.TypeError`：this 非对象、值非字符串、receiver 就是 `Error.prototype`、accessor 无 setter、数据属性不可写、proxy 拒绝；`defineOwnProperty` 的 `error.InvalidLength` 被翻成 `error.RangeError`，`ReadOnly`/`NotExtensible`/`IncompatibleDescriptor` 折成 `false` 后再转 TypeError。proxy trap 与用户 accessor 分支会重入 JS。唯一调用方 `src/exec/error_ops.zig:82`。
+- **所有权 / 错误 / 调用**：不新建值：写入的是借用的 `args[0]` 字符串，最终由属性槽（`defineErrorStackDataProperty`）或 proxy set trap 接管。错误面很宽且全部是裸哨兵 `error.TypeError`：this 非对象、值非字符串、receiver 就是 `Error.prototype`、accessor 无 setter、数据属性不可写、proxy 拒绝；`defineOwnProperty` 的 `error.InvalidLength` 被翻成 `error.RangeError`，`ReadOnly`/`NotExtensible`/`IncompatibleDescriptor` 折成 `false` 后再转 TypeError。proxy trap 与用户 accessor 分支会重入 JS。唯一调用方 `src/exec/exception_ops.zig:82`。
 
-### `isErrorStackSetterValue` (`src/exec/error_stack_ops.zig:322`)
+### `isErrorStackSetterValue` (`src/exec/exception_ops.zig:322`)
 
 - **签名**：`fn isErrorStackSetterValue(value: core.JSValue) bool`（文件私有）。
 - **作用**：谓词：该值是否就是内建的 `Error.prototype.stack` setter 函数。
 - **实现**：`decodeNativeBuiltinId(object.nativeFunctionId())` 后判 `domain == .error_object` 且 id 是 `PrototypeMethod.stack_setter`。
-- **所有权 / 错误 / 调用**：无：解码函数对象的 native builtin id 后比对 domain 与 id，不分配、无 error set。唯一调用方是 `errorStackSetter` 的「setter 就是内建 stack setter」判定（`src/exec/error_stack_ops.zig:295`）。
+- **所有权 / 错误 / 调用**：无：解码函数对象的 native builtin id 后比对 domain 与 id，不分配、无 error set。唯一调用方是 `errorStackSetter` 的「setter 就是内建 stack setter」判定（`src/exec/exception_ops.zig:295`）。
 
 
-### `errorCaptureStackTrace` (`src/exec/error_stack_ops.zig:328`)
+### `errorCaptureStackTrace` (`src/exec/exception_ops.zig:328`)
 
 - **签名**：`pub fn errorCaptureStackTrace( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, ) !core.JSValue`。
 - **作用**：`Error.captureStackTrace(target[, skipFn])`：在 target 上定义 `stack` 数据属性。
 - **实现**：首参缺失或非对象 → TypeError `"not an object"`。第二参可调用时取其函数名当 `skip_name`（回溯里跳到该函数为止，用完 `free`）。`buildErrorStackValue` 产出值后 `defineDataPropertyByAtom(stack, writable=true, enumerable=false, configurable=true)`，返回 undefined。
-- **所有权 / 错误 / 调用**：本簇里唯一持有真正堆缓冲的函数：`exception_ops.functionNameBytes` 返回 allocator 新分配的 `[]u8`，由这里的 `defer ... free` 释放。stack 值是新建的 GC 字符串，经 `defineDataPropertyByAtom` 挂成目标对象的 non-enumerable 属性，之后归属性槽。参数校验失败走 `exception_ops.throwTypeErrorMessage(ctx, global, "not an object")`——Error 已挂 `ctx`，返回的 `error.TypeError` 只是哨兵。唯一调用方 `src/exec/error_ops.zig:73`。
+- **所有权 / 错误 / 调用**：本簇里唯一持有真正堆缓冲的函数：`exception_ops.functionNameBytes` 返回 allocator 新分配的 `[]u8`，由这里的 `defer ... free` 释放。stack 值是新建的 GC 字符串，经 `defineDataPropertyByAtom` 挂成目标对象的 non-enumerable 属性，之后归属性槽。参数校验失败走 `exception_ops.throwTypeErrorMessage(ctx, global, "not an object")`——Error 已挂 `ctx`，返回的 `error.TypeError` 只是哨兵。唯一调用方 `src/exec/exception_ops.zig:73`。
 
 
 ## `src/exec/function_ops.zig` — Function.prototype 与动态函数
@@ -950,50 +950,50 @@ call/apply 有独立记录 + `forwards_call` + managed 直通 ABI，让 `op_call
 - **签名**：`pub fn constructDynamicFunctionFromSource( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, constructor: core.JSValue, new_target: core.JSValue, args: []const core.JSValue, kind: DynamicFunctionKind, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !core.JSValue`。
 - **作用**：动态函数构造的本体：把实参拼成源码、编译、在嵌套 VM 里求值出函数对象。
 - **实现**：末位实参是函数体，其余是形参：都经 `toStringForAnnexB` + `appendSourceStringUtf8`（形参用 `,` 连接）。编译 realm 取自 `functionRealmContext(constructor)`。源码 = 按 kind 选前缀（`"(function anonymous("` / `"(async function anonymous("` / `"(function* anonymous("` / `"(async function* anonymous("`）+ 形参 + `"\n) {\n"` + 函数体 + `"\n})"`；filename 同样按 kind 取 `Function` / `AsyncFunction` / `GeneratorFunction` / `AsyncGeneratorFunction`。`parser.compile(.{ .mode = .eval_direct, .strict = false })`；有 `syntax_error` 就走 `throwParseSyntaxError`（编译错误的 fileName/lineNumber/columnNumber + 首行栈，对照 quickjs.c:7553-7570）。拿到根字节码后建根函数对象并 `rootValues` 钉住，在独立的 `stack_mod.Stack` 上 `runWithCallEnv`（`is_eval_code = true`）。**嵌套 eval 退出时不跑全堆 cycle GC**：外层帧持有本轮看不见的根（例如在途异常），qjs 也从不在 eval 退出时 GC。返回后把 `nested_stack` 里那份同值的残留槽清成 undefined 再 `setLen(0)`，避免 deinit 时二次释放已被别处别名的值。最后按 `new_target` 解析出 prototype 并 `setPrototype`。
-- **所有权 / 错误 / 调用**：三个 `std.ArrayList(u8)`（params / body / source）都用 `ctx.runtime.memory.allocator` 并 `defer deinit`；`parser.compile` 的产物用 `defer compiled.deinit()`，根字节码经 `takeFunctionBytecodeValue` 转交给新建的根函数对象；该对象用 `core.runtime.rootValues` 建根并 `defer deactivate`，嵌套 `stack_mod.Stack` 同样 `defer deinit`，返回前还要把栈里那份别名副本清成 undefined 并 `setLen(0)`，否则 deinit 会重复释放。`dynamicFunctionNewTargetPrototype` 拿到的 prototype 句柄 `defer prototype.deinit`。错误面：编译失败走 `throwParseSyntaxError`（已挂 pending exception，返回 `error.SyntaxError` 哨兵）；拿不到编译单元/根字节码是裸 `error.InvalidBytecode`；`functionRealmContext` 无 global 是 `error.InvalidBuiltinRegistry`；参数 ToString 与嵌套 `runWithCallEnv` 的错误原样透传。8 处调用：本文件 `:424`、`:436`，`src/exec/promise_ops.zig:2578`、`:2590`（async / async generator），以及 `src/exec/class_init_ops.zig:80`-`:83` 四条按构造器名字的分派。
+- **所有权 / 错误 / 调用**：三个 `std.ArrayList(u8)`（params / body / source）都用 `ctx.runtime.memory.allocator` 并 `defer deinit`；`parser.compile` 的产物用 `defer compiled.deinit()`，根字节码经 `takeFunctionBytecodeValue` 转交给新建的根函数对象；该对象用 `core.runtime.rootValues` 建根并 `defer deactivate`，嵌套 `stack_mod.Stack` 同样 `defer deinit`，返回前还要把栈里那份别名副本清成 undefined 并 `setLen(0)`，否则 deinit 会重复释放。`dynamicFunctionNewTargetPrototype` 拿到的 prototype 句柄 `defer prototype.deinit`。错误面：编译失败走 `throwParseSyntaxError`（已挂 pending exception，返回 `error.SyntaxError` 哨兵）；拿不到编译单元/根字节码是裸 `error.InvalidBytecode`；`functionRealmContext` 无 global 是 `error.InvalidBuiltinRegistry`；参数 ToString 与嵌套 `runWithCallEnv` 的错误原样透传。8 处调用：本文件 `:424`、`:436`，`src/exec/promise_ops.zig:2578`、`:2590`（async / async generator），以及 `src/exec/function_ops.zig:80`-`:83` 四条按构造器名字的分派。
 
 
 
-## `src/exec/performance_ops.zig` — performance.now
+## `src/exec/builtin_glue.zig` — performance.now
 
 Web 兼容命名空间；QuickJS 没有。`now` = 单调时钟毫秒 − `runtime.performance_time_origin_ms`。描述符由 core `materializePerformanceAutoInit` 惰性盖 id。
 
 
-### `performanceNowCall` (`src/exec/performance_ops.zig:25`)
+### `performanceNowCall` (`src/exec/builtin_glue.zig:25`)
 
 - **签名**：`fn performanceNowCall( native_ctx: *core.JSContext, native_this: core.JSValue, native_args: []const core.JSValue, native_magic: i32, ) HostError!core.JSValue`。
 - **作用**：`performance.now()` 的实现体：返回自本 runtime 的 time origin 起经过的毫秒数（带小数）。这个命名空间 QuickJS 没有，zjs 仍让它走同一套 cproto/magic/函数指针边界。
 - **实现**：`nativeCall` 恢复环境（失败 TypeError）；`host_call.magic != now_id` 也是 TypeError；返回 `float64(performanceNowMs() - ctx.runtime.performance_time_origin_ms)`。
-- **所有权 / 错误 / 调用**：不分配：返回 float64 立即数（当前时钟减去 `runtime.performance_time_origin_ms`），this/args 借用且不被读取。两处失败都是**裸** `error.TypeError`（`nativeCall` 认不出调用形态、magic 不是 `now_id`），没有 pending exception，由 native seam 的 `materializeRuntimeError` 渲染。没有直接调用方：经 `internal_entries` 的 `genericMagicFunction(&performanceNowCall)`（`src/exec/performance_ops.zig:21`）分发。
+- **所有权 / 错误 / 调用**：不分配：返回 float64 立即数（当前时钟减去 `runtime.performance_time_origin_ms`），this/args 借用且不被读取。两处失败都是**裸** `error.TypeError`（`nativeCall` 认不出调用形态、magic 不是 `now_id`），没有 pending exception，由 native seam 的 `materializeRuntimeError` 渲染。没有直接调用方：经 `internal_entries` 的 `genericMagicFunction(&performanceNowCall)`（`src/exec/builtin_glue.zig:21`）分发。
 
-### `performanceNowMs` (`src/exec/performance_ops.zig:36`)
+### `performanceNowMs` (`src/exec/builtin_glue.zig:36`)
 
 - **签名**：`fn performanceNowMs() f64`。
 - **作用**：单调时钟的当前毫秒数（未减 time origin）。
 - **实现**：`std.Io.Threaded.global_single_threaded.io()` 上取 `Clock.Timestamp.now(.awake)` 的纳秒数，除以 `std.time.ns_per_ms`。
-- **所有权 / 错误 / 调用**：无：读一次单线程全局 `std.Io` 时钟并换算成毫秒，不分配、无 error set、不碰 JS 堆。文件私有，唯一调用方 `performanceNowCall`（`src/exec/performance_ops.zig:33`）。
+- **所有权 / 错误 / 调用**：无：读一次单线程全局 `std.Io` 时钟并换算成毫秒，不分配、无 error set、不碰 JS 堆。文件私有，唯一调用方 `performanceNowCall`（`src/exec/builtin_glue.zig:33`）。
 
 
-## `src/exec/print_inspector.zig` — CLI print / console.log
+## `src/exec/call.zig` — CLI print / console.log
 
 对照 `JS_PrintValue`（quickjs.c:13678-14432）字节级输出：深度 2、字符串 1000、每容器 100 项。顶层字符串由调用方原样写出；其余走 `printValueRec`。分配只有 BigInt 十进制文本，以及 Error 接收者经 `error_stack_ops.errorStackGetter` 物化的 `stack` 字符串（宿主装了 `Error.prepareStackTrace` 时还会重入 JS）。
 
 
-### `State.puts` (`src/exec/print_inspector.zig:44`)
+### `State.puts` (`src/exec/call.zig:44`)
 
 - **签名**：`fn puts(self: *State, text: []const u8) Error!void`。
 - **作用**：往输出 writer 写一段字节。
 - **实现**：`self.writer.writeAll(text)`。
 - **所有权 / 错误 / 调用**：无所有权：把借用切片写进 `State.writer`，不分配。本文件 `Error` = `std.Io.Writer.Error || error{OutOfMemory}`，不是 `RuntimeError`：这里既不挂 pending exception 也不经 `materializeRuntimeError`，错误一路退到唯一外部出口 `src/exec/call.zig:2157`，那里 `error.WriteFailed` 交给 `exception_ops.throwHostError` 变成 JS 异常，`error.OutOfMemory` 原样上浮。 本文件内 45 处调用。
 
-### `State.putc` (`src/exec/print_inspector.zig:48`)
+### `State.putc` (`src/exec/call.zig:48`)
 
 - **签名**：`fn putc(self: *State, byte: u8) Error!void`。
 - **作用**：往输出 writer 写一个字节。
 - **实现**：`self.writer.writeByte(byte)`。
 - **所有权 / 错误 / 调用**：无所有权：单字节写入，不分配；error set 同族（`Writer.Error || OutOfMemory`，不挂 pending exception）。本文件内 22 处调用。
 
-### `State.printf` (`src/exec/print_inspector.zig:52`)
+### `State.printf` (`src/exec/call.zig:52`)
 
 - **签名**：`fn printf(self: *State, comptime fmt: []const u8, args: anytype) Error!void`。
 - **作用**：按格式串写一段文本。
@@ -1001,84 +1001,84 @@ Web 兼容命名空间；QuickJS 没有。`now` = 单调时钟毫秒 − `runtim
 - **所有权 / 错误 / 调用**：无所有权：`std.Io.Writer.print` 的格式化直写，不经中间缓冲、不分配；error set 同族。本文件内 15 处调用，典型 `:186`（`... N more characters`）、`:300`（`... N more items`）、`:496`。
 
 
-### `State.putUnicodeEscape` (`src/exec/print_inspector.zig:56`)
+### `State.putUnicodeEscape` (`src/exec/call.zig:56`)
 
 - **签名**：`fn putUnicodeEscape(self: *State, value: u64) Error!void`。
 - **作用**：写一个 `\uXXXX` 转义。
 - **实现**：先写 `\u`，再用 `gc_audit_print.hexPad(value, 4, &hex_buf)` 补足四位十六进制（栈上 16 字节缓冲）。
 - **所有权 / 错误 / 调用**：`[16]u8` 是栈上十六进制缓冲，由 `gc_audit_print.hexPad` 就地填充，不分配也不逃逸；error set 同族。4 处调用，全在 `printUnits` 的控制字符/孤代理臂（`:141`、`:146`、`:151`、`:157`）。
 
-### `makeState` (`src/exec/print_inspector.zig:63`)
+### `makeState` (`src/exec/call.zig:63`)
 
 - **签名**：`fn makeState(ctx: *core.JSContext, global: *core.Object, output: ?*std.Io.Writer, writer: *std.Io.Writer) State`。
 - **作用**：组装一次打印用的 `State`（runtime/ctx/global/output/writer，level 从 0 起）。
 - **实现**：结构体字面量；`print_stack` 保持 undefined，由 `printValueRec` 按 level 填。
 - **所有权 / 错误 / 调用**：无：按值构造 `State`，四个字段（`rt`/`ctx`/`global`/`writer`）全是**借用**指针，`print_stack` 故意留 `undefined`（只在 `level` 以下有效），不分配、无 error set。文件私有，调用方 `printValue`（`:67`）与 `printHostArgument`（`:74`）。
 
-### `printHostArgument` (`src/exec/print_inspector.zig:69`)
+### `printHostArgument` (`src/exec/call.zig:69`)
 
 - **签名**：`pub fn printHostArgument(ctx: *core.JSContext, global: *core.Object, output: ?*std.Io.Writer, writer: *std.Io.Writer, value: core.JSValue) Error!void`。
 - **作用**：一个 `print` / `console.log` 实参（`js_print`，quickjs-libc.c:4063）。
 - **实现**：顶层字符串走 `printRawString` 原样输出（不加引号、不转义），其余值走 `printValueRec`。
 - **所有权 / 错误 / 调用**：`value` 借用，不产生 JS 值。顶层字符串走 `printRawString`（不加引号），其余进递归 dump。本文件 `Error` = `std.Io.Writer.Error || error{OutOfMemory}`，不是 `RuntimeError`：这里既不挂 pending exception 也不经 `materializeRuntimeError`，错误一路退到唯一外部出口 `src/exec/call.zig:2157`，那里 `error.WriteFailed` 交给 `exception_ops.throwHostError` 变成 JS 异常，`error.OutOfMemory` 原样上浮。 唯一调用方 `src/exec/call.zig:2157`（`hostOutputValues`，即 `print`/`console.log` 的逐参数循环）。
 
-### `printFloat64` (`src/exec/print_inspector.zig:77`)
+### `printFloat64` (`src/exec/call.zig:77`)
 
 - **签名**：`fn printFloat64(s: *State, d: f64) Error!void`。
 - **作用**：按 qjs `js_print_float64`（quickjs.c:13713）打印 double。
 - **实现**：NaN / Infinity / -Infinity 直接写字面量；0 按符号写 `"-0"` 或 `"0"`（`JS_DTOA_MINUS_ZERO`，与 Number::toString 的唯一差别）；其余 `formatFiniteNumberAssumeCapacity` 到栈上 64 字节缓冲。
 - **所有权 / 错误 / 调用**：`[64]u8` 栈缓冲交给 `formatFiniteNumberAssumeCapacity` 就地写，不分配；error set 同族（只有写失败）。4 处调用：`printValueRec`（`:650`）与 typed array 的 float16/32/64 臂（`:522`-`:524`）。
 
-### `Units.len` (`src/exec/print_inspector.zig:92`)
+### `Units.len` (`src/exec/call.zig:92`)
 
 - **签名**：`fn len(self: Units) usize`。
 - **作用**：code-unit 视图的长度。
 - **实现**：latin1 取 `bytes.len`，utf16 取 `units.len`。
 - **所有权 / 错误 / 调用**：无：读 union 里**借用**切片的长度，不分配、无 error set；切片的生命周期由持有它的 `*core.string.String` 决定（String 恒为扁平表示）。调用方 `printUnits` 的循环上界与各 `printString`/`printRegExp` 站点。
 
-### `Units.at` (`src/exec/print_inspector.zig:99`)
+### `Units.at` (`src/exec/call.zig:99`)
 
 - **签名**：`fn at(self: Units, index: usize) u16`。
 - **作用**：取第 index 个 UTF-16 code unit。
 - **实现**：latin1 字节零扩展成 u16，utf16 直接取。
 - **所有权 / 错误 / 调用**：无：按下标读一个 code unit（latin1 零扩展成 u16），不分配、无 error set、不做边界检查——越界是调用方的契约违约。调用方 `printUnits`（`:115` 起）与 `printError` 的 stack 逐单元循环。
 
-### `printUnits` (`src/exec/print_inspector.zig:109`)
+### `printUnits` (`src/exec/call.zig:109`)
 
 - **签名**：`fn printUnits(s: *State, units: Units, len: usize, sep: u16) Error!void`。
 - **作用**：按 `js_print_string1`（quickjs.c:13736-13791）转义输出前 `len` 个 code unit。
 - **实现**：`\t \r \n \b \f \\` 走反斜杠转义；等于 `sep`（引号）也转义；0x20-0x7e 原样；<0x20 与 0x7f-0x9f 用 `\uXXXX`；高代理后面跟合法低代理才合成码点并输出 UTF-8，落单的高/低代理都打成 `\uXXXX`。
 - **所有权 / 错误 / 调用**：`units` 是**借用**的字符串数据（调用方负责保证已 flatten 且在本次调用内不被回收）；转义只写 writer，唯一缓冲是 `[4]u8` 栈上 UTF-8 编码区。error set 同族。3 处调用：`printString`（`:182`）与 `printNameBytes` 的两条臂（`:241`、`:245`）。
 
-### `unitsOfString` (`src/exec/print_inspector.zig:162`)
+### `unitsOfString` (`src/exec/call.zig:162`)
 
 - **签名**：`fn unitsOfString(body: *const core.string.String) Units`。
 - **作用**：把已 flatten 的 String 体转成 `Units` 视图。
 - **实现**：按 `resolveData()` 取 latin1 字节或 utf16 单元。
 - **所有权 / 错误 / 调用**：无：把已 flatten 的 `*const core.string.String` 的 `resolveData()` 包成 `Units`，返回的是指向字符串体内部的**借用**切片，不 retain、不得逃出调用方帧；不分配、无 error set。3 处调用：`printString`（`:178`）、`printRegExp`（`:338`）、`printError`（`:431`）。
 
-### `printString` (`src/exec/print_inspector.zig:171`)
+### `printString` (`src/exec/call.zig:171`)
 
 - **签名**：`fn printString(s: *State, value: core.JSValue) Error!void`。
 - **作用**：带引号、带转义、带截断的字符串输出（`js_print_string`，quickjs.c:13812-13829）。
 - **实现**：取不到 String 体写 `<invalid string tag>`。只打印前 1000 个 code unit（`default_max_string_length`），超出时补 `... N more character(s)`（N>1 才加 s）。
 - **所有权 / 错误 / 调用**：不分配（String 恒扁平，`unitsOfString` 只借用它的 `resolveData()` 切片），只写 writer。非字符串 tag 打印 `<invalid string tag>` 而不报错。文件私有，唯一调用方 `printValueRec`（`:664`）。
 
-### `printRawString` (`src/exec/print_inspector.zig:186`)
+### `printRawString` (`src/exec/call.zig:186`)
 
 - **签名**：`fn printRawString(s: *State, value: core.JSValue) Error!void`。
 - **作用**：字符串原文输出，不加引号不转义（`js_print_raw_string`，quickjs.c:13831）。
 - **实现**：取不到 String 体直接返回。latin1：<0x80 原样，否则手写两字节 UTF-8；utf16：用 `Utf16LeIterator` 逐码点编码成 UTF-8（编码失败的码点跳过）。
 - **所有权 / 错误 / 调用**：不分配，只按 `resolveData()` 的两臂写 writer；latin1 的 0x80-0xFF 按码点重新编成两字节 UTF-8 而不是裸字节，UTF-16 用 `Utf16LeIterator` 并对非法序列 `catch continue` 静默跳过。非字符串值直接 `return`。5 处调用：`printHostArgument`（`:75`）、`printError` 的 name/message（`:408`、`:416`）、`[Function name]`（`:537`）、Date 的 ISO 文本（`:629`）。
 
-### `isAsciiIdent` (`src/exec/print_inspector.zig:210`)
+### `isAsciiIdent` (`src/exec/call.zig:210`)
 
 - **签名**：`fn isAsciiIdent(bytes: []const u8) bool`。
 - **作用**：谓词：这个名字能不能当裸键打印（`is_ascii_ident`，quickjs.c:13843）。
 - **实现**：空串 false；每个字符必须是字母、`_`、`$`，数字只允许出现在首位之后。
 - **所有权 / 错误 / 调用**：无：对借用字节切片做纯谓词判断，不分配、无 error set。文件私有，唯一调用方 `printNameBytes`（`:237`）。
 
-### `printAtom` (`src/exec/print_inspector.zig:223`)
+### `printAtom` (`src/exec/call.zig:223`)
 
 - **签名**：`fn printAtom(s: *State, atom_id: core.Atom) Error!void`。
 - **作用**：打印属性键 / Symbol 描述（`js_print_atom`，quickjs.c:13857-13877）。
@@ -1086,21 +1086,21 @@ Web 兼容命名空间；QuickJS 没有。`now` = 单调时钟毫秒 − `runtim
 - **所有权 / 错误 / 调用**：不分配：`s.rt.atoms.name(atom_id)` 返回 atom 表里的**借用** UTF-8 切片（未知 atom 折成空串），tagged int 与 null atom 各有直写分支。error set 同族。3 处调用：`printClassName`（`:258`）、`printValueRec` 的 Symbol 描述（`:667`）、`printObject` 的属性键（`:591`）。
 
 
-### `printNameBytes` (`src/exec/print_inspector.zig:230`)
+### `printNameBytes` (`src/exec/call.zig:230`)
 
 - **签名**：`fn printNameBytes(s: *State, bytes: []const u8) Error!void`。
 - **作用**：名字的「裸键或带引号」输出。
 - **实现**：`isAsciiIdent` 通过就原样写。否则加引号：先试着把 UTF-8 转成 UTF-16 进栈上 256 单元缓冲再 `printUnits`（这样转义看到的和 qjs 一样）；名字过长或非法 UTF-8 时退回按字节（latin1 视图）转义。
 - **所有权 / 错误 / 调用**：`[256]u16` 是栈上转码缓冲：名字能装下就按 UTF-16 单元走转义，装不下或非法 UTF-8 时退化成按字节（latin1 视图）转义——两条臂都不分配。error set 同族。文件私有，调用方 `printAtom`（`:232`）与 `printClassName` 的 fallback（`:282`）。
 
-### `printClassName` (`src/exec/print_inspector.zig:249`)
+### `printClassName` (`src/exec/call.zig:249`)
 
 - **签名**：`fn printClassName(s: *State, class_id: core.class.ClassId) Error!void`。
 - **作用**：打印对象的 class 名。
 - **实现**：Proxy 之外先查 `rt.classes.className(class_id)`（非 null atom 就走 `printAtom`）。查不到时用内置回退表：Proxy / global / module namespace 都叫 `Object`（qjs 把 Proxy 注册在 `JS_CLASS_PROXY` 下也显示 Object），Promise 家族、async 家族、WeakRef、FinalizationRegistry、DOMException、CallSite、RawJSON、FILE、DisposableStack 等各自的名字；`async_from_sync_iterator` 是空串；表外的 class 打 `<null>`。
 - **所有权 / 错误 / 调用**：不分配：先取 `rt.classes.className(class_id)` 的 atom（借用），没有名字再落到本函数写死的 fallback 字面量表。error set 同族。4 处调用：typed array 头（`:502`）、`[Function]`/一般对象头（`:546`、`:571`）、超深度时的 `[ClassName]`（`:682`）。
 
-### `printComma` (`src/exec/print_inspector.zig:282`)
+### `printComma` (`src/exec/call.zig:282`)
 
 - **签名**：`fn printComma(s: *State, comma_state: *u8) Error!void`。
 - **作用**：容器元素之间的分隔状态机（`js_print_comma`，quickjs.c:13903）。
@@ -1108,77 +1108,77 @@ Web 兼容命名空间；QuickJS 没有。`now` = 单调时钟毫秒 − `runtim
 - **所有权 / 错误 / 调用**：无所有权：只按 `comma_state` 写分隔符并把状态推进到 1，不分配；`comma_state` 由调用方在栈上持有。error set 同族。6 处调用：`printMoreItems`（`:299`）与 `printObject` 的数组/空洞/typed array/Map-Set/属性各臂（`:489`、`:495`、`:512`、`:551`、`:590`）。
 
 
-### `printMoreItems` (`src/exec/print_inspector.zig:292`)
+### `printMoreItems` (`src/exec/call.zig:292`)
 
 - **签名**：`fn printMoreItems(s: *State, comma_state: *u8, n: usize) Error!void`。
 - **作用**：容器截断尾巴 `... N more item(s)`（`js_print_more_items`，quickjs.c:13918）。
 - **实现**：先 `printComma` 补分隔，再按 N 是否 >1 决定复数。
 - **所有权 / 错误 / 调用**：无所有权：转调 `printComma` 后写 `... N more item(s)`，不分配。error set 同族。4 处调用，对应四种被截断的容器（`:492` 数组、`:530` typed array、`:560` Map/Set、`:614` 属性列表）。
 
-### `ownOrProtoDataString` (`src/exec/print_inspector.zig:299`)
+### `ownOrProtoDataString` (`src/exec/call.zig:299`)
 
 - **签名**：`fn ownOrProtoDataString(object: *const core.Object, atom_id: core.Atom) ?core.JSValue`。
 - **作用**：取一个字符串型数据属性：own 的，或往上**一层**原型的（Error 的 `name` 就靠这条）。
 - **实现**：`findProperty` 命中后，auto_init 槽用 `getProperty` 物化（zjs 把内建原型的 `name`、函数的 `prototype` 存成惰性槽，qjs 那边是普通值），否则 `asDataAt`；不是字符串返回 null。最多走一跳原型（`hops == 1` 之后返回 null）。对照 `get_prop_string`（quickjs.c:7504）。
 - **所有权 / 错误 / 调用**：返回的是**借用**的属性值（不 dup）；auto_init 物化失败时当作没找到返回 null。
 
-### `printRegExp` (`src/exec/print_inspector.zig:326`)
+### `printRegExp` (`src/exec/call.zig:326`)
 
 - **签名**：`fn printRegExp(s: *State, object: *const core.Object) Error!void`。
 - **作用**：打印正则字面量形态（`js_print_regexp`，quickjs.c:13926-13990）。
 - **实现**：没有编译字节码或没有 source 就写 `[uninitialized_regexp]`。空 pattern 打 `(?:)`。扫描时跟踪字符类状态 `bra`：`\` 连带下一个单元一起原样输出；`[` 开类（紧跟 `]` 的话连着输出）、`]` 关类；换行/回车转成 `\n` / `\r`；类外的 `/` 转成 `\/`。收尾按 lre 位序输出 flag 字母 `g i m s u y d v`——第 8 位其实是 named-groups 位却打成 `v`，这与 qjs 的输出一致。
 - **所有权 / 错误 / 调用**：`object` 与 `regexpSource()` 都是借用，不分配。未编译/无源码的 RegExp 打印 `[uninitialized_regexp]` 而不报错。flag 位取自 `regexp_adapter.flagBitsFromBytecode`，不分配。文件私有，唯一调用方 `printObject` 的 regexp 臂（`:562`）。
 
-### `putUnitRaw` (`src/exec/print_inspector.zig:390`)
+### `putUnitRaw` (`src/exec/call.zig:390`)
 
 - **签名**：`fn putUnitRaw(s: *State, c: u32) Error!void`。
 - **作用**：把一个 code unit 原样写出。
 - **实现**：<0x80 直接写字节；否则编码成 UTF-8（qjs 只写低字节，这里避免写出孤立字节），编码失败就丢弃。
 - **所有权 / 错误 / 调用**：`[4]u8` 栈上编码缓冲；非法码点被 `catch return` 静默丢弃（而不是报错）。不分配，error set 同族。4 处调用：`printRegExp`（`:383`、`:384`）与 `printError` 的 stack 输出（`:441`、`:444`）。
 
-### `printError` (`src/exec/print_inspector.zig:399`)
+### `printError` (`src/exec/call.zig:399`)
 
 - **签名**：`fn printError(s: *State, object: *const core.Object) Error!void`。
 - **作用**：打印 Error 对象：`Name: message` + 换行 + stack（`js_print_error`，quickjs.c:13992-14026）。
 - **实现**：`name` 取不到就写 `"Error"`；`message` 非空才写 `": "` + 原文。stack 先找 own/原型上的数据属性，没有就通过原生 getter `errorStackGetter` 读（zjs 把 `stack` 放成 `Error.prototype` 上的访问器，V8 形状；读失败当作没有），拿到字符串才换行输出，并丢掉末尾那个 `\n`，输出时自己做代理对合并。
 - **所有权 / 错误 / 调用**：`Error` = `std.Io.Writer.Error || error{OutOfMemory}`：只往 writer 写，不建 JS 值、不挂 pending exception。 读 stack 会经过原生 getter，可能触发一次惰性格式化。
 
-### `isTypedArrayClass` (`src/exec/print_inspector.zig:442`)
+### `isTypedArrayClass` (`src/exec/call.zig:442`)
 
 - **签名**：`fn isTypedArrayClass(class_id: core.class.ClassId) bool`。
 - **作用**：谓词：class 是否属于 typed array 家族。
 - **实现**：class id 落在 `uint8c_array` 到 `float64_array` 的连续区间内。
 - **所有权 / 错误 / 调用**：无：class id 区间比较的纯谓词，不分配、无 error set（依赖 typed array class id 在表中连续这一不变量）。文件私有，唯一调用方 `printObject`（`:499`）。
 
-### `isCallableClass` (`src/exec/print_inspector.zig:448`)
+### `isCallableClass` (`src/exec/call.zig:448`)
 
 - **签名**：`fn isCallableClass(class_id: core.class.ClassId) bool`。
 - **作用**：谓词：qjs 会给这个 class 注册 call handler 吗（quickjs.c:14106 的 `class_array[class_id].call != NULL && class_id != JS_CLASS_PROXY`）。
 - **实现**：白名单 switch：`c_function`、`bytecode_function`、`bound_function`、`c_function_data`、`c_closure`、generator/async/async-generator function、Promise resolve/reject 与 async function resolve/reject，其余 false。
 - **所有权 / 错误 / 调用**：无：class id 白名单查表，不分配、无 error set；对应 qjs 的 `class_array[class_id].call != NULL && class_id != JS_CLASS_PROXY`。文件私有，唯一调用方 `printObject`（`:531`）。
 
-### `printObject` (`src/exec/print_inspector.zig:468`)
+### `printObject` (`src/exec/call.zig:468`)
 
 - **签名**：`fn printObject(s: *State, object: *const core.Object) Error!void`。
 - **作用**：对象体的打印（`js_print_object`，quickjs.c:14028-14267）。
 - **实现**：按 class 选头：Array 打 `[ `，只在 `fast_array` 时遍历稠密元素（最多 100 项，再补 `... N more items`，末尾空洞打 `<N empty item(s)>`）；typed array 打 `ClassName(len) [ ` 后按元素宽度直接读 backing store；可调用 class 打 `[Function name]`（名字为空或取不到打 `(anonymous)`）并置 `comma_state = 2`；Map/Set 打 `ClassName(active_count) { `（Map 的值用 ` => ` 连）；RegExp / Date（ISO 文本成功时）/ Error 各自的头也置 2；其余非 `object` class 先打类名再 `{ `。随后按 shape 顺序遍历属性，跳过 deleted 与非 enumerable（String 包装的整数下标属性也跳过，保持 `String {  }`），前 100 条打 `key: value`：访问器按有无 getter/setter 打 `[Getter/Setter]` / `[Setter]` / `[Getter]`，var_ref 打单元里的值，auto_init 打 `[autoinit]`，data 递归。收尾：数组类写 ` ]`，其余在 `comma_state != 2` 时写 ` }`。
 - **所有权 / 错误 / 调用**：`object` 是**借用**的 `*const core.Object`，整个 dump 期间不建根——安全性靠调用方持有该值、且各臂只读现成数据（`arrayElements`、`typedArrayPayloadFast`、`collectionPayloadBorrowed` 都是借用视图，不复制）。会分配的只有 Error 臂里的 `errorStackGetter`（它可能新建 stack 字符串、甚至经 `Error.prepareStackTrace` 重入 JS；`printError` 用 `catch break :blk null` 把那条路径上的一切错误吞掉）。error set 同族。文件私有，唯一调用方 `printValueRec`（`:679`）。
 
-### `dateIsoText` (`src/exec/print_inspector.zig:618`)
+### `dateIsoText` (`src/exec/call.zig:618`)
 
 - **签名**：`fn dateIsoText(s: *State, object: *const core.Object) bool`。
 - **作用**：Date 的 ISO 文本打印（qjs 的 `get_date_string(..., 0x23)` 臂，quickjs.c:14153），写不出就返回 false。
 - **实现**：`date_ops.isoStringForInspector` 出错或返回 null（如 NaN 时间值）→ false，让调用方退回通用 `Date {  }` 转储；写出来了返回 true（连写失败也返回 true，表示头已处理）。
 - **所有权 / 错误 / 调用**：内部 `catch` 吞掉错误并用返回值表达成败；写失败时也返回 true。
 
-### `printStackIndex` (`src/exec/print_inspector.zig:625`)
+### `printStackIndex` (`src/exec/call.zig:625`)
 
 - **签名**：`fn printStackIndex(s: *State, object: *const core.Object) ?usize`。
 - **作用**：当前打印栈上是否已经有这个对象（用来打 `[circular N]`）。
 - **实现**：线性扫 `print_stack[0..level]` 比指针，命中返回下标。
 - **所有权 / 错误 / 调用**：无：在 `s.print_stack[0..s.level]` 里按**指针**线性找当前对象做循环检测，不分配、无 error set；栈里存的是借用指针，靠 `printValueRec` 的 `level += 1` / `defer level -= 1` 维持有效窗口。文件私有，唯一调用方 `printValueRec`（`:673`）。
 
-### `printValueRec` (`src/exec/print_inspector.zig:633`)
+### `printValueRec` (`src/exec/call.zig:633`)
 
 - **签名**：`fn printValueRec(s: *State, value: core.JSValue) Error!void`。
 - **作用**：一个值的递归打印分发（`js_print_value`，quickjs.c:14278-14399）。
@@ -1186,7 +1186,7 @@ Web 兼容命名空间；QuickJS 没有。`now` = 单调时钟毫秒 − `runtim
 - **所有权 / 错误 / 调用**：`Error` = `std.Io.Writer.Error || error{OutOfMemory}`：只往 writer 写，不建 JS 值、不挂 pending exception。 堆 BigInt 的临时值与十进制文本在本函数内释放。
 
 
-## `src/exec/exceptions.zig` — 零函数 re-export
+## `src/exec/exception_ops.zig` — 零函数 re-export
 
 本文件没有函数。它把 core 的引擎错误面再导出成历史名 `exec.exceptions`：
 
@@ -1214,7 +1214,7 @@ Web 兼容命名空间；QuickJS 没有。`now` = 单调时钟毫秒 − `runtim
 - **签名**：`pub fn createSentinelError( ctx: *core.JSContext, global: *core.Object, err: anyerror, info: ErrorInfo, ) !core.JSValue`。
 - **作用**：把已分类的引擎 sentinel 变成 JS Error；OOM 必须投递预分配对象，不新建。
 - **实现**：`error.OutOfMemory` 返回 `ctx.preallocated_oom_error`（若有）；否则 `createNamedError`。刻意不抓 OOM 栈。
-- **所有权 / 错误 / 调用**：OOM 臂返回的是 realm 引导期就建好的 `ctx.preallocated_oom_error`（**零分配、无 `.stack`**，身份稳定，`src/tests/oom_cap.zig` / `src/tests/oom.zig` 钉住这条契约），其余走 `createNamedError` 新建带 CallSite 的 Error（归 GC）。本身不挂 pending exception，错误只有构造透传。7 处调用：`src/exec/call_runtime.zig:179`、`:326`，`src/exec/builtin_dispatch.zig:467`（`materializeRuntimeError`），`src/exec/module_graph.zig:807`、`src/exec/disposable_ops.zig:269`，以及本文件 `promiseErrorValue`（`:305`）与 `rejectedPromiseForRuntimeError`（`:336`）。
+- **所有权 / 错误 / 调用**：OOM 臂返回的是 realm 引导期就建好的 `ctx.preallocated_oom_error`（**零分配、无 `.stack`**，身份稳定，`src/tests/oom_cap.zig` / `src/tests/oom.zig` 钉住这条契约），其余走 `createNamedError` 新建带 CallSite 的 Error（归 GC）。本身不挂 pending exception，错误只有构造透传。7 处调用：`src/exec/call_runtime.zig:179`、`:326`，`src/exec/builtin_dispatch.zig:467`（`materializeRuntimeError`），`src/exec/module.zig:807`、`src/exec/disposable_ops.zig:269`，以及本文件 `promiseErrorValue`（`:305`）与 `rejectedPromiseForRuntimeError`（`:336`）。
 
 ### `createNamedErrorWithPrototype` (`src/exec/exception_ops.zig:86`)
 
@@ -1257,7 +1257,7 @@ Web 兼容命名空间；QuickJS 没有。`now` = 单调时钟毫秒 − `runtim
 - **签名**：`pub fn normalizeEvalRuntimeError(err: anytype) (@TypeOf(err) || error{TypeError})`。
 - **作用**：把 eval 路径上的属性定义类错误折成 TypeError。
 - **实现**：`IncompatibleDescriptor` / `NotExtensible` / `ReadOnly` → `error.TypeError`，其余原样返回；返回类型是 `@TypeOf(err) || error{TypeError}`。
-- **所有权 / 错误 / 调用**：无所有权：纯 error-set 映射（`IncompatibleDescriptor`/`NotExtensible`/`ReadOnly` → `error.TypeError`，其余原样），不分配、不碰 pending exception——已挂的异常对象与被改写的 sentinel 可能因此不一致，调用方随后要么重新 materialize 要么本就没挂异常。4 处调用：`src/exec/eval_ops.zig:317`、`:368`、`src/exec/call.zig:2532`、`src/exec/call_runtime.zig:3409`。
+- **所有权 / 错误 / 调用**：无所有权：纯 error-set 映射（`IncompatibleDescriptor`/`NotExtensible`/`ReadOnly` → `error.TypeError`，其余原样），不分配、不碰 pending exception——已挂的异常对象与被改写的 sentinel 可能因此不一致，调用方随后要么重新 materialize 要么本就没挂异常。4 处调用：`src/exec/eval_entry.zig:317`、`:368`、`src/exec/call.zig:2532`、`src/exec/call_runtime.zig:3409`。
 
 ### `runtimeErrorValueForGeneratorCatch` (`src/exec/exception_ops.zig:254`)
 
@@ -1278,14 +1278,14 @@ Web 兼容命名空间；QuickJS 没有。`now` = 单调时钟毫秒 − `runtim
 - **签名**：`pub fn promiseErrorValue(ctx: *core.JSContext, global: *core.Object, err: exceptions.HostError) exceptions.HostError!core.JSValue`。
 - **作用**：把哨兵 error 转成 Promise 拒绝理由，不借用 pending exception 槽当中转。
 - **实现**：`error.Interrupted` 且当前异常是 uncatchable 时直接 `takeException`（这条转移只留给 Promise，放进通用匹配器会让 generator catch 吃掉不可捕获错误）。pending exception 匹配也直接 `takeException`。否则 `promiseErrorInfo` 分类后 `createSentinelError`；构造再失败且是 OOM，就投递 `preallocated_oom_error`，连它都没有（构造期/裸 context）就返回 **null 值**当非分配的 abrupt 结果，绝不让已经开跑的 Promise job 丢失。
-- **所有权 / 错误 / 调用**：三条出口的所有权各不同：`takeException()` 两臂（uncatchable 的 `Interrupted`、pending exception 与 err 匹配）把异常槽里的值**转移**给调用方并清空槽；其余走 `createSentinelError` 新建（OOM 时交出 realm 预分配对象，再没有就返回 **null 值**当非分配的 abrupt 结果，绝不让已开跑的 Promise job 丢失）。本函数自己不挂 pending exception，返回值由调用方交给 reject。19 处调用，典型 `src/exec/promise_ops.zig:1003`、`src/exec/async_generator.zig:221`、`src/exec/disposable_ops.zig:575`。
+- **所有权 / 错误 / 调用**：三条出口的所有权各不同：`takeException()` 两臂（uncatchable 的 `Interrupted`、pending exception 与 err 匹配）把异常槽里的值**转移**给调用方并清空槽；其余走 `createSentinelError` 新建（OOM 时交出 realm 预分配对象，再没有就返回 **null 值**当非分配的 abrupt 结果，绝不让已开跑的 Promise job 丢失）。本函数自己不挂 pending exception，返回值由调用方交给 reject。19 处调用，典型 `src/exec/promise_ops.zig:1003`、`src/exec/promise_ops.zig:221`、`src/exec/disposable_ops.zig:575`。
 
 ### `rejectedPromiseForRuntimeError` (`src/exec/exception_ops.zig:327`)
 
 - **签名**：`pub fn rejectedPromiseForRuntimeError( ctx: *core.JSContext, global: *core.Object, err: exceptions.HostError, prototype: ?*core.Object, ) exceptions.HostError!core.JSValue`。
 - **作用**：把哨兵 error 直接变成一个已拒绝的 Promise。
 - **实现**：pending exception 匹配时用 `runtime.current_exception` 作 reason 建 `rejectedWithPrototype`，再 `clearException`。否则 `runtimeErrorInfo` 分类（返回 null 说明不是可转换的哨兵，原样上抛 err），`createSentinelError` 造值后建拒绝 Promise，并清掉残留 pending exception。
-- **所有权 / 错误 / 调用**：两条所有权路径：pending exception 匹配时直接拿 `ctx.runtime.current_exception`（借用）建 rejected promise，再 `ctx.clearException()` 清槽；否则 `createSentinelError` 新建 Error（OOM 时交出 realm 预分配的 OOM 对象，零分配）。`runtimeErrorInfo` 不认识的 err 原样上浮。返回的 promise 归 GC，函数出口保证异常槽已清空。14 处调用，典型 `src/exec/promise_ops.zig:3215`、`src/exec/vm_eval_module.zig:108`、`src/exec/disposable_ops.zig:714`。
+- **所有权 / 错误 / 调用**：两条所有权路径：pending exception 匹配时直接拿 `ctx.runtime.current_exception`（借用）建 rejected promise，再 `ctx.clearException()` 清槽；否则 `createSentinelError` 新建 Error（OOM 时交出 realm 预分配的 OOM 对象，零分配）。`runtimeErrorInfo` 不认识的 err 原样上浮。返回的 promise 归 GC，函数出口保证异常槽已清空。14 处调用，典型 `src/exec/promise_ops.zig:3215`、`src/exec/vm_opcodes.zig:108`、`src/exec/disposable_ops.zig:714`。
 
 ### `throwTypeErrorMessage` (`src/exec/exception_ops.zig:348`)
 
@@ -1306,7 +1306,7 @@ Web 兼容命名空间；QuickJS 没有。`now` = 单调时钟毫秒 − `runtim
 - **签名**：`pub fn throwInternalErrorMessage(ctx: *core.JSContext, global: *core.Object, message: []const u8) !core.JSValue`。
 - **作用**：抛 `InternalError`（qjs `JS_ThrowInternalError` 的对应物）：引擎自身的限额/内部故障用它，例如栈深度耗尽。
 - **实现**：造 `InternalError(message)`、`ctx.throwValue`，返回的哨兵是 **`error.StackOverflow`**——函数头注释已写明这是有意的：四个调用方全是栈/递归限额守卫，`error.StackOverflow` 正是它们的 unwind 路径匹配的哨兵。
-- **所有权 / 错误 / 调用**：`createNamedError` 建 Error（带栈），`ctx.throwValue` **把它移交异常槽**（此后槽是它的根），函数返回 `error.StackOverflow`——注意返回的哨兵与 `InternalError` 名字并不同名，调用方拿到的是**已挂 pending exception** 的错误，不需要也不应再 materialize。构造失败（OOM）则在挂异常之前就上浮。4 处调用：`src/exec/vm_call.zig:67`、`:255`、`src/exec/builtin_dispatch.zig:448`、`src/exec/inline_calls.zig:1456`。
+- **所有权 / 错误 / 调用**：`createNamedError` 建 Error（带栈），`ctx.throwValue` **把它移交异常槽**（此后槽是它的根），函数返回 `error.StackOverflow`——注意返回的哨兵与 `InternalError` 名字并不同名，调用方拿到的是**已挂 pending exception** 的错误，不需要也不应再 materialize。构造失败（OOM）则在挂异常之前就上浮。4 处调用：`src/exec/vm_opcodes.zig:67`、`:255`、`src/exec/builtin_dispatch.zig:448`、`src/exec/inline_calls.zig:1456`。
 
 ### `throwInterrupted` (`src/exec/exception_ops.zig:374`)
 
@@ -1342,7 +1342,7 @@ Web 兼容命名空间；QuickJS 没有。`now` = 单调时钟毫秒 − `runtim
 - **签名**：`pub fn throwReferenceErrorNotDefined(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom) !core.JSValue`。
 - **作用**：未解析绑定的专用出口：把 atom 还原成标识符文本，抛 `ReferenceError: 'name' is not defined`，保证 JS `catch` 看到的是带名字的消息而不是通用哨兵文本。
 - **实现**：tagged int atom 打成十进制数字，否则取 atom 名（取不到用空串）；`allocPrint` 出 `'name' is not defined` 并 `defer free`，再交给 `throwReferenceErrorMessage`。每个未解析绑定的出口（get_var、严格模式 put_var、with 作用域、ref-value）都走这里，否则 JS catch 只会看到 `runtimeErrorInfo` 给的通用 `"not defined"`。对照 qjs `JS_ThrowReferenceErrorNotDefined`（quickjs.c:7820）。
-- **所有权 / 错误 / 调用**：唯一持堆缓冲的 throw helper：`std.fmt.allocPrint` 拼出 `'name' is not defined`，`defer allocator.free(message)` 释放（tagged int atom 走栈上 `[16]u8`，atom 名字是借用切片）。消息串进 `throwReferenceErrorMessage` 后被复制成 GC 字符串，再由 `ctx.throwValue` 移交异常槽；返回 `error.ReferenceError` 哨兵**已带 pending exception**。9 处调用，典型 `src/exec/vm_property_ref.zig:89`、`src/exec/vm_property_globals.zig:82`、`src/exec/vm_property_ref.zig:253`。
+- **所有权 / 错误 / 调用**：唯一持堆缓冲的 throw helper：`std.fmt.allocPrint` 拼出 `'name' is not defined`，`defer allocator.free(message)` 释放（tagged int atom 走栈上 `[16]u8`，atom 名字是借用切片）。消息串进 `throwReferenceErrorMessage` 后被复制成 GC 字符串，再由 `ctx.throwValue` 移交异常槽；返回 `error.ReferenceError` 哨兵**已带 pending exception**。9 处调用，典型 `src/exec/vm_property.zig:89`、`src/exec/vm_property.zig:82`、`src/exec/vm_property.zig:253`。
 
 ### `throwSyntaxErrorMessage` (`src/exec/exception_ops.zig:436`)
 
@@ -1399,7 +1399,7 @@ Web 兼容命名空间；QuickJS 没有。`now` = 单调时钟毫秒 − `runtim
 - **签名**：`pub fn isErrorConstructorName(name: []const u8) bool`。
 - **作用**：谓词：这个名字是不是标准 Error 构造器名。
 - **实现**：转调 `core.error_names.isErrorConstructorName`。
-- **所有权 / 错误 / 调用**：无：转调 `core.error_names.isErrorConstructorName` 的静态名字表查询，只读借用切片，不分配、无 error set。4 处调用走这个 exec 包装：`src/exec/class_init_ops.zig:160`、`src/exec/call_runtime.zig:1169`、`:2358`、`src/js_context.zig:502`（`src/exec/reflect_ops.zig:389` 等另有几处直接调 `core.error_names.isErrorConstructorName`）。
+- **所有权 / 错误 / 调用**：无：转调 `core.error_names.isErrorConstructorName` 的静态名字表查询，只读借用切片，不分配、无 error set。4 处调用走这个 exec 包装：`src/exec/function_ops.zig:160`、`src/exec/call_runtime.zig:1169`、`:2358`、`src/js_context.zig:502`（`src/exec/reflect_ops.zig:389` 等另有几处直接调 `core.error_names.isErrorConstructorName`）。
 
 
 ### `functionNameBytes` (`src/exec/exception_ops.zig:521`)
@@ -1414,7 +1414,7 @@ Web 兼容命名空间；QuickJS 没有。`now` = 单调时钟毫秒 − `runtim
 - **签名**：`pub fn pendingExceptionMatchesError(ctx: *core.JSContext, err: anyerror) bool`。
 - **作用**：当前 pending exception 是不是这个 Zig 哨兵 error 对应的那个异常对象。
 - **实现**：没有 pending exception → false；`error.JSException` 恒为 true（它本来就表示「异常已在槽里」）；否则 `errorNameForRuntimeError` 取期望名，再用 `objectDataStringPropertyMatches` 比异常对象的 `name`。
-- **所有权 / 错误 / 调用**：只读：不分配、不清槽、不转移所有权，纯粹回答「当前 pending exception 是否就是这个 sentinel 的 JS 形态」。`error.JSException` 一律算匹配；其余先经 `errorNameForRuntimeError` 取期望名字，再用 `objectDataStringPropertyMatches` 做**不触发 accessor、不分配**的 `name` 比对（异常处理路径不能再分配）。无 error set。13 处调用，典型 `src/exec/builtin_dispatch.zig:465`（`materializeRuntimeError` 的短路）、`src/exec/error_stack_ops.zig:52`、`src/exec/call_runtime.zig:167`。
+- **所有权 / 错误 / 调用**：只读：不分配、不清槽、不转移所有权，纯粹回答「当前 pending exception 是否就是这个 sentinel 的 JS 形态」。`error.JSException` 一律算匹配；其余先经 `errorNameForRuntimeError` 取期望名字，再用 `objectDataStringPropertyMatches` 做**不触发 accessor、不分配**的 `name` 比对（异常处理路径不能再分配）。无 error set。13 处调用，典型 `src/exec/builtin_dispatch.zig:465`（`materializeRuntimeError` 的短路）、`src/exec/exception_ops.zig:52`、`src/exec/call_runtime.zig:167`。
 
 ### `objectDataStringPropertyMatches` (`src/exec/exception_ops.zig:543`)
 
@@ -1457,7 +1457,7 @@ Web 兼容命名空间；QuickJS 没有。`now` = 单调时钟毫秒 − `runtim
 - **签名**：`pub fn hostErrorValue( ctx: *core.JSContext, global: *core.Object, err: HostIoError, ) exceptions.HostError!core.JSValue`。
 - **作用**：宿主错误到 JS 值的转换。
 - **实现**：`hostIoErrorInfo` 分类后 `createNamedError`（会抓栈），构造错误经 `@errorCast` 收成 `HostError`。不碰 pending exception 槽。
-- **所有权 / 错误 / 调用**：返回 `createNamedError` 新建、已挂好 CallSite 的 Error（归 GC），**不**碰 pending exception 槽——它专门给「要一个拒绝理由值」的调用方用（`throwHostError` 是把同一个值再抛出去的那一层）。构造错误经 `@errorCast` 收成 `HostError` 原样上浮（主要是 OOM），此时没有 pending exception。3 处调用：本文件 `throwHostError`（`src/exec/exception_ops.zig:699`）与模块加载失败的拒绝理由 `src/exec/module_graph.zig:1791`、`:1833`。
+- **所有权 / 错误 / 调用**：返回 `createNamedError` 新建、已挂好 CallSite 的 Error（归 GC），**不**碰 pending exception 槽——它专门给「要一个拒绝理由值」的调用方用（`throwHostError` 是把同一个值再抛出去的那一层）。构造错误经 `@errorCast` 收成 `HostError` 原样上浮（主要是 OOM），此时没有 pending exception。3 处调用：本文件 `throwHostError`（`src/exec/exception_ops.zig:699`）与模块加载失败的拒绝理由 `src/exec/module.zig:1791`、`:1833`。
 
 
 
@@ -1474,7 +1474,7 @@ Web 兼容命名空间；QuickJS 没有。`now` = 单调时钟毫秒 − `runtim
 - **签名**：`pub fn throwModuleHostStall( ctx: *core.JSContext, global: *core.Object, ) exceptions.HostError!core.JSValue`。
 - **作用**：模块求值被宿主调度器卡住（一轮推进后毫无进展）时的抛出点：物化成 `InternalError: module host made no progress`，避免这个状态无声地流出 eval。
 - **实现**：已有 pending exception 就直接 `error.JSException`；否则造 `InternalError: module host made no progress`（`module_host_stall_message`）、`throwValue`，返回 `error.JSException`。主机调度器推不动模块求值属于引擎/宿主集成故障，不是动态 import 的 unsupported 哨兵。
-- **所有权 / 错误 / 调用**：已有 pending exception 时直接返回 `error.JSException`（不覆盖已挂的异常）；否则 `createNamedError` 建带栈的 `InternalError`，`ctx.throwValue` 移交异常槽，返回 `error.JSException` 哨兵——调用方拿到的是已挂异常的错误。构造失败（OOM）在挂异常前上浮。5 处调用：`src/exec/eval_entry.zig:448`、`:456`、`src/exec/module_graph.zig:1258` 等。
+- **所有权 / 错误 / 调用**：已有 pending exception 时直接返回 `error.JSException`（不覆盖已挂的异常）；否则 `createNamedError` 建带栈的 `InternalError`，`ctx.throwValue` 移交异常槽，返回 `error.JSException` 哨兵——调用方拿到的是已挂异常的错误。构造失败（OOM）在挂异常前上浮。5 处调用：`src/exec/eval_entry.zig:448`、`:456`、`src/exec/module.zig:1258` 等。
 
 ### `errorNameForRuntimeError` (`src/exec/exception_ops.zig:733`)
 
@@ -1506,6 +1506,6 @@ Web 兼容命名空间；QuickJS 没有。`now` = 单调时钟毫秒 − `runtim
 
 ## 覆盖核对
 
-- 清单函数数: 199（`src/exec/coercion_ops.zig` 17 + `src/exec/error_ops.zig` 2 + `src/exec/error_stack_ops.zig` 18 + `src/exec/exception_ops.zig` 42 + `src/exec/function_ops.zig` 16 + `src/exec/performance_ops.zig` 2 + `src/exec/primitive_ops.zig` 6 + `src/exec/print_inspector.zig` 29 + `src/exec/value_ops.zig` 67）
+- 清单函数数: 199（`src/exec/value_ops.zig` 17 + `src/exec/exception_ops.zig` 2 + `src/exec/exception_ops.zig` 18 + `src/exec/exception_ops.zig` 42 + `src/exec/function_ops.zig` 16 + `src/exec/builtin_glue.zig` 2 + `src/exec/value_ops.zig` 6 + `src/exec/call.zig` 29 + `src/exec/value_ops.zig` 67）
 - 本文标题覆盖: 200（含 1 条清单外的内嵌辅助函数标题）
 - 未覆盖: 无

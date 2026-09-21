@@ -13,7 +13,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const vm_profile = @import("vm_profile.zig");
+
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const frame_mod = @import("frame.zig");
@@ -24,28 +24,28 @@ const call_runtime = @import("call_runtime.zig");
 const function_ops = @import("function_ops.zig");
 const object_ops = @import("object_ops.zig");
 const exception_ops = @import("exception_ops.zig");
-const HostError = @import("exceptions.zig").HostError;
+const HostError = @import("exception_ops.zig").HostError;
 
-// Op-helper modules.
-const vm_value = @import("vm_value.zig");
-const vm_arith = @import("vm_arith.zig");
-const vm_control = @import("vm_control.zig");
-const vm_call = @import("vm_call.zig");
-const vm_native = @import("vm_native.zig");
+// Op-helper modules (same aliases the VM used when dispatch lived in zjs_vm.zig).
+const vm_value = @import("vm_opcodes.zig");
+const vm_arith = @import("vm_opcodes.zig");
+const vm_control = @import("vm_opcodes.zig");
+const vm_call = @import("vm_opcodes.zig");
+const vm_native = @import("vm_opcodes.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
-const vm_literal = @import("vm_literal.zig");
+const vm_literal = @import("vm_opcodes.zig");
 const iterator_ops = @import("iterator_ops.zig");
-const vm_eval_module = @import("vm_eval_module.zig");
-const vm_gen_async = @import("vm_gen_async.zig");
-const vm_property_globals = @import("vm_property_globals.zig");
-const vm_property_field = @import("vm_property_field.zig");
-const property_direct = @import("property_direct.zig");
+const vm_eval_module = @import("vm_opcodes.zig");
+const vm_gen_async = @import("vm_opcodes.zig");
+const vm_property_globals = @import("vm_property.zig");
+const vm_property_field = @import("vm_property.zig");
+const property_direct = @import("property_ops.zig");
 const string_ops = @import("string_ops.zig");
 const array_ops = @import("array_ops.zig");
-const forof_ops = @import("forof_ops.zig");
-const vm_property_locals = @import("vm_property_locals.zig");
+const forof_ops = @import("iterator_ops.zig");
+const vm_property_locals = @import("vm_property.zig");
 const value_ops = @import("value_ops.zig");
-const coercion_ops = @import("coercion_ops.zig");
+const coercion_ops = @import("value_ops.zig");
 const colds = @import("tailcall_dispatch_colds.zig");
 
 const op = bytecode.opcode.op;
@@ -429,7 +429,7 @@ inline fn residentTailHandler(vm: *const Vm, comptime slot: ResidentTailSlot) Ha
 fn next(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) align(16) linksection(op_handler_section) callconv(.c) Outcome {
     if (comptime builtin.mode == .Debug)
         std.debug.assert(@intFromPtr(pc) < @intFromPtr(vm.function.byteCode().ptr + vm.function.byteCode().len));
-    if (comptime vm_profile.enabled) vm_profile.noteDispatch(vm.ctx.runtime, pc);
+    if (comptime enabled) noteDispatch(vm.ctx.runtime, pc);
     return @call(.always_tail, vm.active_dispatch_tbl[pc[0]], .{ pc, sp, var_buf, vm });
 }
 
@@ -1729,7 +1729,7 @@ fn opCall(comptime argc_source: CallArgcSource) Handler {
                             }
                         }
                         vm.stack.setTopPtr(sp);
-                        switch (vm_native.dispatch(vm, func_obj, argc, .plain) catch |e| return vm.fail(e)) {
+                        switch (vm_native.dispatchNativeCall(vm, func_obj, argc, .plain) catch |e| return vm.fail(e)) {
                             .hit => return nativeHitNext(var_buf, vm),
                             .caught => return coldNext(var_buf, vm),
                             .miss => {},
@@ -1999,7 +1999,7 @@ fn op_call_method(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
                     }
                     if (!rec.flags.forwards_call) {
                         vm.stack.setTopPtr(sp);
-                        switch (vm_native.dispatch(vm, method_obj, argc, .method) catch |e| return vm.fail(e)) {
+                        switch (vm_native.dispatchNativeCall(vm, method_obj, argc, .method) catch |e| return vm.fail(e)) {
                             .hit => return nativeHitNext(var_buf, vm),
                             .caught => return coldNext(var_buf, vm),
                             .miss => {},
@@ -2760,7 +2760,7 @@ fn op_add_strings(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm)
 /// (emission guarantees every dispatch lands on a real opcode) minus the Debug
 /// bound assert; `next` remains the driver/jump entry point.
 inline fn cont(npc: [*]const u8, nsp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm) Outcome {
-    if (comptime vm_profile.enabled) vm_profile.noteDispatch(vm.ctx.runtime, npc);
+    if (comptime enabled) noteDispatch(vm.ctx.runtime, npc);
     return @call(.always_tail, dispatch_table[npc[0]], .{ npc, nsp, var_buf, vm });
 }
 
@@ -6311,4 +6311,30 @@ comptime {
     _ = &coldNext;
     _ = &runDispatchLoop;
     _ = dispatch_table;
+}
+
+
+// ----- merged from vm_profile.zig -----
+// Per-opcode profiling support for the tail-call threaded dispatcher.
+//
+// The pre-threading design wrapped each opcode in an enter/deinit scope;
+// a scope cannot span an `always_tail` chain, so that API is retired.
+// A later 256-entry table shim (`profiledHandler` in `.op_handlers`)
+// slid the L-1 island and broke `op_return`'s musttail ABI on zlib
+// (SIGSEGV, `sp == 0`). Profiling builds now call `noteDispatch` from
+// `cont`/`next` only — handler bodies stay unwrapped. The final open
+// interval is closed by `OpcodeProfile.flushPendingDispatch` before any
+// dump. Compiled out entirely in default builds.
+const build_options = @import("build_options");
+pub const enabled = build_options.zjs_enable_opcode_profile;
+pub inline fn noteDispatch(rt: *core.JSRuntime, pc: [*]const u8) void {
+    if (comptime !enabled) return;
+    const profile = rt.opcode_profile orelse return;
+    const opcode = pc[0];
+    profile.noteDispatch(opcode);
+    // Memory-only, no syscall: safe on the musttail path (the crash
+    // precedent in the header was clock_gettime's frame, not a store).
+    const bc = @import("../bytecode.zig");
+    if (opcode == comptime @intFromEnum(bc.opcode.logical.LogicalOpcode.ext0))
+        profile.noteCarrierSub(pc[1]);
 }

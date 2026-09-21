@@ -65,11 +65,6 @@ pub const State = struct {
     stats: Stats = .{},
 };
 
-/// The mark frontier and the epoch its marks are read under.
-///
-/// The barrier's shared queue lives here rather than inside `gc_mark_queue`
-/// because the barrier reaches it through the Registry and must not import
-/// the queue module to do so.
 /// Mark epoch for non-block trace carriers. Epoch 0 is reserved for
 /// newborn/unmarked; a major advances this scalar, while minors keep it fixed
 /// so sticky survivor marks remain valid. Unlike a global parity flip, a stale

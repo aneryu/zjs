@@ -16,17 +16,17 @@ const core = @import("../core/root.zig");
 const call_mod = @import("call.zig");
 const frame_mod = @import("frame.zig");
 const stack_mod = @import("stack.zig");
-const vm_call = @import("vm_call.zig");
+const vm_call = @import("vm_opcodes.zig");
 const object_ops = @import("object_ops.zig");
 const exception_ops = @import("exception_ops.zig");
-const exceptions = @import("exceptions.zig");
-const vm_gen_async = @import("vm_gen_async.zig");
+const exceptions = @import("exception_ops.zig");
+const vm_gen_async = @import("vm_opcodes.zig");
 const inline_calls = @import("inline_calls.zig");
 const active_invocation_trace = if (core.runtime.value_root_frames_enabled)
-    @import("active_invocation_trace.zig")
+    @import("inline_calls.zig")
 else
     struct {};
-const vm_property_globals = @import("vm_property_globals.zig");
+const vm_property_globals = @import("vm_property.zig");
 const call_runtime = @import("call_runtime.zig");
 const tailcall_dispatch = @import("tailcall_dispatch.zig");
 const array_ops = @import("array_ops.zig");
@@ -719,6 +719,6 @@ const throwTypeErrorIntrinsicForGlobal = call_runtime.throwTypeErrorIntrinsicFor
 pub const getValueProperty = object_ops.getValueProperty;
 
 // `engine eval host globals and throw intrinsic tear down cleanly` was relocated
-// to `src/tests/exec.zig` in Phase 6b-3 STEP 7B: it bootstraps a bare runtime's
+// to `tests/exec.zig` in Phase 6b-3 STEP 7B: it bootstraps a bare runtime's
 // standard globals through `rt.installStandardGlobals`, with the installer
 // registered through the runtime bootstrap seam.

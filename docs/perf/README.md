@@ -1,9 +1,9 @@
 # Performance Workflow
 
 This directory contains performance notes and a historical status snapshot
-for `zjs`. Nothing here is a merge gate. Local `zig build perf-benchmark`
-and `perf stat` are diagnostics; [verification-policy](../verification-policy.md)
-is the authority.
+for `zjs`. Nothing here is a merge gate. Repeatable timing lives outside
+this repository. Local `perf stat` remains a host diagnostic;
+[verification-policy](../verification-policy.md) is the authority.
 
 Current design notes:
 
@@ -28,20 +28,6 @@ ratios are only comparable against the same reference-binary fingerprint
 (hash + compiler) — see the 2026-08-25 reference-drift adjudication in
 [bench-v8-status.md](bench-v8-status.md).
 
-## Current Benchmark Entries
-
-Run the current repeatable diagnostic benchmark with:
-
-```sh
-zig build perf-benchmark --summary all
-```
-
-This builds the ReleaseFast `zjs` CLI and runs
-`tests/perf/microbench.js` with `--perf-json`. The fixture checks deterministic
-results for arithmetic, dense array, object property, and string loops before
-emitting timing JSON. Use the JSON as a local diagnostic signal, not as a
-release gate.
-
 ## Checked-In Artifacts
 
 No benchmark result JSON is checked in.
@@ -55,15 +41,6 @@ and any quoted ratio is only valid against the named reference-binary
 fingerprint.
 
 ## Runtime Profiling
-
-For coarse internal stage timing:
-
-```sh
-zig-out/bin/zjs --perf-json -e "for(var i=0; i<100000; i++) {}" 2> .zig-cache/perf/current/perf.json
-```
-
-The JSON is written to stderr so script stdout remains comparable. Its stage
-timings and memory counters remain usable.
 
 Per-opcode profiling requires the dedicated profiling build:
 

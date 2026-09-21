@@ -87,7 +87,8 @@ zig build zjs -Doptimize=ReleaseFast --summary all
 ./zig-out/bin/zjs path/to/file.js
 ```
 
-Missing or invalid arguments print usage and exit non-zero.
+A file path evaluates as a module. `-e` is a script; `-s` forces script
+mode. Missing or invalid arguments print usage and exit non-zero.
 
 ## Embed JavaScript In Zig
 
@@ -100,14 +101,13 @@ const zjs = @import("zjs");
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
-    const rt = try zjs.JSRuntime.create(allocator, .{});
+    const rt = try zjs.Runtime.create(allocator, .{});
     defer rt.destroy();
 
-    const ctx = try zjs.JSContext.create(rt, .{});
+    const ctx = try zjs.Context.create(rt, .{});
     defer ctx.destroy();
 
     const result = try ctx.eval("let x = 1 + 2; x;", .{});
-    defer result.free(rt);
 
     std.debug.assert(result.as(.int) == @as(?i32, 3));
 }
@@ -119,10 +119,11 @@ modules. The examples are covered by the embedding test target.
 
 ## Runtime And Ownership Boundary
 
-The runtime is single-threaded. Host-owned `JSValue`s must remain in a
-`zjs.value.Scope` / local handle for the duration of a call, or in a
-`zjs.value.Persistent` handle when they cross callbacks, ticks, or host object
-state. Embedders must release owning values with the runtime that created them.
+The runtime is single-threaded. Host-owned `Value`s must remain in a
+handle scope / local handle for the duration of a call, or in a persistent
+handle (`rt.createPersistentValue`) when they cross callbacks, ticks, or host
+object state. Embedders must release owning values with the runtime that
+created them.
 
 Memory and interrupt limits are reliability controls for trusted embeddings;
 they are not a security boundary for untrusted JavaScript. See the Security

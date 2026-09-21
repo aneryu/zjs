@@ -14,7 +14,7 @@
 
 ## `src/libs/root.zig`：再导出图
 
-零函数文件。职责是给 `src/internal_root.zig` / `src/core/` 一个稳定的库入口，避免调用方直接写四个相对路径。
+零函数文件。职责是给 `src/root.zig` / `src/core/` 一个稳定的库入口，避免调用方直接写四个相对路径。
 
 ```
 src/libs/root.zig
@@ -36,7 +36,7 @@ src/libs/root.zig
 | `number_format` | binary64 文本 ↔ 数值双向：格式化 `floatToText`（`js_dtoa`），解析 `textToFloat`（`js_atod` + `js_atof` 规则），ToNumber / parseInt / parseFloat / 字面量 / JSON 全部经 `parseNumberPrefix` / `parseNumberExact` |
 | `bigint` | 分配器拥有的 `BigInt`，上限 `JS_BIGINT_MAX_SIZE`（1M bit） |
 
-本文件没有 `fn`。消费点：`core/bigint.zig`（堆对象借 `libs.bigint.BigInt` 视图）、`exec/regexp_adapter.zig` / `exec/regexp_ops.zig`（编译执行）、`core/number.zig` / `core/value_format.zig` / `lexer.zig` / `exec/json_ops.zig`（双向转换）、parser/lexer（标识符与空白）。
+本文件没有 `fn`。消费点：`core/bigint.zig`（堆对象借 `libs.bigint.BigInt` 视图）、`exec/regexp_ops.zig` / `exec/regexp_ops.zig`（编译执行）、`core/number.zig` / `core/value_format.zig` / `lexer.zig` / `exec/json_ops.zig`（双向转换）、parser/lexer（标识符与空白）。
 
 ## LRE vs `exec/regexp_ops`
 
@@ -49,7 +49,7 @@ JS `new RegExp` / `RegExp.prototype.exec`
  exec/regexp_ops.zig          JS 对象、flags 访问器、RegExp 内建方法
         │  编译 / 执行经 adapter
         ▼
- exec/regexp_adapter.zig      把 JSString 宽度、runtime 栈溢出、timeout 接到库
+ exec/regexp_ops.zig      把 JSString 宽度、runtime 栈溢出、timeout 接到库
         │
         ▼
  libs/regexp.zig              LRE：pattern → 字节码 → 回溯匹配
@@ -68,7 +68,7 @@ JS `new RegExp` / `RegExp.prototype.exec`
 
 `regexp_ops` 文件头写明：匹配引擎留在 `libs/regexp.zig`；VM/字符串可观察行为走 `regexp_fastpath.zig` 与 `string_ops.zig`。`core/regexp.zig` 只做纯字符类谓词（`classMatchesUtf16Unit`），给字符串 replace/match 快路径用，不跑 LRE。
 
-`exec/regexp_adapter.zig` 是运行时桥：`compileWithRuntime` 把 `JSRuntime.checkNativeStackOverflow` 填进 `CompileOptions.check_stack_overflow`（对应 qjs `lre_check_stack_overflow` → `js_check_stack_overflow`）；执行时把已 flatten 的 latin1/utf16 缓冲交给 `execCaptureSlotsSliceTrustedWithOptions`，避免全局 match/replace 循环里反复解码 `JSValue`。
+`exec/regexp_ops.zig` 是运行时桥：`compileWithRuntime` 把 `JSRuntime.checkNativeStackOverflow` 填进 `CompileOptions.check_stack_overflow`（对应 qjs `lre_check_stack_overflow` → `js_check_stack_overflow`）；执行时把已 flatten 的 latin1/utf16 缓冲交给 `execCaptureSlotsSliceTrustedWithOptions`，避免全局 match/replace 循环里反复解码 `JSValue`。
 
 信任契约：本编译器产出的字节码走 `.trusted` 路径（release 不校验每个 operand，对齐 `lre_exec`）；外来字节码走 `.checked`。
 
@@ -85,7 +85,7 @@ JS `new RegExp` / `RegExp.prototype.exec`
 3. **运行期单码点**（同一文件的 `isUnicodePropertyMatches`）
    零分配走同一张表，**不**走 LRE 字节码；目前只有区间自洽测试在用它（`core/regexp.zig` 的字符类快路径只调 `isSupportedUnicodePropertyExpression`）。
 
-4. **支持集**  
+4. **支持集**
    `isSupportedUnicodePropertyExpression`：能解析 **且** 有表或派生表达式。`ID_Compat_Math_Start` / `InCB` 能在 name table 里解析，但 `isSupported` 为 false（没有 QuickJS 区间），编译期当 `InvalidPattern`。
 
 `/v` 特有路径在 `REParseState`：

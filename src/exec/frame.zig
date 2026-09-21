@@ -15,7 +15,7 @@ const memory = @import("../core/memory.zig");
 const runtime = @import("../core/runtime.zig");
 const JSRuntime = runtime.JSRuntime;
 const JSValue = @import("../core/value.zig").JSValue;
-const open_bindings_mod = @import("open_bindings.zig");
+
 
 pub const FrameSlab = struct {
     storage: []JSValue = &.{},
@@ -502,7 +502,7 @@ pub const Frame = struct {
     }
 
     pub fn closeOpenVarRefs(self: *Frame, rt: anytype) void {
-        var table = open_bindings_mod.Table{ .cells = self.open_var_refs };
+        var table = Table{ .cells = self.open_var_refs };
         table.closeAll(rt);
     }
 
@@ -563,14 +563,14 @@ pub const Frame = struct {
     pub fn closeLocalBinding(self: *Frame, rt: anytype, local_idx: usize) !void {
         if (local_idx >= self.locals.len or local_idx >= self.function.varDefs().len) return error.InvalidBytecode;
         const binding_idx = self.function.localOpenBindingIndex(local_idx) orelse return;
-        var table = open_bindings_mod.Table{ .cells = self.open_var_refs };
+        var table = Table{ .cells = self.open_var_refs };
         try table.close(rt, binding_idx);
     }
 
     /// Close parameter-environment aliases at the generator body boundary
     /// while retaining aliases into the resident argument backing.
     pub fn closeParameterEnvironmentVarRefs(self: *Frame, rt: anytype) !void {
-        var table = open_bindings_mod.Table{ .cells = self.open_var_refs };
+        var table = Table{ .cells = self.open_var_refs };
         for (self.function.varDefs()) |vd| {
             if (!vd.isCaptured()) continue;
             try table.close(rt, vd.var_ref_idx);
@@ -696,7 +696,7 @@ fn growLocalsCapacity(account: *memory.MemoryAccount, frame: *Frame, idx: usize)
     // Production frames are pre-sized; synthetic builders may grow only before
     // the first capture. Check before allocating so malformed bytecode cannot
     // turn this invariant failure into an allocation-dependent error.
-    var open_table = open_bindings_mod.Table{ .cells = frame.open_var_refs };
+    var open_table = Table{ .cells = frame.open_var_refs };
     if (open_table.hasOpen()) return error.InvalidBytecode;
 
     const old_locals = frame.locals;
@@ -745,3 +745,39 @@ fn sliceOverlapsStorage(comptime T: type, values: []const T, storage: []const JS
     const storage_end = std.math.add(usize, storage_start, storage_bytes) catch return true;
     return value_start < storage_end and storage_start < value_end;
 }
+
+
+// ----- merged from open_bindings.zig -----
+// Cold binding-identity table for frame locals and arguments.
+//
+// The table names the unique live open cell of each captured binding. Closing
+// detaches the cell from frame storage without changing its identity.
+//
+// The acquire half (qjs get_var_ref, qjs:16997-17044) is NOT here: it is
+// inlined once each into `Frame.captureLocal` and `Frame.captureArg`
+// (exec/frame.zig) so the nested js_closure2 loop keeps a single helper
+// boundary. Keep those two bodies in step with each other.
+pub const Table = struct {
+    cells: []?*core.VarRef = &.{},
+
+    pub fn close(self: *Table, rt: anytype, binding_index: u16) !void {
+        const index: usize = binding_index;
+        if (index >= self.cells.len) return error.InvalidBytecode;
+        const cell = self.cells[index] orelse return;
+        self.cells[index] = null;
+        cell.close(rt);
+    }
+
+    pub fn closeAll(self: *Table, rt: anytype) void {
+        for (self.cells) |*entry| {
+            const cell = entry.* orelse continue;
+            entry.* = null;
+            cell.close(rt);
+        }
+    }
+
+    pub fn hasOpen(self: *const Table) bool {
+        for (self.cells) |cell| if (cell != null) return true;
+        return false;
+    }
+};

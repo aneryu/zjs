@@ -11,8 +11,8 @@ const std = @import("std");
 
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
-const error_stack_ops = @import("error_stack_ops.zig");
-const exceptions = @import("exceptions.zig");
+
+
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
 const value_ops = @import("value_ops.zig");
@@ -30,7 +30,7 @@ pub const ErrorInfo = struct { name: []const u8, message: []const u8 };
 /// and are documented there.
 pub fn createNamedError(ctx: *core.JSContext, global: *core.Object, name: []const u8, message: []const u8) !core.JSValue {
     const error_value = try createNamedErrorWithoutStack(ctx.runtime, global, name, message);
-    try error_stack_ops.attachStackToErrorValue(ctx, global, error_value);
+    try attachStackToErrorValue(ctx, global, error_value);
     return error_value;
 }
 
@@ -94,7 +94,7 @@ pub fn createNamedErrorWithPrototype(ctx: *core.JSContext, global: *core.Object,
     const error_value = object.value();
     const message_value = try value_ops.createStringValue(ctx.runtime, message);
     try defineNonEnumValueProperty(ctx.runtime, object, core.atom.ids.message, message_value);
-    try error_stack_ops.attachStackToErrorValue(ctx, global, error_value);
+    try attachStackToErrorValue(ctx, global, error_value);
     // No own `name` property: it lives on `prototype`, which the caller has
     // already selected for exactly this name (same rule as
     // `errorConstructWithPrototype`). `name` is kept so the call sites stay
@@ -292,11 +292,11 @@ pub fn promiseAggregateError(ctx: *core.JSContext, global: *core.Object, errors:
         }
     }
     try defineNonEnumValueProperty(rt, object, core.atom.ids.errors, errors.value());
-    try error_stack_ops.attachStackToErrorValue(ctx, global, aggregate_error);
+    try attachStackToErrorValue(ctx, global, aggregate_error);
     return aggregate_error;
 }
 
-pub fn promiseErrorValue(ctx: *core.JSContext, global: *core.Object, err: exceptions.HostError) exceptions.HostError!core.JSValue {
+pub fn promiseErrorValue(ctx: *core.JSContext, global: *core.Object, err: HostError) HostError!core.JSValue {
     // QuickJS's async boundary takes the already-thrown interrupt value and
     // rejects with it. Keep this transfer local to Promise conversion:
     // admitting Interrupted to the generic pending-error matcher would let
@@ -327,9 +327,9 @@ pub fn promiseErrorValue(ctx: *core.JSContext, global: *core.Object, err: except
 pub fn rejectedPromiseForRuntimeError(
     ctx: *core.JSContext,
     global: *core.Object,
-    err: exceptions.HostError,
+    err: HostError,
     prototype: ?*core.Object,
-) exceptions.HostError!core.JSValue {
+) HostError!core.JSValue {
     if (pendingExceptionMatchesError(ctx, err)) {
         const thrown_value = ctx.runtime.current_exception;
         const promise = try core.promise.rejectedWithPrototype(ctx, thrown_value, prototype);
@@ -689,7 +689,7 @@ pub fn hostErrorValue(
     ctx: *core.JSContext,
     global: *core.Object,
     err: HostIoError,
-) exceptions.HostError!core.JSValue {
+) HostError!core.JSValue {
     const info = hostIoErrorInfo(err);
     return createNamedError(ctx, global, info.name, info.message) catch |create_err|
         return @errorCast(create_err);
@@ -702,7 +702,7 @@ pub fn throwHostError(
     ctx: *core.JSContext,
     global: *core.Object,
     err: HostIoError,
-) exceptions.HostError!core.JSValue {
+) HostError!core.JSValue {
     if (err == error.OutOfMemory) return error.OutOfMemory;
     if (ctx.hasException()) return error.JSException;
     const error_value = try hostErrorValue(ctx, global, err);
@@ -718,7 +718,7 @@ pub const module_host_stall_message = "module host made no progress";
 pub fn throwModuleHostStall(
     ctx: *core.JSContext,
     global: *core.Object,
-) exceptions.HostError!core.JSValue {
+) HostError!core.JSValue {
     if (ctx.hasException()) return error.JSException;
     const error_value = try createNamedError(
         ctx,
@@ -774,4 +774,412 @@ fn defineNonEnumValueProperty(rt: *core.JSRuntime, object: *core.Object, key: co
 fn throwReferenceErrorSentinel(ctx: *core.JSContext) void {
     const reference_error_atom = comptime core.atom.predefinedId("ReferenceError", .string).?;
     _ = ctx.throwValue(core.JSValue.int32(@intCast(reference_error_atom.raw())));
+}
+
+
+// ----- merged from exceptions.zig -----
+// Compatibility names for the core engine-error authority.
+const core_errors = @import("../core/errors.zig");
+pub const RuntimeError = core_errors.RuntimeError;
+pub const HostError = core_errors.HostError;
+
+
+// ----- merged from error_ops.zig -----
+// Error-object native records and their realm-aware dispatch seam.
+//
+// This module owns the Error prototype/static record ids and forwards stack
+// access, captureStackTrace, and `toString` to their implementation owners.
+// Receiver and arguments are borrowed; returned JSValues are owned. Callable
+// realm selection stays atomic through `builtin_dispatch`, matching the
+// QuickJS Error prototype table and `js_error_toString` at
+const builtin_dispatch = @import("builtin_dispatch.zig");
+const call = @import("call.zig");
+const call_runtime = @import("call_runtime.zig");
+const string_ops = @import("string_ops.zig");
+pub const PrototypeMethod = core.host_function.builtin_method_ids.error_object.PrototypeMethod;
+pub const StaticMethod = enum(u32) {
+    capture_stack_trace = 10,
+};
+pub const internal_entries = errorEntries: {
+    const Entry = core.host_function.InternalEntry;
+    break :errorEntries [_]Entry{
+        errorEntry("toString", 0, @intFromEnum(PrototypeMethod.to_string)),
+        errorEntry("get stack", 1, @intFromEnum(PrototypeMethod.stack_getter)),
+        errorEntry("set stack", 1, @intFromEnum(PrototypeMethod.stack_setter)),
+        errorEntry("captureStackTrace", 1, @intFromEnum(StaticMethod.capture_stack_trace)),
+    };
+};
+fn errorEntry(comptime name: []const u8, comptime length: u8, comptime id: u32) core.host_function.InternalEntry {
+    return .{
+        .name = name,
+        .length = length,
+        .id = id,
+        .magic = @intCast(id),
+        .cproto = .generic_magic,
+        .native_function = builtin_dispatch.genericMagicFunction(&errorCall),
+    };
+}
+
+fn errorCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
+    const realm = try builtin_dispatch.callableRealm(host_call);
+    const ctx = realm.realm;
+    const output = host_call.output;
+    const id: u32 = host_call.magic;
+    const args = host_call.args;
+    const this_value = host_call.this_value;
+    const caller_function = builtin_dispatch.callerBytecode(host_call);
+    const caller_frame = builtin_dispatch.callerFrame(host_call);
+
+    if (id == @intFromEnum(StaticMethod.capture_stack_trace)) {
+        const receiver = call.thisObject(this_value) orelse return error.TypeError;
+        if (!call_runtime.isCallableValue(this_value)) return error.TypeError;
+        if (!try call_runtime.constructorNameEqlLocal(ctx.runtime, receiver, "Error")) return error.TypeError;
+        return errorCaptureStackTrace(ctx, output, realm.global, args);
+    }
+
+    const func_obj = host_call.func_obj;
+    return switch (id) {
+        @intFromEnum(PrototypeMethod.to_string) => string_ops.errorToStringCall(ctx, output, realm.global, this_value, caller_function, caller_frame),
+        @intFromEnum(PrototypeMethod.stack_getter) => errorStackGetter(ctx, output, realm.global, this_value),
+        @intFromEnum(PrototypeMethod.stack_setter) => blk: {
+            const setter_func = func_obj orelse return error.TypeError;
+            break :blk errorStackSetter(ctx, output, realm.global, this_value, setter_func, args, caller_function, caller_frame);
+        },
+        else => error.TypeError,
+    };
+}
+
+
+// ----- merged from error_stack_ops.zig -----
+// Error.stack capture/formatting, backtrace naming and CallSite helpers.
+const method_ids = core.host_function.builtin_method_ids;
+const array_ops = @import("array_ops.zig");
+const object_ops = @import("object_ops.zig");
+const buildCallSiteArray = array_ops.buildCallSiteArray;
+const buildErrorStackStringValue = string_ops.buildErrorStackStringValue;
+const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
+const formatCapturedErrorStackStringValue = string_ops.formatCapturedErrorStackStringValue;
+const isCallableValue = call_runtime.isCallableValue;
+pub fn captureErrorStack(ctx: *core.JSContext, global: *core.Object, instance: *core.Object) !void {
+    const sites = try buildCallSiteArray(ctx, global, null);
+    try instance.setErrorStackSites(ctx.runtime, sites);
+}
+
+/// Value-level stack capture: attach the current VM backtrace as call sites
+/// to `value` when it is an object; non-object values are ignored. This is
+/// the seam used by the `exception_ops` construction primitives, which
+/// capture the stack at error construction time (QuickJS `build_backtrace`
+/// inside `JS_ThrowError2`).
+pub fn attachStackToErrorValue(ctx: *core.JSContext, global: *core.Object, value: core.JSValue) !void {
+    const object = core.value_semantics.objectFromValue(value) orelse return;
+    try captureErrorStack(ctx, global, object);
+}
+
+pub fn buildErrorStackValue(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, error_value: core.JSValue, skip_name: ?[]const u8) !core.JSValue {
+    if (ctx.runtime.formatting_error_stack) return buildErrorStackStringValue(ctx, global, skip_name);
+
+    if (try errorPrepareStackTrace(global)) |prepare| {
+        const sites = try buildCallSiteArray(ctx, global, skip_name);
+        ctx.runtime.formatting_error_stack = true;
+        defer ctx.runtime.formatting_error_stack = false;
+        return callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), prepare, &.{ error_value, sites }, null, null) catch |err| {
+            if (pendingExceptionMatchesError(ctx, err)) {
+                _ = ctx.takeException();
+                return core.JSValue.nullValue();
+            }
+            if (ctx.hasException()) ctx.clearException();
+            if (runtimeErrorInfo(err) != null) return core.JSValue.nullValue();
+            return err;
+        };
+    }
+    return buildErrorStackStringValue(ctx, global, skip_name);
+}
+
+pub fn formatCapturedErrorStackValue(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    error_value: core.JSValue,
+    sites_value: core.JSValue,
+    site_count: usize,
+) !core.JSValue {
+    if (ctx.runtime.formatting_error_stack) return formatCapturedErrorStackStringValue(ctx, sites_value, site_count);
+
+    if (try errorPrepareStackTrace(global)) |prepare| {
+        const sites_arg = sites_value;
+        ctx.runtime.formatting_error_stack = true;
+        defer ctx.runtime.formatting_error_stack = false;
+        return callValueOrBytecodeRoot(ctx, output, global, core.JSValue.undefinedValue(), prepare, &.{ error_value, sites_arg }, null, null) catch |err| {
+            if (pendingExceptionMatchesError(ctx, err)) {
+                _ = ctx.takeException();
+                return core.JSValue.nullValue();
+            }
+            if (ctx.hasException()) ctx.clearException();
+            if (runtimeErrorInfo(err) != null) return core.JSValue.nullValue();
+            return err;
+        };
+    }
+    return formatCapturedErrorStackStringValue(ctx, sites_value, site_count);
+}
+
+/// Throw the compile-error SyntaxError for a parse failure, mirroring qjs's
+/// parse-error surface: build_backtrace's filename branch
+/// defines own fileName/lineNumber/columnNumber data properties
+/// (JS_PROP_WRITABLE | JS_PROP_CONFIGURABLE, non-enumerable) and prepends a
+/// `    at <file>:<line>:<col>` line to the stack, which for compile errors is
+/// built eagerly at throw time (JS_ThrowError2 -> build_backtrace with
+/// filename != NULL). zjs stores the eagerly-built string via `setErrorStack`
+/// so the lazy `stack` accessor returns it verbatim.
+pub fn throwParseSyntaxError(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    filename: []const u8,
+    line: u32,
+    col: u32,
+    message: []const u8,
+) !core.JSValue {
+    const rt = ctx.runtime;
+    const line_num: i32 = std.math.cast(i32, line) orelse std.math.maxInt(i32);
+    const col_num: i32 = std.math.cast(i32, col) orelse std.math.maxInt(i32);
+    const error_value = try createNamedErrorWithoutStack(rt, global, "SyntaxError", message);
+    // Ownership: on construction failure below free the value; once
+    // `throwValue` has stored it the exception slot owns it (the final
+    // `return error.SyntaxError` is the intended result, not a failure).
+    defineParseErrorSurface(ctx, global, error_value, filename, line_num, col_num) catch |err| {
+        return err;
+    };
+    _ = ctx.throwValue(error_value);
+    return error.SyntaxError;
+}
+
+fn defineParseErrorSurface(
+    ctx: *core.JSContext,
+    global: *core.Object,
+    error_value: core.JSValue,
+    filename: []const u8,
+    line_num: i32,
+    col_num: i32,
+) !void {
+    const rt = ctx.runtime;
+    const instance = core.value_semantics.objectFromValue(error_value) orelse return;
+    const filename_value = try value_ops.createStringValue(rt, filename);
+    try instance.defineOwnProperty(rt, core.atom.ids.fileName, core.Descriptor.data(filename_value, .method));
+    try instance.defineOwnProperty(rt, core.atom.ids.lineNumber, core.Descriptor.data(core.JSValue.int32(line_num), .method));
+    try instance.defineOwnProperty(rt, core.atom.ids.columnNumber, core.Descriptor.data(core.JSValue.int32(col_num), .method));
+
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(rt.memory.allocator);
+    try bytes.print(rt.memory.allocator, "    at {s}:{d}:{d}\n", .{ filename, line_num, col_num });
+    const frames_value = try buildErrorStackStringValue(ctx, global, null);
+    try value_ops.appendRawString(rt, &bytes, frames_value);
+    const stack_value = try value_ops.createStringValue(rt, bytes.items);
+    try instance.setErrorStack(rt, stack_value);
+}
+
+fn errorPrepareStackTrace(global: *core.Object) !?core.JSValue {
+    const error_key = core.atom.ids.Error;
+    const error_value = try global.getProperty(error_key);
+    const error_object = core.value_semantics.objectFromValue(error_value) orelse return null;
+    const prepare_key = core.atom.ids.prepareStackTrace;
+    const prepare = try error_object.getProperty(prepare_key);
+    if (!isCallableValue(prepare)) {
+        return null;
+    }
+    return prepare;
+}
+
+pub fn backtraceFunctionNameEql(ctx: *core.JSContext, entry: core.BacktraceFrame, expected: []const u8) bool {
+    return std.mem.eql(u8, callSiteFunctionName(ctx, entry), expected);
+}
+
+/// Display name for a backtrace frame. Mirrors qjs build_backtrace
+///: an empty name renders "<anonymous>", a top-level
+/// script/eval frame renders "<eval>". qjs gets the latter for free because
+/// the compiler names every top-level function def JS_ATOM__eval_
+///; zjs's top-level bytecode instead carries name ==
+/// filename (the name-equality is also its eval-frame detection convention,
+/// e.g. vm_call.zig / eval_ops.zig), so the "<eval>" mapping is applied at
+/// this rendering seam.
+pub fn callSiteFunctionName(ctx: *core.JSContext, entry: core.BacktraceFrame) []const u8 {
+    const name = ctx.runtime.atoms.name(entry.function_name) orelse "";
+    const file = ctx.runtime.atoms.name(entry.filename) orelse "";
+    if (name.len == 0) return "<anonymous>";
+    if (std.mem.eql(u8, name, file)) return "<eval>";
+    return name;
+}
+
+pub fn callSiteFunctionNameValue(ctx: *core.JSContext, entry: core.BacktraceFrame) !core.JSValue {
+    const name = ctx.runtime.atoms.name(entry.function_name) orelse "";
+    const file = ctx.runtime.atoms.name(entry.filename) orelse "";
+    if (name.len == 0) return core.JSValue.nullValue();
+    if (std.mem.eql(u8, name, file)) return value_ops.createStringValue(ctx.runtime, "<eval>");
+    return value_ops.createStringValue(ctx.runtime, name);
+}
+
+pub fn errorStackTraceLimit(_: *core.JSRuntime, global: *core.Object) usize {
+    const error_key = core.atom.ids.Error;
+    const error_object = global.getOwnDataObjectBorrowed(error_key) orelse return 10;
+    const limit_key = core.atom.ids.stackTraceLimit;
+    const limit_value = error_object.getOwnDataPropertyValue(limit_key) orelse return 10;
+    if (limit_value.is(.undefined_value) or limit_value.is(.null_value)) return 0;
+    const number = value_ops.numberValue(limit_value) orelse return 10;
+    if (!std.math.isFinite(number) or number <= 0) return 0;
+    const truncated = @floor(number);
+    if (truncated > @as(f64, @floatFromInt(std.math.maxInt(usize)))) return std.math.maxInt(usize);
+    return @intFromFloat(truncated);
+}
+
+pub fn appendBacktraceFunctionName(
+    ctx: *core.JSContext,
+    bytes: *std.ArrayList(u8),
+    function_name: core.Atom,
+    filename: core.Atom,
+) !void {
+    const name = ctx.runtime.atoms.name(function_name) orelse "";
+    const file = ctx.runtime.atoms.name(filename) orelse "";
+    if (name.len == 0) {
+        try bytes.appendSlice(ctx.runtime.memory.allocator, "<anonymous>");
+    } else if (std.mem.eql(u8, name, file)) {
+        // Top-level script/eval frame (see callSiteFunctionName).
+        try bytes.appendSlice(ctx.runtime.memory.allocator, "<eval>");
+    } else {
+        try bytes.appendSlice(ctx.runtime.memory.allocator, name);
+    }
+}
+
+pub fn appendCallSiteFunctionName(rt: *core.JSRuntime, bytes: *std.ArrayList(u8), site: *core.Object) !void {
+    const name_value = site.callSiteFunctionName() orelse {
+        try bytes.appendSlice(rt.memory.allocator, "<anonymous>");
+        return;
+    };
+    if (!name_value.isString()) {
+        try bytes.appendSlice(rt.memory.allocator, "<anonymous>");
+        return;
+    }
+    try value_ops.appendRawString(rt, bytes, name_value);
+}
+
+pub fn appendCallSiteFileName(rt: *core.JSRuntime, bytes: *std.ArrayList(u8), site: *core.Object) !void {
+    const file_value = site.callSiteFile() orelse {
+        try bytes.appendSlice(rt.memory.allocator, "<anonymous>");
+        return;
+    };
+    if (!file_value.isString()) {
+        try bytes.appendSlice(rt.memory.allocator, "<anonymous>");
+        return;
+    }
+    try value_ops.appendRawString(rt, bytes, file_value);
+}
+
+pub fn errorStackGetter(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+) !core.JSValue {
+    const object = object_ops.objectFromValue(this_value) orelse return error.TypeError;
+    if (object.class_id != core.class.ids.error_) return core.JSValue.undefinedValue();
+    if (object.errorStack()) |stack| return stack;
+    if (object.errorStackSites()) |sites| {
+        const stack = try formatCapturedErrorStackValue(ctx, output, global, this_value, sites, object.errorStackSiteCount());
+        try object.setErrorStack(ctx.runtime, stack);
+        return stack;
+    }
+    return buildErrorStackValue(ctx, output, global, this_value, null);
+}
+
+pub fn errorStackSetter(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: core.JSValue,
+    function_object: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    const receiver = object_ops.objectFromValue(this_value) orelse return error.TypeError;
+    const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    if (!value.isString()) return error.TypeError;
+
+    if (ctx.nativeErrorPrototypeObject(.error_)) |error_proto| {
+        if (object_ops.sameObjectIdentity(this_value, error_proto.value())) return error.TypeError;
+    }
+
+    const stack_key = core.atom.ids.stack;
+    const desc = try object_ops.proxyAwareOwnPropertyDescriptor(ctx, output, global, receiver, stack_key, caller_function, caller_frame);
+
+    if (desc == null) {
+        const create_desc = core.Descriptor.data(value, .all);
+        const ok = if (receiver.proxyTarget() != null)
+            try object_ops.proxyDefineOwnProperty(ctx, output, global, receiver, stack_key, create_desc, caller_function, caller_frame)
+        else blk: {
+            receiver.defineOwnProperty(ctx.runtime, stack_key, create_desc) catch |err| switch (err) {
+                error.ReadOnly, error.NotExtensible, error.IncompatibleDescriptor => break :blk false,
+                error.InvalidLength => return error.RangeError,
+                else => return err,
+            };
+            break :blk true;
+        };
+        if (!ok) return error.TypeError;
+        return core.JSValue.undefinedValue();
+    }
+
+    const own_desc = desc.?;
+    if (own_desc.kind == .accessor and object_ops.sameObjectIdentity(own_desc.setter, function_object.value()) and isErrorStackSetterValue(own_desc.setter)) {
+        if (try object_ops.proxySetTrapForErrorStackSetter(ctx, output, global, this_value, receiver, stack_key, value, caller_function, caller_frame)) {
+            return core.JSValue.undefinedValue();
+        }
+        try object_ops.defineErrorStackDataProperty(ctx, output, global, receiver, stack_key, core.Descriptor.data(value, .all), caller_function, caller_frame);
+        return core.JSValue.undefinedValue();
+    }
+
+    if (receiver.proxyTarget() != null) {
+        const ok = try object_ops.proxySetValueProperty(ctx, output, global, this_value, receiver, stack_key, value, caller_function, caller_frame);
+        if (!ok) return error.TypeError;
+        return core.JSValue.undefinedValue();
+    }
+
+    switch (own_desc.kind) {
+        .accessor => {
+            if (own_desc.setter.is(.undefined_value)) return error.TypeError;
+            _ = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, this_value, own_desc.setter, &.{value}, caller_function, caller_frame);
+            return core.JSValue.undefinedValue();
+        },
+        .data, .generic => {
+            if (own_desc.kind == .data and own_desc.writable == false) return error.TypeError;
+            try object_ops.defineErrorStackDataProperty(ctx, output, global, receiver, stack_key, core.Descriptor{ .kind = .data, .value = value, .value_present = true }, caller_function, caller_frame);
+            return core.JSValue.undefinedValue();
+        },
+    }
+}
+
+fn isErrorStackSetterValue(value: core.JSValue) bool {
+    const object = object_ops.objectFromValue(value) orelse return false;
+    const native_ref = core.function.decodeNativeBuiltinId(object.nativeFunctionId()) orelse return false;
+    return native_ref.domain == .error_object and native_ref.id == @intFromEnum(method_ids.error_object.PrototypeMethod.stack_setter);
+}
+
+pub fn errorCaptureStackTrace(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    args: []const core.JSValue,
+) !core.JSValue {
+    if (args.len < 1 or !args[0].is(.object)) return throwTypeErrorMessage(ctx, global, "not an object");
+    const target = try property_ops.expectObject(args[0]);
+    const skip_name = if (args.len >= 2 and isCallableValue(args[1]))
+        try functionNameBytes(ctx.runtime, args[1])
+    else
+        null;
+    defer if (skip_name) |bytes| ctx.runtime.memory.allocator.free(bytes);
+    const stack_value = try buildErrorStackValue(ctx, output, global, args[0], skip_name);
+    try target.defineOwnProperty(ctx.runtime, core.atom.ids.stack, core.Descriptor.data(stack_value, .method));
+    return core.JSValue.undefinedValue();
 }

@@ -22,12 +22,12 @@ core/module.zig           ModuleRecord 身份、status、export cell、registry
         │  禁止 core 调 VM
         │
 exec/promise_ops.zig      NewPromiseCapability、then、combinator、async 函数
-exec/promise_builtin_ops.zig  NativeEntry 表（resolve/all/then/catch/finally）
-exec/async_generator.zig  AsyncGenerator 请求队列与 resume
-exec/async_completion.zig Machine 拥有的 async 完成根（与 callee arena 无关）
+exec/promise_ops.zig  NativeEntry 表（resolve/all/then/catch/finally）
+exec/promise_ops.zig  AsyncGenerator 请求队列与 resume
+exec/inline_calls.zig Machine 拥有的 async 完成根（与 callee arena 无关）
 exec/module.zig           安装、链接、声明实例化、单步求值、namespace
-exec/module_graph.zig     宿主加载、dynamic import job、TLA 续体排水
-exec/using_ops.zig        ext0 字节码：using create/add/dispose + 回收 opcode
+exec/module.zig     宿主加载、dynamic import job、TLA 续体排水
+exec/vm_opcodes.zig        ext0 字节码：using create/add/dispose + 回收 opcode
 exec/disposable_ops.zig   DisposableStack / AsyncDisposableStack 算法
 src/event_loop.zig        宿主循环：定时器 / fd / 再调 drainPendingPromiseJobs
 ```

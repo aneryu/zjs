@@ -57,7 +57,7 @@ const expectObject = value_semantics.expectObject;
 
 /// Proxy-aware `Array.isArray` predicate. Pure: walks the proxy target chain
 /// via the object's `is_proxy`/`is_array` flags with no VM state. Relocated to
-/// engine core in Phase 6b-3 STEP 2; `exec/array_builtin_ops.zig` owns the
+/// engine core in Phase 6b-3 STEP 2; `exec/array_ops.zig` owns the
 /// native record surface that re-exports it.
 pub fn isArrayValue(value: JSValue) !bool {
     // Iterative proxy-chain walk with a depth cap, mirroring QuickJS
@@ -78,7 +78,7 @@ pub fn isArrayValue(value: JSValue) !bool {
 
 /// Coerce a value to an array `*Object` or fail with TypeError. Pure object
 /// predicate (object shape + `is_array` flag); relocated to engine core in
-/// Phase 6b-3 STEP 2 and re-exported from `exec/array_builtin_ops.zig`.
+/// Phase 6b-3 STEP 2 and re-exported from `exec/array_ops.zig`.
 pub fn expectArray(value: JSValue) !*Object {
     const object = try expectObject(value);
     if (!object.isArray()) return error.TypeError;
@@ -87,7 +87,7 @@ pub fn expectArray(value: JSValue) !*Object {
 
 /// Construct a dense array from already-evaluated literal element `values` for
 /// the `array_from`/array-literal opcode. Pure (only core `Object` array
-/// primitives + descriptor ops), so it lives in engine core; `src/exec/vm_literal.zig`
+/// primitives + descriptor ops), so it lives in engine core; `src/exec/vm_opcodes.zig`
 /// calls it directly without naming `builtins`. Unlike the Array *constructor*
 /// (`constructConstructorWithPrototype`) this never applies the single-number
 /// length semantics — a one-element `[n]` literal yields `[n]`, not a length-n

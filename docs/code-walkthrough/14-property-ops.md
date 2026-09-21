@@ -7,14 +7,14 @@
 | 文档 | 源码 | 内容 |
 | --- | --- | --- |
 | 本文 | [`src/exec/property_ops.zig`](../../src/exec/property_ops.zig) | 薄包装与 ToPropertyKey atom 化 |
-| [14-property-direct.md](14-property-direct.md) | [`property_direct.zig`](../../src/exec/property_direct.zig) | 无用户代码的 own/proto/global data 快探 |
+| [14-property-direct.md](14-property-direct.md) | [`property_direct.zig`](../../src/exec/property_ops.zig) | 无用户代码的 own/proto/global data 快探 |
 | [14-object-ops.md](14-object-ops.md) | [`object_ops.zig`](../../src/exec/object_ops.zig) 前半 | 原型、闭包函数对象、构造 |
 | [14-object-ops-objects.md](14-object-ops-objects.md) | 同上中段 | rest、generator、iterator、arguments |
 | [14-object-ops-get-set.md](14-object-ops-get-set.md) | 同上后段 | OrdinaryGet/Set/Has/Delete/Define |
 | [14-object-ops-proxy.md](14-object-ops-proxy.md) | 同上末段 | super/brand、Proxy 陷阱 |
-| [14-object-builtin-ops.md](14-object-builtin-ops.md) | [`object_builtin_ops.zig`](../../src/exec/object_builtin_ops.zig) | `Object.*` native-record |
-| [14-slot-ops.md](14-slot-ops.md) | [`slot_ops.zig`](../../src/exec/slot_ops.zig) | 帧 loc/arg/var-ref 槽 |
-| [14-class-init-ops.md](14-class-init-ops.md) | [`class_init_ops.zig`](../../src/exec/class_init_ops.zig) | 内建 `super()` 构造 |
+| [14-object-builtin-ops.md](14-object-builtin-ops.md) | [`object_builtin_ops.zig`](../../src/exec/object_ops.zig) | `Object.*` native-record |
+| [14-slot-ops.md](14-slot-ops.md) | [`slot_ops.zig`](../../src/exec/property_ops.zig) | 帧 loc/arg/var-ref 槽 |
+| [14-class-init-ops.md](14-class-init-ops.md) | [`class_init_ops.zig`](../../src/exec/function_ops.zig) | 内建 `super()` 构造 |
 
 ## OrdinaryGet / OrdinarySet 与 exotic
 
@@ -48,7 +48,7 @@ ECMA-262 把 `[[Get]]` / `[[Set]]` 分成 ordinary 对象与带内部方法的 e
 
 ## `property_direct` 与字段站点缓存
 
-属性快路径包括 `exec/property_direct.zig` 的无用户代码探测，以及 `vm_property_field.zig` 的站点 inline cache。`PropSiteCache` 由 VM 字段站点和宿主 `PropertySite` 共用：own-data 最多缓存两种 shape identity，另有单层原型数据与 native getter 分支；miss 后允许重新捕获，达到预算后退为 `.mega`。缓存存 identity/slot 等标量，不持有对象指针；shape 变更通过新的 identity 使旧缓存失效。
+属性快路径包括 `exec/property_ops.zig` 的无用户代码探测，以及 `vm_property_field.zig` 的站点 inline cache。`PropSiteCache` 由 VM 字段站点和宿主 `PropertySite` 共用：own-data 最多缓存两种 shape identity，另有单层原型数据与 native getter 分支；miss 后允许重新捕获，达到预算后退为 `.mega`。缓存存 identity/slot 等标量，不持有对象指针；shape 变更通过新的 identity 使旧缓存失效。
 
 `property_direct.zig` 本身不维护 `PropSiteCache`，只判断当前对象是否能安全直接读写 data 槽；站点的缓存捕获、命中和退化由 `vm_property_field.zig` 及其调用方处理。
 
@@ -165,9 +165,9 @@ ECMA-262 把 `[[Get]]` / `[[Set]]` 分成 ordinary 对象与带内部方法的 e
 ```sh
 python3 docs/code-walkthrough/_check_coverage.py \
     --docs 'docs/code-walkthrough/14-*.md' \
-    src/exec/property_ops.zig src/exec/property_direct.zig \
-    src/exec/object_ops.zig src/exec/object_builtin_ops.zig \
-    src/exec/slot_ops.zig src/exec/class_init_ops.zig
+    src/exec/property_ops.zig src/exec/property_ops.zig \
+    src/exec/object_ops.zig src/exec/object_ops.zig \
+    src/exec/property_ops.zig src/exec/function_ops.zig
 ```
 
 输出：`docs 9 inventory 301 missing 0`。

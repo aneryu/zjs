@@ -13,22 +13,22 @@
 const core = @import("../core/root.zig");
 const iterator_ops = @import("iterator_ops.zig");
 const function_builtin = core.function;
-const primitive_ops = @import("primitive_ops.zig");
+const primitive_ops = @import("value_ops.zig");
 const globals_mod = core.global_slots;
 const unicode = @import("../libs/unicode.zig");
 const std = @import("std");
-const iterator_slots = @import("iterator_slots.zig");
+const iterator_slots = @import("iterator_ops.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const call_runtime = @import("call_runtime.zig");
 const call_site_mod = @import("call_site.zig");
 const CallSite = call_site_mod.CallSite;
-const collection_adapter = @import("collection_adapter.zig");
-const exceptions = @import("exceptions.zig");
+
+const exceptions = @import("exception_ops.zig");
 const object_ops = @import("object_ops.zig");
 const array_ops = @import("array_ops.zig");
-const coercion_ops = @import("coercion_ops.zig");
+const coercion_ops = @import("value_ops.zig");
 const exception_ops = @import("exception_ops.zig");
-const forof_ops = @import("forof_ops.zig");
+const forof_ops = @import("iterator_ops.zig");
 const property_ops = @import("property_ops.zig");
 const value_ops = @import("value_ops.zig");
 
@@ -223,7 +223,7 @@ fn collectionCall(
             }
             return methodCallObjectWithGlobal(ctx, active_global, receiver, id, args, globals);
         }
-        return methodCallWithCallbackHost(ctx.runtime, this_value, id, args, collection_adapter.host(ctx, globals));
+        return methodCallWithCallbackHost(ctx.runtime, this_value, id, args, callbackHost(ctx, globals));
     };
     const active_global = callable_global orelse return error.InvalidBuiltinRegistry;
     if (try collectionNativeRecord(ctx, output, active_global, this_value, function_object, id, args, caller_function, caller_frame)) |value| return value;
@@ -257,7 +257,7 @@ fn collectionGroupByRecord(
         prototype = object_ops.constructorPrototypeObject(ctx.runtime, this_value) catch null;
     }
     const prototype_object = if (prototype) |owned| owned.object() else null;
-    return groupByWithCallbackHost(ctx.runtime, args, prototype_object, collection_adapter.host(ctx, globals)) catch |err| switch (err) {
+    return groupByWithCallbackHost(ctx.runtime, args, prototype_object, callbackHost(ctx, globals)) catch |err| switch (err) {
         error.TypeError => error.TypeError,
         else => err,
     };
@@ -470,7 +470,7 @@ pub fn groupBy(
     globals: []globals_mod.Slot,
     prototype: ?*core.Object,
 ) !core.JSValue {
-    return groupByWithCallbackHost(ctx.runtime, args, prototype, collection_adapter.host(ctx, globals));
+    return groupByWithCallbackHost(ctx.runtime, args, prototype, callbackHost(ctx, globals));
 }
 
 pub fn groupByWithCallbackHost(
@@ -549,7 +549,7 @@ fn mapGet(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue) !core.JS
 
 // Map latin1-prefix-int fusion fast paths relocated to engine core
 // (`core/collection.zig`) in Phase 6b-3 STEP 7A so the VM loop-fusion caller
-// (`exec/vm_property_locals.zig`) imports them straight from core; re-exported
+// (`exec/vm_property.zig`) imports them straight from core; re-exported
 // here under the original names for any builtins-side caller.
 pub const mapGetLatin1PrefixIntValue = core.collection.mapGetLatin1PrefixIntValue;
 pub const mapSetLatin1PrefixInt32Range = core.collection.mapSetLatin1PrefixInt32Range;
@@ -2296,4 +2296,53 @@ fn mapAppendGroupByValue(
         core.Descriptor.data(value, .all),
     );
     _ = try methodCall(ctx.runtime, map_value, 1, &.{ key, group.value() });
+}
+
+
+// ----- merged from collection_adapter.zig -----
+// Realm-aware adapter for the core collection callback protocol.
+//
+// Callback, receiver, arguments, and legacy global slots are borrowed;
+// successful heap results are owned by the caller. The explicit `JSContext`
+// is the error realm authority: ordinary engine failures become a pending JS
+// exception here, while only the seven hard/control outcomes cross the core
+// callback seam. Synthetic `c_closure` bodies live in `call.zig`; collection
+// algorithms stay in this file.
+const closure_mod = @import("call.zig");
+pub fn callbackHost(ctx: *core.JSContext, globals: []globals_mod.Slot) CallbackHost {
+    return .{
+        .ctx = ctx,
+        .globals = globals,
+        .call = callWithThis,
+    };
+}
+
+fn callWithThis(
+    ctx: *core.JSContext,
+    callback: core.JSValue,
+    this_value: core.JSValue,
+    args: []const core.JSValue,
+    globals: []globals_mod.Slot,
+) CallbackError!core.JSValue {
+    return closure_mod.callWithThis(ctx.runtime, callback, this_value, args, globals) catch |err|
+        return narrowCallbackError(ctx, err);
+}
+
+fn narrowCallbackError(ctx: *core.JSContext, err: anytype) CallbackError {
+    return switch (@as(anyerror, err)) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Interrupted => error.Interrupted,
+        error.ProcessExit => error.ProcessExit,
+        error.StackOverflow => error.StackOverflow,
+        error.Timeout => error.Timeout,
+        error.UnhandledPromiseRejection => error.UnhandledPromiseRejection,
+        error.JSException => if (ctx.hasException()) error.JSException else blk: {
+            _ = builtin_dispatch.nativeFromHostError(ctx, ctx.global, err);
+            break :blk error.JSException;
+        },
+        else => blk: {
+            _ = builtin_dispatch.nativeFromHostError(ctx, ctx.global, err);
+            break :blk error.JSException;
+        },
+    };
 }

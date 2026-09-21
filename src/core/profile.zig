@@ -32,7 +32,7 @@ pub const OpcodeProfile = struct {
     alloc_count: u64 = 0,
     call_frame_count: u64 = 0,
     /// Delta-attribution state for the tail-call threaded dispatcher (see
-    /// exec/vm_profile.zig): the currently-open opcode interval, closed by
+    /// exec/tailcall_dispatch.zig): the currently-open opcode interval, closed by
     /// the next table dispatch or by `flushPendingDispatch`.
     pending_op: u16 = no_pending_op,
     pending_start_ns: u64 = 0,

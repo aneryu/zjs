@@ -63,7 +63,7 @@ and should not rely on process exit for cleanup.
 
 - Reference counts are non-atomic. A runtime and its values are thread-affine.
 - The collector is non-moving. Embedders must still treat raw object pointers as
-  runtime-owned and must not keep them without a `zjs.value.Persistent` handle or
+  runtime-owned and must not keep them without a persistent handle (`rt.createPersistentValue`) or
   documented native payload ownership.
 - GC safe points are explicit. New VM or host APIs that allocate must root
   temporaries before polling GC.

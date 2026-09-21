@@ -600,42 +600,42 @@ bytecode 与 native 互斥：`functionPayload()` 对 bytecode class 返回 null�
 - **签名**：`pub fn functionAsyncContinuationSlot(self: *Object, rt: *JSRuntime) !*?JSValue`。
 - **作用**：借出异步续跑闭包的捕获槽，存的是「await 完成后要回到谁」——异步生成器对象，或 async-from-sync 包装里的同步迭代器。
 - **实现**：`ensureFunctionRarePayload` 的两条臂：bytecode class 首次调用时 `createPayloadCell(BytecodeFunctionAux)` 建 a 类 payload cell、把原 `home_or_aux` 里的 home object 搬进 `aux.home_object` 再打上 tag，并 `rememberOwnerForBulkWrite` 记下这条新边；native class 则 `rt.createRuntime(FunctionRarePayload)` 零初始化后挂到 `payload.rare`。没有 function payload 的对象返回 `error.TypeError`；返回 `&payload.async_function_continuation`（`*?JSValue`）。两处写入方：`async_generator.resolveFunction` 存 generator 对象（同时写 rejected 位与 action 码），`promise_ops.asyncFromSyncIteratorCloseWrap` 存同步迭代器（配 `.async_from_sync_iterator_close_wrap` 标签）。
-- **所有权 / 错误 / 调用**：`ensureFunctionRarePayload` 会分配：bytecode 臂首次调用铸一枚 `BytecodeFunctionAux` 的 `.payload` GC cell（由 sweep 回收，`rememberOwnerForBulkWrite` 补上新边），native 臂 `rt.createRuntime(FunctionRarePayload)` 挂进 `FunctionPayload.rare`、由 `destroyFunctionPayload` 释放；error set = 分配 OOM + 非函数对象的 `error.TypeError`，沿 `try` 上抛后在 builtin 边界由 `materializeRuntimeError` 变成 JS 异常。rare payload 建好后不再搬移，返回的槽指针在对象存活期内有效。槽是 GC 边（`async_function_continuation`），直接写不跑分代屏障；生产调用方 `exec/async_generator.zig:183` 与 `exec/promise_ops.zig:3294` 都经 `setOptionalValueSlot` 写入（`src/tests/core.zig:10519` 是测试里的直写）。
+- **所有权 / 错误 / 调用**：`ensureFunctionRarePayload` 会分配：bytecode 臂首次调用铸一枚 `BytecodeFunctionAux` 的 `.payload` GC cell（由 sweep 回收，`rememberOwnerForBulkWrite` 补上新边），native 臂 `rt.createRuntime(FunctionRarePayload)` 挂进 `FunctionPayload.rare`、由 `destroyFunctionPayload` 释放；error set = 分配 OOM + 非函数对象的 `error.TypeError`，沿 `try` 上抛后在 builtin 边界由 `materializeRuntimeError` 变成 JS 异常。rare payload 建好后不再搬移，返回的槽指针在对象存活期内有效。槽是 GC 边（`async_function_continuation`），直接写不跑分代屏障；生产调用方 `exec/promise_ops.zig:183` 与 `exec/promise_ops.zig:3294` 都经 `setOptionalValueSlot` 写入（`src/tests/core.zig:10519` 是测试里的直写）。
 
 ### `Object.functionAsyncContinuation` (`src/core/object.zig:5682`)
 
 - **签名**：`pub fn functionAsyncContinuation(self: *const Object) ?JSValue`。
 - **作用**：读出上述续跑目标，是这类内部闭包的身份标记兼捕获数据。
 - **实现**：读路径统一是 `functionRarePayloadConst()` 的两条臂：bytecode function 走 `home_or_aux` 低位 tag 指向的 `BytecodeFunctionAux.rare`，native function 走 `FunctionPayload.rare` 指针，返回 `payload.async_function_continuation`，无 payload 时 null。`async_generator.asyncGeneratorResolveFunctionCall` 以它作守卫：null 返回 null 表示不是这类闭包；非 null 则转成 generator 对象（失败抛 `TypeError`），再连同 rejected 位与 action 码一起决定怎么恢复协程。
-- **所有权 / 错误 / 调用**：无分配、无 error set；返回的是 rare payload 借用的 `?JSValue`，存活靠 payload 的 trace 边，调用方不释放。调用方 `exec/promise_ops.zig:3305`、`exec/async_generator.zig:509`，null 都表示「不是续跑闭包」，返回 null 退回通用路径。
+- **所有权 / 错误 / 调用**：无分配、无 error set；返回的是 rare payload 借用的 `?JSValue`，存活靠 payload 的 trace 边，调用方不释放。调用方 `exec/promise_ops.zig:3305`、`exec/promise_ops.zig:509`，null 都表示「不是续跑闭包」，返回 null 退回通用路径。
 
 ### `Object.functionAsyncContinuationRejectedSlot` (`src/core/object.zig:5687`)
 
 - **签名**：`pub fn functionAsyncContinuationRejectedSlot(self: *Object, rt: *JSRuntime) !*bool`。
 - **作用**：借出续跑闭包的方向位槽——同一个 action 会造正反两个闭包，分别接到 await 的兑现与拒绝侧。
 - **实现**：`ensureFunctionRarePayload` 的两条臂：bytecode class 首次调用时 `createPayloadCell(BytecodeFunctionAux)` 建 a 类 payload cell、把原 `home_or_aux` 里的 home object 搬进 `aux.home_object` 再打上 tag，并 `rememberOwnerForBulkWrite` 记下这条新边；native class 则 `rt.createRuntime(FunctionRarePayload)` 零初始化后挂到 `payload.rare`。没有 function payload 的对象返回 `error.TypeError`；返回 `&payload.async_function_rejected`。`async_generator.resolveFunction` 用 `is_reject` 参数写入，`asyncGeneratorAwait` 随即用 false / true 各造一个闭包挂上同一个 promise。
-- **所有权 / 错误 / 调用**：`ensureFunctionRarePayload` 会分配：bytecode 臂首次调用铸一枚 `BytecodeFunctionAux` 的 `.payload` GC cell（由 sweep 回收，`rememberOwnerForBulkWrite` 补上新边），native 臂 `rt.createRuntime(FunctionRarePayload)` 挂进 `FunctionPayload.rare`、由 `destroyFunctionPayload` 释放；error set = 分配 OOM + 非函数对象的 `error.TypeError`，沿 `try` 上抛后在 builtin 边界由 `materializeRuntimeError` 变成 JS 异常。rare payload 建好后不再搬移，返回的槽指针在对象存活期内有效。标量槽不是 GC 边，调用方直接 `.* =` 即可，无屏障义务。树内唯一调用方 `exec/async_generator.zig:184`。
+- **所有权 / 错误 / 调用**：`ensureFunctionRarePayload` 会分配：bytecode 臂首次调用铸一枚 `BytecodeFunctionAux` 的 `.payload` GC cell（由 sweep 回收，`rememberOwnerForBulkWrite` 补上新边），native 臂 `rt.createRuntime(FunctionRarePayload)` 挂进 `FunctionPayload.rare`、由 `destroyFunctionPayload` 释放；error set = 分配 OOM + 非函数对象的 `error.TypeError`，沿 `try` 上抛后在 builtin 边界由 `materializeRuntimeError` 变成 JS 异常。rare payload 建好后不再搬移，返回的槽指针在对象存活期内有效。标量槽不是 GC 边，调用方直接 `.* =` 即可，无屏障义务。树内唯一调用方 `exec/promise_ops.zig:184`。
 
 ### `Object.functionAsyncContinuationRejected` (`src/core/object.zig:5691`)
 
 - **签名**：`pub fn functionAsyncContinuationRejected(self: *const Object) bool`。
 - **作用**：读出方向位，决定 await 回来后是把值送回协程还是把异常抛进协程。
 - **实现**：读路径统一是 `functionRarePayloadConst()` 的两条臂：bytecode function 走 `home_or_aux` 低位 tag 指向的 `BytecodeFunctionAux.rare`，native function 走 `FunctionPayload.rare` 指针，返回 `payload.async_function_rejected`，无 payload 时 false。在 `asyncGeneratorResolveFunctionCall` 里与 action 码组合使用，例如 `.awaiting_return` 分支下它决定 `settleHead` 的最后一个参数是兑现还是拒绝。
-- **所有权 / 错误 / 调用**：无分配、无 error set；缺 payload 返回 false。树内唯一调用方 `exec/async_generator.zig:511`。
+- **所有权 / 错误 / 调用**：无分配、无 error set；缺 payload 返回 false。树内唯一调用方 `exec/promise_ops.zig:511`。
 
 ### `Object.functionAsyncGeneratorActionSlot` (`src/core/object.zig:5696`)
 
 - **签名**：`pub fn functionAsyncGeneratorActionSlot(self: *Object, rt: *JSRuntime) !*u8`。
 - **作用**：借出异步生成器续跑闭包的动作码槽，区分这次 await 是替哪一步等的。
 - **实现**：`ensureFunctionRarePayload` 的两条臂：bytecode class 首次调用时 `createPayloadCell(BytecodeFunctionAux)` 建 a 类 payload cell、把原 `home_or_aux` 里的 home object 搬进 `aux.home_object` 再打上 tag，并 `rememberOwnerForBulkWrite` 记下这条新边；native class 则 `rt.createRuntime(FunctionRarePayload)` 零初始化后挂到 `payload.rare`。没有 function payload 的对象返回 `error.TypeError`；返回 `&payload.async_generator_action`，写入 `ResolveAction` 的 `@intFromEnum`。这是 zjs 对 qjs `js_async_generator_resolve_function` magic 值的改编（见字段上的 `quickjs.c:21670` 注释）：qjs 把部分 await 编进函数体字节码，zjs 用额外的 action 值承载。
-- **所有权 / 错误 / 调用**：`ensureFunctionRarePayload` 会分配：bytecode 臂首次调用铸一枚 `BytecodeFunctionAux` 的 `.payload` GC cell（由 sweep 回收，`rememberOwnerForBulkWrite` 补上新边），native 臂 `rt.createRuntime(FunctionRarePayload)` 挂进 `FunctionPayload.rare`、由 `destroyFunctionPayload` 释放；error set = 分配 OOM + 非函数对象的 `error.TypeError`，沿 `try` 上抛后在 builtin 边界由 `materializeRuntimeError` 变成 JS 异常。rare payload 建好后不再搬移，返回的槽指针在对象存活期内有效。标量槽不是 GC 边，调用方直接 `.* =` 即可，无屏障义务。树内唯一调用方 `exec/async_generator.zig:185`。
+- **所有权 / 错误 / 调用**：`ensureFunctionRarePayload` 会分配：bytecode 臂首次调用铸一枚 `BytecodeFunctionAux` 的 `.payload` GC cell（由 sweep 回收，`rememberOwnerForBulkWrite` 补上新边），native 臂 `rt.createRuntime(FunctionRarePayload)` 挂进 `FunctionPayload.rare`、由 `destroyFunctionPayload` 释放；error set = 分配 OOM + 非函数对象的 `error.TypeError`，沿 `try` 上抛后在 builtin 边界由 `materializeRuntimeError` 变成 JS 异常。rare payload 建好后不再搬移，返回的槽指针在对象存活期内有效。标量槽不是 GC 边，调用方直接 `.* =` 即可，无屏障义务。树内唯一调用方 `exec/promise_ops.zig:185`。
 
 ### `Object.functionAsyncGeneratorAction` (`src/core/object.zig:5700`)
 
 - **签名**：`pub fn functionAsyncGeneratorAction(self: *const Object) u8`。
 - **作用**：读出动作码，决定 await 完成后走异步生成器状态机的哪一条恢复路径。
 - **实现**：读路径统一是 `functionRarePayloadConst()` 的两条臂：bytecode function 走 `home_or_aux` 低位 tag 指向的 `BytecodeFunctionAux.rare`，native function 走 `FunctionPayload.rare` 指针，返回 `payload.async_generator_action`，无 payload 时 0。`@enumFromInt` 成 `ResolveAction` 后 switch：0=`none` 返回 null，1=`await_resume`（表达式 await 续跑），2=`yield_operand`（yield 操作数先被 await），4=`awaiting_return`（`return()` 请求的收尾——该分支按 qjs 的实际行为结算队首并置 `completed`，且刻意不再 resume_next）。
-- **所有权 / 错误 / 调用**：无分配、无 error set；缺 payload 返回 0。树内唯一调用方 `exec/async_generator.zig:512` 直接 `@enumFromInt` 成 `ResolveAction`，所以 0 必须是合法枚举值（`ResolveAction.none`），默认值与枚举是一条绑定的约束。
+- **所有权 / 错误 / 调用**：无分配、无 error set；缺 payload 返回 0。树内唯一调用方 `exec/promise_ops.zig:512` 直接 `@enumFromInt` 成 `ResolveAction`，所以 0 必须是合法枚举值（`ResolveAction.none`），默认值与枚举是一条绑定的约束。
 
 ### `Object.functionAsyncFromSyncUnwrapDoneSlot` (`src/core/object.zig:5705`)
 
@@ -740,14 +740,14 @@ bytecode 与 native 互斥：`functionPayload()` 对 bytecode class 返回 null�
 - **签名**：`pub fn callSiteFile(self: *const Object) ?JSValue`。
 - **作用**：查询 ordinary payload 的 callsite_file。
 - **实现**：有 ordinaryPayloadConst 返回字段，否则 null。
-- **所有权 / 错误 / 调用**：无分配、无 error set；返回 OrdinaryPayload 借用的 `?JSValue`，存活靠 `callsite_file` 这条 trace 边，调用方不释放。调用方 `exec/exception_ops.zig:444`（null → JS `null`）、`exec/error_stack_ops.zig:229`。
+- **所有权 / 错误 / 调用**：无分配、无 error set；返回 OrdinaryPayload 借用的 `?JSValue`，存活靠 `callsite_file` 这条 trace 边，调用方不释放。调用方 `exec/exception_ops.zig:444`（null → JS `null`）、`exec/exception_ops.zig:229`。
 
 ### `Object.callSiteFunctionName` (`src/core/object.zig:5862`)
 
 - **签名**：`pub fn callSiteFunctionName(self: *const Object) ?JSValue`。
 - **作用**：查询 ordinary payload 的 callsite_function。
 - **实现**：有 ordinaryPayloadConst 返回字段，否则 null。
-- **所有权 / 错误 / 调用**：无分配、无 error set；返回借用 `?JSValue`，且按 `setCallSiteMetadata` 的注释它可能是被调函数对象而不是名字字符串，调用方要自己兜底。调用方 `exec/exception_ops.zig:443`、`exec/error_stack_ops.zig:217`。
+- **所有权 / 错误 / 调用**：无分配、无 error set；返回借用 `?JSValue`，且按 `setCallSiteMetadata` 的注释它可能是被调函数对象而不是名字字符串，调用方要自己兜底。调用方 `exec/exception_ops.zig:443`、`exec/exception_ops.zig:217`。
 
 ### `Object.callSiteLine` (`src/core/object.zig:5867`)
 
@@ -782,7 +782,7 @@ bytecode 与 native 互斥：`functionPayload()` 对 bytecode class 返回 null�
 - **签名**：`pub fn errorStack(self: *const Object) ?JSValue`。
 - **作用**：查询 ordinary payload 的 error_stack。
 - **实现**：有 ordinaryPayloadConst 返回字段，否则 null。
-- **所有权 / 错误 / 调用**：无分配、无 error set；返回借用 `?JSValue`（trace 边 `error_stack` 维持存活）。唯一生产调用方 `exec/error_stack_ops.zig:248`：取到就当 `stack` 字符串直接返回，取不到才改读 `errorStackSites`；写入端 `setErrorStack` 会把 sites 清零，两种表示互斥。
+- **所有权 / 错误 / 调用**：无分配、无 error set；返回借用 `?JSValue`（trace 边 `error_stack` 维持存活）。唯一生产调用方 `exec/exception_ops.zig:248`：取到就当 `stack` 字符串直接返回，取不到才改读 `errorStackSites`；写入端 `setErrorStack` 会把 sites 清零，两种表示互斥。
 
 ### `Object.setErrorStackSites` (`src/core/object.zig:5903`)
 
@@ -796,14 +796,14 @@ bytecode 与 native 互斥：`functionPayload()` 对 bytecode class 返回 null�
 - **签名**：`pub fn errorStackSites(self: *const Object) ?JSValue`。
 - **作用**：查询 ordinary payload 的 error_stack_sites。
 - **实现**：有 ordinaryPayloadConst 返回字段，否则 null。
-- **所有权 / 错误 / 调用**：无分配、无 error set；返回借用 `?JSValue`（trace 边 `error_stack_sites`）。唯一调用方 `exec/error_stack_ops.zig:249`，拿到后连同 `errorStackSiteCount()` 交给 `formatCapturedErrorStackValue` 现场格式化。
+- **所有权 / 错误 / 调用**：无分配、无 error set；返回借用 `?JSValue`（trace 边 `error_stack_sites`）。唯一调用方 `exec/exception_ops.zig:249`，拿到后连同 `errorStackSiteCount()` 交给 `formatCapturedErrorStackValue` 现场格式化。
 
 ### `Object.errorStackSiteCount` (`src/core/object.zig:5920`)
 
 - **签名**：`pub fn errorStackSiteCount(self: *const Object) usize`。
 - **作用**：查询 ordinary payload 的 error_stack_site_count。
 - **实现**：有 ordinaryPayloadConst 返回字段，否则 0。
-- **所有权 / 错误 / 调用**：无分配、无 error set；缺 payload 返回 0。计数由 `setErrorStackSites` 调 `capturedStackSiteCount` 一次算好（非数组即 0），读取端不重算、也不校验与 sites 数组是否仍一致。唯一调用方 `exec/error_stack_ops.zig:250`。
+- **所有权 / 错误 / 调用**：无分配、无 error set；缺 payload 返回 0。计数由 `setErrorStackSites` 调 `capturedStackSiteCount` 一次算好（非数组即 0），读取端不重算、也不校验与 sites 数组是否仍一致。唯一调用方 `exec/exception_ops.zig:250`。
 
 ### `Object.capturedStackSiteCount` (`src/core/object.zig:5925`)
 

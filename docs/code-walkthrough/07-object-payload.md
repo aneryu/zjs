@@ -428,7 +428,7 @@ iterator / Map-Set / FinalizationRegistry / ArrayBuffer / TypedArray / RegExp / 
 - **签名**：`pub fn iteratorTarget(self: *const Object) ?JSValue`。
 - **作用**：查询iterator payload的target值。
 - **实现**：iteratorPayloadConst存在则返回payload.target，否则null。
-- **所有权 / 错误 / 调用**：无分配、无 error set、不 retain：返回的是 `IteratorPayload` 借用的 `?JSValue`，存活靠 `IteratorPayload.traceChildEdges` 的对应边（`destroy` 只把槽置 null），调用方不得释放。`class_payload_kind` 非 iterator 与字段未设置都返回 null，二者不可区分。调用方 `exec/iterator_ops.zig:1509`、`exec/string_builtin_ops.zig:2191`，两处都把 null 变成 `error.TypeError`。
+- **所有权 / 错误 / 调用**：无分配、无 error set、不 retain：返回的是 `IteratorPayload` 借用的 `?JSValue`，存活靠 `IteratorPayload.traceChildEdges` 的对应边（`destroy` 只把槽置 null），调用方不得释放。`class_payload_kind` 非 iterator 与字段未设置都返回 null，二者不可区分。调用方 `exec/iterator_ops.zig:1509`、`exec/string_ops.zig:2191`，两处都把 null 变成 `error.TypeError`。
 
 ### `Object.iteratorDataSlot` (`src/core/object.zig:3209`)
 

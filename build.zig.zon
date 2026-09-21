@@ -21,6 +21,7 @@
         "llms.txt",
         "src",
         "test262.conf",
+        "test_root.zig",
         "tests",
         "tools",
     },

@@ -14,14 +14,14 @@
 - **签名**：`pub fn popCatchMarker(_: *core.JSRuntime, stack: *stack_mod.Stack) !??usize`。
 - **作用**：for-of 记录的 catch-offset 编码或识别。
 - **实现**：从栈顶往下扫：遇 `forof_ops.isIteratorCatchMarker` 认定的 marker 就连弹三格（iterator / nextMethod / marker 三元组，不足 3 格是 `error.StackUnderflow`）继续扫；否则弹一格，若它 `is(.catch_offset)` 就返回 `popped.catchTarget()`。扫空整条栈都没有 catch offset 时返回外层 `null`（返回类型是 `!??usize`：外层 null = 没有 catch 目标，内层 optional 是 `catchTarget()` 自己的）。错误：error.StackUnderflow。
-- **所有权 / 错误 / 调用**：`stack` 借用；弹出的值直接丢弃（TGC 下出栈没有 release 义务，槽位由栈顶指针回退失去根身份），不分配、不建根。error set 只有 `error.StackUnderflow`——迭代器 catch marker 后面不足三个槽意味着引擎不变量已破；`exception_ops.runtimeErrorInfo` 不认识这个 sentinel，所以它没有对应的 JS 错误构造器，万一逃到 native 边界只会被 `nativeFromHostError` 兜底成 `Error: StackUnderflow`。调用方：`exec/vm_control.zig:114`、`:119`（throw 处理）与 `exec/call_runtime.zig:198`（catch 派发）。
+- **所有权 / 错误 / 调用**：`stack` 借用；弹出的值直接丢弃（TGC 下出栈没有 release 义务，槽位由栈顶指针回退失去根身份），不分配、不建根。error set 只有 `error.StackUnderflow`——迭代器 catch marker 后面不足三个槽意味着引擎不变量已破；`exception_ops.runtimeErrorInfo` 不认识这个 sentinel，所以它没有对应的 JS 错误构造器，万一逃到 native 边界只会被 `nativeFromHostError` 兜底成 `Error: StackUnderflow`。调用方：`exec/vm_opcodes.zig:114`、`:119`（throw 处理）与 `exec/call_runtime.zig:198`（catch 派发）。
 
 ### `arrayPrototypeFromGlobal` (`src/exec/array_ops.zig:132`)
 
 - **签名**：`pub fn arrayPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*core.Object`。
 - **作用**：取当前 realm 的 `Array.prototype`，给新建数组定原型用。
 - **实现**：先查 realm 缓存 `cachedRealmValue(.array_prototype)`（`expectObject` 失败按 null 处理）；缓存未填时退回 global 上 own data 属性 `Array` 再取其 own data `prototype`；都没有返回 null。关键调用：`global.cachedRealmValue`、`property_ops.expectObject`、`global.getOwnDataObjectBorrowed`、`constructor.getOwnDataObjectBorrowed`。
-- **所有权 / 错误 / 调用**：返回借用指针：原型由 realm 缓存或 `global.Array` 的 `prototype` 属性持有，调用方既不 retain 也不释放；null 时调用方用引擎默认原型建数组。无 error set——`property_ops.expectObject` 的失败被 `catch null` 吞成「缓存不可用」。调用方遍布 exec（50 余处，如 `object_ops.zig:747`、`iterator_ops.zig:1165`、本文件 `buildCallSiteArray` `:277`），是「新建数组挂什么原型」的统一入口；比 `exec/array_builtin_ops.zig:284` 的同名私有函数多一层 `Array.prototype` 属性回退。
+- **所有权 / 错误 / 调用**：返回借用指针：原型由 realm 缓存或 `global.Array` 的 `prototype` 属性持有，调用方既不 retain 也不释放；null 时调用方用引擎默认原型建数组。无 error set——`property_ops.expectObject` 的失败被 `catch null` 吞成「缓存不可用」。调用方遍布 exec（50 余处，如 `object_ops.zig:747`、`iterator_ops.zig:1165`、本文件 `buildCallSiteArray` `:277`），是「新建数组挂什么原型」的统一入口；比 `exec/array_ops.zig:284` 的同名私有函数多一层 `Array.prototype` 属性回退。
 
 ### `arrayIteratorPrototypeFromContext` (`src/exec/array_ops.zig:142`)
 
@@ -42,14 +42,14 @@
 - **签名**：`pub fn pushFunctionClosure( ctx: *core.JSContext, frame: *frame_mod.Frame, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, global: *core.Object, index: usize, ) !void`。
 - **作用**：VM 栈原语（不属于 Array 语义）：取常量池第 `index` 项造出字节码函数对象并压栈，`vm_call.zig` 的闭包 opcode 用。
 - **实现**：`function.constantAt(index)` 拿不到常量即 `error.InvalidBytecode`；否则 `createBytecodeFunctionObject(ctx, frame, global, value)` 造对象再 `stack.push`。关键调用：`function.constantAt`、`createBytecodeFunctionObject`、`stack.push`。错误：error.InvalidBytecode。
-- **所有权 / 错误 / 调用**：新建的函数对象所有权随 `stack.push` 转给操作数栈（栈槽同时是 GC 根）；`function`/`global`/`frame` 借用。error set：常量池下标越界 → `error.InvalidBytecode`（引擎不变量；`runtimeErrorInfo` 不认识它，逃到 native 边界只会兜底成 `Error: InvalidBytecode`），其余是 `createBytecodeFunctionObject` 的 OOM。push 失败时新建对象没有 errdefer，直接留给 GC 回收。唯一调用方 `exec/vm_call.zig:436`（闭包 opcode）。
+- **所有权 / 错误 / 调用**：新建的函数对象所有权随 `stack.push` 转给操作数栈（栈槽同时是 GC 根）；`function`/`global`/`frame` 借用。error set：常量池下标越界 → `error.InvalidBytecode`（引擎不变量；`runtimeErrorInfo` 不认识它，逃到 native 边界只会兜底成 `Error: InvalidBytecode`），其余是 `createBytecodeFunctionObject` 的 OOM。push 失败时新建对象没有 errdefer，直接留给 GC 回收。唯一调用方 `exec/vm_opcodes.zig:436`（闭包 opcode）。
 
 ### `arrayMethodFastCall` (`src/exec/array_ops.zig:164`)
 
 - **签名**：`pub fn arrayMethodFastCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, receiver: core.JSValue, func: core.JSValue, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !?core.JSValue`。
 - **作用**：先确认 callee 是 native callable（用户字节码函数一次 bail）。
 - **实现**：先确认 callee 是 native callable（用户字节码函数一次 bail）。iterator 域走 `iteratorCallForNativeRecord`；随后级联 iteration/at/reduce/search/copyWithin/fill/push/pop/shift/unshift/reverse/splice/TA slice/slice/map/flat/sort/by-copy/concat。全部 miss 返回 null，交给通用调用。QuickJS 坐标：quickjs.c:17562、quickjs.c:18220。对不上这个 builtin 时返回 `null`，让上层继续级联。
-- **所有权 / 错误 / 调用**：返回 owned 值，或 null 表示「这不是数组方法，回退通用调用」；`receiver`/`func`/`args` 都是 VM 操作数栈上的借用（栈帧即根），本函数自身不分配不建根。唯一调用方 `exec/vm_call.zig:600`：它把这里抛出的错误交给 `call_runtime.handleCatchableRuntimeError` 变成 JS 异常并跳 catch，null 则继续走 `callValueOrBytecodeRoot*`。级联的共享前置守卫是开头那句 `callableObjectFromValue(func) orelse return null`。
+- **所有权 / 错误 / 调用**：返回 owned 值，或 null 表示「这不是数组方法，回退通用调用」；`receiver`/`func`/`args` 都是 VM 操作数栈上的借用（栈帧即根），本函数自身不分配不建根。唯一调用方 `exec/vm_opcodes.zig:600`：它把这里抛出的错误交给 `call_runtime.handleCatchableRuntimeError` 变成 JS 异常并跳 catch，null 则继续走 `callValueOrBytecodeRoot*`。级联的共享前置守卫是开头那句 `callableObjectFromValue(func) orelse return null`。
 
 ### `arrayPrototypeNativeRecord` (`src/exec/array_ops.zig:221`)
 
@@ -63,7 +63,7 @@
 - **签名**：`pub fn buildCallSiteArray(ctx: *core.JSContext, global: *core.Object, skip_name: ?[]const u8) !core.JSValue`。
 - **作用**：给 `error_stack_ops` 造 `Error.prepareStackTrace` 用的 CallSite 数组。
 - **实现**：对象分配后 `errdefer destroyFromHeader`，失败不泄漏。从最内层帧往外遍历快照；`skip_name` 非空时先跳过直到名字匹配的那一帧（含该帧）；`errorStackTraceLimit` 到达即停；每帧 `createCallSiteObject` 后按序号 define，最后同时 `setArrayLength` 与 define `length`。关键调用：`Object.createArray`、`arrayPrototypeFromGlobal`、`Object.destroyFromHeader`、`array.gcHeader`、`errorStackTraceLimit`、`ctx.snapshotBacktraceFrames`、`ctx.freeBacktraceFrameSnapshot`、`exception_ops.resolveBacktraceFunctionName`。
-- **所有权 / 错误 / 调用**：返回 owned 数组值，建到一半失败由 `errdefer destroyFromHeader` 回收；backtrace 快照 `frames` 由 `defer ctx.freeBacktraceFrameSnapshot` 释放，每个 CallSite 对象建好即交给数组属性持有。error set：OOM 与 `createCallSiteObject` / `defineOwnProperty` 透传。调用方 `exec/error_stack_ops.zig:30`、`:48`（经该文件顶部的别名）。
+- **所有权 / 错误 / 调用**：返回 owned 数组值，建到一半失败由 `errdefer destroyFromHeader` 回收；backtrace 快照 `frames` 由 `defer ctx.freeBacktraceFrameSnapshot` 释放，每个 CallSite 对象建好即交给数组属性持有。error set：OOM 与 `createCallSiteObject` / `defineOwnProperty` 透传。调用方 `exec/exception_ops.zig:30`、`:48`（经该文件顶部的别名）。
 
 ### `aggregateErrorsIterableToArray` (`src/exec/array_ops.zig:301`)
 
@@ -77,7 +77,7 @@
 - **签名**：`pub fn regExpLegacyNoCaptureSliceValue(rt: *core.JSRuntime, legacy: anytype, kind: RegExpLegacyNoCaptureSlice) ?core.JSValue`。
 - **作用**：RegExp 符号方法、exec 结果或 legacy 静态槽。
 - **实现**：`legacy.lazy_no_capture_match` 为假或 `legacy.input` 为空就返回 `null`（该 legacy 槽不是惰性无捕获匹配，调用方另想办法）。否则按 kind 切：`.match` 取 `[lazy_match_index, +lazy_match_len)`；`.left` 在 index 为 0 时给空串，否则取 `[0, index)`；`.right` 从 `@min(index+len, lazy_input_len)` 取到输入尾，越界给空串。切片失败（`catch null`）也归 null。
-- **所有权 / 错误 / 调用**：返回 owned 的新字符串值，或 null 表示「没有可复算的惰性缓存」；`legacy` 是 `anytype` 的借用视图（RegExp 的 legacy 静态状态），`input` 不被 retain。**无 error set**：`stringSliceValue` / `createStringValue` 的失败一律被 `catch null` 吞掉，OOM 因此表现为一次 miss 而不是异常。调用方 `exec/regexp_fastpath.zig:580`（lastMatch）、`:582`（leftContext）、`:583`（rightContext），miss 时回退 `regExpLegacySlotValue`。
+- **所有权 / 错误 / 调用**：返回 owned 的新字符串值，或 null 表示「没有可复算的惰性缓存」；`legacy` 是 `anytype` 的借用视图（RegExp 的 legacy 静态状态），`input` 不被 retain。**无 error set**：`stringSliceValue` / `createStringValue` 的失败一律被 `catch null` 吞掉，OOM 因此表现为一次 miss 而不是异常。调用方 `exec/regexp_ops.zig:580`（lastMatch）、`:582`（leftContext）、`:583`（rightContext），miss 时回退 `regExpLegacySlotValue`。
 
 ### `throwRegExpAccessorTypeError` (`src/exec/array_ops.zig:387`)
 
@@ -168,7 +168,7 @@
 - **签名**：`pub fn arrayBufferMaxByteLengthOption( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, args: []const core.JSValue, byte_length: usize, ) !?usize`。
 - **作用**：解析 `new ArrayBuffer(len, { maxByteLength })` 第二个参数里的 `maxByteLength` 选项；返回 null 表示没给，于是新 buffer 是固定长度的。
 - **实现**：第二个参数缺席、是 undefined 或不是对象就返回 `null`（没有 options）；否则 `[[Get]] maxByteLength`，仍是 undefined 也返回 `null`；强制成索引后小于 `byte_length` 即 `error.RangeError`。关键调用：`isUndefined`、`isObject`、`getValueProperty`、`max_value.isUndefined`、`typedArrayConstructToIndex`。错误：error.RangeError。
-- **所有权 / 错误 / 调用**：返回 `?usize`，不分配；第二参数不是对象、或没有 `maxByteLength` 属性一律返回 null（= 非 resizable）。error set：`maxByteLength < byteLength` → `error.RangeError`，属性 getter 与 `typedArrayConstructToIndex` 的异常透传。调用方 `exec/class_init_ops.zig:90`（经别名）与本文件 `:705`。
+- **所有权 / 错误 / 调用**：返回 `?usize`，不分配；第二参数不是对象、或没有 `maxByteLength` 属性一律返回 null（= 非 resizable）。error set：`maxByteLength < byteLength` → `error.RangeError`，属性 getter 与 `typedArrayConstructToIndex` 的异常透传。调用方 `exec/function_ops.zig:90`（经别名）与本文件 `:705`。
 
 ### `typedArrayConstructFromIterable` (`src/exec/array_ops.zig:723`)
 

@@ -1,6 +1,6 @@
 # 01 — `zjs.native`：宿主函数
 
-> `leaf` / `leafWithState` / `Class` 已从 `src/native.zig` 删除。下文若仍写这些生成器，以源码为准：只剩 `Call` / `Spec` / `Options` / `managed`。内建叶签名仍走 `exec/native_legacy.zig`。
+> `leaf` / `leafWithState` / `Class` 已从 `src/native.zig` 删除。下文若仍写这些生成器，以源码为准：只剩 `Call` / `Spec` / `Options` / `managed`。内建叶签名仍走 `exec/builtin_dispatch.zig`。
 
 `src/native.zig` 为宿主函数生成 comptime 的 C ABI thunk，并通过 NativeEntry 描述其调用种类、参数签名和目标。
 

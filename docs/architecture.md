@@ -14,8 +14,7 @@ reference shapes, matching QuickJS’s own monoliths.
 ## Layers
 
 ```
-embedder  →  src/root.zig  →  src/js_context.zig + src/native.zig  →  src/core/
-CLI/tests →  src/internal_root.zig
+embedder / CLI / tests  →  src/root.zig  →  src/js_context.zig + src/native.zig  →  src/core/
 compile   →  src/parser.zig  →  src/compiler/  →  src/bytecode/
 execute   →  src/exec/  (VM, builtins, modules, promises)
 host      →  src/event_loop.zig
@@ -27,26 +26,28 @@ the event loop.
 `src/` companions sit beside those layers:
 
 - `event_loop.zig`: host timers, fd/signal handlers, and job draining
-  (`zjs.runtime`).
-- `js_context.zig`: host `JSContext` facade (eval, calls, properties).
-- `native.zig`: `zjs.native.managed` host-function thunks.
+  (`zjs.EventLoop`).
+- `js_context.zig`: host `Context` facade (eval, calls, properties).
+- `native.zig`: host-function thunks used by `Context.defineFunction`.
 - `simple_token.zig`: parser token kinds for QuickJS `simple_next_token`
   lookahead; used by `parser.zig` and the CLI.
 
 ## Public entry — `src/root.zig`
 
-Embedders import `zjs`. The remaining host surface is `JSRuntime`, `JSContext`,
-`JSValue`, `zjs.value` handles, `zjs.native.managed` (host functions),
-and `zjs.runtime` (the host event loop).
-Contract: [public-api-contract.md](public-api-contract.md). Examples:
-[embedding-cookbook.md](embedding-cookbook.md).
+Embedders import `zjs`. The host surface is `Runtime`, `Context`,
+`Value`, `Call`, `Context.defineFunction` (host functions),
+`Context.defineScriptArgs` (CLI `scriptArgs`), nested eval options on
+`Context`, and `EventLoop`. Handle types come from `Runtime` methods; byte
+stores from `Value.Bytes`. Contract: [public-api-contract.md](public-api-contract.md).
+Examples: [embedding-cookbook.md](embedding-cookbook.md).
 
-`src/internal_root.zig` aggregates CLI, test262, and in-repo tests. It is not
-the public embedding contract.
+The same file is the CLI, test262, and in-tree test compile root. Embedders
+stay on `Runtime` / `Context` / `Value` / `Call` / `EventLoop`; in-tree hosts
+also use the layer re-exports (`core`, `exec`, `parser`).
 
-`src/js_context.zig` is the host `JSContext` facade (eval, calls, properties,
+`src/js_context.zig` is the host `Context` facade (eval, calls, properties,
 native-function install). `src/native.zig` builds comptime thunks over
-`NativeEntry` via `managed`. Neither file may import CLI.
+`NativeEntry`. Neither file may import CLI.
 
 ## Core — `src/core/`
 
@@ -161,20 +162,22 @@ point, not the current contract.
 ## Execution — `src/exec/`
 
 Start at `zjs_vm.zig` (dispatcher), then `frame.zig` / `stack.zig` /
-`inline_calls.zig`. Opcode families are `vm_*.zig`. Standard globals are
-hand-installed in `standard_globals.zig`; native records live beside
-`*_ops.zig` and dispatch through `builtin_dispatch.zig`. There is no
-`src/builtins/` layer.
+`inline_calls.zig`. Opcode handlers are `vm_opcodes.zig` and
+`vm_property.zig`. Standard globals are hand-installed in
+`standard_globals.zig`; native records live in the same `*_ops.zig` file
+as the domain implementation and dispatch through `builtin_dispatch.zig`.
+There is no `src/builtins/` layer.
 
 File and function naming conventions in `exec/`:
 
-- `vm_X.zig` holds stack-VM opcode handlers and their helpers (they take
-  the operand stack / frame); `X_ops.zig` holds value-level runtime and
-  builtin implementations (they take runtime + values); `X_builtin_ops.zig`
-  holds native-record tables. Import aliases must equal the file name minus
-  `.zig` (one documented exception: `internal_builtins.zig` aliases each
-  record file by its `NativeBuiltinDomain` name, because that file is the
-  domain table).
+- `vm_opcodes.zig` / `vm_property.zig` hold stack-VM opcode handlers (they
+  take the operand stack / frame); `X_ops.zig` holds value-level runtime,
+  builtin implementations, and that domain's native-record table (they take
+  runtime + values). Import aliases should equal the file name minus
+  `.zig`. `internal_builtins.zig` aliases each record file by its
+  `NativeBuiltinDomain` name, because that file is the domain table.
+  `exec/root.zig` also keeps compatibility aliases for retired satellite
+  names (`array_builtin_ops`, `exceptions`, `module_graph`, …).
 - A `Vm` function suffix (`binaryVm`, `execVm`, …) marks the stack-VM entry
   variant of a value-level operation of the same name.
 - The historical `qjs*` function prefix was removed on 2026-08-19 (owner
@@ -188,19 +191,21 @@ File and function naming conventions in `exec/`:
 - Fast-path names: `*ForFastPath` is an ingredient or precondition check
   **used by** a fast path; `*Fast` / `fast*` is the fast **variant of** the
   operation itself.
-- `X_builtin_ops.zig` exists only where `X_ops.zig` also exists (the
-  native-record table split out of the value-level runtime file);
-  single-file domains keep their records inside `X_ops.zig`, and
-  `builtin_glue.zig` holds the deliberate cross-domain leftovers.
+- Cross-domain leftover records stay in `builtin_glue.zig`.
 
 | Enter here | Owns |
 | --- | --- |
 | `zjs_vm.zig` | interpreter loop |
-| `call.zig` / `call_runtime.zig` / `construct.zig` | calls and construct |
+| `call.zig` / `call_runtime.zig` / `construct.zig` / `call_site.zig` | calls and construct |
 | `eval_entry.zig` | eval |
-| `module.zig` / `module_graph.zig` | modules |
+| `module.zig` | modules |
 | `promise_ops.zig` | Promise abstract operations |
 | `standard_globals.zig` | global bootstrap |
+
+Runtime call flow, role layers, hubs, and load-bearing `@import`
+cycles: [exec-dependency-graph.md](exec-dependency-graph.md). Zig allows
+circular imports, so the compile graph is not a DAG; that page maps who
+calls whom on eval / `[[Call]]` / native / construct.
 
 Promise object state is `src/core/promise.zig`. Job-queue primitives are
 `src/core/jobs.zig`. There is no `src/exec/eval.zig` and no `src/exec/promise.zig`.
@@ -212,7 +217,7 @@ ordinary `call + return`; `test262.conf` still skips `tail-call-optimization`
 because method-position tails are out of scope. Per-opcode profiling is a
 working profiler on the
 `zjs-profile` artifact: profiling builds call `noteDispatch` from `cont` /
-`next` (`src/exec/vm_profile.zig`), `build.zig` ships `zjs-profile` plus
+`next` (`src/exec/tailcall_dispatch.zig`), `build.zig` ships `zjs-profile` plus
 nine `perf-*-profile` steps with exact opcode pins, and
 `tests/smoke_test.zig` asserts `--profile-opcodes` output. The default
 `zjs` binary still fail-closes `--profile-opcodes`.
@@ -221,15 +226,15 @@ nine `perf-*-profile` steps with exact opcode pins, and
 
 The leftover `src/runtime/` directory is gone. Host policy that must stay
 out of core lives in this companion file: timers, fd/signal handlers, and
-job draining. `zjs.runtime` re-exports it (`EventLoop`, `runUntilIdle`).
+job draining. `zjs.EventLoop` is the public type (`runUntilIdle`, `drain`).
 
 Atomics waiter cleanup, module file graphs, and ArrayBuffer detach live in
 `src/exec/`. The dynamic plugin loader and its `zjs.ffi` ABI were deleted
-2026-09-06. Host functions register through `zjs.native`
-(`JSContext.defineFunction` / `createFunction`): each registration is one
+2026-09-06. Host functions register through `Context.defineFunction` /
+`createFunction`: each registration is one
 immutable `NativeEntry` (`src/core/native_entry.zig`) that the VM dispatches
-exactly like a builtin (`src/exec/vm_native.zig`); native -> JS goes through
-`JSContext.callFunction`.
+exactly like a builtin (`src/exec/vm_opcodes.zig`); native -> JS goes through
+`Context.callFunction`.
 
 ## Libraries, CLI, tests
 
@@ -242,20 +247,28 @@ exactly like a builtin (`src/exec/vm_native.zig`); native -> JS goes through
   `run_test262_source.zig` owns harness caching, local source overrides, and
   source assembly. `run_test262_reporter.zig` owns synchronized
   stderr, failure buckets, directory summaries, and report files
-- `src/test262_host.zig`: Test262 globals (`$262`) and the `$262.agent`
-  coordinator. It lives in the engine tree because both `run-test262` and
-  the in-tree test helpers use it; the CLI only wraps it.
-- The unified Zig test binary has two modules: the engine (`zjs`, root
-  `src/internal_root.zig`, the same shape the CLI links) and the test root
-  `src/unified_tests.zig`, which adds the stress and CLI test families.
-  Engine files never import `src/cli/` or `src/stress.zig`; that rule is
-  what keeps the CLI executable, whose root is `src/cli/zjs.zig`, free of a
-  module clash.
+- `src/cli/run_test262_host.zig`: Test262 globals (`$262`) and the
+  `$262.agent` coordinator. It is a `run-test262` module
+  (`@import("test262_host")`), not an engine export. Test compiles of
+  the engine add the same module so `TestEngine` can install harness
+  globals without putting the host file in the engine module.
+- Zig tests use two compile roots so engine files never path-import
+  `src/cli/` (that would clash with the CLI executable, whose root is
+  `src/cli/zjs.zig`): `test_root.zig` is the engine suite (re-exports
+  `src/root.zig` so one module sees `src/` and `tests/`);
+  `src/cli/tests.zig` pulls the colocated CLI tests and imports the
+  engine as `zjs`. Test compiles add `@import("test262_host")` so
+  `TestEngine` can install `$262` without exporting the host from the
+  engine.
 - Zig unit tests sit next to the code they exercise: package `tests.zig`
-  (`src/core/tests.zig`, `src/exec/tests.zig`, `src/parser/tests.zig`,
-  `src/bytecode/tests.zig`, `src/compiler/tests.zig`) plus colocated
-  `test` blocks
-- `tests/`: public-root embedding examples, CLI smoke, OOM-injection, plus
+  (`src/parser/tests.zig`, `src/bytecode/tests.zig`,
+  `src/compiler/tests.zig`) plus colocated `test` blocks
+- Integration-test harness: `tests/harness.zig` plus `tests/harness/`
+  (`gc`, `expect`, `fixture`, `test_engine`, `shared`). Used by
+  `tests/core.zig` and `tests/exec.zig`. Unit tests next to `src/` do
+  not import it.
+- `tests/`: engine integration (public API, runtime/GC, VM/eval),
+  public-root embedding, CLI smoke, OOM-injection, plus
   `tests/fixtures/` (test262 harness and override fixtures)
 
 Layering rules: [api-boundary.md](api-boundary.md).
@@ -278,7 +291,7 @@ zjs is already a bytecode interpreter:
 - `parser.zig` parses and emits QuickJS-aligned stack bytecode;
 - `compiler/` performs resolve, stack-size, pc2line, and finalize;
 - `zjs_vm.zig` / `tailcall_dispatch.zig` execute opcodes;
-- `vm_*.zig` and `vm_property_*` own the concrete opcode families.
+- `vm_opcodes.zig` and `vm_property.zig` own the concrete opcode families.
 
 There is no evidence supporting a rewrite to a register/accumulator VM
 (reaffirmed by [engine-evolution-plan.md](engine-evolution-plan.md) §17).
@@ -322,7 +335,7 @@ Main entry points:
 The tail-call handler split is a current code-generation constraint, not a
 file-organization preference: each opcode handler ends in a tail dispatch,
 the hot arm completes inside the handler, and cold work that might emit an
-ordinary call is outlined into `vm_*.zig` first. Folding those handlers
+ordinary call is outlined into `vm_opcodes.zig` / `vm_property.zig` first. Folding those handlers
 back into one large switch would grow the shared stack frame again; do not
 merge them without a frozen binary, disassembly, and multi-build PMU
 evidence.
@@ -344,11 +357,11 @@ provide only the root storage and keep its stack address valid for that scope.
 Property access has a per-site cache (W1, 2026-09): `FunctionBytecode`
 carries a `PropSiteCache` table (`src/bytecode.zig`, `PropSiteCache`) that
 `get_field`/`put_field` sites fill through `captureFieldSite` /
-`capturePutSite` in `src/exec/vm_property_field.zig`.
+`capturePutSite` in `src/exec/vm_property.zig`.
 There is still no `src/core/ic.zig`, no `zjs_enable_ic` option, and no call
 inline cache.
 
-`src/exec/property_direct.zig` (renamed from the historical
+`src/exec/property_ops.zig` (renamed from the historical
 `property_ic.zig` on 2026-08-19) holds non-cached direct
 shape/property/global fast paths. Every access checks the current
 object/shape/property state; the retained `dataPropertyValueForFastPath`
@@ -416,14 +429,14 @@ Opcode profiling (after the D0 fix):
 - A profiling build (`zig build zjs-profile` /
   `-Dzjs_enable_opcode_profile=true`) wraps the whole hot dispatch table
   at comptime: every table dispatch is counted and delta-timed through
-  `vm_profile.noteDispatch` (a scope cannot span an `always_tail` chain;
+  `tailcall_dispatch.noteDispatch` (a scope cannot span an `always_tail` chain;
   the previous opcode's interval is closed by the next dispatch, and the
   last one by `flushPendingDispatch` before dump). `cold_table` and the
   property tail tables are not wrapped — they redispatch the same pc, and
   wrapping them would double-count.
 - The default build's table is entry-for-entry equal to the unwrapped
   table; `--profile-opcodes` fail-closes on a non-profiling binary (exit
-  2); `--perf-json` emits `opcode_profile_enabled` explicitly.
+  2).
 
 Not implemented:
 

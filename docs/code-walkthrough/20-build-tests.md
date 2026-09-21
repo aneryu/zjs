@@ -5,11 +5,11 @@
 | 文件 | 覆盖 |
 | --- | --- |
 | [20-build.md](20-build.md) | `build.zig`、`build/*.zig`：每个 `pub fn`、每个 `b.step`、无函数的 profile 表 |
-| [20-tests.md](20-tests.md) | 测试 shell、`src/testing.zig`、中小测试文件（abi/smoke/stress/gc-stress/oom/embedding/bytecode/…） |
-| [20-tests-core.md](20-tests-core.md) | `src/core/tests.zig` 每个 `fn` 与每个 `test` |
+| [20-tests.md](20-tests.md) | 测试 shell、`tests/harness.zig` + `tests/harness/`、中小测试文件（abi/smoke/gc-stress/oom/embedding/bytecode/…） |
+| [20-tests-core.md](20-tests-core.md) | `tests/core.zig` 每个 `fn` 与每个 `test` |
 | [20-tests-parser.md](20-tests-parser.md) | `src/parser/tests.zig` |
-| [20-tests-exec.md](20-tests-exec.md) | `src/exec/tests.zig` |
-| [20-tests-builtins.md](20-tests-builtins.md) | builtins 段（现并入 `src/exec/tests.zig`） |
+| [20-tests-exec.md](20-tests-exec.md) | `tests/exec.zig` |
+| [20-tests-builtins.md](20-tests-builtins.md) | builtins 段（现并入 `tests/exec.zig`） |
 | [20-tools.md](20-tools.md) | `test262.conf` / `tests/fixtures/` |
 
 写作规范：[`_spec.md`](_spec.md)。函数清单：[`_inventory.tsv`](_inventory.tsv)。引擎分层总览：[00-overview.md](00-overview.md)。
@@ -18,8 +18,8 @@
 
 ## 1. 测试图三句话
 
-1. **两个编译根**：公共 `src/root.zig` ⊂ 内部 `src/internal_root.zig`。生产 CLI 和 `zig build test` 都编内部根；`test-embedding` 是唯一把公共根当 `zjs` 模块来编的测试产物。
-2. **统一套件是唯一 Zig 单测编译**：子系统选择走 `test-fast` 编译期 `--test-filter`，不为每个领域再编一份根。
+1. **一个引擎模块**：`src/root.zig` 是 `@import("zjs")`。生产 CLI 和 `test-embedding` 编这一文件。引擎 Zig 套件根是 `test_root.zig`（re-export 同一模块，才能看到 `tests/`）。CLI 测试把 `src/root.zig` 当独立模块 import。
+2. **引擎套件是包测试的唯一编译根**：子系统选择走 `test-fast` 编译期 `--test-filter`，不为每个引擎领域再编一份根。CLI / embedding / OOM 是宿主族，各自编译。
 3. **一次 `zig build` 一种 `-Doptimize`**：默认 Debug；发货显式 `-Doptimize=ReleaseFast`。需要独立 options 文件时各自 `addOptions`，不为第二种优化模式再钉一颗 CLI。
 
 细节与 attest 矩阵：[docs/testing-graph.md](../testing-graph.md)。
@@ -39,14 +39,14 @@ git diff --check
 # 直接复现：JS 夹具或 run-test262 -d/-f 切片
 ```
 
-子系统选择：`mise run test-fast -- 'exec.tests.'`（或其它名字子串），空选择失败。
+子系统选择：`mise run test-fast -- 'tests.exec.'`（或其它名字子串），空选择失败。
 
 CLI/runtime 胶水：`mise run quick-gate`（= `smoke`）。
 
 **每改动收尾**
 
 ```bash
-zig build test                           # 统一套件，Zig 默认 runner；stress 测试 SkipZigTest
+zig build test                           # 引擎套件 + CLI 测试
 ```
 
 **checkpoint**（额外表面需要时；收尾仍是一次 `test`）
@@ -55,14 +55,14 @@ zig build test                           # 统一套件，Zig 默认 runner；st
 mise run checkpoint-gate                 # test + gc-stress + smoke + check-embedding
 ```
 
-不含 Fast `zjs`、不含全量 test262、不含 `test-stress`。碰栈展开/bigint 内核时本地加 `zig build test-stress`。
+不含 Fast `zjs`、不含全量 test262。
 
 **合并批 / 发布**
 
 ```bash
-mise run batch-gate                      # Debug checkpoint-gate + test-stress，再 ReleaseFast test262-check
+mise run batch-gate                      # Debug checkpoint-gate，再 ReleaseFast test262-check
 mise run production-gate                 # engine-production-gate -Doptimize=ReleaseFast
-zig build test test-stress -Doptimize=ReleaseSafe --summary all
+zig build test -Doptimize=ReleaseSafe --summary all
 ```
 
 **仪器层（夜间 CI；改到对应子系统才本地先跑）**
@@ -86,13 +86,12 @@ test262 零失败门在 PR：`zig build test262-check`。本地先跑聚焦切�
 
 | 步骤 | 编什么 | 谁依赖 |
 | --- | --- | --- |
-| `zjs` | 跟随 `-Doptimize` 的 CLI | install、smoke、perf-benchmark |
+| `zjs` | 跟随 `-Doptimize` 的 CLI | install、smoke |
 | `zjs-profile` | 同模式 + opcode profile | smoke（profile 合同） |
 | `zjs-size` | 同引擎第二安装名 | 不进门 |
 | `run-test262` | 跟随 `-Doptimize` 的 runner | `test262-check` |
 | `check` | 统一根 sema-only | **无门依赖** |
-| `test` | 统一根，Zig 默认 runner；stress SkipZigTest | checkpoint / production |
-| `test-stress` | 同一根，编译期 filter `stress.`，`ZJS_RUN_STRESS=1` | batch-gate / production / CI |
+| `test` | 引擎根 + CLI 测试根 | checkpoint / production |
 | `test-gc-stress` | 同一二进制 + GC 诊断环境 | checkpoint |
 | `test-oom` / `test-leak-census` | test-oom 独立产物；leak-census 同一根 + 两遍 runner | 夜间 |
 | `test-embedding` / `check-embedding` | 公共根；后者 sema-only | production / checkpoint |
@@ -109,7 +108,8 @@ Run 步可选钉核：`-Dgate-run-cpus`（默认不钉）。
 - **`test262.conf`**：全量 test262 的 INI（模式、async/module、features、errorfile）。`test262-check` 传 `-c test262.conf -d test262/test`。exclude 只能收紧，不能为绿而放宽。
 - **`test262/` 子模块**：上游用例。本系列不逐文件讲。
 - **`tests/fixtures/`**：仓内 harness 与 overrides（见 [20-tools.md](20-tools.md)）。
-- **`src/core/tests.zig`、`src/exec/tests.zig`、`src/parser/tests.zig`、`src/bytecode/tests.zig`、`src/compiler/tests.zig`**：Zig 单测体，跟子系统走；统一编译根是 `src/internal_root.zig`。
+- **`src/parser/tests.zig`、`src/bytecode/tests.zig`、`src/compiler/tests.zig`**：Zig 单元测试，跟子系统走。
+- **`tests/core.zig`、`tests/exec.zig`、`tests/public_api.zig`**：引擎集成测试，由 `tests/engine.zig` 拉进 `test_root.zig`。
 
 ---
 
@@ -129,10 +129,10 @@ Run 步可选钉核：`-Dgate-run-cpus`（默认不钉）。
 
 ```sh
 python3 docs/code-walkthrough/_check_coverage.py --docs 'docs/code-walkthrough/20-*.md' \
-  src/internal_root.zig src/testing.zig \
-  src/exec/tests.zig src/bytecode/tests.zig src/core/tests.zig \
+  src/root.zig tests/harness.zig tests/harness/*.zig \
+  tests/exec.zig src/bytecode/tests.zig tests/core.zig \
   tests/embedding_examples.zig src/parser/tests.zig \
-  tests/oom.zig tests/smoke_test.zig src/stress.zig
+  tests/oom.zig tests/smoke_test.zig
 ```
 
 `build.zig` / `build/*.zig` 的 18 个函数已纳入 `_inventory.tsv`；函数条目见 [20-build.md](20-build.md) 文末列表。

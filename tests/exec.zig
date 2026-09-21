@@ -1,8 +1,10 @@
-//! Exercises VM execution, calls, jobs, control flow, and runtime semantics.
+//! Integration tests for VM execution, calls, jobs, modules, and eval.
 const std = @import("std");
 const zjs = @import("zjs");
 const engine = zjs;
 const core = zjs.core;
+const helpers = @import("harness.zig");
+const vm_helpers = helpers.vm_helpers;
 const bytecode = zjs.bytecode;
 const function_def = zjs.bytecode.function_def;
 const op = zjs.bytecode.opcode.op;
@@ -305,7 +307,7 @@ test "eval lazily materializes a bare core context global before root closure co
     defer ctx.destroy();
     try std.testing.expect(ctx.global == null);
 
-    var wrapper = zjs.JSContext.borrowCore(ctx);
+    var wrapper = zjs.borrowContext(ctx);
     const result = try wrapper.eval("'lazy-global-ok'", .{});
     try helpers.expectStringValueBytes(result, "lazy-global-ok");
     try std.testing.expect(ctx.global != null);
@@ -2719,14 +2721,14 @@ test "initial async resume rejects with the caller-Realm interrupt exception" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
-    var parent_facade = zjs.JSContext.borrowCore(js.context);
-    const parent_global = try parent_facade.globalObject();
+    var parent_facade = zjs.borrowContext(js.context);
+    const parent_global = try zjs.globalObjectPtr(&parent_facade);
     const child_holder = try engine.exec.call.createRealmObject(js.context);
     const child_record = try core.Object.expect(child_holder);
     const child = child_record.realmContext() orelse return error.TestUnexpectedResult;
     const child_global = try engine.exec.zjs_vm.contextGlobal(child);
 
-    var child_facade = zjs.JSContext.borrowCore(child);
+    var child_facade = zjs.borrowContext(child);
     _ = try child_facade.eval(
         "globalThis.__w2_async_interrupt = async function () { return 17; };",
         .{},
@@ -2795,14 +2797,14 @@ test "cross-Realm interrupt polls charge caller entry and callee body separately
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
-    var parent_facade = zjs.JSContext.borrowCore(js.context);
-    const parent_global = try parent_facade.globalObject();
+    var parent_facade = zjs.borrowContext(js.context);
+    const parent_global = try zjs.globalObjectPtr(&parent_facade);
     const child_holder = try engine.exec.call.createRealmObject(js.context);
     const child_record = try core.Object.expect(child_holder);
     const child = child_record.realmContext() orelse return error.TestUnexpectedResult;
     const child_global = try engine.exec.zjs_vm.contextGlobal(child);
 
-    var child_facade = zjs.JSContext.borrowCore(child);
+    var child_facade = zjs.borrowContext(child);
     _ = try child_facade.eval(
         \\globalThis.__w2_body_ran = false;
         \\globalThis.__w2_foreign = function () {
@@ -3021,6 +3023,72 @@ test "tail-frame reuse charges planned stack bytes and fully restores both budge
             "nested-weighted:true\n" ++
             "own-catch:InternalError:stack overflow\n" ++
             "bounded:done\n",
+        stream.buffered(),
+    );
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
+    try std.testing.expectEqual(baseline_tail_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+}
+
+test "raw tail call opcodes share the bounded tail-chain stack contract" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    js.runtime.setNativeStackSize(128 * 1024);
+
+    const plain_code = [_]u8{
+        op.special_object,
+        bytecode.opcode.special_object_subtype.current_function,
+        op.call,
+        0,
+        0,
+        op.@"return",
+    };
+    const method_code = [_]u8{
+        op.push_this,
+        op.special_object,
+        bytecode.opcode.special_object_subtype.current_function,
+        op.tail_call_method,
+        0,
+        0,
+    };
+    const plain = try createTailOpcodeFixture(&js, "__w2RawTail", &plain_code, 1);
+    const method = try createTailOpcodeFixture(&js, "__w2RawMethodTail", &method_code, 2);
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const plain_key = try js.runtime.internAtom("__w2RawTail");
+    const method_key = try js.runtime.internAtom("__w2RawMethodTail");
+    try global.defineOwnProperty(
+        js.runtime,
+        plain_key,
+        core.Descriptor.data(plain, .all),
+    );
+    try global.defineOwnProperty(
+        js.runtime,
+        method_key,
+        core.Descriptor.data(method, .all),
+    );
+
+    const baseline_call_depth = js.runtime.hot.call_depth;
+    const baseline_native_depth = js.runtime.hot.native_call_depth;
+    const baseline_tail_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    const result = try js.evalWithOutput(
+        \\function __w2InvokeRaw(fn) { return 1 + fn(); }
+        \\function __w2ExpectRaw(label, fn) {
+        \\    try { __w2InvokeRaw(fn); print(label + ":missing"); }
+        \\    catch (e) { print(label + ":" + e.name + ":" + e.message); }
+        \\}
+        \\__w2ExpectRaw("plain", __w2RawTail);
+        \\__w2ExpectRaw("method", __w2RawMethodTail);
+        \\print("recovered:" + (20 + 22));
+    , &stream);
+
+    try std.testing.expect(result.is(.undefined_value));
+    try std.testing.expectEqualStrings(
+        "plain:InternalError:stack overflow\n" ++
+            "method:InternalError:stack overflow\n" ++
+            "recovered:42\n",
         stream.buffered(),
     );
     try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
@@ -4008,9 +4076,6 @@ test "strict generator resident frame supports qjs argument counts beyond u16 st
     try std.testing.expect(result.is(.undefined_value));
 }
 
-pub const helpers = @import("../testing.zig");
-pub const vm_helpers = helpers.vm_helpers;
-
 // ================== core_native.zig ==================
 
 test "a dynamic function outlives its teardown when its object held the last bytecode reference" {
@@ -4916,8 +4981,8 @@ test "closure helper stores closure state outside the VM" {
     defer rt.destroy();
 
     const closure_value = try engine.exec.closure.create(rt, .counter);
-    const first = try engine.exec.closure.call(rt, closure_value, &.{}, &.{});
-    const second = try engine.exec.closure.call(rt, closure_value, &.{}, &.{});
+    const first = try engine.exec.closure.callCClosure(rt, closure_value, &.{}, &.{});
+    const second = try engine.exec.closure.callCClosure(rt, closure_value, &.{}, &.{});
 
     try std.testing.expectEqual(@as(?i32, 1), first.as(.int));
     try std.testing.expectEqual(@as(?i32, 2), second.as(.int));
@@ -5290,7 +5355,7 @@ test "call subsystem installs and invokes host globals" {
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
     try helpers.installHostGlobalsBare(rt, global);
-    var wrapper = zjs.JSContext.borrowCore(ctx);
+    var wrapper = zjs.borrowContext(ctx);
     try zjs.test262_host.installTest262Globals(rt, &wrapper, global);
 
     const print_key = try rt.internAtom("print");
@@ -8780,6 +8845,19 @@ test "X-89 frame disasm: return call and method emit tail opcodes" {
     try bytecode.dump.dumpFunctionBytecode(&sloppy_cond_w, sloppy_cond, &js.runtime.atoms, .{});
     const sloppy_cond_dump = sloppy_cond_w.buffered();
     try std.testing.expect(std.mem.indexOf(u8, sloppy_cond_dump, "tail_call") == null);
+
+    // Concise-body arrows inherit the script's strictness, then the same
+    // `call`→`tail_call` fold as `return g(x)` in a strict function.
+    _ = try js.eval(
+        \\"use strict";
+        \\var arrowTail = (x) => g(x);
+    );
+    const arrow = try globalFunctionBytecode(js, "arrowTail");
+    var arrow_w = std.Io.Writer.fixed(&buf);
+    try bytecode.dump.dumpFunctionBytecode(&arrow_w, arrow, &js.runtime.atoms, .{});
+    const arrow_dump = arrow_w.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, arrow_dump, ": tail_call ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, arrow_dump, "tail_call_method") == null);
 }
 
 test "pc2line malformed transition reports zero location instead of header fallback" {
@@ -9057,8 +9135,8 @@ test "external C function preflight uses caller realm and callback errors use ca
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
-    var caller_facade = zjs.JSContext.borrowCore(js.context);
-    const caller_global = try caller_facade.globalObject();
+    var caller_facade = zjs.borrowContext(js.context);
+    const caller_global = try zjs.globalObjectPtr(&caller_facade);
     const callee_holder = try engine.exec.call.createRealmObject(js.context);
     const callee_record = try core.Object.expect(callee_holder);
     const callee = callee_record.realmContext() orelse return error.TestUnexpectedResult;
@@ -10585,24 +10663,24 @@ test "Engine API eval and job queue are wired" {
     const result = try js.eval("1; 2");
     try std.testing.expect(result.is(.undefined_value));
 
-    helpers.job_counter = 0;
+    helpers.test_engine.job_counter = 0;
     try js.runtime.job_queue.enqueueFunc(js.context, countJob, &.{});
     try js.runtime.job_queue.enqueueFunc(js.context, countJob, &.{});
     try js.runJobs();
-    try std.testing.expectEqual(@as(usize, 2), helpers.job_counter);
+    try std.testing.expectEqual(@as(usize, 2), helpers.test_engine.job_counter);
 
-    helpers.job_counter = 0;
+    helpers.test_engine.job_counter = 0;
     var i: usize = 0;
     while (i < 16) : (i += 1) try js.runtime.job_queue.enqueueFunc(js.context, countJob, &.{});
     try js.runJobs();
-    try std.testing.expectEqual(@as(usize, 16), helpers.job_counter);
+    try std.testing.expectEqual(@as(usize, 16), helpers.test_engine.job_counter);
 
-    helpers.job_counter = 0;
+    helpers.test_engine.job_counter = 0;
     try js.runtime.job_queue.enqueueFunc(js.context, countJobArgs, &.{ core.JSValue.int32(2), core.JSValue.int32(3) });
     try js.runJobs();
-    try std.testing.expectEqual(@as(usize, 5), helpers.job_counter);
+    try std.testing.expectEqual(@as(usize, 5), helpers.test_engine.job_counter);
 
-    helpers.job_counter = 0;
+    helpers.test_engine.job_counter = 0;
     try js.runtime.job_queue.enqueueFunc(js.context, countJobArgs, &.{
         core.JSValue.int32(1),
         core.JSValue.int32(2),
@@ -10611,7 +10689,7 @@ test "Engine API eval and job queue are wired" {
         core.JSValue.int32(5),
     });
     try js.runJobs();
-    try std.testing.expectEqual(@as(usize, 15), helpers.job_counter);
+    try std.testing.expectEqual(@as(usize, 15), helpers.test_engine.job_counter);
 
     try std.testing.expectError(error.TooManyJobArgs, js.runtime.job_queue.enqueueFunc(js.context, countJobArgs, &.{
         core.JSValue.int32(1),
@@ -10784,7 +10862,7 @@ test "waitAsync completion OOM stays at FIFO head for same-runtime retry" {
 
     try engine.exec.atomics_ops.processExpiredAtomicsWaiters(js.context);
     waiter_linked = false;
-    helpers.job_counter = 0;
+    helpers.test_engine.job_counter = 0;
     try js.runtime.job_queue.enqueueFunc(js.context, countJob, &.{});
 
     // TGC S4-b: sweep first -- the limit-triggered retry collection can now
@@ -10808,7 +10886,7 @@ test "waitAsync completion OOM stays at FIFO head for same-runtime retry" {
     try std.testing.expect(std.meta.activeTag(js.runtime.job_queue.jobs[0].payload) == .generic);
     try std.testing.expect(std.meta.activeTag(js.runtime.job_queue.jobs[1].payload) == .promise);
     try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global)) == .success);
-    try std.testing.expectEqual(@as(usize, 1), helpers.job_counter);
+    try std.testing.expectEqual(@as(usize, 1), helpers.test_engine.job_counter);
     try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global)) == .success);
 }
 
@@ -10831,7 +10909,7 @@ test "dynamic import job OOM retains its FIFO position for retry" {
         }
     };
     ImportProbe.attempts = 0;
-    helpers.job_counter = 0;
+    helpers.test_engine.job_counter = 0;
     try js.runtime.job_queue.enqueueDynamicImport(
         js.context,
         ImportProbe.run,
@@ -10856,7 +10934,7 @@ test "dynamic import job OOM retains its FIFO position for retry" {
     try std.testing.expectEqual(@as(usize, 1), js.runtime.job_queue.jobs.len);
     try std.testing.expect(std.meta.activeTag(js.runtime.job_queue.jobs[0].payload) == .generic);
     try std.testing.expect((try engine.exec.promise_ops.drainOnePendingJob(js.context, null, global)) == .success);
-    try std.testing.expectEqual(@as(usize, 1), helpers.job_counter);
+    try std.testing.expectEqual(@as(usize, 1), helpers.test_engine.job_counter);
 }
 
 test "dynamic import job keeps its enqueue Realm after creator facade release" {
@@ -11200,7 +11278,7 @@ test "ordinary script entry points do not run full-heap cycle collection on exit
     );
     try std.testing.expectEqual(baseline_major_gc_count, js.runtime.gcStats().major_gc_count);
 
-    var context = zjs.JSContext.borrowCore(js.context);
+    var context = zjs.borrowContext(js.context);
     const host_eval_script = try context.evalScriptSource(
         "globalThis.__hostEvalExitProbe = 7; __hostEvalExitProbe",
         .{ .filename = "no-exit-cycle-host-eval-script.js" },
@@ -13220,6 +13298,39 @@ test "exact-args leaf abrupt teardown releases borrowed args exactly once" {
     const baseline_objects = js.runtime.gc.liveCount();
 
     _ = try js.eval("exerciseExactArgsLeafThrow()");
+    _ = js.runtime.runObjectCycleRemoval();
+
+    try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
+}
+
+test "missing-argument abrupt teardown releases supplied args and pads exactly once" {
+    const js = helpers.sharedTestEngine();
+    defer helpers.endSharedTest();
+
+    // Release-balance side of `argc < arg_count`: general teardown walks the
+    // FULL `arg_count` window — the supplied refcounted prefix exactly once
+    // (double free corrupts rc, missed free strands the object) and the
+    // undefined pads as tag-test no-ops. Covers supplied-prefix (argc=1 < 2),
+    // all-missing (argc=0 < 2), and the plain/strict/method entry arms.
+    _ = try js.eval(
+        \\function padThrow(a, b) { return a.x + null.missing + String(b); }
+        \\function strictPadThrow(a, b) { "use strict"; return a.x + null.missing + String(b); }
+        \\const padThrowRecv = { m: function (a, b) { return a.x + null.missing + String(b); } };
+        \\function exercisePaddedLeafThrow() {
+        \\    for (let i = 0; i < 256; i++) {
+        \\        try { padThrow({ x: 1 }); } catch (error) {}
+        \\        try { padThrow(); } catch (error) {}
+        \\        try { strictPadThrow({ x: 2 }); } catch (error) {}
+        \\        try { padThrowRecv.m({ x: 3 }); } catch (error) {}
+        \\    }
+        \\    return true;
+        \\}
+        \\exercisePaddedLeafThrow();
+    );
+    _ = js.runtime.runObjectCycleRemoval();
+    const baseline_objects = js.runtime.gc.liveCount();
+
+    _ = try js.eval("exercisePaddedLeafThrow()");
     _ = js.runtime.runObjectCycleRemoval();
 
     try std.testing.expectEqual(baseline_objects, js.runtime.gc.liveCount());
@@ -16899,7 +17010,7 @@ test "escaped closure keeps its compile realm after facade destruction" {
     var compile_facade_alive = true;
     defer if (compile_facade_alive) compile_facade.destroy();
     const compile_realm = compile_facade.core;
-    const compile_global = try compile_facade.globalObject();
+    const compile_global = try zjs.globalObjectPtr(compile_facade);
     var parsed = try engine.parser.compile(
         .{ .realm = compile_realm },
         "(function escaped() { return this; })",
@@ -17436,13 +17547,13 @@ test "FinalizationRegistry cleanup job keeps registry realm before invoking call
     var registry_facade_alive = true;
     defer if (registry_facade_alive) registry_facade.destroy();
     const registry_realm = registry_facade.core;
-    const registry_global = try registry_facade.globalObject();
+    const registry_global = try zjs.globalObjectPtr(registry_facade);
 
     const callback_facade = try zjs.JSContext.create(rt, .{});
     var callback_facade_alive = true;
     defer if (callback_facade_alive) callback_facade.destroy();
     const callback_realm = callback_facade.core;
-    const callback_global = try callback_facade.globalObject();
+    const callback_global = try zjs.globalObjectPtr(callback_facade);
     try std.testing.expect(registry_realm != callback_realm);
 
     var probe: CrossRealmNativeProbe = .{};
@@ -17540,7 +17651,7 @@ test "event-loop caller reaches external C function with one callee realm view" 
         core.Descriptor.data(native_value, .all),
     );
 
-    var caller_wrapper = zjs.JSContext.borrowCore(caller_realm);
+    var caller_wrapper = zjs.borrowContext(caller_realm);
     _ = try caller_wrapper.eval(
         \\globalThis.__eventLoopWrapper = function () {
         \\    globalThis.__caller_body_ran = true;
@@ -18601,8 +18712,8 @@ test "same module specifier keeps record cells namespace import meta and error s
 
     const realm_b = try core.JSContext.create(js.runtime, .{});
     defer realm_b.destroy();
-    var facade_a = zjs.JSContext.borrowCore(js.context);
-    var facade_b = zjs.JSContext.borrowCore(realm_b);
+    var facade_a = zjs.borrowContext(js.context);
+    var facade_b = zjs.borrowContext(realm_b);
     const filename = "w1e-shared-module-identity.mjs";
 
     try std.testing.expectError(
@@ -18755,8 +18866,8 @@ test "context module eval resumes TLA from its reaction FIFO position" {
 test "Runtime loader keeps same-path TLA continuations and waiters in parent and child Realms" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
-    var parent_facade = zjs.JSContext.borrowCore(js.context);
-    _ = try parent_facade.globalObject();
+    var parent_facade = zjs.borrowContext(js.context);
+    _ = try zjs.globalObjectPtr(&parent_facade);
 
     const dir = ".zig-cache/w1e-cross-realm-tla";
     const main_path = dir ++ "/main.js";
@@ -22109,15 +22220,15 @@ test "fulfilled await preserves FIFO and bypasses an overridden then" {
 test "fulfilled await preserves the registration and body realms" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
-    var parent_facade = zjs.JSContext.borrowCore(js.context);
-    const parent_global = try parent_facade.globalObject();
+    var parent_facade = zjs.borrowContext(js.context);
+    const parent_global = try zjs.globalObjectPtr(&parent_facade);
     var child_holder = try engine.exec.call.createRealmObject(js.context);
     var child_root = core.runtime.rootValues(.{&child_holder});
     child_root.activate(js.runtime);
     defer child_root.deactivate(js.runtime);
     const child = (try core.Object.expect(child_holder)).realmContext().?;
     const child_global = try engine.exec.zjs_vm.contextGlobal(child);
-    var child_facade = zjs.JSContext.borrowCore(child);
+    var child_facade = zjs.borrowContext(child);
     _ = try child_facade.eval("globalThis.foreignDirect = async function () { await 0; return new Error('foreign'); };", .{});
     const function = try child_global.getProperty(try js.runtime.internAtom("foreignDirect"));
     var output = try engine.exec.call_runtime.callValueOrBytecodeRoot(js.context, null, parent_global, core.JSValue.undefinedValue(), function, &.{}, null, null);
@@ -23923,7 +24034,7 @@ test "collection callback adapter materializes errors in its explicit realm" {
 
     const callback = try engine.exec.closure.create(rt, .throws_type_error);
 
-    const callback_host = engine.exec.collection_adapter.host(callback_realm, &.{});
+    const callback_host = engine.exec.collection_adapter.callbackHost(callback_realm, &.{});
     try std.testing.expectError(
         error.JSException,
         callback_host.callWithThis(callback, core.JSValue.undefinedValue(), &.{}),
@@ -24859,7 +24970,7 @@ test "host WeakMap mutation closure rejects registered symbol keys" {
         .{ .name = key_name, .value = try rt.symbolValue(registered_atom) },
     };
 
-    if (engine.exec.closure.call(rt, closure_value, &.{}, globals[0..])) |_| {
+    if (engine.exec.closure.callCClosure(rt, closure_value, &.{}, globals[0..])) |_| {
         try std.testing.expect(false);
     } else |err| {
         try std.testing.expectEqual(error.TypeError, err);
@@ -24899,7 +25010,7 @@ test "host WeakMap mutation closure links entries into existing weak index" {
         .{ .name = key_name, .value = mutation_key.value() },
     };
 
-    try std.testing.expectError(error.JSException, engine.exec.closure.call(rt, closure_value, &.{}, globals[0..]));
+    try std.testing.expectError(error.JSException, engine.exec.closure.callCClosure(rt, closure_value, &.{}, globals[0..]));
 
     try std.testing.expectEqual(@as(usize, 9), map_object.weakCollectionEntries().len);
     const get_result = try engine.exec.collection_ops.methodCall(rt, map_value, 2, &.{mutation_key.value()});
@@ -25317,7 +25428,7 @@ test "host map closure releases appended value when entry allocation fails" {
     const old_bytes = rt.memory.allocated_bytes;
     const old_allocations = rt.memory.allocation_count;
     rt.setMemoryLimit(old_bytes + @sizeOf(core.string.String) + "mutated".len);
-    try std.testing.expectError(error.OutOfMemory, engine.exec.closure.call(rt, closure_value, &.{}, globals[0..]));
+    try std.testing.expectError(error.OutOfMemory, engine.exec.closure.callCClosure(rt, closure_value, &.{}, globals[0..]));
     rt.setMemoryLimit(null);
 
     try std.testing.expectEqual(old_bytes, rt.memory.allocated_bytes);
@@ -25354,7 +25465,7 @@ test "host map closure rolls back appended entry when size update fails" {
     const old_bytes = rt.memory.allocated_bytes;
 
     rt.setMemoryLimit(old_bytes + @sizeOf(core.string.String) + "mutated".len);
-    try std.testing.expectError(error.OutOfMemory, engine.exec.closure.call(rt, closure_value, &.{}, globals[0..]));
+    try std.testing.expectError(error.OutOfMemory, engine.exec.closure.callCClosure(rt, closure_value, &.{}, globals[0..]));
     rt.setMemoryLimit(null);
 
     const entries_slot = map_object.collectionEntriesSlot();
@@ -26230,4 +26341,98 @@ test "Math.min/max and hasOwnProperty exec_direct arms keep the qjs semantics on
         "key,TypeError\n" ++
         "true false true\n" ++
         "true true\n");
+}
+
+test "native callee realm constructor conversion errors" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    var bytes: [4000]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    _ = try js.evalWithOutput(
+        \\const R = $262.createRealm().global;
+        \\const cases = [
+        \\ ['Date', () => new R.Date(Symbol())],
+        \\ ['String', () => new R.String(Symbol())],
+        \\ ['Number', () => new R.Number(Symbol())],
+        \\ ['Promise', () => new R.Promise(0)],
+        \\ ['Map', () => new R.Map(0)],
+        \\ ['Set', () => new R.Set(0)],
+        \\ ['WeakMap', () => new R.WeakMap(0)],
+        \\ ['WeakRef', () => new R.WeakRef(0)],
+        \\ ['FinalizationRegistry', () => new R.FinalizationRegistry(0)],
+        \\ ['DataView', () => new R.DataView(0)],
+        \\ ['ArrayBuffer', () => new R.ArrayBuffer(Symbol())],
+        \\ ['RegExp', () => new R.RegExp(Symbol())],
+        \\ ['Error', () => new R.Error(Symbol())]
+        \\];
+        \\for (const [name, fn] of cases) {
+        \\  try { fn(); print(name + ':no-error'); }
+        \\  catch (e) { print(name + ':' + (e instanceof R.TypeError ? 'foreign' : e instanceof TypeError ? 'caller' : e.name)); }
+        \\}
+    , &out);
+    try std.testing.expectEqualStrings("Date:foreign\nString:foreign\nNumber:foreign\nPromise:foreign\nMap:foreign\nSet:foreign\nWeakMap:foreign\nWeakRef:foreign\nFinalizationRegistry:foreign\nDataView:foreign\nArrayBuffer:foreign\nRegExp:foreign\nError:foreign\n", out.buffered());
+}
+
+test "native callee realm call conversion errors and user exceptions" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    var bytes: [2000]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    _ = try js.evalWithOutput(
+        \\const R = $262.createRealm().global;
+        \\const cases = [
+        \\ ['Number', () => R.Number(Symbol())],
+        \\ ['RegExp', () => R.RegExp(Symbol())],
+        \\ ['Error', () => R.Error(Symbol())],
+        \\ ['Math.abs', () => R.Math.abs(Symbol())],
+        \\ ['JSON.parse', () => R.JSON.parse('{')]
+        \\];
+        \\for (const [name, fn] of cases) {
+        \\  try { fn(); print(name + ':no-error'); }
+        \\  catch (e) { print(name + ':' + (Object.getPrototypeOf(e) === R[e.name].prototype ? 'foreign' : 'caller')); }
+        \\}
+        \\const sentinel = new TypeError('user');
+        \\let caught = false;
+        \\try { new R.Date({[Symbol.toPrimitive](){throw sentinel}}); }
+        \\catch (e) { caught = true; assert.sameValue(e, sentinel); }
+        \\assert.sameValue(caught, true);
+        \\assert.sameValue(Function.prototype(), undefined);
+    , &out);
+    try std.testing.expectEqualStrings("Number:foreign\nRegExp:foreign\nError:foreign\nMath.abs:foreign\nJSON.parse:foreign\n", out.buffered());
+}
+
+test "native callee realm preserves argument evaluation and constructor forwarding" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    _ = try js.eval(
+        \\const R = $262.createRealm().global;
+        \\function expectError(C, fn) {
+        \\  let caught = false;
+        \\  try { fn(); } catch (e) {
+        \\    caught = true;
+        \\    assert.sameValue(Object.getPrototypeOf(e), C.prototype);
+        \\  }
+        \\  assert.sameValue(caught, true);
+        \\}
+        \\// Evaluating the argument still belongs to the calling code.
+        \\expectError(TypeError, () => new R.Date(+Symbol()));
+        \\expectError(TypeError, () => new R.Math.abs());
+        \\// The constructor's own conversion belongs to its realm, including
+        \\// the error after a user coercion callback returns an invalid value.
+        \\expectError(R.TypeError, () => new R.Date({[Symbol.toPrimitive]() { return {}; }}));
+        \\expectError(R.TypeError, () => new (R.Date.bind(null))(Symbol()));
+        \\expectError(R.TypeError, () => new (new Proxy(R.Date, {}))(Symbol()));
+        \\function LocalTarget() {}
+        \\expectError(R.TypeError, () => Reflect.construct(R.Date, [Symbol()], LocalTarget));
+        \\assert.sameValue(Object.getPrototypeOf(Reflect.construct(R.Date, [0], LocalTarget)), LocalTarget.prototype);
+        \\assert.sameValue(Object.getPrototypeOf(new R.Date(0)), R.Date.prototype);
+        \\// A callback's own exception is never rebuilt in the callee realm.
+        \\const sentinel = new TypeError('user');
+        \\for (const run of [x => R.Number(x), x => new R.Number(x), x => new R.Date(x)]) {
+        \\  let caught = false;
+        \\  try { run({[Symbol.toPrimitive]() { throw sentinel; }}); }
+        \\  catch (e) { caught = true; assert.sameValue(e, sentinel); }
+        \\  assert.sameValue(caught, true);
+        \\}
+    );
 }

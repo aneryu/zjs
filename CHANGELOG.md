@@ -2,14 +2,84 @@
 
 ## Unreleased
 
-- **Build:** the CLI executable builds again. 617e6941 imported the CLI and
+- **Tests:** retire `src/stress.zig` / `test-stress`. The unique cheap
+  pins (raw tail-opcode budget restore, padded-arg abrupt teardown,
+  `subMulAt` pattern sweep, concise-arrow `tail_call` fold) live in
+  `tests/exec.zig` and `src/libs/bigint.zig`. Deep default-budget
+  unwind and the 500k random limb sweep were repeating the eval-tail
+  walker and the division identity tests. `check`, batch-gate,
+  production-gate, and CI no longer compile a third test root.
+- **CLI:** move the test262 `$262` host back under `run-test262`.
+  `src/cli/run_test262_host.zig` is a `test262_host` module that depends
+  on the engine; `src/root.zig` no longer exports it. Test compiles add
+  the same module so `TestEngine` can still install harness globals.
+  The CLI imports the host file directly to retain its colocated tests.
+- **Tests:** the shared harness is integration-test infrastructure.
+  It lives at `tests/harness.zig` plus `tests/harness/` (`gc`, `expect`,
+  `fixture`, `test_engine`, `shared`) and imports the engine as `zjs`.
+  `src/root.zig` no longer exports `zjs.testing`. Parser/bytecode unit
+  tests reclaim with a local `runObjectCycleRemoval` helper.
+- **CLI:** drop the ReleaseFast `simple_panic` override
+  (`src/cli/panic_policy.zig`). Both binaries use Zig's default handler
+  in every optimize mode.
+- **CLI:** files default to module. `zjs file.js` no longer sniffs the
+  first token or the `.mjs` suffix (the qjs `JS_DetectModule` clone is
+  gone). `-e` stays script; `-s` forces script; `-m` still names module
+  explicitly. `-I` includes are modules. The external test262 engine
+  path passes `-s` for script tests.
+- **CLI:** `zjs` argv parsing is a pure slice → `Command` layer in
+  `src/cli/zjs.zig`. `-e` is a file whose source is already filled;
+  options live in one table. `--name=value` and `--` are accepted. `main`
+  only parses, then `execute`s.
+- **Tests:** split Zig tests into unit vs integration. Unit tests stay
+  next to the implementation (colocated `test` blocks plus
+  `src/parser/tests.zig`, `src/compiler/tests.zig`,
+  `src/bytecode/tests.zig`). Multi-module system tests moved to
+  `tests/core.zig`, `tests/exec.zig`, and `tests/public_api.zig`, pulled
+  by `test_root.zig` via `tests/engine.zig` when
+  `zjs_unified_test_suite` is on. The same root file-imports the
+  parser/compiler/bytecode unit suites so `--test-filter` can see them.
+  Zig 0.16 names the integration tests `tests.public_api.`, `tests.core.`,
+  `tests.exec.`. `test-leak-census` filters `tests.exec.`.
+- **CLI / build:** removed `--perf-json`, the in-tree `perf-benchmark` step,
+  and `tests/perf/microbench.js`. Repeatable timing lives outside this
+  repository. `--profile-opcodes` still prints the human-readable opcode
+  table; smoke reads `opcodes executed:` from that stdout dump.
+- **Build:** `src/internal_root.zig` and `src/unified_tests.zig` are gone.
+  `src/root.zig` is the single engine module (`@import("zjs")` is itself).
+  The engine Zig-test root is `test_root.zig` so one module can see both
+  `src/` unit tests and `tests/` integration tests. CLI tests compile from
+  `src/cli/tests.zig` against `src/root.zig`. The separate stress root
+  and `test-stress` step are retired as described above.
+  `ZJS_RUN_STRESS` / `skipUnlessStress` are gone. Embedder names stay
+  `Runtime` / `Context` / `Value` / `Call` / `EventLoop`; JS* names and
+  layer re-exports live on the same module. There is no `public_api` alias.
+- **Public API:** the embedder surface is now ownership-named. `src/root.zig`
+  exports `Runtime`, `Context`, `Value`, `Call`, and `EventLoop`. Nested
+  option types live on their owner (`Runtime.Options`, `Context.EvalMode` /
+  `EvalOptions` / `FunctionOptions`). `Context.defineFunction` takes
+  `fn (*Call) E!Value` directly; `Context.defineScriptArgs` installs the CLI
+  `scriptArgs` global; `Context.globalObject` returns a `Value`. Removed the
+  `zjs.host` / `zjs.context` wrapper namespaces. `zjs.native` and
+  `zjs.runtime` remain engine-layer exports, and `JSRuntime` / `JSContext` /
+  `JSValue` remain aliases on the same module. `CallSite`, `PropertySite`,
+  and `NativeBinding` stay deleted. Handles come from `Runtime` methods;
+  byte stores from `Value.Bytes.Store`.
+- **Public API (prior):** `src/root.zig` was the CLI / `run-test262` host facade, not
+  a second object model. Removed `zjs.value` (constructors and handle
+  aliases), `zjs.object` (opaque Object, Buffer borrows), `zjs.module`,
+  `zjs.job`, `host.defineArgvGlobals`, and `host.evalGlobalScript*`. Kept
+  opcode-profile helpers. Handles come from `Runtime` methods; byte
+  stores from `Value.Bytes.Store`.
+- **Build (prior):** restored CLI compilation after 617e6941 imported the CLI and
   stress test families from `src/internal_root.zig` behind a comptime `if`;
   Zig assigns files to modules when it collects imports, so `zig build zjs`
   failed with a module clash in every optimize mode. `src/unified_tests.zig`
-  is now the unified test root (it mirrors `internal_root`, comptime
-  checked), `src/cli/run_test262_host.zig` moved into the engine tree as
+  became the unified test root (mirroring `internal_root`, comptime
+  checked), and `src/cli/run_test262_host.zig` moved into the engine tree as
   `src/test262_host.zig` (shared by `run-test262` and the test helpers), and
-  engine files never import `src/cli/` or `src/stress.zig`.
+  engine files stopped importing `src/cli/` or `src/stress.zig`. The root
+  and host layout described above supersedes that intermediate arrangement.
   `tools/gates/bytecode_fingerprint.sh` is back as the identity gate.
 - **Bytecode:** the call-site cache is gone. Every variable-arity call
   instruction carried a trailing `cache_idx:u8` into a `call_sites` FAM tail
@@ -57,15 +127,18 @@
   `createMeasured`). Pass `.{}` for the defaults. README, the embedding
   cookbook, the public-API contract, `tests/embedding_examples.zig`,
   `tests/oom.zig` and every unit test are updated.
+- **CLI:** `zjs` no longer wraps `Runtime` / `Context` / `EventLoop` in a
+  local bundle type. `execute` keeps those three as locals; `--leak-check`
+  tears down the event loop, context, then runtime.
 - **CLI:** `zjs` `main` is decomposed into `loadSource` / `configureRuntime`
   / `evalSource` / `failEvaluation` (`!noreturn`) / `exitIfRequested`.
-  `Command` is a flat struct whose `input` (`.eval` / `.file`) is the only
-  input-form discriminant; reading the file, owning the buffer and module
-  detection derive from it, so a file literally named `<eval>` is read like
-  any other. The fabricated `TypeError: not a function ... :7:20` stack
-  printed for an exception-less `error.TypeError` is gone; that path now
-  reports `zjs: evaluation failed: TypeError` like every other bare error.
-  Flags, usage and all other output are unchanged.
+  Argv lives in `src/cli/zjs.zig`. `-e` is a file whose source is already
+  filled and whose mode stays script; a path leaves `source` null until
+  `loadSource` reads it, preserving the mode selected by argv parsing. Later
+  stages do not switch on how the job was filled. The fabricated
+  `TypeError: not a function ... :7:20` stack printed for an exception-less
+  `error.TypeError` is gone; that path now reports
+  `zjs: evaluation failed: TypeError` like every other bare error.
 - **Parser:** the parse root no longer needs a `Bytecode` carrier. `State`
   carries `memory` / `atoms` / `root_name` and owns the module record
   (`ensureModule`, `takeModuleRecord`); `State.init(lex, memory, atoms, name)`

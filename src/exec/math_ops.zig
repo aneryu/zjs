@@ -8,9 +8,9 @@ const iterator_ops = @import("iterator_ops.zig");
 const std = @import("std");
 const bignum = @import("../libs/bigint.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
-const coercion_ops = @import("coercion_ops.zig");
+const coercion_ops = @import("value_ops.zig");
 const exception_ops = @import("exception_ops.zig");
-const exceptions = @import("exceptions.zig");
+const exceptions = @import("exception_ops.zig");
 const value_ops = @import("value_ops.zig");
 
 const HostError = exceptions.HostError;

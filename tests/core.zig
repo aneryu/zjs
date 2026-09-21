@@ -1,10 +1,10 @@
-//! Exercises core value, object, GC, memory, and runtime primitives.
+//! Integration tests for runtime lifecycle, GC, and core heap contracts.
 const std = @import("std");
 const builtin = @import("builtin");
 const zjs = @import("zjs");
 const engine = zjs;
 const core = zjs.core;
-const helpers = @import("../testing.zig");
+const helpers = @import("harness.zig");
 
 extern "c" fn tmpfile() ?*std.c.FILE;
 
@@ -2410,7 +2410,7 @@ test "engine production: 8MB cap OOM reaches JS catch as InternalError and the c
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
-    var wrapper = BindingContext.borrowCore(ctx);
+    var wrapper = zjs.borrowContext(ctx);
 
     // Unbounded eager string growth must hit the cap, surface as a
     // catchable InternalError inside JS, and leave the engine alive.
@@ -2530,7 +2530,7 @@ test "engine production: exhausted-heap OOM delivery to JS catch allocates nothi
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
-    var wrapper = BindingContext.borrowCore(ctx);
+    var wrapper = zjs.borrowContext(ctx);
 
     var state = ExhaustState{ .rt = rt, .counting = &counting };
     _ = try wrapper.defineFunction("__exhaust", zjs.native.managed(ExhaustState.exhaust), .{ .state = @ptrCast(&state) });
@@ -2564,7 +2564,7 @@ test "engine production: exhausted-heap OOM delivery to JS catch allocates nothi
 
 // --- engine production ---
 
-const public_zjs = @import("../root.zig");
+const public_zjs = zjs;
 const InterruptState = struct {
     hits: usize = 0,
 
@@ -2609,31 +2609,34 @@ const BytesStoreState = struct {
 };
 
 test "production public API contract exposes Zig-native embedding spellings" {
-    try std.testing.expect(!@hasDecl(public_zjs.JSValue, "Scope"));
-    try std.testing.expect(!@hasDecl(public_zjs.JSValue, "Local"));
-    try std.testing.expect(!@hasDecl(public_zjs.JSValue, "Persistent"));
-    try std.testing.expect(!@hasDecl(public_zjs.JSValue, "Weak"));
-    try std.testing.expect(@hasDecl(public_zjs.value, "Scope"));
-    try std.testing.expect(@hasDecl(public_zjs.value, "Local"));
-    try std.testing.expect(@hasDecl(public_zjs.value, "Persistent"));
-    try std.testing.expect(@hasDecl(public_zjs.value, "Weak"));
-    try std.testing.expect(public_zjs.value.String == public_zjs.JSValue.String);
-    try std.testing.expect(public_zjs.value.Bytes == public_zjs.JSValue.Bytes);
-    try std.testing.expect(@typeInfo(public_zjs.object.Object) == .@"opaque");
+    try std.testing.expect(@hasDecl(public_zjs, "Runtime"));
+    try std.testing.expect(@hasDecl(public_zjs, "Context"));
+    try std.testing.expect(@hasDecl(public_zjs, "Value"));
+    try std.testing.expect(@hasDecl(public_zjs, "Call"));
+    try std.testing.expect(@hasDecl(public_zjs, "EventLoop"));
+    try std.testing.expect(@hasDecl(public_zjs.Context, "defineScriptArgs"));
+    try std.testing.expect(public_zjs.Runtime == public_zjs.JSRuntime);
+    try std.testing.expect(public_zjs.Context == public_zjs.JSContext);
+    try std.testing.expect(public_zjs.Value == public_zjs.JSValue);
+    try std.testing.expect(!@hasDecl(public_zjs.Value, "Scope"));
+    try std.testing.expect(!@hasDecl(public_zjs.Value, "Local"));
+    try std.testing.expect(!@hasDecl(public_zjs.Value, "Persistent"));
+    try std.testing.expect(!@hasDecl(public_zjs.Value, "Weak"));
+    try std.testing.expect(!@hasDecl(public_zjs, "host"));
+    try std.testing.expect(!@hasDecl(public_zjs, "context"));
+    try std.testing.expect(!@hasDecl(public_zjs, "value"));
+    try std.testing.expect(!@hasDecl(public_zjs, "object"));
+    try std.testing.expect(!@hasDecl(public_zjs, "module"));
+    try std.testing.expect(!@hasDecl(public_zjs, "job"));
     try std.testing.expect(!@hasDecl(public_zjs, "internal"));
     try std.testing.expect(!@hasDecl(public_zjs, "kernel"));
+    try std.testing.expect(!@hasDecl(public_zjs, "public_api"));
     try std.testing.expect(!@hasDecl(public_zjs, "CallSite"));
     try std.testing.expect(!@hasDecl(public_zjs, "PropertySite"));
     try std.testing.expect(!@hasDecl(public_zjs, "PropNameID"));
-    try std.testing.expect(!@hasDecl(public_zjs, "JSString"));
-    try std.testing.expect(!@hasDecl(public_zjs, "JSBytes"));
     try std.testing.expect(!@hasDecl(public_zjs, "binding"));
     try std.testing.expect(!@hasDecl(public_zjs, "binding_root"));
     try std.testing.expect(!@hasDecl(public_zjs, "js_context"));
-    try std.testing.expect(!@hasDecl(public_zjs.host, "NativeBinding"));
-    try std.testing.expect(!@hasDecl(public_zjs.host, "PropName"));
-    try std.testing.expect(!@hasDecl(public_zjs.native, "leaf"));
-    try std.testing.expect(!@hasDecl(public_zjs.native, "Class"));
 }
 
 test "production embedding can own JSRuntime and JSContext directly" {
@@ -2651,7 +2654,7 @@ test "production embedding can own JSRuntime and JSContext directly" {
     const object = try ctx.eval("({ answer: 42 })", .{});
     try std.testing.expect(object.is(.object));
 
-    const global = try ctx.globalObject();
+    const global = try zjs.globalObjectPtr(&ctx);
     try std.testing.expect(global.isGlobal());
 }
 
@@ -2785,7 +2788,7 @@ test "production embedding can create external host function values" {
     try std.testing.expect(prototype.is(.object));
 
     const global = try ctx.globalObject();
-    try ctx.defineDataProperty(global.value(), "HostCtor", function, .{});
+    try ctx.defineDataProperty(global, "HostCtor", function, .{});
     const surface = try ctx.eval(
         \\var prototypeDescriptor = Object.getOwnPropertyDescriptor(HostCtor, "prototype");
         \\var constructorDescriptor = Object.getOwnPropertyDescriptor(HostCtor.prototype, "constructor");
@@ -2844,7 +2847,7 @@ test "production embedding can inspect own property descriptors by JS key" {
 
     try std.testing.expect(try ctx.hasOwnPropertyKey(object, key, .{}));
     var desc = (try ctx.ownPropertyDescriptor(object, key, .{})) orelse return error.TestExpectedEqual;
-    try std.testing.expectEqual(public_zjs.context.PropertyDescriptor.data(zjs.JSValue.int32(17), .{ .configurable = true }).kind, desc.kind);
+    try std.testing.expectEqual(core.PropertyDescriptor.data(zjs.JSValue.int32(17), .{ .configurable = true }).kind, desc.kind);
     try std.testing.expectEqual(@as(?i32, 17), desc.value.as(.int));
     try std.testing.expectEqual(false, desc.writable.?);
     try std.testing.expectEqual(false, desc.enumerable.?);
@@ -3013,14 +3016,14 @@ test "production embedding roots host-held values with public handles" {
 
     const object = try ctx.eval("({ answer: 42 })", .{});
 
-    var scope: public_zjs.value.Scope = rt.enterHandleScope();
-    const local: public_zjs.value.Local = try scope.localDup(object);
+    var scope = rt.enterHandleScope();
+    const local = try scope.localDup(object);
 
     try std.testing.expectEqual(@as(usize, 1), rt.localRootCountForTest());
     try std.testing.expectEqual(@as(usize, 0), rt.persistentRootCountForTest());
     try std.testing.expect(local.get().is(.object));
 
-    var persistent: public_zjs.value.Persistent = try rt.createPersistentValue(local.get());
+    var persistent = try rt.createPersistentValue(local.get());
     defer persistent.deinit();
 
     scope.deinit();
@@ -3497,7 +3500,7 @@ test "production embedding can eval script source in explicit function realms" {
     var state = HostFunctionState{ .value = 1 };
     const function = try ctx.createFunction("RealmTaggedHost", zjs.native.managed(HostFunctionState.call), .{
         .state = @ptrCast(&state),
-        .realm_global = realm_global_object,
+        .realm_global = realm_global,
     });
     const function_global = (try ctx.functionRealmGlobal(function)) orelse return error.TestExpectedEqual;
     try std.testing.expect(function_global == realm_global_object);

@@ -8,18 +8,18 @@ const builtin_dispatch = @import("builtin_dispatch.zig");
 const bytecode = @import("../bytecode.zig");
 const array_ops = @import("array_ops.zig");
 const core = @import("../core/root.zig");
-const HostError = @import("exceptions.zig").HostError;
+const HostError = @import("exception_ops.zig").HostError;
 const method_ids = core.host_function.builtin_method_ids;
 const buffer_id_lookup = core.host_function.builtin_method_id_lookup.buffer;
 const collection_id_lookup = core.host_function.builtin_method_id_lookup.collection;
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
 const std = @import("std");
-const iterator_slots = @import("iterator_slots.zig");
+const iterator_slots = @import("iterator_ops.zig");
 const value_ops = @import("value_ops.zig");
 
 const call_runtime = @import("call_runtime.zig");
-const coercion_ops = @import("coercion_ops.zig");
+const coercion_ops = @import("value_ops.zig");
 const exception_ops = @import("exception_ops.zig");
 const object_ops = @import("object_ops.zig");
 const string_ops = @import("string_ops.zig");
@@ -738,3 +738,38 @@ pub fn defineNativeDataMethodNamedWithNativeId(rt: *core.JSRuntime, global: *cor
 }
 
 // --- Primitive coercion moved to coercion_ops.zig ---
+
+
+// ----- merged from performance_ops.zig -----
+// Typed standard-native record for the `performance` namespace.
+//
+// QuickJS does not provide this Web-compatible namespace, but zjs still routes
+// its native method through the same cproto/magic/function-pointer boundary as
+// the ECMAScript standard globals.
+pub const now_id: u32 = 1;
+pub const performance_internal_entries = [_]core.host_function.InternalEntry{
+    .{
+        .name = "now",
+        .length = 0,
+        .id = now_id,
+        .magic = now_id,
+        .cproto = .generic_magic,
+        .native_function = builtin_dispatch.genericMagicFunction(&performanceNowCall),
+    },
+};
+fn performanceNowCall(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) HostError!core.JSValue {
+    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
+    if (host_call.magic != now_id) return error.TypeError;
+    return core.JSValue.float64(performanceNowMs() - host_call.ctx.runtime.performance_time_origin_ms);
+}
+
+fn performanceNowMs() f64 {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const ns = std.Io.Clock.Timestamp.now(io, .awake).raw.toNanoseconds();
+    return @as(f64, @floatFromInt(ns)) / std.time.ns_per_ms;
+}

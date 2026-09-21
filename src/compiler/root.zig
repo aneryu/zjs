@@ -66,5 +66,4 @@ test {
     _ = resolve_variables;
     _ = resolve_labels;
     _ = compileFunction;
-    _ = @import("tests.zig");
 }

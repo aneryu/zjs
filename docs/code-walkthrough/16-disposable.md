@@ -1,6 +1,6 @@
 # 16 — using opcode 与 DisposableStack
 
-本文件覆盖 `src/exec/using_ops.zig` 与 `src/exec/disposable_ops.zig`。字节码面在前者，ECMA-262 Explicit Resource Management 算法在后者。`promise_ops.zig` 顶部把 async 一组名字 re-export 回来，实现不在 Promise 文件里。
+本文件覆盖 `src/exec/vm_opcodes.zig` 与 `src/exec/disposable_ops.zig`。字节码面在前者，ECMA-262 Explicit Resource Management 算法在后者。`promise_ops.zig` 顶部把 async 一组名字 re-export 回来，实现不在 Promise 文件里。
 
 ## `using_ops.zig`：ext0 调度
 
@@ -12,49 +12,49 @@
 
 `DisposalDisposition`（`using_ops.zig:28`）：`normal` 弹 1 个操作数；`throw` 弹 2 个（栈 + pending 完成值）。
 
-### `popOwnedOperands` (`src/exec/using_ops.zig:33`)
+### `popOwnedOperands` (`src/exec/vm_opcodes.zig:33`)
 
 - **签名**：`fn popOwnedOperands(_: *core.JSRuntime, stack: *stack_mod.Stack, count: usize) !void`。
 - **作用**：从操作数栈弹出 `count` 个值并丢弃，给 add/dispose 失败或成功后清操作数。
 - **实现**：循环 `stack.pop()`。tracing GC 下弹出即不再被栈窗口根住；runtime 参数忽略。
 - **所有权 / 错误 / 调用**：`addResourceWithHint`、`disposeStackVm` 在把值交给 disposable_ops 之后调用。栈下溢由 `pop` 报 `StackUnderflow`。
 
-### `routeRuntimeError` (`src/exec/using_ops.zig:40`)
+### `routeRuntimeError` (`src/exec/vm_opcodes.zig:40`)
 
 - **签名**：`fn routeRuntimeError( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, stack: *stack_mod.Stack, frame: *frame_mod.Frame, catch_target: *?usize, err: anytype, ) !Step`。
 - **作用**：把 disposable/using 算法的同步失败送进当前字节码 catch。
 - **实现**：`call_runtime.handleCatchableRuntimeError` 成功则 `.continue_loop`，否则原样返回 `err`。
 - **所有权 / 错误 / 调用**：create/add/dispose 的 `catch` 臂。不吞 `OutOfMemory` / `ProcessExit` 一类不可捕获错误。
 
-### `createStackVm` (`src/exec/using_ops.zig:55`)
+### `createStackVm` (`src/exec/vm_opcodes.zig:55`)
 
 - **签名**：`pub noinline fn createStackVm( ctx: *core.JSContext, global: *core.Object, stack: *stack_mod.Stack, frame: *frame_mod.Frame, catch_target: *?usize, output: ?*std.Io.Writer, ) !Step`。
 - **作用**：`ext0_sub.create`：为 parser `using`/`await using` 造内部 disposable 栈并压到操作数栈。
 - **实现**：`stack.reserveAdditional(1)`；`usingCreateAsyncDisposableStack`（内部 `async_disposable_stack`，不查用户构造器）。失败走 `routeRuntimeError`。
 - **所有权 / 错误 / 调用**：返回值 `pushOwnedAssumeCapacity`。不是 `new AsyncDisposableStack()`，避免用户改 prototype 被观察到。该 pub noinline 函数已纳入清单。
 
-### `execVm` (`src/exec/using_ops.zig:71`)
+### `execVm` (`src/exec/vm_opcodes.zig:71`)
 
 - **签名**：`pub noinline fn execVm( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, stack: *stack_mod.Stack, function: *const bytecode.FunctionBytecode, frame: *frame_mod.Frame, catch_target: *?usize, ) !Step`。
 - **作用**：ext0 第二级分发：using 与寄居冷 opcode。
 - **实现**：读 `code[frame.pc]` 为 sub，PC+1。`isAdd(sub)` 则 `addResourceWithHint(..., addHint(sub))`。其余：`create`/`dispose`/`dispose_throw` 走 using；`put_super_value`/`to_object`/`to_propkey`/`set_name_computed`/`set_proto`/`check_ctor_return`、类型测试 `is_undefined`/`typeof_is_undefined`/`typeof_is_function`，以及一串 stack perm（`insert4`…`dup1`）转给 `object_ops` / `vm_value` / `vm_property_field` / `vm_call` / `vm_literal`。未知 sub → `error.InvalidBytecode`。
 - **所有权 / 错误 / 调用**：`tailcall_dispatch_colds` 唯一生产入口。hint 非法也是 `InvalidBytecode`。
 
-### `addResourceWithHint` (`src/exec/using_ops.zig:178`)
+### `addResourceWithHint` (`src/exec/vm_opcodes.zig:178`)
 
 - **签名**：`fn addResourceWithHint( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, stack: *stack_mod.Stack, frame: *frame_mod.Frame, catch_target: *?usize, hint_byte: u8, ) !Step`。
 - **作用**：`using` / `await using` 绑定：按 hint 把栈顶值登记到 disposable 栈。
 - **实现**：hint `0` = `DisposalHint.sync`，`1` = `.async`，否则 `InvalidBytecode`。需要 ≥2 操作数：`[stack, value]`。sync → `disposable_ops.usingAddSyncResource`；async → `promise_ops.usingAddAsyncResource`（re-export）。无论成败都 `popOwnedOperands(..., 2)`。
 - **所有权 / 错误 / 调用**：资源对象与 dispose 方法由 stack payload 持有。失败经 `routeRuntimeError`。
 
-### `disposeStack` (`src/exec/using_ops.zig:207`)
+### `disposeStack` (`src/exec/vm_opcodes.zig:207`)
 
 - **签名**：`fn disposeStack( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, stack_value: core.JSValue, completion: ?core.JSValue, ) !core.JSValue`。
 - **作用**：按栈上对象是 sync 还是 async hint 选择同步或异步拆栈。
 - **实现**：`parserDisposableStackReceiver` 接受 `disposable_stack` 与 `async_disposable_stack`。无 async hint：有 `completion` 走 `usingDisposeSyncStackForThrow`，否则 `usingDisposeSyncStack`。有 async hint：对应 `usingDisposeAsyncStack*`（返回 Promise）。
 - **所有权 / 错误 / 调用**：只被 `disposeStackVm` 调用。sync 路径错误是抛出的 JS 异常；async 路径错误变成 rejected Promise。
 
-### `disposeStackVm` (`src/exec/using_ops.zig:232`)
+### `disposeStackVm` (`src/exec/vm_opcodes.zig:232`)
 
 - **签名**：`pub noinline fn disposeStackVm( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, stack: *stack_mod.Stack, frame: *frame_mod.Frame, catch_target: *?usize, disposition: DisposalDisposition, ) !Step`。
 - **作用**：`ext0_sub.dispose` / `dispose_throw` 的栈约定。
@@ -367,6 +367,6 @@ payload 在对象 class `disposable_stack` / `async_disposable_stack` 上。每�
 
 ## 覆盖核对
 
-- 清单函数数: 49（`src/exec/disposable_ops.zig` 42 + `src/exec/using_ops.zig` 7）
+- 清单函数数: 49（`src/exec/disposable_ops.zig` 42 + `src/exec/vm_opcodes.zig` 7）
 - 本文标题覆盖: 49
 - 未覆盖: 无

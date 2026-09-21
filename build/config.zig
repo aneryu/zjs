@@ -56,9 +56,10 @@ pub const EngineOptionInputs = struct {
     /// suite, so every test measured a heap the shipped build never has. Only
     /// the `test-oom` step turns it on.
     oom_injection: bool = false,
-    /// Package `tests.zig` files import themselves only when this is true.
-    /// Default false so `test-embedding` / `test-oom` do not analyze the
-    /// eval families. The unified `test` module turns it on.
+    /// Package unit-test files and `tests/engine.zig` import themselves
+    /// only when this is true. Default false so `test-embedding` /
+    /// `test-oom` do not analyze those families. The unified `test`
+    /// module turns it on.
     unified_test_suite: bool = false,
     force_gc: bool,
     ownership_audit: bool,
@@ -96,4 +97,17 @@ pub fn addEngineOptions(b: *std.Build, in: EngineOptionInputs) *std.Build.Step.O
 /// break silently.
 pub fn forceLlvmBackendOnDebug(compile: *std.Build.Step.Compile) void {
     if (compile.root_module.optimize == .Debug) compile.use_llvm = true;
+}
+
+/// `$262` host for `run-test262` and test compiles that need TestEngine
+/// harness globals. Depends on `engine`; the engine never imports this
+/// file. Each engine instance needs its own host module so types match.
+pub fn addTest262Host(ctx: Ctx, engine: *std.Build.Module) *std.Build.Module {
+    return ctx.b.createModule(.{
+        .root_source_file = ctx.b.path("src/cli/run_test262_host.zig"),
+        .target = ctx.target,
+        .optimize = ctx.optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "zjs", .module = engine }},
+    });
 }

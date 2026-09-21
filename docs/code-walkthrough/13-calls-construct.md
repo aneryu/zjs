@@ -132,7 +132,7 @@
 - **签名**：`pub fn typedArrayElement(name: []const u8) ?TypedArrayElement`。
 - **作用**：名字 → 元素大小/kind。
 - **实现**：`core.typed_array_names.element`。
-- **所有权 / 错误 / 调用**：纯名字查表，返回按值的 `?Element`，不分配、不抛。调用方跨模块共 6 处：`src/exec/object_ops.zig:1652`、`src/exec/class_init_ops.zig:175`、`src/exec/reflect_ops.zig:140` 等（另有 `reflect_ops.zig:551`、`array_ops.zig:1248`、本文件 `179`）。
+- **所有权 / 错误 / 调用**：纯名字查表，返回按值的 `?Element`，不分配、不抛。调用方跨模块共 6 处：`src/exec/object_ops.zig:1652`、`src/exec/function_ops.zig:175`、`src/exec/reflect_ops.zig:140` 等（另有 `reflect_ops.zig:551`、`array_ops.zig:1248`、本文件 `179`）。
 
 ### `constructTypedArrayArrayInput` (`src/exec/construct.zig:632`)
 

@@ -62,7 +62,7 @@ GC 对象，VM 真正跑的东西。镜像 `JSFunctionBytecode`（quickjs.c:768-
 - **签名**：`pub fn init(value: Init) BytecodeVarDef`。
 - **作用**：把 Init 压成 12 字节 runtime 行。
 - **实现**：flags 打包 const/lexical/captured/has_scope 与 var_kind；未捕获时 var_ref_idx 强制 0。
-- **所有权 / 错误 / 调用**：不分配、无 error set，按值返回 12 字节行。生产路径唯一调用方是同结构体的 `fromCompile`（`src/bytecode.zig:3336`）；直接以 `.init` 造行的只有夹具与单测（`src/exec/call_runtime.zig:1437` 的 test 块、`src/tests/exec.zig:3438`）。
+- **所有权 / 错误 / 调用**：不分配、无 error set，按值返回 12 字节行。生产路径唯一调用方是同结构体的 `fromCompile`（`src/bytecode.zig:3336`）；直接以 `.init` 造行的只有夹具与单测（`src/exec/call_runtime.zig:1437` 的 test 块、`tests/exec.zig:3438`）。
 
 
 ### `BytecodeVarDef.fromCompile` (`src/bytecode/function_bytecode.zig:134`)
@@ -78,7 +78,7 @@ GC 对象，VM 真正跑的东西。镜像 `JSFunctionBytecode`（quickjs.c:768-
 - **签名**：`pub inline fn isConst(self: BytecodeVarDef) bool`。
 - **作用**：const 位。
 - **实现**：flags & mask。
-- **所有权 / 错误 / 调用**：纯位读、不分配、无 error set。读者是帧捕获 `src/exec/frame.zig:591`（写进 `VarRef.is_const`）、直接 eval 的种子收集 `src/exec/eval_ops.zig:102`/`:116`/`:123`，以及 `src/exec/vm_property_locals.zig:145` 的写前 const 检查。
+- **所有权 / 错误 / 调用**：纯位读、不分配、无 error set。读者是帧捕获 `src/exec/frame.zig:591`（写进 `VarRef.is_const`）、直接 eval 的种子收集 `src/exec/eval_entry.zig:102`/`:116`/`:123`，以及 `src/exec/vm_property.zig:145` 的写前 const 检查。
 
 
 ### `BytecodeVarDef.isLexical` (`src/bytecode/function_bytecode.zig:209`)
@@ -86,7 +86,7 @@ GC 对象，VM 真正跑的东西。镜像 `JSFunctionBytecode`（quickjs.c:768-
 - **签名**：`pub inline fn isLexical(self: BytecodeVarDef) bool`。
 - **作用**：lexical 位。
 - **实现**：flags & mask。
-- **所有权 / 错误 / 调用**：纯位读、不分配、无 error set。`src/exec/frame.zig:592` 写进 `VarRef.is_lexical`；`src/exec/eval_ops.zig:102`/`:116`/`:123` 把它带进 eval 种子；`src/exec/call_runtime.zig:3337` 用它把 lexical 行排除出 eval 提升的 var。
+- **所有权 / 错误 / 调用**：纯位读、不分配、无 error set。`src/exec/frame.zig:592` 写进 `VarRef.is_lexical`；`src/exec/eval_entry.zig:102`/`:116`/`:123` 把它带进 eval 种子；`src/exec/call_runtime.zig:3337` 用它把 lexical 行排除出 eval 提升的 var。
 
 
 ### `BytecodeVarDef.isCaptured` (`src/bytecode/function_bytecode.zig:158`)
@@ -102,7 +102,7 @@ GC 对象，VM 真正跑的东西。镜像 `JSFunctionBytecode`（quickjs.c:768-
 - **签名**：`pub inline fn hasScope(self: BytecodeVarDef) bool`。
 - **作用**：是否非函数顶层词法作用域。
 - **实现**：has_scope 位。
-- **所有权 / 错误 / 调用**：纯位读、不分配、无 error set。消费者集中在两处：直接 eval 的作用域链遍历 `src/exec/eval_ops.zig:101`/`:115`/`:122`/`:195`，以及 `src/exec/call_runtime.zig:3337` 的 eval 提升判定。
+- **所有权 / 错误 / 调用**：纯位读、不分配、无 error set。消费者集中在两处：直接 eval 的作用域链遍历 `src/exec/eval_entry.zig:101`/`:115`/`:122`/`:195`，以及 `src/exec/call_runtime.zig:3337` 的 eval 提升判定。
 
 
 ### `BytecodeVarDef.varKind` (`src/bytecode/function_bytecode.zig:217`)
@@ -110,7 +110,7 @@ GC 对象，VM 真正跑的东西。镜像 `JSFunctionBytecode`（quickjs.c:768-
 - **签名**：`pub inline fn varKind(self: BytecodeVarDef) VarKind`。
 - **作用**：高 4 位 VarKind。
 - **实现**：@enumFromInt。
-- **所有权 / 错误 / 调用**：纯位读、不分配、无 error set；`VarKind` 是 `enum(u4)` 但只定义了 0-10（`src/bytecode.zig:3244`-`:3259`），11-15 属发布 bug，Debug/ReleaseSafe 下 `@enumFromInt` 直接 panic。调用方：`src/exec/frame.zig:593`（标记 function-name 槽）、`src/exec/eval_ops.zig:67`、`src/exec/call_runtime.zig:3338`-`:3340`。
+- **所有权 / 错误 / 调用**：纯位读、不分配、无 error set；`VarKind` 是 `enum(u4)` 但只定义了 0-10（`src/bytecode.zig:3244`-`:3259`），11-15 属发布 bug，Debug/ReleaseSafe 下 `@enumFromInt` 直接 panic。调用方：`src/exec/frame.zig:593`（标记 function-name 槽）、`src/exec/eval_entry.zig:67`、`src/exec/call_runtime.zig:3338`-`:3340`。
 
 
 ### `ClosureVar.init` (`src/bytecode/function_bytecode.zig:1338`)
@@ -126,7 +126,7 @@ GC 对象，VM 真正跑的东西。镜像 `JSFunctionBytecode`（quickjs.c:768-
 - **签名**：`pub inline fn closureType(self: ClosureVar) ClosureType`。
 - **作用**：低 3 位 ClosureType。
 - **实现**：mask。
-- **所有权 / 错误 / 调用**：纯位读、不分配、无 error set。它是 closure 行的主分流器：`src/exec/vm_call.zig:394`/`:403` 建 `VarRef` 时按类型取初值，`src/exec/module.zig:135`/`:574`/`:582` 类型不符直接返回 `error.InvalidBytecode`，`src/exec/vm_property_globals.zig:394`/`:451`/`:504` 用 `.global_decl` 过滤全局声明。
+- **所有权 / 错误 / 调用**：纯位读、不分配、无 error set。它是 closure 行的主分流器：`src/exec/vm_opcodes.zig:394`/`:403` 建 `VarRef` 时按类型取初值，`src/exec/module.zig:135`/`:574`/`:582` 类型不符直接返回 `error.InvalidBytecode`，`src/exec/vm_property.zig:394`/`:451`/`:504` 用 `.global_decl` 过滤全局声明。
 
 
 ### `ClosureVar.isLexical` (`src/bytecode/function_bytecode.zig:209`)
@@ -134,7 +134,7 @@ GC 对象，VM 真正跑的东西。镜像 `JSFunctionBytecode`（quickjs.c:768-
 - **签名**：`pub inline fn isLexical(self: ClosureVar) bool`。
 - **作用**：lexical 位。
 - **实现**：bit3。
-- **所有权 / 错误 / 调用**：纯位读、不分配、无 error set。`src/exec/vm_call.zig:410` 与 `src/exec/module.zig:305` 写进 `VarRef.is_lexical`；`src/exec/vm_property_globals.zig:142` 用它决定是否抛全局 TDZ ReferenceError；`FunctionBytecode.varRefIsLexicalAt`（`src/bytecode.zig:4157`）是按下标的包装。
+- **所有权 / 错误 / 调用**：纯位读、不分配、无 error set。`src/exec/vm_opcodes.zig:410` 与 `src/exec/module.zig:305` 写进 `VarRef.is_lexical`；`src/exec/vm_property.zig:142` 用它决定是否抛全局 TDZ ReferenceError；`FunctionBytecode.varRefIsLexicalAt`（`src/bytecode.zig:4157`）是按下标的包装。
 
 
 ### `ClosureVar.isConst` (`src/bytecode/function_bytecode.zig:213`)
@@ -142,7 +142,7 @@ GC 对象，VM 真正跑的东西。镜像 `JSFunctionBytecode`（quickjs.c:768-
 - **签名**：`pub inline fn isConst(self: ClosureVar) bool`。
 - **作用**：const 位。
 - **实现**：bit4。
-- **所有权 / 错误 / 调用**：纯位读、不分配、无 error set。`FunctionBytecode.varRefIsConstAt`（`src/bytecode.zig:4162`）是按下标的包装；直接读者是全局词法 cell 的创建 `src/exec/object_ops.zig:381` 与 `src/exec/vm_property_globals.zig:507`-`:508`。
+- **所有权 / 错误 / 调用**：纯位读、不分配、无 error set。`FunctionBytecode.varRefIsConstAt`（`src/bytecode.zig:4162`）是按下标的包装；直接读者是全局词法 cell 的创建 `src/exec/object_ops.zig:381` 与 `src/exec/vm_property.zig:507`-`:508`。
 
 
 ### `ClosureVar.varKind` (`src/bytecode/function_bytecode.zig:217`)
@@ -150,7 +150,7 @@ GC 对象，VM 真正跑的东西。镜像 `JSFunctionBytecode`（quickjs.c:768-
 - **签名**：`pub inline fn varKind(self: ClosureVar) VarKind`。
 - **作用**：kind_flags 低 4 位。
 - **实现**：mask。
-- **所有权 / 错误 / 调用**：纯位读、不分配、无 error set。`src/exec/vm_call.zig:411` 与 `src/exec/module.zig:307` 用 `== .function_name` 置 `VarRef` 的 function-name 槽；`src/exec/vm_property_globals.zig:406` 用 `.global_function_decl` 认全局函数声明；`src/exec/slot_ops.zig:224` 同样用于 function-name 判定。
+- **所有权 / 错误 / 调用**：纯位读、不分配、无 error set。`src/exec/vm_opcodes.zig:411` 与 `src/exec/module.zig:307` 用 `== .function_name` 置 `VarRef` 的 function-name 槽；`src/exec/vm_property.zig:406` 用 `.global_function_decl` 认全局函数声明；`src/exec/property_ops.zig:224` 同样用于 function-name 判定。
 
 
 ### `ClosureVar.toInit` (`src/bytecode/function_bytecode.zig:221`)
@@ -334,7 +334,7 @@ GC 对象，VM 真正跑的东西。镜像 `JSFunctionBytecode`（quickjs.c:768-
 - **签名**：`pub inline fn isDerivedClassConstructor(self: *const FunctionBytecodeImpl) bool`。
 - **作用**：该函数体是不是 `class X extends Y` 的构造器——决定 `this` 在 `super()` 之前处于 TDZ，且一律不得内联。
 - **实现**：读 `flag_byte17` 的 bit 2（`byte17_derived_constructor_mask`），由 `applyFlags` 写入，是 QuickJS 头里原有的规范位。
-- **所有权 / 错误 / 调用**：纯位读、无 error set。`src/exec/vm_property_locals.zig:116`/`:166` 用它判断局部 `this` 是否需要 TDZ 检查、`src/exec/frame.zig:220` 决定帧是否要额外的 this 初始化状态、`src/exec/inline_calls.zig:173` 与 `src/exec/small_inline.zig:473` 直接拒绝内联；同文件 `publishExecutionFlags` 以 `std.debug.assert(!fb.isDerivedClassConstructor() or class_syntax_excludes_inline)`（`src/bytecode.zig:12173`）守住两套排除口径一致。
+- **所有权 / 错误 / 调用**：纯位读、无 error set。`src/exec/vm_property.zig:116`/`:166` 用它判断局部 `this` 是否需要 TDZ 检查、`src/exec/frame.zig:220` 决定帧是否要额外的 this 初始化状态、`src/exec/inline_calls.zig:173` 与 `src/exec/small_inline.zig:473` 直接拒绝内联；同文件 `publishExecutionFlags` 以 `std.debug.assert(!fb.isDerivedClassConstructor() or class_syntax_excludes_inline)`（`src/bytecode.zig:12173`）守住两套排除口径一致。
 
 
 ### `FunctionBytecode.needHomeObject` (`src/bytecode/function_bytecode.zig:745`)
@@ -470,7 +470,7 @@ GC 对象，VM 真正跑的东西。镜像 `JSFunctionBytecode`（quickjs.c:768-
 - **签名**：`pub inline fn argVarDefs(self: *const FunctionBytecodeImpl) []BytecodeVarDef`。
 - **作用**：参数行前缀。
 - **实现**：allVarDefs[0..arg_count]。
-- **所有权 / 错误 / 调用**：借用切片，不分配、无 error set；`[0..arg_count]` 超出实际行数属发布 bug（越界由切片语义在 Debug 下 panic）。调用方以参数环境重建为主：`src/exec/eval_ops.zig:110`-`:111`、`src/exec/vm_property.zig:150`-`:151`，以及同结构体的 `argOpenBindingIndex`（`src/bytecode.zig:4183`）。
+- **所有权 / 错误 / 调用**：借用切片，不分配、无 error set；`[0..arg_count]` 超出实际行数属发布 bug（越界由切片语义在 Debug 下 panic）。调用方以参数环境重建为主：`src/exec/eval_entry.zig:110`-`:111`、`src/exec/vm_property.zig:150`-`:151`，以及同结构体的 `argOpenBindingIndex`（`src/bytecode.zig:4183`）。
 
 
 ### `FunctionBytecode.localVarDefs` (`src/bytecode/function_bytecode.zig:838`)
@@ -486,7 +486,7 @@ GC 对象，VM 真正跑的东西。镜像 `JSFunctionBytecode`（quickjs.c:768-
 - **签名**：`pub inline fn varDefs(self: *const FunctionBytecodeImpl) []BytecodeVarDef`。
 - **作用**：兼容名：帧局部。
 - **实现**：`localVarDefs()`。
-- **所有权 / 错误 / 调用**：`localVarDefs` 的同义名，借用切片，不分配、无 error set。非测试调用方约 21 处：`src/exec/frame.zig:572`/`:591`/`:631` 的局部捕获、`src/exec/vm_property_locals.zig:117`-`:168` 的 this/TDZ 与 const 判定、`src/exec/eval_ops.zig` 的 eval 种子收集等。
+- **所有权 / 错误 / 调用**：`localVarDefs` 的同义名，借用切片，不分配、无 error set。非测试调用方约 21 处：`src/exec/frame.zig:572`/`:591`/`:631` 的局部捕获、`src/exec/vm_property.zig:117`-`:168` 的 this/TDZ 与 const 判定、`src/exec/eval_entry.zig` 的 eval 种子收集等。
 
 
 ### `FunctionBytecode.closureVar` (`src/bytecode/function_bytecode.zig:845`)
@@ -494,7 +494,7 @@ GC 对象，VM 真正跑的东西。镜像 `JSFunctionBytecode`（quickjs.c:768-
 - **签名**：`pub inline fn closureVar(self: *const FunctionBytecodeImpl) []BytecodeClosureVar`。
 - **作用**：闭包行切片。
 - **实现**：count 0 则空且指针 null。
-- **所有权 / 错误 / 调用**：借用切片（adapter 则借 adapter 的行），不分配、无 error set；计数为 0 时返回空切片并断言指针为 null。这是读得最多的 FB 访问器之一（非测试 45 处）：`src/exec/vm_call.zig:394` 起的 `VarRef` 装载、`src/exec/module.zig:135`/`:323` 的模块环境校验、`src/exec/vm_property_globals.zig:33`-`:34` 的按下标取行。
+- **所有权 / 错误 / 调用**：借用切片（adapter 则借 adapter 的行），不分配、无 error set；计数为 0 时返回空切片并断言指针为 null。这是读得最多的 FB 访问器之一（非测试 45 处）：`src/exec/vm_opcodes.zig:394` 起的 `VarRef` 装载、`src/exec/module.zig:135`/`:323` 的模块环境校验、`src/exec/vm_property.zig:33`-`:34` 的按下标取行。
 
 
 ### `FunctionBytecode.cpoolSlice` (`src/bytecode/function_bytecode.zig:853`)
@@ -510,7 +510,7 @@ GC 对象，VM 真正跑的东西。镜像 `JSFunctionBytecode`（quickjs.c:768-
 - **签名**：`pub inline fn constantAt(self: *const FunctionBytecodeImpl, index: usize) ?JSValue`。
 - **作用**：按下标取常量，越界 null。
 - **实现**：cpoolSlice。
-- **所有权 / 错误 / 调用**：返回 cpool 里的借用 `JSValue`——GC 边归 FB 所有，调用方不 retain。本身无 error set，越界返回 `null`，由调用方翻成 JS 异常：`src/exec/array_ops.zig:160` 与 `src/exec/tailcall_dispatch.zig:3626` 转 `error.InvalidBytecode`，`src/exec/vm_value.zig:89`/`:97` 转 `error.TypeError`。
+- **所有权 / 错误 / 调用**：返回 cpool 里的借用 `JSValue`——GC 边归 FB 所有，调用方不 retain。本身无 error set，越界返回 `null`，由调用方翻成 JS 异常：`src/exec/array_ops.zig:160` 与 `src/exec/tailcall_dispatch.zig:3626` 转 `error.InvalidBytecode`，`src/exec/vm_opcodes.zig:89`/`:97` 转 `error.TypeError`。
 
 
 ### `FunctionBytecode.funcName` (`src/bytecode/function_bytecode.zig:867`)
@@ -534,7 +534,7 @@ GC 对象，VM 真正跑的东西。镜像 `JSFunctionBytecode`（quickjs.c:768-
 - **签名**：`pub inline fn varRefIsConstAt(self: *const FunctionBytecodeImpl, idx: usize) bool`。
 - **作用**：闭包行是否 const。
 - **实现**：越界 false。
-- **所有权 / 错误 / 调用**：借用读、不分配、无 error set；越界返回 `false`。生产调用方 `src/exec/vm_call.zig:366`，用于给新建的 `VarRef` 置 `is_const`。
+- **所有权 / 错误 / 调用**：借用读、不分配、无 error set；越界返回 `false`。生产调用方 `src/exec/vm_opcodes.zig:366`，用于给新建的 `VarRef` 置 `is_const`。
 
 
 ### `FunctionBytecode.varRefIsGlobalDeclAt` (`src/bytecode/function_bytecode.zig:878`)
@@ -542,7 +542,7 @@ GC 对象，VM 真正跑的东西。镜像 `JSFunctionBytecode`（quickjs.c:768-
 - **签名**：`pub inline fn varRefIsGlobalDeclAt(self: *const FunctionBytecodeImpl, idx: usize) bool`。
 - **作用**：是否 global_decl。
 - **实现**：closureType 比较。
-- **所有权 / 错误 / 调用**：借用读、不分配、无 error set；越界返回 `false`。调用方 `src/exec/vm_call.zig:356` 与 `src/exec/slot_ops.zig:142`，两处都用它把 global-decl 引用分流到全局环境而不是帧内 `VarRef`。
+- **所有权 / 错误 / 调用**：借用读、不分配、无 error set；越界返回 `false`。调用方 `src/exec/vm_opcodes.zig:356` 与 `src/exec/property_ops.zig:142`，两处都用它把 global-decl 引用分流到全局环境而不是帧内 `VarRef`。
 
 
 ### `FunctionBytecode.varRefNamesLen` (`src/bytecode/function_bytecode.zig:882`)
@@ -550,7 +550,7 @@ GC 对象，VM 真正跑的东西。镜像 `JSFunctionBytecode`（quickjs.c:768-
 - **签名**：`pub inline fn varRefNamesLen(self: *const FunctionBytecodeImpl) usize`。
 - **作用**：闭包名数量 = closureVarCount。
 - **实现**：不再有平行名字数组。
-- **所有权 / 错误 / 调用**：纯计数读、不分配、无 error set；与 `closureVarCount` 的差别是它先问 legacy adapter。调用方 `src/exec/vm_property.zig:64`/`:146`/`:172` 与 `src/exec/slot_ops.zig:135`/`:179`，都是「下标是否落在 closure 表内」的守卫。
+- **所有权 / 错误 / 调用**：纯计数读、不分配、无 error set；与 `closureVarCount` 的差别是它先问 legacy adapter。调用方 `src/exec/vm_property.zig:64`/`:146`/`:172` 与 `src/exec/property_ops.zig:135`/`:179`，都是「下标是否落在 closure 表内」的守卫。
 
 
 ### `FunctionBytecode.varRefName` (`src/bytecode/function_bytecode.zig:885`)
@@ -582,7 +582,7 @@ GC 对象，VM 真正跑的东西。镜像 `JSFunctionBytecode`（quickjs.c:768-
 - **签名**：`pub inline fn isModule(self: *const FunctionBytecodeImpl) bool`。
 - **作用**：CallFacts.execution.is_module。
 - **实现**：callFacts()。
-- **所有权 / 错误 / 调用**：经 `callFacts()` 读热尾位，不分配、无 error set；无扩展尾时读成 `false`。调用方把它当校验或分流开关：`src/exec/object_ops.zig:301` 与 `src/exec/module.zig:124` 不满足即 `error.InvalidBytecode`，`src/exec/zjs_vm.zig:56`/`:90`/`:164` 据此定 this 绑定与入口形态，`src/exec/vm_gen_async.zig:683` 参与 await 挂起策略。
+- **所有权 / 错误 / 调用**：经 `callFacts()` 读热尾位，不分配、无 error set；无扩展尾时读成 `false`。调用方把它当校验或分流开关：`src/exec/object_ops.zig:301` 与 `src/exec/module.zig:124` 不满足即 `error.InvalidBytecode`，`src/exec/zjs_vm.zig:56`/`:90`/`:164` 据此定 this 绑定与入口形态，`src/exec/vm_opcodes.zig:683` 参与 await 挂起策略。
 
 
 ### `FunctionBytecode.isAsync` (`src/bytecode/function_bytecode.zig:901`)
@@ -590,7 +590,7 @@ GC 对象，VM 真正跑的东西。镜像 `JSFunctionBytecode`（quickjs.c:768-
 - **签名**：`pub inline fn isAsync(self: *const FunctionBytecodeImpl) bool`。
 - **作用**：kind 为 async 或 async_generator。
 - **实现**：functionKind。
-- **所有权 / 错误 / 调用**：两次 `functionKind()` 位读，不分配、无 error set，不碰扩展尾。`src/exec/zjs_vm.zig:605` 用它与 `isGenerator` 一起排除内联帧存储；`src/exec/vm_gen_async.zig:684`/`:689` 用它选 raw 恢复策略。
+- **所有权 / 错误 / 调用**：两次 `functionKind()` 位读，不分配、无 error set，不碰扩展尾。`src/exec/zjs_vm.zig:605` 用它与 `isGenerator` 一起排除内联帧存储；`src/exec/vm_opcodes.zig:684`/`:689` 用它选 raw 恢复策略。
 
 
 ### `FunctionBytecode.isGenerator` (`src/bytecode/function_bytecode.zig:904`)
@@ -614,7 +614,7 @@ GC 对象，VM 真正跑的东西。镜像 `JSFunctionBytecode`（quickjs.c:768-
 - **签名**：`pub inline fn isStrictMode(self: *const FunctionBytecodeImpl) bool`。
 - **作用**：js_mode bit0。adapter init 已把事实拷进该字节。
 - **实现**：bit。
-- **所有权 / 错误 / 调用**：纯位读、不分配、无 error set；adapter 在 init 时已把该事实拷进 QJS 的 js_mode 字节，所以两种表示共用这条直读。读者遍布执行与编译侧：`src/exec/vm_property_ref.zig:88`/`:266`/`:305`/`:392` 与 `runtimeStrictMode` 一起决定未解析引用是抛 ReferenceError 还是静默，`src/parser.zig:15902` 供直接 eval 继承，`src/exec/small_inline.zig:1170` 在展开时透传，`src/bytecode.zig:12178` 用于发布判定。
+- **所有权 / 错误 / 调用**：纯位读、不分配、无 error set；adapter 在 init 时已把该事实拷进 QJS 的 js_mode 字节，所以两种表示共用这条直读。读者遍布执行与编译侧：`src/exec/vm_property.zig:88`/`:266`/`:305`/`:392` 与 `runtimeStrictMode` 一起决定未解析引用是抛 ReferenceError 还是静默，`src/parser.zig:15902` 供直接 eval 继承，`src/exec/small_inline.zig:1170` 在展开时透传，`src/bytecode.zig:12178` 用于发布判定。
 
 
 ### `FunctionBytecode.runtimeStrictMode` (`src/bytecode/function_bytecode.zig:918`)
@@ -622,7 +622,7 @@ GC 对象，VM 真正跑的东西。镜像 `JSFunctionBytecode`（quickjs.c:768-
 - **签名**：`pub inline fn runtimeStrictMode(self: *const FunctionBytecodeImpl) bool`。
 - **作用**：zjs 扩展的 runtime_strict 位。
 - **实现**：byte18 bit6。
-- **所有权 / 错误 / 调用**：纯位读、不分配、无 error set；唯一写入点是 `applyFlags`（`src/bytecode.zig:3982`）。读者与 `isStrictMode` 成对出现：`src/exec/vm_property_ref.zig:88`/`:266`/`:305`/`:392` 的未解析引用处理、`src/exec/zjs_vm.zig:90`（决定入口 this 是 `undefined` 还是全局对象）。
+- **所有权 / 错误 / 调用**：纯位读、不分配、无 error set；唯一写入点是 `applyFlags`（`src/bytecode.zig:3982`）。读者与 `isStrictMode` 成对出现：`src/exec/vm_property.zig:88`/`:266`/`:305`/`:392` 的未解析引用处理、`src/exec/zjs_vm.zig:90`（决定入口 this 是 `undefined` 还是全局对象）。
 
 
 ### `FunctionBytecode.executionFlags` (`src/bytecode/function_bytecode.zig:923`)

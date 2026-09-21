@@ -212,47 +212,47 @@ exec 子系统命名空间与嵌入用薄 `Vm` 门面。只 re-export 各域，�
 - **作用**：按 FB `stack_size` 预留操作数栈（Debug 允许未 finalize 的夹具用 code 长度）。
 - **实现**：ReleaseFast 用 finalize 过的 `stack_size`；Debug 若 stack_size==0 但有 code，用 code 长度兜未跑 stack-size pass 的夹具。然后 `Stack.reserveFrameCapacity`。
 - **所有权 / 错误 / 调用**：错误：error union（`StackOverflow` / OOM），由 `runWithArgsState` 交给上层。 调用：只由 `runWithArgsState` 在非 resume（`!skip_resume_slab`）时调用；已驻留的 generator 帧在创建那次已过同一道门。
-## `src/exec/vm_profile.zig`
+## `src/exec/tailcall_dispatch.zig`
 默认构建整文件编译掉。剖析构建把计数放在 `cont`/`next`，handler 体保持未包一层（曾经的 256 槽 `profiledHandler` 把 L-1 岛滑开，zlib 上 `op_return` musttail ABI 崩溃）。
 
-### `noteDispatch` (`src/exec/vm_profile.zig:17`)
+### `noteDispatch` (`src/exec/tailcall_dispatch.zig:17`)
 
 - **签名**：`pub inline fn noteDispatch(rt: *core.JSRuntime, pc: [*]const u8) void`。
 - **作用**：剖析构建里记下一次 opcode 分发（含 ext0 子码）。
 - **实现**：`enabled`（= `build_options.zjs_enable_opcode_profile`）为 false 时 `comptime` 直接 return，整函数编译掉。否则 `rt.opcode_profile` 为 null 就返回，有则 `profile.noteDispatch(pc[0])`；若该字节是 `LogicalOpcode.ext0` 再 `noteCarrierSub(pc[1])`。只做内存存储，不 syscall，musttail 安全。
 - **所有权 / 错误 / 调用**：错误：无。 调用：`tailcall_dispatch.zig` 的两个分发点 `next` 与 `cont`（都包在 `if (comptime vm_profile.enabled)` 里），handler 体不再套壳。
-## `src/exec/active_invocation_trace.zig`
+## `src/exec/inline_calls.zig`
 `zjs_vm.zig` 只在 `core.runtime.value_root_frames_enabled` 为真时 `@import` 它（该常量现在恒为 `true`，见 `src/core/runtime.zig`，所以实际总是编译）。core 只看见记录偏移 0 的 `ActiveInvocationTrace`；文件顶部的 `comptime` 块就断言这两件事。只扫语义活窗口：Frame 的 this/function/args/locals/var_refs、Stack `liveValues`、以及仍停在起点的 `PendingCallRegion`。未使用的 slab 容量不访问。未 publish 的 generator shell 不能当 Object 走（shape_ref 未初始化）。
 
-### `traceRoots` (`src/exec/active_invocation_trace.zig:26`)
+### `traceRoots` (`src/exec/inline_calls.zig:26`)
 
 - **签名**：`pub fn traceRoots(invocation_ptr: *anyopaque, visitor: *RootVisitor) RootTraceError!void`。
 - **作用**：精确根扫描入口：沿 `ActiveInvocation` 链走每台 Machine。
 - **实现**：把 opaque 指针当成 `ActiveInvocation*`，沿 `previous` 链对每台 Machine 调 `traceMachine`。
 - **所有权 / 错误 / 调用**：错误：`RootTraceError`，由收集器处理。 调用：不是被 VM 调用的——`runWithArgsState` 把它写进 `ActiveInvocation.header`，`JSRuntime.traceActiveRoots` 通过 `rt.active_invocation` 的偏移 0 记录头调用。
 
-### `traceMachine` (`src/exec/active_invocation_trace.zig:34`)
+### `traceMachine` (`src/exec/inline_calls.zig:34`)
 
 - **签名**：`fn traceMachine(machine: *inline_calls.Machine, visitor: *RootVisitor) RootTraceError!void`。
 - **作用**：扫 L0 与 inline Entry 的 Frame/Stack/pending 窗口和已 publish 的 generator。
 - **实现**：扫 `async_completions`、L0 frame/stack、已 `heap_accounted` 的 generator_state（用 `visitor.constOptionalObject`），再沿 `machine.top` 的 Entry 链逐层 `traceFrame`/`traceStack`/`traceEntryExtras`，两处 `traceStack` 都带上同一个 `machine.pending_call_region`。未 publish 的 generator shell 不当地当 Object 走（shape_ref 未初始化）。
 - **所有权 / 错误 / 调用**：错误：`RootTraceError`。 GC：本函数是精确根 walk，只扫活窗口。 调用：本模块的 `traceRoots` 沿 `previous` 链逐台 Machine 调用。
 
-### `traceFrame` (`src/exec/active_invocation_trace.zig:64`)
+### `traceFrame` (`src/exec/inline_calls.zig:64`)
 
 - **签名**：`fn traceFrame(rt: *core.JSRuntime, frame: *frame_mod.Frame, visitor: *RootVisitor) RootTraceError!void`。
 - **作用**：扫 this/current_function/已注册 FB/args/locals/cold/var_refs。
 - **实现**：扫 this、current_function；仅当 `rt.gc.address_registry.containsHeader` 认得该 FB header 才把 function 当堆对象报上去（栈上夹具 Bytecode 的 header 是垃圾）。再扫 args/locals；`frame.cold` 存在时扫非 `aliases_function` 的 new_target 与 `cold.original_args`；最后逐个把 var_ref/非空 open_var_ref 的 `valueRef()` 报上去。
 - **所有权 / 错误 / 调用**：错误：`RootTraceError`。 GC：本函数是精确根 walk，只扫活窗口。 调用：本模块的 `traceMachine`（L0 帧与每个 inline Entry 的帧）。
 
-### `traceStack` (`src/exec/active_invocation_trace.zig:98`)
+### `traceStack` (`src/exec/inline_calls.zig:98`)
 
 - **签名**：`fn traceStack( stack: *stack_mod.Stack, pending: *const stack_mod.PendingCallRegion, visitor: *RootVisitor, ) RootTraceError!void`。
 - **作用**：扫 `liveValues` 以及仍停在起点的 `PendingCallRegion`。
 - **实现**：`visitor.values(liveValues())`；若 `pending.windowFor(stack)` 非空再扫那一段（调用点已 retreat、尚未入帧的参数）。
 - **所有权 / 错误 / 调用**：错误：`RootTraceError`。 GC：本函数是精确根 walk，只扫活窗口。 调用：本模块的 `traceMachine`（L0 Stack 与每个 Entry 的 Stack）。
 
-### `traceEntryExtras` (`src/exec/active_invocation_trace.zig:114`)
+### `traceEntryExtras` (`src/exec/inline_calls.zig:114`)
 
 - **签名**：`fn traceEntryExtras(entry: *inline_calls.Entry, visitor: *RootVisitor) RootTraceError!void`。
 - **作用**：扫 native_caller 与 `.proxy_get` 停住的 atom。
@@ -260,7 +260,7 @@ exec 子系统命名空间与嵌入用薄 `Vm` 门面。只 re-export 各域，�
 - **所有权 / 错误 / 调用**：错误：`RootTraceError`。 GC：本函数是精确根 walk，只扫活窗口。 调用：本模块的 `traceMachine`，只对 inline Entry 调。
 ## 覆盖核对
 
-- 清单函数数: 27（`src/exec/active_invocation_trace.zig` 5 + `src/exec/root.zig` 5 + `src/exec/vm_profile.zig` 1 + `src/exec/zjs_vm.zig` 16）
+- 清单函数数: 27（`src/exec/inline_calls.zig` 5 + `src/exec/root.zig` 5 + `src/exec/tailcall_dispatch.zig` 1 + `src/exec/zjs_vm.zig` 16）
 - 本文标题覆盖: 27
 - 未覆盖: 无
 - 第 11 册合计（五份子文件）: 清单 755，标题 755，未覆盖 无（27 + 72 + 125 + 242 + 289）
@@ -272,5 +272,5 @@ python3 docs/code-walkthrough/_check_coverage.py --docs 'docs/code-walkthrough/1
   src/exec/root.zig src/exec/zjs_vm.zig src/exec/tailcall_dispatch.zig \
   src/exec/tailcall_dispatch_colds.zig src/exec/frame.zig src/exec/stack.zig \
   src/exec/inline_calls.zig src/exec/small_inline.zig \
-  src/exec/vm_profile.zig src/exec/active_invocation_trace.zig
+  src/exec/tailcall_dispatch.zig src/exec/inline_calls.zig
 ```

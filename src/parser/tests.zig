@@ -1,7 +1,6 @@
 //! Exercises lexer/parser semantics and emitted bytecode invariants.
 const std = @import("std");
 const zjs = @import("zjs");
-const helpers = @import("../testing.zig");
 const engine = zjs;
 const core = zjs.core;
 const parser = zjs.parser;
@@ -17,6 +16,10 @@ const atom = zjs.core.atom;
 const function_def_mod = zjs.bytecode.function_def;
 const ParseState = engine.parser.Parser.ParseState;
 const test_entry = zjs.compiler.test_entry;
+
+fn reclaimNow(rt: *core.JSRuntime) void {
+    _ = rt.runObjectCycleRemoval();
+}
 
 test "scope proof cache bounds ancestor scans across sibling functions" {
     const ScopeProofTestCounters = function_def.ScopeProofTestCounters;
@@ -10370,7 +10373,7 @@ test "canonical root and child independently keep their compile realm alive" {
     // The realm outlives its last release for as long as the two
     // FunctionBytecodes holding its JS_DupContext edges are unreclaimed, and
     // reclaiming a FunctionBytecode is the tracer's decision, not the drop's.
-    helpers.reclaimNow(rt);
+    reclaimNow(rt);
     try std.testing.expect(rt.firstContext() == null);
 }
 
@@ -10446,7 +10449,7 @@ test "module nested function independently keeps its compile realm alive" {
     // Same edge as the script case: the module root and the nested
     // FunctionBytecode each hold the realm, so the realm's last edge falls
     // only when those two are reclaimed.
-    helpers.reclaimNow(rt);
+    reclaimNow(rt);
     try std.testing.expect(rt.firstContext() == null);
 }
 
@@ -12997,7 +13000,7 @@ test "parser releases identifier and private-name token atoms" {
     // after a collection, or `before` still carries the warm-up's retains and
     // `after` carries two compiles' worth. Nothing here is held past the
     // release, so the compile products are unreachable and need no root frame.
-    helpers.reclaimNow(rt);
+    reclaimNow(rt);
 
     const before = atomLiveEntryTotal(rt);
     {
@@ -13005,7 +13008,7 @@ test "parser releases identifier and private-name token atoms" {
         defer parsed.deinit();
         try std.testing.expect(parsed.syntax_error == null);
     }
-    helpers.reclaimNow(rt);
+    reclaimNow(rt);
     const after = atomLiveEntryTotal(rt);
     try std.testing.expectEqual(before, after);
 }
@@ -13034,7 +13037,7 @@ test "parser releases module and import-attribute token atoms" {
     }
     // Module records own atoms too, and are equally reclaimed by the trace
     // rather than by the release above; both samples bracket a collection.
-    helpers.reclaimNow(rt);
+    reclaimNow(rt);
 
     const before = atomLiveEntryTotal(rt);
     {
@@ -13042,7 +13045,7 @@ test "parser releases module and import-attribute token atoms" {
         defer parsed.deinit();
         try std.testing.expect(parsed.syntax_error == null);
     }
-    helpers.reclaimNow(rt);
+    reclaimNow(rt);
     const after = atomLiveEntryTotal(rt);
     try std.testing.expectEqual(before, after);
 }
@@ -13084,14 +13087,14 @@ test "parser returns the atom table to balance across every token-bearing constr
         // Both samples bracket a collection: the atoms are owned by the
         // compile product's FunctionBytecodes and module record, which the
         // tracer -- not the release above -- decides to reclaim.
-        helpers.reclaimNow(rt);
+        reclaimNow(rt);
         const before = atomLiveEntryTotal(rt);
         {
             var parsed = try compileForTest(rt, c.src, options);
             defer parsed.deinit();
             try std.testing.expect(parsed.syntax_error == null);
         }
-        helpers.reclaimNow(rt);
+        reclaimNow(rt);
         const after = atomLiveEntryTotal(rt);
         if (before != after) {
             std.debug.print("atom balance case {d} ({s}): before={d} after={d}\n", .{ index, c.file, before, after });

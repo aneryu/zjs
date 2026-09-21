@@ -334,234 +334,234 @@ RegExp 分三层：`regexp_ops` 记录/编译/escape，`regexp_fastpath` 可观�
 - **实现**：转发 `core.value_string.appendValueString(rt, buffer, value, .{ .unsupported = .type_error })`——与 `uri_ops` 里同名函数的区别就在这个选项：无法字符串化的值报 `error.TypeError` 而不是走默认处理。
 - **所有权 / 错误 / 调用**：缓冲归调用方；`regExpStringValue` / `escapedSource` / `toString` 都经它。
 
-## `src/exec/regexp_fastpath.zig` — RegExp 可观察 exec/test/construct
+## `src/exec/regexp_ops.zig` — RegExp 可观察 exec/test/construct
 
 `regExpConstructCall` 先 preflight + NativeBacktraceScope，再在同一 native 帧里做可观察强制转换。exec 默认 `exec` 方法仍是内建时走编译字节码；`test` 在 lastIndex 可跳过 coerce 且非 global/sticky 时 `regExpTestFastNoResult`。Annex B 遗留 `$1`/`input` 等走 `regExpLegacyAccessor`。
 
 
-### `constructRegExpRecordInNativeScope` (`src/exec/regexp_fastpath.zig:32`)
+### `constructRegExpRecordInNativeScope` (`src/exec/regexp_ops.zig:32`)
 
 - **签名**：`fn constructRegExpRecordInNativeScope( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, constructor: ?*core.Object, prototype: ?*core.Object, pattern: core.JSValue, flags: core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !core.JSValue`。
 - **作用**：本文件所有构造路径的共同终点：用已强制转换好的 (pattern, flags) 跑记录表里的 RegExp 构造器体。
 - **实现**：把两个值装成 `args` 数组，调 `builtin_dispatch.callConstructRecordInNativeScope(..., regexp_construct_ref, prototype, &args, ...)`，返回 null 折成 `error.TypeError`。用文件顶部固定的 `regexp_construct_ref`（domain `.regexp` + `ConstructorMethod.construct`）而不是直接 import `regexp_ops.constructWithPrototype`，好让构造逻辑的所有权留在记录表里。
 - **所有权 / 错误 / 调用**：结果对象归调用方；被 `regExpFunctionCall` 与 `regExpConstructCallInNativeScope` 使用。
 
-### `regExpFunctionCall` (`src/exec/regexp_fastpath.zig:82`)
+### `regExpFunctionCall` (`src/exec/regexp_ops.zig:82`)
 
 - **签名**：`pub fn regExpFunctionCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, constructor: ?*core.Object, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !core.JSValue`。
 - **作用**：`RegExp(...)` 当**普通函数**调用时的实现。
 - **实现**：先做「原样返回」判定：`isRegExpObservable(pattern)`（读 `Symbol.match`）为真且没给 flags 时，读 pattern 的 `constructor` 属性，若与 global 上的 `RegExp` 是同一对象就直接返回原 pattern。否则开始强制转换：缺省 pattern 用空串；pattern 是「可观察 RegExp」但 class 不是 `regexp`（用户伪造的 RegExp-like）时读它的 `source` 属性；pattern 是非 regexp 对象时 `toStringForAnnexB`；既不是 RegExp、也不是字符串 / undefined 的原始值同样 `toStringForAnnexB`——镜像 `js_regexp_constructor`（quickjs.c:47786-47793）走 `JS_ToString`，所以 Symbol 抛 TypeError 而不是漏出 `[object Object]`。flags 同理：显式给了就用；没给且 pattern 是非原生 RegExp-like 时读它的 `flags` 属性；再不然空串；最后非字符串的 flags 也过一次 `toStringForAnnexB`（对应 `js_compile_regexp` quickjs.c:47577-47578 的 `JS_ToCStringLen`，Symbol 抛 TypeError）。终点是 `constructRegExpRecordInNativeScope`，原型固定取 `ctx.classPrototypeObject(regexp)`（函数调用形态没有 new.target）。
 - **所有权 / 错误 / 调用**：中途新建的字符串记录在 `owned_*` 局部里；调用方是 `regexp_ops.regexpCall` 的非构造分支与 VM 的调用快路径。
 
-### `regExpConstructCall` (`src/exec/regexp_fastpath.zig:159`)
+### `regExpConstructCall` (`src/exec/regexp_ops.zig:159`)
 
 - **签名**：`pub fn regExpConstructCall( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, constructor: ?*core.Object, new_target: core.JSValue, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !core.JSValue`。
 - **作用**：`new RegExp(...)` 的 VM 快路径入口：负责 native 帧与错误物化。
 - **实现**：`builtin_dispatch.preflightInternalRecordCFunction(ctx, global, constructor, regexp_construct_ref)` 先做记录预检；`NativeBacktraceScope.init(ctx, constructor)` 后 `push()` 并 defer `deinit()`，让强制转换期间的回溯里带上这一层 native 帧；然后调 `regExpConstructCallInNativeScope`，捕获到错误时先 `builtin_dispatch.materializeRuntimeError(ctx, global, err)` 再把错误原样上抛。
 - **所有权 / 错误 / 调用**：结果归调用方；调用方是 VM 的 construct 分派。
 
-### `regExpConstructCallInNativeScope` (`src/exec/regexp_fastpath.zig:180`)
+### `regExpConstructCallInNativeScope` (`src/exec/regexp_ops.zig:180`)
 
 - **签名**：`fn regExpConstructCallInNativeScope( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, constructor: ?*core.Object, new_target: core.JSValue, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !core.JSValue`。
 - **作用**：`new RegExp(...)` 的实际参数解析与构造。
 - **实现**：最快的一支：pattern 与 flags **都**已经是字符串或 undefined 时没有任何可观察强制转换，`reflectConstructPrototypeVm(..., "RegExp", new_target, ...)` 解析实例原型后直接把原值送进记录（源码注明这条已经取代了早先借用 Latin1 的快路径，结果对象完全一致）。否则先 `isRegExpObservable`，再按情况取 source：undefined → 空串；可观察 RegExp 且 class 是 `regexp` → `regexpInternalStringValue(..., true)` 读内部 source；可观察但不是原生 regexp → 读 `source` 属性；非 regexp 对象或其它非字符串原始值 → `toStringForAnnexB`（quickjs.c:47786-47793）。flags：显式给了就用；没给且 pattern 是原生 regexp → `regexpInternalStringValue(..., false)`；没给且是 RegExp-like → 读 `flags` 属性；否则 undefined。**顺序要点**：先 `reflectConstructPrototypeVm` 解析 new.target 的原型，**之后**才对非字符串 flags 做 `toStringForAnnexB`——对应 qjs 里 flags 的 ToString 发生在 `js_create_from_ctor` 之后（quickjs.c:47795-47797 + 47577-47578），且 `JS_ToCStringLen` 对 Symbol 抛的是 TypeError 而非 SyntaxError。最后 `constructRegExpRecordInNativeScope`。
 - **所有权 / 错误 / 调用**：`OwnedPrototype` defer 释放；中间字符串记在 `owned_*` 局部。
 
-### `regExpExecMethod` (`src/exec/regexp_fastpath.zig:276`)
+### `regExpExecMethod` (`src/exec/regexp_ops.zig:276`)
 
 - **签名**：`pub fn regExpExecMethod( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !core.JSValue`。
 - **作用**：内建 `RegExp.prototype.exec`。
 - **实现**：receiver 不是对象、或 class 不是 `regexp` → `throwTypeErrorMessage(..., "RegExp object expected")`；输入实参缺省 `undefined`，非字符串走 `toStringForAnnexB`；然后 `regExpExecResult(..., use_last_index = true, ...)`，返回 null（没有编译好的字节码等）时折成 `error.TypeError`。
 - **所有权 / 错误 / 调用**：结果数组或 `null` 值归调用方；调用方有 `regexp_ops` 的 `exec` 记录（`regexp_ops.zig:289,408`）、本文件的 `regExpExecGeneric`（:550）与 VM 的 exec 快路径 `call_runtime.zig:1340`（`regExpTestMethod` 不经它，直接调 `regExpExecResult`）。
 
-### `regExpTestMethod` (`src/exec/regexp_fastpath.zig:301`)
+### `regExpTestMethod` (`src/exec/regexp_ops.zig:301`)
 
 - **签名**：`pub fn regExpTestMethod( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !?core.JSValue`。
 - **作用**：内建 `RegExp.prototype.test`。
 - **实现**：receiver 必须是对象（否则 `"RegExp object expected"`，注意这里**不**再要求 class 是 regexp）；输入非字符串走 `toStringForAnnexB`。随后按 receiver 的 `exec` 是否仍是默认内建（`regExpPrototypeMethodIsDefault`，比对 `PrototypeMethod.exec` 记录）分两路：是默认时先试 `regExpTestFastNoResult`（不物化结果数组），给出结果就直接返回布尔；否则退到 `regExpExecResult`（null 视为 `false`），结果非 null 即为 true。`exec` 被覆写时走 `regExpExecGeneric` 调用户的 `exec`，再看结果是不是 null。
 - **所有权 / 错误 / 调用**：返回 `?core.JSValue`；`regexp_ops` 的 `test` 记录把 null 折成 TypeError。
 
-### `regExpTestFastNoResult` (`src/exec/regexp_fastpath.zig:333`)
+### `regExpTestFastNoResult` (`src/exec/regexp_ops.zig:333`)
 
 - **签名**：`pub fn regExpTestFastNoResult( ctx: *core.JSContext, regexp_object: *core.Object, string_value: core.JSValue, ) !?bool`。
 - **作用**：`test` 的「只要布尔、不建结果数组」快路径。
 - **实现**：三道准入——`regExpLastIndexCanSkipCoercion` 为假（lastIndex 是对象/BigInt/Symbol，读它可能可观察）返回 null；没有已编译 bytecode 返回 null；flag 里带 `global` 或 `sticky`（需要读写 lastIndex）也返回 null。都过了就 `regexp_adapter.testOnStringFromIndex(..., start = 0)`，把 `BytecodeCorrupt` / `Timeout` 吞成 null（让调用方走慢路径），其余错误上抛。
 - **所有权 / 错误 / 调用**：不分配；null 表示「快路径不适用」。
 
-### `regExpLastIndexCanSkipCoercion` (`src/exec/regexp_fastpath.zig:354`)
+### `regExpLastIndexCanSkipCoercion` (`src/exec/regexp_ops.zig:354`)
 
 - **签名**：`pub fn regExpLastIndexCanSkipCoercion(object: *core.Object) bool`。
 - **作用**：判断 `lastIndex` 能不能不做可观察的转换就跳过。
 - **实现**：取不到内部 `lastIndex` 槽 → false；值是对象、BigInt 或 Symbol（ToLength 会跑用户代码或抛错）→ false；其余为 true。
 - **所有权 / 错误 / 调用**：纯谓词。
 
-### `regExpCompile` (`src/exec/regexp_fastpath.zig:360`)
+### `regExpCompile` (`src/exec/regexp_ops.zig:360`)
 
 - **签名**：`pub fn regExpCompile( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !?core.JSValue`。
 - **作用**：Annex B 的 `RegExp.prototype.compile`：就地替换 receiver 的模式与 flags。
 - **实现**：receiver 不是对象或 class 不是 `regexp` → 返回 null（交回上层）；receiver 的原型必须正好是 realm 的 `RegExp.prototype`，否则 `"RegExp object expected"` TypeError。① flags 是 undefined 且 pattern 是原生 regexp 时，直接复制它的内部 source 与已编译 bytecode（bytecode 为空 → TypeError），再把 `lastIndex` 置 0 并返回 this。② 否则分别算 source 与 flags：pattern 是原生 regexp 时，**给了 flags 就 `error.TypeError`**（规范禁止 `re.compile(otherRegExp, "g")`），source/flags 都取内部值；pattern 是 undefined 取空串、其它值 `toStringForAnnexB`；flags 是 undefined 取空串、否则 `toStringForAnnexB`。然后把两者 `appendValueString` 摊成字节，`regexp_adapter.compileWithRuntime` 编译：`InvalidPattern` / `Unsupported` → `error.SyntaxError`，`StackOverflow` → 先抛 `SyntaxError("stack overflow")` 再返回 `error.SyntaxError`。成功后 `setRegexpCompiledBytecode` + `setRegexpSource`，`lastIndex` 置 0（走 `setValuePropertyStrict`，可观察），返回 this。
 - **所有权 / 错误 / 调用**：两个字节缓冲与 `Compiled` 都 defer 释放；`OwnedPrototype` 也 defer 释放。
 
-### `regExpSpeciesConstructor` (`src/exec/regexp_fastpath.zig:441`)
+### `regExpSpeciesConstructor` (`src/exec/regexp_ops.zig:441`)
 
 - **签名**：`pub fn regExpSpeciesConstructor( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, rx: core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !core.JSValue`。
 - **作用**：`SpeciesConstructor(rx, %RegExp%)`：给 `Symbol.split` / `Symbol.replace` 等挑构造器。
 - **实现**：默认值用 `regExpConstructorFromGlobal` 取 **realm 内建** 的 RegExp 构造器（对应 `JS_SpeciesConstructor(ctx, rx, ctx->regexp_ctor)`——不是可被替换的全局绑定）。读 `rx.constructor`：`undefined` → 默认；不是对象 → `error.TypeError`；再读它的 `Symbol.species`：`undefined` 或 `null` → 默认；不是 constructor-like → `error.TypeError`；否则返回 species。
 - **所有权 / 错误 / 调用**：返回值归调用方（`regExpConstructorFromGlobal` 的回退查找可能产生最后一个引用）。
 
-### `regExpFlagsAreFullUnicode` (`src/exec/regexp_fastpath.zig:470`)
+### `regExpFlagsAreFullUnicode` (`src/exec/regexp_ops.zig:470`)
 
 - **签名**：`pub fn regExpFlagsAreFullUnicode(rt: *core.JSRuntime, flags_string: core.JSValue) !bool`。
 - **作用**：判断一段 flags 字符串是不是 full-unicode 模式。
 - **实现**：`stringValueContainsByte(rt, flags_string, 'u')` 或 `'v'` 任一为真即 true——直接在字符串里找字母，不解析成位图。
 - **所有权 / 错误 / 调用**：通常不分配——`stringValueContainsByte`（`src/exec/string_ops.zig:1081`）对已是字符串的 flags 就地扫 Latin-1/UTF-16 payload；但非字符串入参会走 `appendRawString` 的兜底，临时 `ArrayList` 在该函数内 `defer deinit`，不外泄。error 也只来自那条兜底路径（OOM / 转换异常）。调用方 `src/exec/string_ops.zig:958,1060,1246,1379`（`@@match`/`@@replace`/`@@split` 的 unicode 判定），经 :91 的别名引入。
 
-### `setRegExpLastIndexZero` (`src/exec/regexp_fastpath.zig:475`)
+### `setRegExpLastIndexZero` (`src/exec/regexp_ops.zig:475`)
 
 - **签名**：`pub fn setRegExpLastIndexZero(rt: *core.JSRuntime, regexp_object: *core.Object) !void`。
 - **作用**：把 `lastIndex` 重置为 0（内部写，不走 receiver 链）。
 - **实现**：`regexp_object.setProperty(rt, lastIndex, int32(0))`，把 `ReadOnly` / `AccessorWithoutSetter` / `NotExtensible` 三种失败统一折成 `error.TypeError`，其余错误上抛。
 - **所有权 / 错误 / 调用**：不分配、不建根：写入的是立即数 `int32(0)`，不产生指针边、无需写屏障。error 映射是这里的实质内容——`ReadOnly`/`AccessorWithoutSetter`/`NotExtensible` 三种定义失败被折成 `error.TypeError`（对应 spec 的 Set(…, true) throw），其余原样上抛。调用方 `src/exec/string_ops.zig:1478,1514,1522`，经 :92 的别名引入。
 
-### `appendNamedCaptureSubstitution` (`src/exec/regexp_fastpath.zig:482`)
+### `appendNamedCaptureSubstitution` (`src/exec/regexp_ops.zig:482`)
 
 - **签名**：`pub fn appendNamedCaptureSubstitution( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, named_captures: core.JSValue, replacement: []const u16, index: *usize, out: *std.ArrayList(u16), caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !bool`。
 - **作用**：处理替换串里的 `$<name>` 具名捕获引用。
 - **实现**：`named_captures` 是 undefined → 直接 false（不是具名替换）。名字从 `index + 2` 开始，找不到 `'>'` 也返回 false。把这段 UTF-16 转成 UTF-8（`appendUtf16UnitsAsUtf8`，缓冲 defer 释放）后 `internAtom`；用 `core.runtime.rootAtoms` 把 atom 钉住——TGC S3 §4 class B：属性读取可能跑用户 accessor，其结果还要 ToString，atom 必须活过这两步。读到的 capture 非 undefined 时 `toStringForAnnexB` 后 `appendStringValueUnits` 写进 `out`（undefined 相当于写空）。最后把 `index.*` 推到 `'>'` 的位置并返回 true。
 - **所有权 / 错误 / 调用**：atom 根帧 defer 撤销；输出缓冲归调用方。
 
-### `regExpExecGeneric` (`src/exec/regexp_fastpath.zig:514`)
+### `regExpExecGeneric` (`src/exec/regexp_ops.zig:514`)
 
 - **签名**：`pub fn regExpExecGeneric( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, rx: core.JSValue, string_value: core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !core.JSValue`。
 - **作用**：规范的 `RegExpExec(R, S)`：优先调 receiver 上的 `exec`，否则回落到内建。
 - **实现**：读 `rx.exec`。既不是 undefined 也不是 null 时：可调用就 `call_runtime.callValueOrBytecodeSyncInternalOutlined` 以 rx 为 this、字符串为唯一实参调用它，结果必须是 null 或对象（否则 `error.TypeError`）并原样返回（源码注明 receiver / 方法 / 字符串都被这个作用域钉住，所以合格的 bytecode 覆写可以跑在当前 Machine 上）。不可调用时，rx 必须是原生 regexp 对象，否则 `error.TypeError`。`exec` 是 undefined / null，或上面那条原生兜底成立时，走 `regExpExecMethod`。
 - **所有权 / 错误 / 调用**：结果归调用方。
 
-### `regExpLegacyAccessor` (`src/exec/regexp_fastpath.zig:553`)
+### `regExpLegacyAccessor` (`src/exec/regexp_ops.zig:553`)
 
 - **签名**：`pub fn regExpLegacyAccessor( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, this_value: core.JSValue, function_object: *core.Object, method: method_ids.regexp.LegacyAccessorMethod, args: []const core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !core.JSValue`。
 - **作用**：Annex B 的 RegExp 静态遗留访问器（`RegExp.input` / `$_`、`lastMatch`、`lastParen`、`leftContext`、`rightContext`、`$1`..`$9`）。
 - **实现**：realm 取自 getter 函数自己的 `nativeFunctionRealmGlobalPtr()`（拿不到才退回传入的 global），因此跨 realm 取到的是定义它的那个 realm 的状态。receiver 必须**就是**该 realm 的 RegExp 构造器对象，否则 `"RegExp legacy accessor receiver mismatch"` TypeError。`ensureInstalledRealmRegExpLegacyStatics` 取（或建）遗留状态块。随后按 method 分派：`set_input` 先 `materializeRegExpLegacyNoCaptureSlots` 把惰性槽落实，再把实参 `toStringForAnnexB` 后写进 `legacy.input`，返回 undefined；`get_input` 读 `legacy.input`；`get_last_match` / `get_left_context` / `get_right_context` 先试惰性切片 `regExpLegacyNoCaptureSliceValue(.match/.left/.right)`，不行才读已物化的槽；`get_last_paren` 与 `$1`..`$9`（经 `legacyCaptureIndex` 换算下标）先试 `regExpLegacyCaptureSliceValue`，同样以槽值兜底；未知 method → `error.TypeError`。空槽由 `regExpLegacySlotValue` 变成空字符串。
 - **所有权 / 错误 / 调用**：新建的切片字符串经 `replaceRegExpLegacySlot` 挂进 realm 状态；调用方是 `regexp_ops.regexpCall` 的 legacy 分支。
 
-### `regExpConstructorFromGlobal` (`src/exec/regexp_fastpath.zig:594`)
+### `regExpConstructorFromGlobal` (`src/exec/regexp_ops.zig:594`)
 
 - **签名**：`pub fn regExpConstructorFromGlobal(rt: *core.JSRuntime, global: *core.Object) !core.JSValue`。
 - **作用**：取 realm 的 RegExp 构造器值。
 - **实现**：优先读 realm 缓存 `global.cachedRealmValue(rt, .regexp_constructor)`，缓存里不是对象 → `error.TypeError`；没有缓存时回落到 global 上的 `RegExp` 属性，同样要求是对象。
 - **所有权 / 错误 / 调用**：源码注明返回的是**拥有的**值——回退查找可能产生某个新对象的最后一个引用，所以调用方在使用对象指针期间必须持住这个 JSValue。
 
-### `regExpLegacySlotValue` (`src/exec/regexp_fastpath.zig:607`)
+### `regExpLegacySlotValue` (`src/exec/regexp_ops.zig:607`)
 
 - **签名**：`pub fn regExpLegacySlotValue(rt: *core.JSRuntime, slot: ?core.JSValue) !core.JSValue`。
 - **作用**：读遗留槽，空槽给空字符串。
 - **实现**：槽里有值就原样返回，否则 `value_ops.createStringValue(rt, "")`。
 - **所有权 / 错误 / 调用**：空串走规范空串 atom，不真分配。
 
-### `materializeRegExpLegacyNoCaptureSlots` (`src/exec/regexp_fastpath.zig:612`)
+### `materializeRegExpLegacyNoCaptureSlots` (`src/exec/regexp_ops.zig:612`)
 
 - **签名**：`pub fn materializeRegExpLegacyNoCaptureSlots(rt: *core.JSRuntime, owner: *core.Object, legacy: anytype) !void`。
 - **作用**：把惰性记录的「上次匹配位置」落实成真正的字符串槽（写 `input` 之前必须先做，否则旧切片会指错串）。
 - **实现**：`legacy.lazy_no_capture_match` 为假直接返回；`legacy.input` 为空则清掉惰性标记后返回。否则按 `lazy_match_index` / `lazy_match_len` 切出 `last_match` 写进槽；`lazy_match_index == 0` 时 `left_context` 直接清空，否则切 `[0, index)`；右侧起点取 `min(index + len, lazy_input_len)`，越界就清空 `right_context`，否则切到串尾。接着把 `last_paren` 与 `captures[0..capture_slot_count]` 里还是惰性编码的槽逐个 `regExpLegacyCaptureSliceValue` 物化并写回。最后 `lazy_no_capture_match = false`。
 - **所有权 / 错误 / 调用**：新字符串经 `replaceRegExpLegacySlot` 挂进 realm 状态（带写屏障）；`legacy` 用 `anytype` 是为了不在这里 import 那个状态结构的类型。
 
-### `regExpLegacyCaptureSliceValue` (`src/exec/regexp_fastpath.zig:648`)
+### `regExpLegacyCaptureSliceValue` (`src/exec/regexp_ops.zig:648`)
 
 - **签名**：`pub fn regExpLegacyCaptureSliceValue(rt: *core.JSRuntime, legacy: anytype, slot: ?core.JSValue) ?core.JSValue`。
 - **作用**：把一个惰性编码的捕获槽解成真正的子串值。
 - **实现**：不在惰性状态、没有 `input`、槽为空、或 `decodeRegExpLegacyCaptureSlice` 解不出 (start, len) 都返回 null；否则 `stringSliceValue` 切子串，**切失败（`catch null`）也返回 null**。
 - **所有权 / 错误 / 调用**：返回的新字符串归调用方；null 表示「该走已物化的槽值」。
 
-### `clearRegExpLegacySlot` (`src/exec/regexp_fastpath.zig:656`)
+### `clearRegExpLegacySlot` (`src/exec/regexp_ops.zig:656`)
 
 - **签名**：`pub fn clearRegExpLegacySlot(_: *core.JSRuntime, slot: *?core.JSValue) void`（`rt` 参数未使用）。
 - **作用**：清空一个遗留槽。
 - **实现**：一句 `slot.* = null`；不需要写屏障，因为只是去掉引用。
 - **所有权 / 错误 / 调用**：被 `materializeRegExpLegacyNoCaptureSlots` 的左右上下文分支使用。
 
-### `getRegExpLastIndexLength` (`src/exec/regexp_fastpath.zig:660`)
+### `getRegExpLastIndexLength` (`src/exec/regexp_ops.zig:660`)
 
 - **签名**：`pub fn getRegExpLastIndexLength( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, regexp_value: core.JSValue, regexp_object: *core.Object, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !usize`。
 - **作用**：读 `lastIndex` 并转成长度索引。
 - **实现**：快路径——`regexp_value` 就是 `regexp_object` 本身、内部槽有值、且 `fastToLengthIndex` 能直接转换时，直接返回。否则走可观察的 `getValueProperty(lastIndex)` + `toLengthIndexSlow`（可能触发 getter 与 valueOf）。
-- **所有权 / 错误 / 调用**：自身不分配、不建根，返回 Zig `usize`（不是 JSValue，所以结果无需 GC 保护）。慢路径会执行用户可见的 getter 与 `valueOf`，因此可能带出 `error.JSException`（pending exception 已挂）以及 `toLengthIndexSlow` 的 `error.RangeError`/`error.TypeError`；调用方必须把它当作可重入点，重新读回可能被改动的对象状态。树内唯一调用方 `src/exec/regexp_fastpath.zig:713`。
+- **所有权 / 错误 / 调用**：自身不分配、不建根，返回 Zig `usize`（不是 JSValue，所以结果无需 GC 保护）。慢路径会执行用户可见的 getter 与 `valueOf`，因此可能带出 `error.JSException`（pending exception 已挂）以及 `toLengthIndexSlow` 的 `error.RangeError`/`error.TypeError`；调用方必须把它当作可重入点，重新读回可能被改动的对象状态。树内唯一调用方 `src/exec/regexp_ops.zig:713`。
 
-### `setRegExpLastIndexStrict` (`src/exec/regexp_fastpath.zig:678`)
+### `setRegExpLastIndexStrict` (`src/exec/regexp_ops.zig:678`)
 
 - **签名**：`pub fn setRegExpLastIndexStrict( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, regexp_value: core.JSValue, regexp_object: *core.Object, value: core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !void`。
 - **作用**：按 strict 语义写 `lastIndex`。
 - **实现**：快路径——`regexp_value` 与 `regexp_object` 同一对象且内部槽存在时，先查 `regexpLastIndexWritable()`，不可写 → `error.TypeError`，可写就直接写槽。否则走可观察的 `setValuePropertyStrict`。
-- **所有权 / 错误 / 调用**：快路径直写 `regexpLastIndexSlot()` 且不打写屏障——这是安全的，因为四个调用方传的 `value` 一律是 `int32`/`float64` 数字（`src/exec/regexp_fastpath.zig:727,794,810`、`src/exec/string_ops.zig:1538`），不会在对象里种下新的指针边。不可写时返回 `error.TypeError`；慢路径交给 `setValuePropertyStrict`，可能执行用户 setter 并带出 `error.JSException`。自身不分配、不建根。
+- **所有权 / 错误 / 调用**：快路径直写 `regexpLastIndexSlot()` 且不打写屏障——这是安全的，因为四个调用方传的 `value` 一律是 `int32`/`float64` 数字（`src/exec/regexp_ops.zig:727,794,810`、`src/exec/string_ops.zig:1538`），不会在对象里种下新的指针边。不可写时返回 `error.TypeError`；慢路径交给 `setValuePropertyStrict`，可能执行用户 setter 并带出 `error.JSException`。自身不分配、不建根。
 
-### `regExpExecResult` (`src/exec/regexp_fastpath.zig:698`)
+### `regExpExecResult` (`src/exec/regexp_ops.zig:698`)
 
 - **签名**：`pub fn regExpExecResult( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, regexp_value: core.JSValue, regexp_object: *core.Object, string_value: core.JSValue, use_last_index: bool, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !?core.JSValue`。
 - **作用**：内建 exec 的前半段：算起点、处理越界，再交给编译匹配。
 - **实现**：`string_value` 拿不到字符串体 → 返回 null（交回慢路径）。`use_last_index` 时先 `getRegExpLastIndexLength` 读起点。没有已编译 bytecode 时同样返回 null。有 bytecode 时从 flag 位取 `is_global` / `is_sticky` / `has_indices`；起点只有在 `use_last_index` 且 global 或 sticky 时才用 lastIndex，否则 0。起点**大于**串长时：global/sticky 情况下把 lastIndex 归 0，然后返回 `null` 值（JS 的 `null`，不是 Zig 的 null）。其余交 `regExpExecCompiledResult`。
 - **所有权 / 错误 / 调用**：返回 Zig `null` 表示「本函数管不了」，返回 JS `null` 表示「没匹配上」——两者含义不同。
 
-### `regExpExecCompiledResult` (`src/exec/regexp_fastpath.zig:737`)
+### `regExpExecCompiledResult` (`src/exec/regexp_ops.zig:737`)
 
 - **签名**：`pub fn regExpExecCompiledResult( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, regexp_value: core.JSValue, regexp_object: *core.Object, string_value: core.JSValue, string_data: core.string.String.ResolvedData, compiled: regexp_adapter.Compiled, use_last_index: bool, is_global: bool, is_sticky: bool, has_indices: bool, start_index: usize, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !?core.JSValue`。
 - **作用**：真正跑匹配并物化结果数组。
 - **实现**：先把 `regexp_value` 与 `string_value` 用 `rootValues` 钉住——TGC R1-c：借用的 `compiled.bytecode`（后面还要给 `captureNameAt` 读）与 `string_data` 都不是扫描器能映射回 owner 的 GC 指针，只有钉住这两个 JSValue 才能让它们活过 `setRegExpLastIndexStrict`（可能跑 accessor）与 `createRegExpMatchArrayFromValue`（为每个捕获分配子串）。捕获槽按 `compiled.allocCount()` 选：不超过 `small_exec_slots` 用栈数组，否则堆分配（defer 释放）。`execCaptureSlotsOnResolvedStringFromIndex` 跑匹配，`BytecodeCorrupt` / `Timeout` 吞成 null。`.match`：槽 0/1 给出起止（`captureSlotValue` 为 null 时起点按 0、终点按起点），`use_last_index` 且 global/sticky 时把 lastIndex 更新成 `match_end`（超出 i32 范围就用 float64），然后组 `RegExpMatch`（`capture_slots` 取 `[2 .. capture_count*2]`、`capture_count` 是总数减 1、`has_named_captures` 看 `named_groups` 位）交 `createRegExpMatchArrayFromValue`。`.no_match` / `.out_of_range`：global/sticky 时把 lastIndex 归 0，返回 JS `null`。`.not_available`：返回 Zig null。
 - **所有权 / 错误 / 调用**：堆捕获槽 defer 释放；结果数组归调用方。
 
-### `isRegExpValue` (`src/exec/regexp_fastpath.zig:818`)
+### `isRegExpValue` (`src/exec/regexp_ops.zig:818`)
 
 - **签名**：`pub fn isRegExpValue(value: core.JSValue) bool`。
 - **作用**：判断值是不是原生 RegExp 实例（不可观察）。
 - **实现**：`property_ops.expectObject` 失败返回 false，否则看 class 是不是 `regexp`。
 - **所有权 / 错误 / 调用**：纯谓词。
 
-### `isRegExpObservable` (`src/exec/regexp_fastpath.zig:823`)
+### `isRegExpObservable` (`src/exec/regexp_ops.zig:823`)
 
 - **签名**：`pub fn isRegExpObservable( ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue, caller_function: ?*const bytecode.FunctionBytecode, caller_frame: ?*frame_mod.Frame, ) !bool`。
 - **作用**：规范的 IsRegExp：先看 `Symbol.match`，再退到内部 class。
 - **实现**：不是对象直接 false；`Symbol.match` atom 取不到时退化成 `isRegExpValue`。读 `value[Symbol.match]`（可观察，可能跑 getter），非 undefined 时按它的真值性返回；是 undefined 才退回 `isRegExpValue`。
 - **所有权 / 错误 / 调用**：读属性可能抛错；调用方是本文件两条构造路径（:93、:205）以及 `string_ops.zig`（:432、:981、:2127，经 :77 的别名引入）。
 
-### `regexpLastIndex` (`src/exec/regexp_fastpath.zig:838`)
+### `regexpLastIndex` (`src/exec/regexp_ops.zig:838`)
 
 - **签名**：`pub fn regexpLastIndex(_: *core.JSRuntime, object: *core.Object) usize`（`rt` 参数未使用）。
 - **作用**：不可观察地把内部 `lastIndex` 读成一个 usize。
 - **实现**：槽为空返回 0；int32 时负数按 0；float64 时 NaN 或 ≤ 0 按 0、≥ `maxInt(usize)` 截到最大值、其余向下取整；其它类型（对象 / BigInt / Symbol）一律 0。
 - **所有权 / 错误 / 调用**：不抛错、不分配——与可观察的 `getRegExpLastIndexLength` 是两回事。
 
-### `createRegExpIndexPair` (`src/exec/regexp_fastpath.zig:849`)
+### `createRegExpIndexPair` (`src/exec/regexp_ops.zig:849`)
 
 - **签名**：`pub fn createRegExpIndexPair(rt: *core.JSRuntime, global: *core.Object, start: usize, end: usize) !core.JSValue`。
 - **作用**：为 `d` 标志（`hasIndices`）的结果建一个 `[start, end]` 二元数组。
 - **实现**：以 realm 的 `Array.prototype` `createArray`（errdefer 销毁），`defineSplitValueElement` 写下标 0 与 1 两个 int32。
 - **所有权 / 错误 / 调用**：数组归调用方。
 
-### `appendDecodedRegExpGroupName` (`src/exec/regexp_fastpath.zig:857`)
+### `appendDecodedRegExpGroupName` (`src/exec/regexp_ops.zig:857`)
 
 - **签名**：`pub fn appendDecodedRegExpGroupName(rt: *core.JSRuntime, out: *std.ArrayList(u8), name: []const u8) !void`。
 - **作用**：把 bytecode 里存的捕获组名解转义后写出（组名允许 `\uXXXX` 形式）。
 - **实现**：逐字节扫描；遇到 `\u` 就试 `readRegExpGroupNameEscape`，解出的码点若是高代理，则保存位置再试读下一个转义，是低代理就合成完整码点、否则回退位置；解出的码点用 `appendUtf8CodePointForRegExpName` 写出并 `continue`（不再额外推进）。不是转义（或解析失败）就原样写一个字节并推进一位。
 - **所有权 / 错误 / 调用**：输出缓冲归调用方。
 
-### `readRegExpGroupNameEscape` (`src/exec/regexp_fastpath.zig:884`)
+### `readRegExpGroupNameEscape` (`src/exec/regexp_ops.zig:884`)
 
 - **签名**：`pub fn readRegExpGroupNameEscape(name: []const u8, index: *usize) ?u21`。
 - **作用**：从组名里读一个 `\uXXXX` 或 `\u{...}` 转义，成功时推进下标。
 - **实现**：位置上不是 `\u`（或长度不够）返回 null。`{` 形式：逐位累加十六进制直到 `}`，中途出现非十六进制字符、值超过 `0x10ffff`、一位数字都没有、或没等到 `}` 都返回 null；成功时把下标移到 `}` 之后。定长形式：第一个字符必须是十六进制，然后**最多**看 4 位连续十六进制，实际用的位数是 `min(可用位数, 4)`——不足 4 位也接受（比严格的 `\uXXXX` 宽松）；累加后把下标推进相应位数。两种形式都返回码点。
 - **所有权 / 错误 / 调用**：只被 `appendDecodedRegExpGroupName` 使用；失败时不改 `index.*`。
 
-## `src/exec/regexp_adapter.zig` — 运行时感知的 regexp 库适配
+## `src/exec/regexp_ops.zig` — 运行时感知的 regexp 库适配
 
 把扁平 JS 字符串、native 栈溢出、超时中断、捕获槽接到 `libs/regexp.zig`。`compileWithRuntime` 把 `lre_check_stack_overflow` 接到 `JSRuntime.checkNativeStackOverflow`。
 
 
-### `compile` (`src/exec/regexp_adapter.zig:24`)
+### `compile` (`src/exec/regexp_ops.zig:24`)
 
 - **签名**：`pub fn compile(allocator: std.mem.Allocator, pattern: []const u8, flags: []const u8) !Compiled`。
 - **作用**：不带运行时钩子的编译入口（fixture / 单测用）。
 - **实现**：直接转发 `regexp_lib.compilePatternAndFlags(allocator, pattern, flags)`，不装栈溢出检查回调。
 - **所有权 / 错误 / 调用**：返回的 `Compiled` 归调用方，要用同一个 allocator `deinit`。
 
-### `compileWithRuntime` (`src/exec/regexp_adapter.zig:28`)
+### `compileWithRuntime` (`src/exec/regexp_ops.zig:28`)
 
 - **签名**：`pub fn compileWithRuntime(rt: *core.JSRuntime, pattern: []const u8, flags: []const u8) !Compiled`。
 - **作用**：引擎正式路径的编译入口：用运行时分配器并接上栈溢出检查。
@@ -569,35 +569,35 @@ RegExp 分三层：`regexp_ops` 记录/编译/escape，`regexp_fastpath` 可观�
 - **所有权 / 错误 / 调用**：返回的 `Compiled` 归调用方（RegExp 对象的 payload），用 `rt.memory.allocator` 释放。
 
 
-### `execCaptureSlotsOnResolvedStringFromIndex` (`src/exec/regexp_adapter.zig:45`)
+### `execCaptureSlotsOnResolvedStringFromIndex` (`src/exec/regexp_ops.zig:45`)
 
 - **签名**：`pub fn execCaptureSlotsOnResolvedStringFromIndex( rt: *core.JSRuntime, compiled: Compiled, string_data: core.string.String.ResolvedData, start_index: usize, capture: []usize, ) ExecError!ExecResult`。
 - **作用**：对**已经解析好**的扁平字符串数据跑一次匹配，把捕获写进调用方给的槽数组。
 - **实现**：先 `execOptions(rt)` 拿到（可能带超时回调的）选项，再按 `string_data` 的 `.latin1` / `.utf16` 两臂分别调 `regexp_bytecode.execCaptureSlotsSliceTrustedWithOptions`。之所以传已解析的宽度而不是 JSValue：QuickJS 从 `js_regexp_exec` 一路把同一个 `JSString *` / buffer 带进 `lre_exec`，这样 global match/replace 的循环里不用每次重新解码。
 - **所有权 / 错误 / 调用**：`capture` 槽由调用方分配与持有；错误集是 `ExecError = { OutOfMemory, BytecodeCorrupt, Timeout }`。
 
-### `captureSlotValue` (`src/exec/regexp_adapter.zig:59`)
+### `captureSlotValue` (`src/exec/regexp_ops.zig:59`)
 
 - **签名**：`pub fn captureSlotValue(value: usize) ?usize`。
 - **作用**：把一个原始捕获槽解释成「有值 / 未参与匹配」。
 - **实现**：直接转发 `regexp_bytecode.captureSlotValue(value)`，哨兵值返回 null。
 - **所有权 / 错误 / 调用**：纯转换，不分配。
 
-### `groupName` (`src/exec/regexp_adapter.zig:63`)
+### `groupName` (`src/exec/regexp_ops.zig:63`)
 
 - **签名**：`pub fn groupName(bytecode: []const u8, one_based_capture_index: usize) ?[]const u8`。
 - **作用**：按 1 起的捕获序号查命名捕获组的名字。
 - **实现**：直接转发 `regexp_bytecode.groupName(bytecode, one_based_capture_index)`；没有名字返回 null。
 - **所有权 / 错误 / 调用**：返回的切片指向 bytecode 内部，随 `Compiled` 存活，不需要释放。
 
-### `testOnStringFromIndex` (`src/exec/regexp_adapter.zig:67`)
+### `testOnStringFromIndex` (`src/exec/regexp_ops.zig:67`)
 
 - **签名**：`pub fn testOnStringFromIndex(rt: *core.JSRuntime, compiled: Compiled, string_value: core.JSValue, start_index: usize) ExecError!?bool`。
 - **作用**：只问「从某位置起匹配不匹配」，不物化捕获。
 - **实现**：`string_value.asStringBody()` 取不到字符串体就返回 null（交回调用方走慢路径）；字符串恒为扁平表示（旧的空壳 `String.ensureFlat` 及其全部调用点已删除）；直接按 `resolveData()` 的 `.latin1` / `.utf16` 两臂调 `regexp_bytecode.testMatchTrustedWithOptions`，选项同样来自 `execOptions`。
 - **所有权 / 错误 / 调用**：不分配捕获缓冲；返回 `?bool`——null 表示「这不是字符串」，不是「不匹配」。
 
-### `execOptions` (`src/exec/regexp_adapter.zig:77`)
+### `execOptions` (`src/exec/regexp_ops.zig:77`)
 
 - **签名**：`fn execOptions(rt: *core.JSRuntime) regexp_bytecode.ExecOptions`。
 - **作用**：按运行时有没有装中断处理器决定匹配期要不要查超时。
@@ -605,21 +605,21 @@ RegExp 分三层：`regexp_ops` 记录/编译/escape，`regexp_fastpath` 可观�
 - **所有权 / 错误 / 调用**：被 `execCaptureSlotsOnResolvedStringFromIndex` 与 `testOnStringFromIndex` 使用。
 
 
-### `flagBitsFromBytecode` (`src/exec/regexp_adapter.zig:90`)
+### `flagBitsFromBytecode` (`src/exec/regexp_ops.zig:90`)
 
 - **签名**：`pub fn flagBitsFromBytecode(bytecode: []const u8) u16`。
 - **作用**：从编译结果里取 flag 位图。
 - **实现**：直接转发 `regexp_bytecode.getFlags(bytecode)`。
 - **所有权 / 错误 / 调用**：纯读。
 
-### `appendCanonicalFlagsFromBits` (`src/exec/regexp_adapter.zig:94`)
+### `appendCanonicalFlagsFromBits` (`src/exec/regexp_ops.zig:94`)
 
 - **签名**：`pub fn appendCanonicalFlagsFromBits(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), bits: u16) !void`。
 - **作用**：按规范顺序把 flag 位图写成字母序列。
 - **实现**：固定顺序表 `d`(indices) / `g`(global) / `i`(ignore_case) / `m`(multiline) / `s`(dot_all) / `u`(unicode) / `v`(unicode_sets) / `y`(sticky)，逐项检查对应位；唯一特例是 `u`——当 `unicode_sets` 位也置着时跳过 `u`，只输出 `v`。
 - **所有权 / 错误 / 调用**：往调用方的 `ArrayList` 追加，缓冲归调用方。
 
-### `flagsStringValueFromBytecode` (`src/exec/regexp_adapter.zig:111`)
+### `flagsStringValueFromBytecode` (`src/exec/regexp_ops.zig:111`)
 
 - **签名**：`pub fn flagsStringValueFromBytecode(rt: *core.JSRuntime, bytecode: []const u8) !core.JSValue`。
 - **作用**：把编译结果的 flag 位图变成 `RegExp.prototype.flags` 那种字符串值。
@@ -899,6 +899,6 @@ RegExp 分三层：`regexp_ops` 记录/编译/escape，`regexp_fastpath` 可观�
 
 ## 覆盖核对
 
-- 清单函数数: 127（`src/exec/regexp_adapter.zig` 12 + `src/exec/regexp_fastpath.zig` 30 + `src/exec/regexp_ops.zig` 47 + `src/exec/uri_ops.zig` 38）
+- 清单函数数: 127（`src/exec/regexp_ops.zig` 12 + `src/exec/regexp_ops.zig` 30 + `src/exec/regexp_ops.zig` 47 + `src/exec/uri_ops.zig` 38）
 - 本文标题覆盖: 127
 - 未覆盖: 无

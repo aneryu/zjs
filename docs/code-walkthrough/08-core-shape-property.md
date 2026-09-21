@@ -47,7 +47,7 @@
 
 **原型**是 Shape 的一部分：`replacePrototypeAssumePrepared` 换 proto、重算 hash、发新 identity，并对 Shape→proto 做分代屏障。
 
-属性快路径包括 `exec/property_direct.zig` 的无用户代码探测，以及 `vm_property_field.zig` 的站点 inline cache。`PropSiteCache` 由 VM 字段站点和宿主 `PropertySite` 共用：own-data 最多缓存两种 shape identity，另有单层原型数据与 native getter 分支；miss 后允许重新捕获，达到预算后退为 `.mega`。缓存存 identity/slot 等标量，不持有对象指针；shape 变更通过新的 identity 使旧缓存失效。
+属性快路径包括 `exec/property_ops.zig` 的无用户代码探测，以及 `vm_property_field.zig` 的站点 inline cache。`PropSiteCache` 由 VM 字段站点和宿主 `PropertySite` 共用：own-data 最多缓存两种 shape identity，另有单层原型数据与 native getter 分支；miss 后允许重新捕获，达到预算后退为 `.mega`。缓存存 identity/slot 等标量，不持有对象指针；shape 变更通过新的 identity 使旧缓存失效。
 
 ## 2. 属性槽与 AUTOINIT
 

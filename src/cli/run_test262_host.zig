@@ -1,14 +1,16 @@
 //! Test262 host hooks and the `$262.agent` coordinator.
 //!
-//! Keep the runner-facing interface limited to global installation, agent
-//! cleanup, and the assertion helper reused by engine integration tests.
+//! The CLI imports this file directly, so its colocated tests are collected.
+//! Engine integration tests use the `test262_host` module. It depends on
+//! the engine and is not part of `@import("zjs")`. The
+//! runner-facing interface is global installation, agent cleanup, and
+//! the assertion helper reused by engine integration tests.
 
 const std = @import("std");
-const test262_root = @import("internal_root.zig");
+const zjs = @import("zjs");
 
-const zjs = test262_root;
-const Object = test262_root.core.Object;
-const runtime_layer = test262_root.runtime;
+const Object = zjs.core.Object;
+const runtime_layer = zjs.runtime;
 
 pub fn assertSameValue(actual: zjs.JSValue, expected: zjs.JSValue) !zjs.JSValue {
     if (!actual.sameValue(expected)) return error.JSException;
@@ -258,7 +260,7 @@ pub fn cleanupTest262Agents(rt: *zjs.JSRuntime) usize {
     test262_agents.cond.broadcast(io);
     test262_agents.mutex.unlock(io);
 
-    test262_root.exec.atomics_ops.wakeAtomicsWaitersForRuntimes(rt, agent_runtimes[0..agent_runtimes_count]);
+    zjs.exec.atomics_ops.wakeAtomicsWaitersForRuntimes(rt, agent_runtimes[0..agent_runtimes_count]);
 
     var attempts: usize = 0;
     while (attempts < 500) : (attempts += 1) {
@@ -321,8 +323,8 @@ fn test262AgentRun(agent: *Test262Agent) void {
     var event_loop = runtime_layer.EventLoop.init(ctx, .{});
     event_loop.install();
     defer event_loop.deinit();
-    defer test262_root.exec.atomics_ops.cleanupAtomicsWaitersForContext(ctx.core);
-    const global = ctx.globalObject() catch return;
+    defer zjs.exec.atomics_ops.cleanupAtomicsWaitersForContext(ctx.core);
+    const global = zjs.globalObjectPtr(ctx) catch return;
     installTest262Globals(rt, ctx, global) catch return;
     _ = ctx.eval(agent.source, .{
         .mode = .script,
@@ -799,7 +801,7 @@ fn hostCallSetTimeout(
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     _ = output;
-    const active_global = global orelse try ctx.globalObject();
+    const active_global = global orelse try zjs.globalObjectPtr(ctx);
     const callback = if (args.len >= 1) args[0] else zjs.JSValue.undefinedValue();
     if (!ctx.isCallable(callback)) return try ctx.throwError("TypeError", "not a function", .{ .realm_global = active_global });
     var delay = try test262Int64Arg(ctx, args, 1);
@@ -959,7 +961,7 @@ fn test262DetachArrayBuffer(
     _ = output;
     _ = global;
     if (args.len < 1) return error.TypeError;
-    return try test262_root.exec.buffer_ops.detachArrayBuffer(ctx.runtimePtr(), args[0]);
+    return try zjs.exec.buffer_ops.detachArrayBuffer(ctx.runtimePtr(), args[0]);
 }
 
 fn test262Gc(
@@ -1041,7 +1043,7 @@ fn createExternalHostFunctionWithRealm(
     return context.createFunction(name, spec, .{
         .length = @intCast(@max(length, 0)),
         .with_prototype = with_prototype,
-        .realm_global = realm_global,
+        .realm_global = if (realm_global) |global| global.value() else null,
     });
 }
 
@@ -1054,7 +1056,7 @@ test "test262 globals do not retain local namespace object reference" {
     defer rt.destroy();
     const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
-    const global = try ctx.globalObject();
+    const global = try zjs.globalObjectPtr(ctx);
 
     try installTest262Globals(rt, ctx, global);
 
@@ -1074,7 +1076,7 @@ test "test262 evalScript uses the installed function realm" {
     defer rt.destroy();
     const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
-    const global = try ctx.globalObject();
+    const global = try zjs.globalObjectPtr(ctx);
 
     const realm = try ctx.createRealm();
     const realm_global = try ctx.realmGlobal(realm);

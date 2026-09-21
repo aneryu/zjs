@@ -2,7 +2,7 @@
 
 `typed_array.zig`：元素读写、强制、AB/SAB 存储操作、视图构造。`typed_array_names.zig`：标准 `*Array` 名 ↔ `{size, kind}`。
 
-本模块不运行用户 `valueOf`/`ToPrimitive`，内部转换只是有限的原语处理或裸 runtime 字符串化，不能当作完整规范转换。带 `maxByteLength` option 对象的 `*ConstructArgs` 在 `exec/typed_array_construct.zig`。视图的 `TypedArrayPayload` 保存 data/live_length 缓存与强 buffer 值，并通过 backing buffer 的弱 view 链表在 resize/detach 时刷新；不是 Object 中独立的裸 ptr/count 缓存。低层裸字节读写和 fill 不自行检查所有状态，调用方必须满足相应有效性与可写前提。
+本模块不运行用户 `valueOf`/`ToPrimitive`，内部转换只是有限的原语处理或裸 runtime 字符串化，不能当作完整规范转换。带 `maxByteLength` option 对象的 `*ConstructArgs` 在 `exec/buffer_ops.zig`。视图的 `TypedArrayPayload` 保存 data/live_length 缓存与强 buffer 值，并通过 backing buffer 的弱 view 链表在 resize/detach 时刷新；不是 Object 中独立的裸 ptr/count 缓存。低层裸字节读写和 fill 不自行检查所有状态，调用方必须满足相应有效性与可写前提。
 
 元素 kind 与字节宽度见下表。DataView 使用另一套 kind：1–6 为 Int8/Uint8/Int16/Uint16/Int32/Uint32，7/8 为 Float32/Float64，9/10 为 BigInt64/BigUint64，11 为 Float16；不能与 TypedArray kind 混用。TypedArray 多字节读写固定 little endian；DataView 按参数选择，缺省 big endian。
 

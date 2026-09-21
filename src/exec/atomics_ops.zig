@@ -4,25 +4,23 @@
 //! The bodies lived in `call_runtime.zig` until 2026-08-20 (backlog H1): a
 //! thousand lines of a self-contained domain -- waiter registry, typed
 //! read-modify-write, the `*ForAtomics` coercions -- in the file that owns the
-//! call chain. `atomics_wait.zig` owns the platform wait primitives and
-//! method-id enum; Promise construction/settlement is borrowed through the
-//! narrow compatibility seam in `promise_ops.zig`.
+//! call chain. Method IDs and wait primitives live with their handlers here;
+//! Promise construction/settlement is borrowed through `promise_ops.zig`.
 
 const std = @import("std");
 const atomics_ops = @This();
 const core = @import("../core/root.zig");
 const jobs_mod = core.jobs;
-const atomics_wait = @import("atomics_wait.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
 const exception_ops = @import("exception_ops.zig");
 const array_ops = @import("array_ops.zig");
-const coercion_ops = @import("coercion_ops.zig");
+const coercion_ops = @import("value_ops.zig");
 const frame_mod = @import("frame.zig");
 const bytecode = @import("../bytecode.zig");
 const object_ops = @import("object_ops.zig");
 const promise_ops = @import("promise_ops.zig");
 const value_ops = @import("value_ops.zig");
-const HostError = @import("exceptions.zig").HostError;
+const HostError = @import("exception_ops.zig").HostError;
 const atomicsBufferObject = object_ops.atomicsBufferObject;
 const atomicsTypedArray = array_ops.atomicsTypedArray;
 const atomicsTypedArrayIsBigInt = array_ops.atomicsTypedArrayIsBigInt;
@@ -30,7 +28,22 @@ const defineValueProperty = object_ops.defineValueProperty;
 const objectFromValue = object_ops.objectFromValue;
 const promisePrototypeFromGlobal = promise_ops.promisePrototypeFromGlobal;
 
-pub const StaticMethod = atomics_wait.StaticMethod;
+pub const StaticMethod = enum(u32) {
+    add = 1,
+    @"and" = 2,
+    compare_exchange = 3,
+    exchange = 4,
+    is_lock_free = 5,
+    load = 6,
+    notify = 7,
+    @"or" = 8,
+    pause = 9,
+    store = 10,
+    sub = 11,
+    wait = 12,
+    wait_async = 13,
+    xor = 14,
+};
 
 pub fn methodId(name: []const u8) ?u32 {
     if (std.mem.eql(u8, name, "isLockFree")) return @intFromEnum(StaticMethod.is_lock_free);
@@ -156,22 +169,21 @@ pub fn atomicsCallForNativeRecord(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const atomics_mod = atomics_wait;
     return switch (id) {
-        @intFromEnum(atomics_mod.StaticMethod.is_lock_free) => try atomicsIsLockFree(ctx, output, global, args, caller_function, caller_frame),
-        @intFromEnum(atomics_mod.StaticMethod.pause) => try atomicsPause(ctx, output, global, args, caller_function, caller_frame),
-        @intFromEnum(atomics_mod.StaticMethod.notify) => try atomicsNotify(ctx, output, global, args, caller_function, caller_frame),
-        @intFromEnum(atomics_mod.StaticMethod.wait) => try atomicsWait(ctx, output, global, args, caller_function, caller_frame),
-        @intFromEnum(atomics_mod.StaticMethod.wait_async) => try promise_ops.atomicsWaitAsync(ctx, output, global, args, caller_function, caller_frame),
-        @intFromEnum(atomics_mod.StaticMethod.store) => try atomicsStore(ctx, output, global, args, caller_function, caller_frame),
-        @intFromEnum(atomics_mod.StaticMethod.load) => try atomicsReadModifyWrite(ctx, output, global, args, .load, caller_function, caller_frame),
-        @intFromEnum(atomics_mod.StaticMethod.add) => try atomicsReadModifyWrite(ctx, output, global, args, .add, caller_function, caller_frame),
-        @intFromEnum(atomics_mod.StaticMethod.@"and") => try atomicsReadModifyWrite(ctx, output, global, args, .@"and", caller_function, caller_frame),
-        @intFromEnum(atomics_mod.StaticMethod.@"or") => try atomicsReadModifyWrite(ctx, output, global, args, .@"or", caller_function, caller_frame),
-        @intFromEnum(atomics_mod.StaticMethod.sub) => try atomicsReadModifyWrite(ctx, output, global, args, .sub, caller_function, caller_frame),
-        @intFromEnum(atomics_mod.StaticMethod.xor) => try atomicsReadModifyWrite(ctx, output, global, args, .xor, caller_function, caller_frame),
-        @intFromEnum(atomics_mod.StaticMethod.exchange) => try atomicsReadModifyWrite(ctx, output, global, args, .exchange, caller_function, caller_frame),
-        @intFromEnum(atomics_mod.StaticMethod.compare_exchange) => try atomicsReadModifyWrite(ctx, output, global, args, .compareExchange, caller_function, caller_frame),
+        @intFromEnum(StaticMethod.is_lock_free) => try atomicsIsLockFree(ctx, output, global, args, caller_function, caller_frame),
+        @intFromEnum(StaticMethod.pause) => try atomicsPause(ctx, output, global, args, caller_function, caller_frame),
+        @intFromEnum(StaticMethod.notify) => try atomicsNotify(ctx, output, global, args, caller_function, caller_frame),
+        @intFromEnum(StaticMethod.wait) => try atomicsWait(ctx, output, global, args, caller_function, caller_frame),
+        @intFromEnum(StaticMethod.wait_async) => try promise_ops.atomicsWaitAsync(ctx, output, global, args, caller_function, caller_frame),
+        @intFromEnum(StaticMethod.store) => try atomicsStore(ctx, output, global, args, caller_function, caller_frame),
+        @intFromEnum(StaticMethod.load) => try atomicsReadModifyWrite(ctx, output, global, args, .load, caller_function, caller_frame),
+        @intFromEnum(StaticMethod.add) => try atomicsReadModifyWrite(ctx, output, global, args, .add, caller_function, caller_frame),
+        @intFromEnum(StaticMethod.@"and") => try atomicsReadModifyWrite(ctx, output, global, args, .@"and", caller_function, caller_frame),
+        @intFromEnum(StaticMethod.@"or") => try atomicsReadModifyWrite(ctx, output, global, args, .@"or", caller_function, caller_frame),
+        @intFromEnum(StaticMethod.sub) => try atomicsReadModifyWrite(ctx, output, global, args, .sub, caller_function, caller_frame),
+        @intFromEnum(StaticMethod.xor) => try atomicsReadModifyWrite(ctx, output, global, args, .xor, caller_function, caller_frame),
+        @intFromEnum(StaticMethod.exchange) => try atomicsReadModifyWrite(ctx, output, global, args, .exchange, caller_function, caller_frame),
+        @intFromEnum(StaticMethod.compare_exchange) => try atomicsReadModifyWrite(ctx, output, global, args, .compareExchange, caller_function, caller_frame),
         else => error.TypeError,
     };
 }

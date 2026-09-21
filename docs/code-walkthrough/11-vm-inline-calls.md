@@ -37,14 +37,14 @@
 - **签名**：`pub fn resetMachineTestMetrics() void`。
 - **作用**：把 `Machine` 的测试计数器 `MachineTestMetrics`（machine_inits / entry_chunk_allocations / same_machine_sync_calls / same_machine_async_calls / max_depth）整体清零，让每个用例从干净基线开始断言内联入帧行为。
 - **实现**：先 `if (!builtin.is_test) @compileError("test-only helper")` 把非测试构建挡在编译期，再把 `TestMetricStorage.metrics` 整体赋成默认 `.{}`（五个计数全 0）。`TestMetricStorage` 只在 `builtin.is_test` 时才带 `var metrics`，Release 下是空结构体，所以这个 `@compileError` 同时也是防止引用不存在字段的守卫。
-- **所有权 / 错误 / 调用**：错误：不返回错误；非 `is_test` 构建直接 `@compileError("test-only helper")`。所有权：只把 comptime 静态 `TestMetricStorage.metrics` 归零，不分配、不涉及 GC 根。调用：仅测试树 `src/tests/exec.zig`（25 处，如 `:650`、`:747`、`:821`），生产路径没有调用方。
+- **所有权 / 错误 / 调用**：错误：不返回错误；非 `is_test` 构建直接 `@compileError("test-only helper")`。所有权：只把 comptime 静态 `TestMetricStorage.metrics` 归零，不分配、不涉及 GC 根。调用：仅测试树 `tests/exec.zig`（25 处，如 `:650`、`:747`、`:821`），生产路径没有调用方。
 
 ### `machineTestMetrics` (`src/exec/inline_calls.zig:48`)
 
 - **签名**：`pub fn machineTestMetrics() MachineTestMetrics`。
 - **作用**：读出当前累计的 `Machine` 内联入帧计数快照，供测试断言「走了几次同机同步调用」「开了几块 Entry chunk」「逻辑深度峰值多少」。
 - **实现**：同样以 `if (!builtin.is_test) @compileError("test-only helper")` 拒绝非测试构建，然后按值 `return TestMetricStorage.metrics`——返回的是结构体副本而非指针，调用方之后的计数不会回写到这份快照。
-- **所有权 / 错误 / 调用**：错误：无；非 test 构建同样 `@compileError`。所有权：按值返回计数器快照，调用方不持有任何指针。调用：仅测试树 `src/tests/exec.zig`（27 处断言点），生产路径没有调用方。
+- **所有权 / 错误 / 调用**：错误：无；非 test 构建同样 `@compileError`。所有权：按值返回计数器快照，调用方不持有任何指针。调用：仅测试树 `tests/exec.zig`（27 处断言点），生产路径没有调用方。
 
 ### `recordSameMachineSyncCall` (`src/exec/inline_calls.zig:53`)
 
@@ -72,7 +72,7 @@
 - **签名**：`pub inline fn resolveInlineFunction(global: *core.Object, func: core.JSValue) ?ResolvedInlineFunction`。
 - **作用**：判定一个 `JSValue` callable 能否走同机字节码调用（普通 kind、非 class constructor、同 Realm），能则连带取出 `FunctionBytecode`、capture 数组与 `CallFacts` 快照。
 - **实现**：两步：`object_ops.plainBytecodeFunctionObjectFromValue(func)` 先用一次比较把非字节码函数、generator/async 这些独立 class 的 callable 全部筛掉（注释标注对齐 qjs `JS_CallInternal`，quickjs.c:17816：qjs 在这里就落到慢路径，而不是先过四类集合测试再被 kind 检查驳回）；通过后转交 `resolveInlineFunctionFromObject` 做 kind / entry 策略 / Realm global 三项检查。
-- **所有权 / 错误 / 调用**：错误：不返回错误；任何不合格条件都返回 null，调用方据此退到通用 [[Call]]。所有权：纯读，不分配；返回的 `ResolvedInlineFunction` 借用 `FunctionBytecode` 与 capture 数组。调用：`src/exec/host_invocation.zig:219`、`src/exec/call_site.zig:318` 与 `:490`、`src/exec/tailcall_dispatch.zig:2898`，以及本文件 `resolveInlineTargetInto`（`:294`）。
+- **所有权 / 错误 / 调用**：错误：不返回错误；任何不合格条件都返回 null，调用方据此退到通用 [[Call]]。所有权：纯读，不分配；返回的 `ResolvedInlineFunction` 借用 `FunctionBytecode` 与 capture 数组。调用：`src/exec/call_site.zig:219`、`src/exec/call_site.zig:318` 与 `:490`、`src/exec/tailcall_dispatch.zig:2898`，以及本文件 `resolveInlineTargetInto`（`:294`）。
 
 ### `resolveInlineFunctionFromObject` (`src/exec/inline_calls.zig:150`)
 
@@ -107,7 +107,7 @@
 - **签名**：`pub inline fn resolveInlineTarget(global: *core.Object, receiver: core.JSValue, func: core.JSValue) ?InlineTarget`。
 - **作用**：`resolveInlineTargetInto` 的按值封装：给只想要「可内联就拿 `InlineTarget`，否则 null」的调用点用。
 - **实现**：栈上开一个 `undefined` 的 `InlineTarget`，交给 `resolveInlineTargetInto` 就地填写；返回 false 则原样返回 null，true 则把填好的结构体按值返回。之所以保留 into 版本，是因为热调用点希望把 `InlineTarget` 直接写进自己已有的槽，省掉这次按值搬运。
-- **所有权 / 错误 / 调用**：错误：无；不可内联返回 null。所有权：按值返回 `InlineTarget`，内部引用全部借用，不分配。调用：`src/exec/vm_call.zig:567` 与 `:780`、`src/exec/tailcall_dispatch.zig:4793`（getter）与 `:4896`（proxy trap）、`src/exec/call_runtime.zig:106`、`src/exec/eval_ops.zig:283`。
+- **所有权 / 错误 / 调用**：错误：无；不可内联返回 null。所有权：按值返回 `InlineTarget`，内部引用全部借用，不分配。调用：`src/exec/vm_opcodes.zig:567` 与 `:780`、`src/exec/tailcall_dispatch.zig:4793`（getter）与 `:4896`（proxy trap）、`src/exec/call_runtime.zig:106`、`src/exec/eval_entry.zig:283`。
 
 ### `resolveInlineTargetInto` (`src/exec/inline_calls.zig:285`)
 
@@ -366,7 +366,7 @@
 - **签名**：`pub fn segment(machine: *const Machine, bottom_exclusive: ?*Entry) MachineBacktraceView`。
 - **作用**：给一段 native→JS 回调造只覆盖它自己那截 Entry 的视图：从当时的栈顶往下到 `bottom_exclusive`（不含）为止，不含 L0，这样嵌套的原生跨界能拼成互不重叠的段。
 - **实现**：`include_l0 = false`、`bottom_exclusive` 取参数（通常是栅栏处的 `machine.top`）、`live` 保持默认 true。`frozen_top` 的初值分两臂：ReleaseFast 下写 `undefined`，其余构建写 `null`。注释给了理由——live 视图只读 `Machine.top` 永不读 `frozen_top`，而嵌套的原生再入总是先 `freeze` 再翻 `live`，所以该字段在第一次可能被读到之前必已初始化。
-- **所有权 / 错误 / 调用**：错误：无。所有权：借用 `*Machine`，`bottom_exclusive` 记录段底 Entry；ReleaseFast 下 `frozen_top` 留 undefined，靠 `freeze` 填。调用：`src/exec/host_invocation.zig:105`（常驻宿主 invocation 的 root view）与本文件 `:1073`（`NativeBoundaryScope.init`）。
+- **所有权 / 错误 / 调用**：错误：无。所有权：借用 `*Machine`，`bottom_exclusive` 记录段底 Entry；ReleaseFast 下 `frozen_top` 留 undefined，靠 `freeze` 填。调用：`src/exec/call_site.zig:105`（常驻宿主 invocation 的 root view）与本文件 `:1073`（`NativeBoundaryScope.init`）。
 
 ### `MachineBacktraceView.freeze` (`src/exec/inline_calls.zig:914`)
 
@@ -401,7 +401,7 @@
 - **签名**：`pub fn resolveMachineBacktraceView(data: ?*const anyopaque, index: usize) ?core.ActiveBacktraceSnapshot`。
 - **作用**：装进 `ActiveBacktraceFrame` 的 resolver 函数指针：core 的通用 backtrace 遍历器拿 `index` 来问，这里把它翻译成 Machine 段内的第 index 帧。
 - **实现**：把 `?*const anyopaque` 还原成 `*const MachineBacktraceView`（`data.?` 直接解包，安装时保证非 null），然后按视图状态选栈顶——`view.live` 为真读实时的 `view.machine.top`，已被 `freeze` 的外层视图则读 `view.frozen_top`——最后连同 `bottom_exclusive`、`include_l0`、`index` 交给 `resolveMachineBacktraceRange`。
-- **所有权 / 错误 / 调用**：错误：无。所有权：把 `?*const anyopaque` 还原成 `*const MachineBacktraceView`（视图归 scope 所有），live 时读 `machine.top`、否则读冻结的 `frozen_top`。调用：不被直接调用，而是作为 `BacktraceFrame.resolver` 函数指针安装：`src/exec/inline_calls.zig:1094`（`NativeBoundaryScope.push`）、`src/exec/host_invocation.zig:108`、`src/exec/zjs_vm.zig:507`。
+- **所有权 / 错误 / 调用**：错误：无。所有权：把 `?*const anyopaque` 还原成 `*const MachineBacktraceView`（视图归 scope 所有），live 时读 `machine.top`、否则读冻结的 `frozen_top`。调用：不被直接调用，而是作为 `BacktraceFrame.resolver` 函数指针安装：`src/exec/inline_calls.zig:1094`（`NativeBoundaryScope.push`）、`src/exec/call_site.zig:108`、`src/exec/zjs_vm.zig:507`。
 
 ### `nativeBacktraceSnapshot` (`src/exec/inline_calls.zig:978`)
 
@@ -520,14 +520,14 @@
 - **签名**：`pub inline fn isIntact(self: *const LeanFrame) bool`。
 - **作用**：问站点自有的这块 lean 帧模板还完不完好——callee 里的尾调用如果复用了这个物理 Entry，会把它改建成通用帧并抹掉标记，此时站点必须重新 `initInPlace` 才能再用。
 - **实现**：一行 `return self.entry.continuation_payload == marker`（`marker` 常量为 1，其它 native-boundary 帧该字段一律是 0）。清标记的动作发生在 `Entry.adoptContinuation`：尾调用接管续延时，`.native_boundary` 分支把 payload 写 0。
-- **所有权 / 错误 / 调用**：错误：无。所有权：只读 `entry.continuation_payload` 与 `marker` 比较，判断这块常驻 lean 帧有没有被后续调用改写过。调用：`src/exec/call_site.zig:139`、`src/exec/host_invocation.zig:155` 与 `:202`（复用前的校验）。
+- **所有权 / 错误 / 调用**：错误：无。所有权：只读 `entry.continuation_payload` 与 `marker` 比较，判断这块常驻 lean 帧有没有被后续调用改写过。调用：`src/exec/call_site.zig:139`、`src/exec/call_site.zig:155` 与 `:202`（复用前的校验）。
 
 ### `LeanFrame.initInPlace` (`src/exec/inline_calls.zig:1253`)
 
 - **签名**：`pub inline fn initInPlace(lean: *LeanFrame, rt: *core.JSRuntime, target: *const InlineTarget) bool`。
 - **作用**：把站点自有的 `LeanFrame` 按一个内联目标就地烘成模板：凡是每次调用都不变的几何与字段都在这里写死，之后每次跨界只剩「arena 切窗、拷实参、填与 arena 相关的窗口字段、加深度/字节预算、挂链」五件事。
 - **实现**：先过准入：`Machine.nativeBoundarySimpleEligible(target)` 不成立返回 false；`function.openVarRefCount() != 0` 返回 false；形状必须是已发布的空叶（`simple_inline_empty_leaf` 或 `raw_this_inline_empty_leaf`）或精确实参叶（`exact_args_leaf_kind != .none`），否则 false；空叶却带 capture 也返回 false。随后算几何：`frame_arg_count` 空叶为 0、否则取 `function.arg_count`，`stack_count = function.stack_size + 1`，`planned_stack_bytes = vm_call.bytecodeFrameAllocaSize(function, 0, true)`，`total_words = frame_arg_count + stack_count`，并把 `in_use` 置 false。再填内嵌 `Entry`：`return_action = .native_boundary`、`continuation_payload = marker`、`catch_target = null`、`arena_mark` 故意留 `undefined`（push 时才知道）、`frame` 写死 function/this/current_function/captures 与 `ownership`（capture 非空为 `.borrowed`、空则 `.owned`；storage 恒 `.borrowed`），`args` 与 `stack` 用 `undefined` 基址加固定长度先把**长度**定下来（注释：指针每次调用现切，长度不变），`teardown = { .simple, .special_return, .copy_argv }`，`native_caller = undefined value`，`prev = null`。成功返回 true。写成就地初始化 + bool 而不是返回 optional，是因为按值返回会把 300 字节的帧从 q 寄存器搬一遍。
-- **所有权 / 错误 / 调用**：错误：无，任何不合格（非 native-boundary simple、有 open var-ref、既不是空叶也不是精确实参叶、空叶却带 captures）都返回 false，调用方退回通用 push。所有权：就地初始化调用方持有的 `LeanFrame`——`entry.arena_mark` 留 undefined 待 push 时填，`continuation_payload` 写 `marker` 作为完好性凭证，`prev`/`native_caller` 置空；不分配任何内存。调用：`src/exec/host_invocation.zig:168`、`src/exec/call_site.zig:146`（`src/core/runtime.zig:1591` 的同名命中属 `classes.initInPlace`）。
+- **所有权 / 错误 / 调用**：错误：无，任何不合格（非 native-boundary simple、有 open var-ref、既不是空叶也不是精确实参叶、空叶却带 captures）都返回 false，调用方退回通用 push。所有权：就地初始化调用方持有的 `LeanFrame`——`entry.arena_mark` 留 undefined 待 push 时填，`continuation_payload` 写 `marker` 作为完好性凭证，`prev`/`native_caller` 置空；不分配任何内存。调用：`src/exec/call_site.zig:168`、`src/exec/call_site.zig:146`（`src/core/runtime.zig:1591` 的同名命中属 `classes.initInPlace`）。
 
 ### `Machine.init` (`src/exec/inline_calls.zig:1339`)
 
@@ -541,7 +541,7 @@
 - **签名**：`pub inline fn alreadyTargets(self: *const Machine, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) bool`。
 - **作用**：问这台常驻 Machine 现在挂的是不是正好就是要用的那组 (ctx, global, output)，是则可以跳过 `retarget`。
 - **实现**：三个指针相等的与：`self.ctx == ctx and self.global == global and self.output == output`。存在这道判断是因为不加时每次宿主调用都会写五条必然相同的 store（见 `retarget` 的注释）。
-- **所有权 / 错误 / 调用**：错误：无。所有权：只做三个指针比较（ctx / global / output），不改状态。调用：唯一调用方 `src/exec/host_invocation.zig:136`，用于决定常驻 Machine 是否需要 `retarget`。
+- **所有权 / 错误 / 调用**：错误：无。所有权：只做三个指针比较（ctx / global / output），不改状态。调用：唯一调用方 `src/exec/call_site.zig:136`，用于决定常驻 Machine 是否需要 `retarget`。
 
 ### `Machine.retarget` (`src/exec/inline_calls.zig:1362`)
 
@@ -555,7 +555,7 @@
 - **签名**：`pub fn deinitStorage(self: *Machine, rt: *core.JSRuntime) void`。
 - **作用**：释放 Machine 自己的 Entry 块存储（只在 depth 0 时允许）。
 - **实现**：断言 `depth == 0`；`async_completions.deinit(rt)`，逐块 `rt.memory.destroy` 已分配的 `chunk_count` 个 `[entries_per_chunk]Entry`，把 `chunk_count` 归零，再 `rt.memory.free` chunk 指针数组并置空切片。
-- **所有权 / 错误 / 调用**：错误：无（`assert(depth == 0)` 要求栈已空）。所有权：释放 Machine 自己的堆存储——`async_completions.deinit(rt)`、逐块 `rt.memory.destroy` Entry chunk、再 `free` chunk 指针数组并把 `chunks` 置空切片；帧内的 JSValue 不在这里处理。调用：本文件 `:1396`（`Machine.deinit`）与 `src/exec/host_invocation.zig:126`（常驻宿主 Machine 拆除）。
+- **所有权 / 错误 / 调用**：错误：无（`assert(depth == 0)` 要求栈已空）。所有权：释放 Machine 自己的堆存储——`async_completions.deinit(rt)`、逐块 `rt.memory.destroy` Entry chunk、再 `free` chunk 指针数组并把 `chunks` 置空切片；帧内的 JSValue 不在这里处理。调用：本文件 `:1396`（`Machine.deinit`）与 `src/exec/call_site.zig:126`（常驻宿主 Machine 拆除）。
 
 ### `Machine.deinit` (`src/exec/inline_calls.zig:1388`)
 
@@ -1031,7 +1031,7 @@
 - **签名**：`pub fn nativeBoundarySimpleEligible(target: *const InlineTarget) bool`。
 - **作用**：判定一个内联目标能不能在 native→JS 栅栏上用 simple 建帧——这是宿主跨界调用是否走瘦路径（含 `LeanFrame`）的总闸门。
 - **实现**：读 `target.call_facts.execution`，返回三个 FB 预计算资格位的或：`simple_inline_eligible`（sloppy）、`strict_simple_inline_eligible`（strict）、`strict_simple_snapshot_inline_eligible`（strict 且需要原始实参快照）。三者都不中说明 callee 需要通用序言，栅栏侧只能走权威路径。
-- **所有权 / 错误 / 调用**：错误：无。所有权：只读 `execution` 的三个 eligible 位。调用：13 处准入判断，如 `src/exec/host_invocation.zig:224`、`src/exec/call_runtime.zig:684`、本文件 `:1258`（`LeanFrame.initInPlace`）与 `:3813`、`:4127`；`src/exec/call_runtime.zig:547`、`:586`、`:640` 是断言形态。
+- **所有权 / 错误 / 调用**：错误：无。所有权：只读 `execution` 的三个 eligible 位。调用：13 处准入判断，如 `src/exec/call_site.zig:224`、`src/exec/call_runtime.zig:684`、本文件 `:1258`（`LeanFrame.initInPlace`）与 `:3813`、`:4127`；`src/exec/call_runtime.zig:547`、`:586`、`:640` 是断言形态。
 
 ### `Machine.pushNativeBoundaryCopiedArgs` (`src/exec/inline_calls.zig:3690`)
 
@@ -1305,7 +1305,7 @@
 - **签名**：`pub fn printProbe() void`。
 - **作用**：进程收尾时按需打印小函数内联的两个探针计数（`probe_prep` = 准备过多少次特化，`probe_take` = 真正命中执行多少次），供调优时看 take 率。原名 `writeProbeFile` 有误导——它不写文件，只打 stderr。
 - **实现**：`std.c.getenv("ZJS_INLINE_PROBE")` 未设置或值为空串直接返回（注释说明 zig 0.16 链接 libc 时没有 `std.posix.getenv`，只能用 `std.c.getenv`）。否则 `std.debug.print` 输出 `prep`、`take` 与整数百分比 `take*100/prep`（`prep == 0` 时打 0，避免除零）。
-- **所有权 / 错误 / 调用**：错误：无；`ZJS_INLINE_PROBE` 未设置或为空串直接返回。所有权：只读 `probe_prep`/`probe_take` 两个全局计数器并打印，不分配、不建根。调用：`src/internal_root.zig` 的 `printSmallInlineProbe` 包装（进程退出时打印探针计数）。
+- **所有权 / 错误 / 调用**：错误：无；`ZJS_INLINE_PROBE` 未设置或为空串直接返回。所有权：只读 `probe_prep`/`probe_take` 两个全局计数器并打印，不分配、不建根。调用：`src/root.zig` 的 `printSmallInlineProbe` 包装（进程退出时打印探针计数）。
 
 ### `decodeCallerState` (`src/exec/small_inline.zig:137`)
 

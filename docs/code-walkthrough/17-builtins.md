@@ -38,8 +38,8 @@ op_call / nativeMethodFastDispatch
 
 ### 3. Atomics.waitAsync 线程规则
 
-外线程的 `Atomics.notify` **只允许**：改 `AtomicsWaiter.completion` 标量、`cond.signal`、`signalHostCompletion`。  
-**禁止**：分配、改 Promise、改 RealmRef、跑 GC。  
+外线程的 `Atomics.notify` **只允许**：改 `AtomicsWaiter.completion` 标量、`cond.signal`、`signalHostCompletion`。
+**禁止**：分配、改 Promise、改 RealmRef、跑 GC。
 owner 线程的事件循环才 `processExpiredAtomicsWaiters` → typed job → `atomicsRunAsyncWaiterCompletion` 结算 Promise。
 
 ## 子文档
@@ -62,6 +62,6 @@ owner 线程的事件循环才 `processExpiredAtomicsWaiters` → typed job → 
 
 ## 覆盖核对
 
-- 清单函数数: 1031（子文档标题之和；另含零函数文件 `src/exec/exceptions.zig`）
+- 清单函数数: 1031（子文档标题之和；另含零函数文件 `src/exec/exception_ops.zig`）
 - 本文标题覆盖: 0（索引，函数在子文档）
 - 未覆盖: 无
