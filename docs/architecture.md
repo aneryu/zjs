@@ -200,6 +200,11 @@ File and function naming conventions in `exec/`:
 | `promise_ops.zig` | Promise abstract operations |
 | `standard_globals.zig` | global bootstrap |
 
+Runtime call flow, role layers, hubs, and load-bearing `@import`
+cycles: [exec-dependency-graph.md](exec-dependency-graph.md). Zig allows
+circular imports, so the compile graph is not a DAG; that page maps who
+calls whom on eval / `[[Call]]` / native / construct.
+
 Promise object state is `src/core/promise.zig`. Job-queue primitives are
 `src/core/jobs.zig`. There is no `src/exec/eval.zig` and no `src/exec/promise.zig`.
 

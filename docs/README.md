@@ -34,7 +34,8 @@ recover them from git history when needed.
 - [Guide](../GUIDE.md): Zig engineering rules and the validation command ladder.
 - [Architecture](architecture.md): current source tour, layer map, and the
   Stack Bytecode VM Status chapter. Evolution scope lives in the
-  [Engine Evolution Plan](engine-evolution-plan.md).
+  [Engine Evolution Plan](engine-evolution-plan.md). Exec runtime call
+  flow and import hubs: [exec-dependency-graph.md](exec-dependency-graph.md).
 - [源码逐函数讲解](code-walkthrough/README.md): Chinese function-level
   walkthrough of `src/` and the build/test entry points.
 - [GC invariants](gc-invariants.md): rules the production tracing collector

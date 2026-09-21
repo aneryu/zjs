@@ -26342,3 +26342,97 @@ test "Math.min/max and hasOwnProperty exec_direct arms keep the qjs semantics on
         "true false true\n" ++
         "true true\n");
 }
+
+test "native callee realm constructor conversion errors" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    var bytes: [4000]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    _ = try js.evalWithOutput(
+        \\const R = $262.createRealm().global;
+        \\const cases = [
+        \\ ['Date', () => new R.Date(Symbol())],
+        \\ ['String', () => new R.String(Symbol())],
+        \\ ['Number', () => new R.Number(Symbol())],
+        \\ ['Promise', () => new R.Promise(0)],
+        \\ ['Map', () => new R.Map(0)],
+        \\ ['Set', () => new R.Set(0)],
+        \\ ['WeakMap', () => new R.WeakMap(0)],
+        \\ ['WeakRef', () => new R.WeakRef(0)],
+        \\ ['FinalizationRegistry', () => new R.FinalizationRegistry(0)],
+        \\ ['DataView', () => new R.DataView(0)],
+        \\ ['ArrayBuffer', () => new R.ArrayBuffer(Symbol())],
+        \\ ['RegExp', () => new R.RegExp(Symbol())],
+        \\ ['Error', () => new R.Error(Symbol())]
+        \\];
+        \\for (const [name, fn] of cases) {
+        \\  try { fn(); print(name + ':no-error'); }
+        \\  catch (e) { print(name + ':' + (e instanceof R.TypeError ? 'foreign' : e instanceof TypeError ? 'caller' : e.name)); }
+        \\}
+    , &out);
+    try std.testing.expectEqualStrings("Date:foreign\nString:foreign\nNumber:foreign\nPromise:foreign\nMap:foreign\nSet:foreign\nWeakMap:foreign\nWeakRef:foreign\nFinalizationRegistry:foreign\nDataView:foreign\nArrayBuffer:foreign\nRegExp:foreign\nError:foreign\n", out.buffered());
+}
+
+test "native callee realm call conversion errors and user exceptions" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    var bytes: [2000]u8 = undefined;
+    var out = std.Io.Writer.fixed(&bytes);
+    _ = try js.evalWithOutput(
+        \\const R = $262.createRealm().global;
+        \\const cases = [
+        \\ ['Number', () => R.Number(Symbol())],
+        \\ ['RegExp', () => R.RegExp(Symbol())],
+        \\ ['Error', () => R.Error(Symbol())],
+        \\ ['Math.abs', () => R.Math.abs(Symbol())],
+        \\ ['JSON.parse', () => R.JSON.parse('{')]
+        \\];
+        \\for (const [name, fn] of cases) {
+        \\  try { fn(); print(name + ':no-error'); }
+        \\  catch (e) { print(name + ':' + (Object.getPrototypeOf(e) === R[e.name].prototype ? 'foreign' : 'caller')); }
+        \\}
+        \\const sentinel = new TypeError('user');
+        \\let caught = false;
+        \\try { new R.Date({[Symbol.toPrimitive](){throw sentinel}}); }
+        \\catch (e) { caught = true; assert.sameValue(e, sentinel); }
+        \\assert.sameValue(caught, true);
+        \\assert.sameValue(Function.prototype(), undefined);
+    , &out);
+    try std.testing.expectEqualStrings("Number:foreign\nRegExp:foreign\nError:foreign\nMath.abs:foreign\nJSON.parse:foreign\n", out.buffered());
+}
+
+test "native callee realm preserves argument evaluation and constructor forwarding" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    _ = try js.eval(
+        \\const R = $262.createRealm().global;
+        \\function expectError(C, fn) {
+        \\  let caught = false;
+        \\  try { fn(); } catch (e) {
+        \\    caught = true;
+        \\    assert.sameValue(Object.getPrototypeOf(e), C.prototype);
+        \\  }
+        \\  assert.sameValue(caught, true);
+        \\}
+        \\// Evaluating the argument still belongs to the calling code.
+        \\expectError(TypeError, () => new R.Date(+Symbol()));
+        \\expectError(TypeError, () => new R.Math.abs());
+        \\// The constructor's own conversion belongs to its realm, including
+        \\// the error after a user coercion callback returns an invalid value.
+        \\expectError(R.TypeError, () => new R.Date({[Symbol.toPrimitive]() { return {}; }}));
+        \\expectError(R.TypeError, () => new (R.Date.bind(null))(Symbol()));
+        \\expectError(R.TypeError, () => new (new Proxy(R.Date, {}))(Symbol()));
+        \\function LocalTarget() {}
+        \\expectError(R.TypeError, () => Reflect.construct(R.Date, [Symbol()], LocalTarget));
+        \\assert.sameValue(Object.getPrototypeOf(Reflect.construct(R.Date, [0], LocalTarget)), LocalTarget.prototype);
+        \\assert.sameValue(Object.getPrototypeOf(new R.Date(0)), R.Date.prototype);
+        \\// A callback's own exception is never rebuilt in the callee realm.
+        \\const sentinel = new TypeError('user');
+        \\for (const run of [x => R.Number(x), x => new R.Number(x), x => new R.Date(x)]) {
+        \\  let caught = false;
+        \\  try { run({[Symbol.toPrimitive]() { throw sentinel; }}); }
+        \\  catch (e) { caught = true; assert.sameValue(e, sentinel); }
+        \\  assert.sameValue(caught, true);
+        \\}
+    );
+}

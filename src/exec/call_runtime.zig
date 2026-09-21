@@ -1000,7 +1000,10 @@ noinline fn callNativeCallableObject(
         args,
         caller_function,
         caller_frame,
-    );
+    ) catch |err| {
+        try builtin_dispatch.materializeRuntimeError(view.realm, view.global, err);
+        return err;
+    };
 }
 
 fn callValueOrBytecodeDispatch(
@@ -2166,6 +2169,34 @@ fn constructValueOrBytecodeWithNewTargetMode(
 }
 
 fn constructValueOrBytecodeWithNewTargetAfterInterruptPoll(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    func: core.JSValue,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+    new_target: core.JSValue,
+    copy_argv: bool,
+) HostError!core.JSValue {
+    if (object_ops.callableObjectFromValue(func)) |function_object| {
+        if (function_object.class_id == core.class.ids.c_function and try isConstructorLike(ctx, func)) {
+            // Rejecting a non-constructor stays in the caller environment.
+            // Like V8's InvokeFunctionWithNewTarget, enter the callee context
+            // before running the native constructor, including argument coercion.
+            // Argument expressions have already been evaluated by the caller.
+            // Bound functions and proxies forward before selecting this view.
+            const view = try builtin_dispatch.finalCallableRealmView(ctx, function_object);
+            return constructValueOrBytecodeInEnvironment(view.realm, output, view.global, func, args, caller_function, caller_frame, new_target, copy_argv) catch |err| {
+                try builtin_dispatch.materializeRuntimeError(view.realm, view.global, err);
+                return err;
+            };
+        }
+    }
+    return constructValueOrBytecodeInEnvironment(ctx, output, global, func, args, caller_function, caller_frame, new_target, copy_argv);
+}
+
+fn constructValueOrBytecodeInEnvironment(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
