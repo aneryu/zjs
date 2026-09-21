@@ -19,7 +19,6 @@ const AddressRegistry = @import("gc_address_registry.zig");
 const runtime_mod = @import("runtime.zig");
 const object_mod = @import("object.zig");
 const JSRuntime = runtime_mod.JSRuntime;
-const diag = @import("gc_conservative_diag.zig");
 
 pub const target_supported = switch (builtin.cpu.arch) {
     .aarch64 => switch (builtin.os.tag) {
@@ -270,10 +269,6 @@ fn scanWords(
     metrics.candidates += candidates;
     while (addr + @sizeOf(usize) <= hi) : (addr += @sizeOf(usize)) {
         const word = @as(*const usize, @ptrFromInt(addr)).*;
-        if (comptime gc.roots_diag_enabled) {
-            diag.current_word.addr = addr;
-            diag.current_word.word = word;
-        }
         // Shade every gc object the word lands inside, not just one. A word
         // sitting where object A's one-past-end meets object B's metadata
         // prefix is a live reference to whichever of the two the native code
@@ -316,12 +311,6 @@ pub fn spillRegistersAndScan(
     const sp = dumpRegisters(&image);
     std.mem.doNotOptimizeAway(&image);
     const high = scanHigh(rt, sp);
-    if (comptime gc.roots_diag_enabled) {
-        diag.current_word.sp = sp;
-        diag.current_word.image_lo = @intFromPtr(&image);
-        diag.current_word.image_hi = @intFromPtr(&image) + @sizeOf(SpillImage);
-        diag.current_word.high = high;
-    }
     scanWords(rt, sp, high, scan_filter, metrics, shade, shade_ctx);
 }
 

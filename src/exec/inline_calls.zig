@@ -1307,7 +1307,11 @@ pub const Machine = struct {
     output: ?*std.Io.Writer,
     global: *core.Object,
     /// Borrowed invocation root, used when the inline chain reaches depth 0.
-    l0: *const L0State,
+    /// Mutable because the generator shell it holds is a ROOT: a copying
+    /// young generation relocates that object and writes the new address back
+    /// through this slot. A `*const` view made the slot read-only, and the
+    /// shell's continuation was then reached through a stale pointer.
+    l0: *L0State,
     /// Chunked entry storage; only the first `chunk_count` slots are valid.
     /// The chunk-pointer array is heap-allocated lazily on the first inline
     /// push (capacity `max_chunks`), so a Machine that never pushes carries
@@ -1336,7 +1340,7 @@ pub const Machine = struct {
     /// through `NativeBoundaryScope`. Layout of the bundle itself is the
     /// measured one in tailcall_dispatch.zig.
     vm: tailcall_dispatch.Vm,
-    pub fn init(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, l0: *const L0State) Machine {
+    pub fn init(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, l0: *L0State) Machine {
         if (comptime builtin.is_test) TestMetricStorage.metrics.machine_inits += 1;
         var machine: Machine = .{
             .ctx = ctx,

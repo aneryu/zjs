@@ -4,6 +4,8 @@ This is a map of the tree as it exists now. QuickJS remains the semantic
 reference. Validation commands live in [GUIDE.md](../GUIDE.md) Part B.6; this
 page does not repeat them. Function-level Chinese walkthrough of every
 `src/` function: [code-walkthrough/README.md](code-walkthrough/README.md).
+Shipped ReleaseFast binary size by layer and function:
+[binary-size.md](binary-size.md).
 
 Start from the layer you are changing. Do not read `parser.zig` or `object.zig`
 from the first line to the last — those files are large

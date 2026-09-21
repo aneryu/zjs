@@ -15,7 +15,6 @@ const std = @import("std");
 const JSRuntime = @import("runtime.zig").JSRuntime;
 
 const gc = @import("gc.zig");
-const gc_audit_print = @import("gc_audit_print.zig");
 const carrier = @import("gc_carrier.zig");
 const gc_space = @import("gc_space.zig");
 const memory = @import("memory.zig");
@@ -47,7 +46,6 @@ const kindIsOwnedStorageCell = gc.kindIsOwnedStorageCell;
 const isBlockCellHeader = Registry.isBlockCellHeader;
 const trace_object_shape_summary_mask = gc.trace_object_shape_summary_mask;
 const metadata_prefix_size = gc.metadata_prefix_size;
-const heap_accounting_oracle_enabled = gc.heap_accounting_oracle_enabled;
 const headerCondemned = gc.headerCondemned;
 const kindIsBlockCellKind = gc.kindIsBlockCellKind;
 const CarrierStateMask = gc.CarrierStateMask;
@@ -233,7 +231,21 @@ pub fn verifyObjectPropertyStorageLayouts(self: *const Registry, rt: *JSRuntime)
         // bytes as a header).
         if (owner.propertyStoragePointerIsExternal(storage)) {
             const cell_header: *const Header = @ptrCast(@alignCast(storage));
-            if (!self.containsHeader(cell_header)) return error.DanglingPropertyStorageCell;
+            if (!self.containsHeader(cell_header)) {
+                std.debug.print("DIAG dangling owner={x} o_nursery={} o_block={} o_marked={} o_young={} | cell={x} c_nursery={} c_block={} c_accounted={} c_kind={d}\n", .{
+                    @intFromPtr(header),
+                    header.metaConst().alloc_info.nursery,
+                    isBlockCellHeader(header),
+                    self.headerMarked(header),
+                    header.metaConst().flags.young,
+                    @intFromPtr(cell_header),
+                    cell_header.metaConst().alloc_info.nursery,
+                    isBlockCellHeader(cell_header),
+                    cell_header.metaConst().alloc_info.heap_accounted,
+                    @intFromEnum(cell_header.metaConst().flags.kind),
+                });
+                return error.DanglingPropertyStorageCell;
+            }
             if (cell_header.metaConst().flags.kind != .property_storage)
                 return error.InvalidPropertyStorageKind;
         }
@@ -249,18 +261,12 @@ pub fn verifyObjectPropertyStorageLayouts(self: *const Registry, rt: *JSRuntime)
                 // which adoption path forgot its barrier.
                 // The cell may be unmapped memory by now: name it, do not
                 // read it.
-                gc_audit_print.print(&.{
-                    .{ .text = "gc: PROPERTY STORAGE AUDIT: array owner class=" },
-                    .{ .dec = owner.class_id },
-                    .{ .text = " fast_array=" },
-                    .{ .text = gc_audit_print.boolText(owner.flags.fast_array) },
-                    .{ .text = " capacity=" },
-                    .{ .dec = owner.arrayArm().*.capacity },
-                    .{ .text = " young=" },
-                    .{ .text = gc_audit_print.boolText(header.metaConst().flags.young) },
-                    .{ .text = " cell=0x" },
-                    .{ .hex = @intFromPtr(cell_header) },
-                    .{ .text = "\n" },
+                std.debug.print("gc: PROPERTY STORAGE AUDIT: array owner class={d} fast_array={} capacity={d} young={} cell=0x{x}\n", .{
+                    owner.class_id,
+                    owner.flags.fast_array,
+                    owner.arrayArm().*.capacity,
+                    header.metaConst().flags.young,
+                    @intFromPtr(cell_header),
                 });
                 return error.DanglingArrayStorageCell;
             }
@@ -328,7 +334,7 @@ pub fn recordMajorSlicePause(self: *Registry, ns: u64, kind: SliceKind) void {
 /// `recordSuccess` minus the ring push: the slices already recorded
 /// themselves, and pushing the cycle total as one more sample would count
 /// the same nanoseconds twice.
-pub fn recordIncrementalCycleSuccess(self: *Registry, result: CollectionResult) void {
+pub fn recordCycleSuccess(self: *Registry, result: CollectionResult) void {
     self.finishCycleEnvelope();
     self.stats.last_failure = .none;
     self.stats.cycle_gc_count +|= 1;
@@ -504,28 +510,20 @@ fn verifyPublishedHeaderRepresentation(
     const meta = header.metaConst();
     const kind = expected_kind orelse meta.flags.kind;
     verifyMetadataSemantics(meta, kind, .registry_published) catch |err| {
-        var alloc_info_buf: [16]u8 = undefined;
-        var flags_buf: [16]u8 = undefined;
-        var lifetime_buf: [16]u8 = undefined;
-        gc_audit_print.print(&.{
-            .{ .text = "gc: REPRESENTATION HEADER population=" },
-            .{ .text = if (expected_kind == null) "live" else "doomed" },
-            .{ .text = " header=0x" },
-            .{ .hex = @intFromPtr(header) },
-            .{ .text = " kind=" },
-            .{ .text = @tagName(kind) },
-            .{ .text = " size_class=" },
-            .{ .dec = meta.size_class },
-            .{ .text = " alloc_info=0x" },
-            .{ .text = gc_audit_print.hexPad(@as(u8, @bitCast(meta.alloc_info)), 2, &alloc_info_buf) },
-            .{ .text = " flags=0x" },
-            .{ .text = gc_audit_print.hexPad(@as(u8, @bitCast(meta.flags)), 2, &flags_buf) },
-            .{ .text = " lifetime=0x" },
-            .{ .text = gc_audit_print.hexPad(@as(u32, @bitCast(meta.lifetime)), 8, &lifetime_buf) },
-            .{ .text = " error=" },
-            .{ .text = @errorName(err) },
-            .{ .text = "\n" },
-        });
+        std.debug.print(
+            "gc: REPRESENTATION HEADER population={s} header=0x{x} kind={s} size_class={d} " ++
+                "alloc_info=0x{x:0>2} flags=0x{x:0>2} lifetime=0x{x:0>8} error={s}\n",
+            .{
+                if (expected_kind == null) "live" else "doomed",
+                @intFromPtr(header),
+                @tagName(kind),
+                meta.size_class,
+                @as(u8, @bitCast(meta.alloc_info)),
+                @as(u8, @bitCast(meta.flags)),
+                @as(u32, @bitCast(meta.lifetime)),
+                @errorName(err),
+            },
+        );
         return err;
     };
 
@@ -659,13 +657,13 @@ pub fn verifyMajorRetirementCommit(self: *Registry) InvariantError!void {
 }
 
 pub fn verifyHeapAccounting(self: *const Registry, rt: *JSRuntime) InvariantError!void {
-    if (comptime carrier.extent_identity_enabled) {
+    if (comptime carrier.audit_enabled) {
         self.memory.gc_extent_identity.verify() catch return error.CarrierOldNewMismatch;
     }
-    if (comptime carrier.lifecycle_state_enabled) {
+    if (comptime carrier.audit_enabled) {
         self.memory.gc_extent_lifecycle.verify() catch return error.CarrierOldNewMismatch;
     }
-    if (comptime carrier.block_generation_enabled) {
+    if (comptime carrier.audit_enabled) {
         self.block_heap.verifyGenerationAuthority() catch return error.CarrierOldNewMismatch;
     }
     // The extent page index is what makes a conservative candidate
@@ -675,7 +673,7 @@ pub fn verifyHeapAccounting(self: *const Registry, rt: *JSRuntime) InvariantErro
     // free page runs. A run cached above the bitmap's truth hands the
     // same pages to two extents.
     self.block_heap.verifyMediumBuckets() catch return error.CarrierOldNewMismatch;
-    if (comptime carrier.lifecycle_state_enabled) {
+    if (comptime carrier.audit_enabled) {
         self.block_heap.verifyLifecycleAuthority() catch return error.CarrierOldNewMismatch;
         self.block_heap.verifyAccountingCellsAllowing(
             representation.block_cell_size_class,
@@ -703,12 +701,12 @@ pub fn verifyHeapAccounting(self: *const Registry, rt: *JSRuntime) InvariantErro
         } else {
             old_live_bytes = std.math.add(usize, old_live_bytes, bytes) catch std.math.maxInt(usize);
         }
-        if (comptime heap_accounting_oracle_enabled) {
+        if (comptime gc.carrier_audit_enabled) {
             const raw = self.heap_accounting_oracle.raw.get(@intFromPtr(header)) orelse
                 return error.CarrierRawOwnedMismatch;
             if (!raw.published) return error.CarrierOldNewMismatch;
             if (raw.accounted_bytes != bytes) return error.CarrierByteMismatch;
-            if (comptime carrier.authority_audit_enabled) {
+            if (comptime carrier.audit_enabled) {
                 const handle = self.allocationHandle(header) orelse return error.CarrierOldNewMismatch;
                 const resolved = self.resolveExact(
                     handle,
@@ -742,13 +740,13 @@ pub fn verifyHeapAccounting(self: *const Registry, rt: *JSRuntime) InvariantErro
     // The expected value is lifecycle-maintained, not another instance of
     // the ownership iterator above. An accounted header that loses every
     // owner container must therefore leave the walk short and fail here.
-    if (comptime heap_accounting_oracle_enabled) {
+    if (comptime gc.carrier_audit_enabled) {
         const oracle = &self.heap_accounting_oracle;
         if (heap_live_bytes != oracle.heap_live_bytes) return error.HeapLiveBytesMismatch;
         if (old_live_bytes != oracle.old_live_bytes) return error.OldLiveBytesMismatch;
         if (large_object_bytes != oracle.large_object_bytes) return error.LargeObjectBytesMismatch;
 
-        if (comptime carrier.authority_audit_enabled) {
+        if (comptime carrier.audit_enabled) {
             // independent raw -> new owned authority
             var raw_it = oracle.raw.valueIterator();
             while (raw_it.next()) |raw| {
@@ -766,7 +764,7 @@ pub fn verifyHeapAccounting(self: *const Registry, rt: *JSRuntime) InvariantErro
         }
 
         // new extent authority -> independent raw
-        if (comptime carrier.extent_identity_enabled) {
+        if (comptime carrier.audit_enabled) {
             var extent_it = self.memory.gc_extent_identity.records.valueIterator();
             while (extent_it.next()) |record| {
                 const raw = oracle.raw.get(record.base) orelse return error.CarrierRawOwnedMismatch;
@@ -776,7 +774,7 @@ pub fn verifyHeapAccounting(self: *const Registry, rt: *JSRuntime) InvariantErro
                 }
             }
         }
-        if (comptime carrier.lifecycle_state_enabled) {
+        if (comptime carrier.audit_enabled) {
             var lifecycle_it = self.memory.gc_extent_lifecycle.records.iterator();
             while (lifecycle_it.next()) |entry| {
                 const raw = oracle.raw.get(entry.key_ptr.*) orelse return error.CarrierRawOwnedMismatch;
@@ -798,7 +796,7 @@ pub fn verifyHeapAccounting(self: *const Registry, rt: *JSRuntime) InvariantErro
                 if (raw.generation != handle.generation) audit.mismatch = error.CarrierGenerationMismatch;
             }
         };
-        if (comptime carrier.block_generation_enabled and carrier.lifecycle_state_enabled) {
+        if (comptime carrier.audit_enabled and carrier.audit_enabled) {
             var block_audit: BlockAudit = .{ .oracle = oracle };
             self.block_heap.forEachOwnedIdentity(metadata_prefix_size, &block_audit, BlockAudit.visit);
             if (block_audit.mismatch) |err| return err;

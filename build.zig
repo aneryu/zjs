@@ -40,25 +40,12 @@ pub fn build(b: *std.Build) void {
     // `zig build test -Dzjs_ownership_audit=true`; see
     // docs/borrowed_atom_audit.md §6.
     const zjs_ownership_audit = b.option(bool, "zjs_ownership_audit", "Quarantine the atom slots retired by the last sweep so borrowed-atom use-after-free trips an assertion instead of being masked by slot reuse (audit tier; never ReleaseFast)") orelse false;
-    // TGC R3 roots diagnosis. Links scalar
-    // ValueRootFrames in production, attributes every object the conservative
-    // scan alone kept alive (`--gc-stats` "conservative-only census"), and
-    // arms the L3 unbarriered-store probe in the ReleaseFast binary. Never on
-    // in a shipped or measured artifact.
-    const gc_roots_diag_option = b.option(
-        bool,
-        "zjs_gc_roots_diag",
-        "DIAGNOSTIC precise-scalar-root linking + conservative-only root census (default off)",
-    );
-    const gc_roots_diag = gc_roots_diag_option orelse false;
-
     const engine_option_inputs: config.EngineOptionInputs = .{
         .enable_opcode_profile = zjs_enable_opcode_profile,
         .compiler_layout = zjs_compiler_layout,
         .oom_coverage = zjs_oom_coverage,
         .force_gc = zjs_force_gc,
         .ownership_audit = zjs_ownership_audit,
-        .gc_roots_diag = gc_roots_diag,
     };
     const engine_options = config.addEngineOptions(b, engine_option_inputs);
 

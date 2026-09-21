@@ -74,8 +74,32 @@ pub inline fn atom(vis: anytype, id: atom_mod.Atom) !void {
 
 /// TGC S4 spec 2.2: an owner's edge to a bare storage cell (property
 /// entries, array elements, payload slices).
-pub inline fn storageCell(vis: anytype, header: *gc.Header) !void {
-    return call(vis, "storageCell", header);
+/// A storage cell named by a raw pointer inside its owner.
+///
+/// `slot` is the owner's pointer itself, read as an address. Every such
+/// pointer IS the cell's `Header` address (each `*CellHeader` helper is a bare
+/// `@ptrCast`), so a collector that relocates the cell writes the new address
+/// straight back through the slot. Handing over a copy of the pointer instead
+/// leaves the owner naming the old cell, which is a dangling read the moment
+/// anything moves.
+pub const CellSlot = struct {
+    slot: *usize,
+    /// Low bits the owner keeps in the stored word. Zero for a plain pointer;
+    /// `bytecode_function_aux_tag` for the one owner that tags.
+    tag: usize = 0,
+
+    pub inline fn address(self: CellSlot) usize {
+        return self.slot.* & ~self.tag;
+    }
+
+    pub inline fn rebind(self: CellSlot, moved: usize) void {
+        self.slot.* = moved | (self.slot.* & self.tag);
+    }
+};
+
+pub inline fn storageCell(vis: anytype, edge: CellSlot) !void {
+    if (edge.address() == 0) return;
+    return call(vis, "storageCell", edge);
 }
 
 pub inline fn module(vis: anytype, record: *module_mod.ModuleRecord) !void {
@@ -93,9 +117,13 @@ pub inline fn finalizationCell(vis: anytype, entry: *object_payloads.Finalizatio
 /// A string body's child edges: the rope children and the out-of-line
 /// buffer cell.  Bodies are reached through `JSValue` slots, so the helper
 /// takes the value form the visitors understand.
-pub inline fn stringBody(vis: anytype, body: *string.String) !void {
-    var slot = body.value();
-    try value(vis, &slot);
+/// A string body named by an optional `*String` field. Same contract as
+/// `storageCell`: the owner's slot, so a relocation is written back.
+pub inline fn stringBody(vis: anytype, slot: *?*string.String) !void {
+    const body = slot.* orelse return;
+    var boxed = body.value();
+    try value(vis, &boxed);
+    slot.* = boxed.asStringBodyRaw();
 }
 
 test "call skips undeclared methods and adapts to void or fallible ones" {

@@ -948,11 +948,7 @@ fn dumpGcPanels(writer: *std.Io.Writer, runtime: *zjs.JSRuntime, runtime_options
         try dumpGcBlockCensus(writer, &runtime.gc);
     }
     try dumpGcMarkFootprint(writer, runtime);
-    try dumpGcPhaseTotals(writer, &runtime.gc);
     try dumpGcGenerationStats(writer, &runtime.gc);
-    if (comptime engine.core.gc.roots_diag_enabled) {
-        try engine.core.gc_conservative_diag.reportGlobal(writer);
-    }
     try dumpGcDoomedState(
         writer,
         if (runtime_options.gc_gate_settle) "settled" else "endpoint",
@@ -1258,32 +1254,23 @@ fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *engine.core.gc.Regis
         .{ "gc: minor young-at-start mean ", mean_young },
         .{ ", max ", st.young_at_start_max },
     }, "\n");
-    if (engine.core.gc.verify_minor) {
+    if (engine.core.gc.forensics.verifying()) {
         try writeCounterLine(writer, &.{
             .{ "gc: conservative-only young ", st.conservative_only_young },
             .{ " over ", st.minor_collections },
         }, " verified minors\n");
     } else {
-        try writer.writeAll("gc: conservative-only young unavailable (set ZJS_GC_VERIFY_MINOR=1)\n");
+        try writer.writeAll("gc: conservative-only young unavailable (set ZJS_GC_VERIFY=1)\n");
     }
     const cs = registry.incremental.stats;
     try writeCounterLine(writer, &.{
-        .{ "gc: exact-target marking barrier calls ", cs.barrier_calls },
-        .{ ", exit marked-target ", cs.barrier_marked_target },
-        .{ ", exit unpublished-owner ", cs.barrier_unpublished_owner },
-        .{ ", exit unpublished-target ", cs.barrier_unpublished_target },
-        .{ ", requeued-owner ", cs.barrier_requeued_owner },
-        .{ ", shaded-target ", cs.shaded },
+        .{ "gc: marking barrier calls ", cs.barrier_calls },
     }, "\n");
     try writeCounterLine(writer, &.{
-        .{ "gc: incremental doomed condemned headers ", cs.doomed_condemned_headers },
-        .{ ", destroyed counted objects ", cs.doomed_destroyed_objects },
+        .{ "gc: destroyed counted objects ", cs.doomed_destroyed_objects },
     }, "\n");
     try writeCounterLine(writer, &.{
-        .{ "gc: incremental major cycles completed ", cs.cycles_completed },
-        .{ ", aborted ", cs.cycles_aborted },
-        .{ ", forced ", cs.forced_finishes },
-        .{ ", mark steps ", cs.increments },
+        .{ "gc: major cycles completed ", cs.cycles_completed },
         .{ ", cycle STW last ", cs.last_cycle_stw_ns },
         .{ " ns max ", cs.max_cycle_stw_ns },
     }, " ns\n");
@@ -1297,24 +1284,7 @@ fn dumpGcGenerationStats(writer: *std.Io.Writer, registry: *engine.core.gc.Regis
         .{ ", B/T-x1000000 ", engine.core.gc.incremental.ratioMillionthsCeil(cs.envelope_max_begin_bytes, cs.envelope_max_threshold_bytes) },
         .{ ", P/T-x1000000 ", engine.core.gc.incremental.ratioMillionthsCeil(cs.envelope_max_peak_bytes, cs.envelope_max_threshold_bytes) },
         .{ ", P/S-x1000000 ", engine.core.gc.incremental.ratioMillionthsCeil(cs.envelope_max_peak_bytes, cs.envelope_max_start_bytes) },
-        .{ ", forced ", cs.forced_finishes },
     }, "\n");
-    try writeCounterLine(writer, &.{
-        .{ "gc: incremental STW phase-segment max ns begin ", cs.segment_max_ns[0] },
-        .{ ", increment ", cs.segment_max_ns[1] },
-        .{ ", destroy ", cs.segment_max_ns[2] },
-        .{ ", finish ", cs.segment_max_ns[3] },
-    }, "\n");
-    try writeCounterLine(writer, &.{
-        .{ "gc: incremental STW phase totals begin ", cs.total_stw_by_kind[0] },
-        .{ " ns/", cs.total_segments_by_kind[0] },
-        .{ " segments, increment ", cs.total_stw_by_kind[1] },
-        .{ " ns/", cs.total_segments_by_kind[1] },
-        .{ " segments, destroy ", cs.total_stw_by_kind[2] },
-        .{ " ns/", cs.total_segments_by_kind[2] },
-        .{ " segments, finish ", cs.total_stw_by_kind[3] },
-        .{ " ns/", cs.total_segments_by_kind[3] },
-    }, " segments\n");
 }
 
 fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {
@@ -1373,46 +1343,6 @@ fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const engine.core.gc.
     try writeCounterLine(writer, &.{
         .{ "gc: process heap trim attempts ", st.malloc_trim_attempts },
         .{ ", successes ", st.malloc_trim_successes },
-    }, "\n");
-}
-
-fn dumpGcPhaseTotals(writer: *std.Io.Writer, registry: *const engine.core.gc.Registry) !void {
-    const ph = registry.incremental.stats;
-    // Two finish-side timers added by TGC S0 go on the reconciliation row
-    // below so this row keeps its eight fields.
-    try writeCounterLine(writer, &.{
-        .{ "gc: incremental subphase ns totals begin-clear ", ph.phase_begin_clear_ns },
-        .{ ", begin-precise-seed ", ph.phase_begin_precise_seed_ns },
-        .{ ", begin-conservative-seed ", ph.phase_begin_conservative_seed_ns },
-        .{ ", begin-retire ", ph.phase_begin_retire_ns },
-        .{ ", finish-remark-total ", ph.phase_finish_remark_ns },
-        .{ ", finish-conservative-seed-subset ", ph.phase_finish_conservative_seed_ns },
-        .{ ", finish-weak ", ph.phase_finish_weak_ns },
-        .{ ", finish-condemn ", ph.phase_finish_condemn_ns },
-    }, "\n");
-    // Reconciliation against the STW rows above: both are cumulative over
-    // the run, so the residuals are what the subphase timers do not cover
-    // (the `nowNanos` reads around each pause, and for begin the frontier
-    // seeding between clear and retire).
-    const begin_total = ph.total_stw_by_kind[@intFromEnum(engine.core.gc.Registry.SliceKind.begin)];
-    const finish_total = ph.total_stw_by_kind[@intFromEnum(engine.core.gc.Registry.SliceKind.finish)];
-    const begin_sum = ph.phase_begin_clear_ns +| ph.phase_begin_precise_seed_ns +| ph.phase_begin_conservative_seed_ns +| ph.phase_begin_retire_ns;
-    const finish_sum = ph.phase_finish_init_ns +| ph.phase_finish_remark_ns +| ph.phase_finish_weak_ns +| ph.phase_finish_condemn_ns +| ph.phase_finish_tail_ns;
-    try writeCounterLine(writer, &.{
-        .{ "gc: incremental subphase reconciliation finish-init ", ph.phase_finish_init_ns },
-        .{ ", finish-tail ", ph.phase_finish_tail_ns },
-        .{ "; begin STW ", begin_total },
-        .{ " - subphases ", begin_sum },
-        .{ " = other ", begin_total -| begin_sum },
-        .{ " ns; finish STW ", finish_total },
-        .{ " - subphases ", finish_sum },
-        .{ " = other ", finish_total -| finish_sum },
-    }, " ns\n");
-    try writeCounterLine(writer, &.{
-        .{ "gc: incremental subphase work totals retired non-block headers ", ph.phase_retired_nonblock_headers },
-        .{ ", retired young blocks ", ph.phase_retired_young_blocks },
-        .{ ", retired remembered sets ", ph.phase_retired_remembered_sets },
-        .{ ", clearMarks non-block headers ", ph.phase_cleared_nonblock_headers },
     }, "\n");
 }
 
@@ -1848,9 +1778,9 @@ test "zjs generation diagnostic lines preserve populated snapshot" {
     }
     var samples = [_]u64{ 7, 2, 5 };
     registry.generation.minor_pause_samples = .{ .items = &samples, .capacity = samples.len };
-    const old_verify = engine.core.gc.verify_minor;
-    defer engine.core.gc.verify_minor = old_verify;
-    engine.core.gc.verify_minor = false;
+    const old_verify = engine.core.gc.forensics.verify;
+    defer engine.core.gc.forensics.verify = old_verify;
+    engine.core.gc.forensics.verify = .off;
     var buffer: [8192]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buffer);
     try dumpGcGenerationStats(&writer, &registry);
@@ -1864,13 +1794,11 @@ test "zjs generation diagnostic lines preserve populated snapshot" {
         \\gc: minor pause p50 5 ns, p95 7 ns, p99 7 ns, max 7 ns over 3 retained of 3 samples
         \\gc: minor phase totals clear 26, roots 27, conservative 28, remembered 29, trace 30, sweep+destroy 31, promote 32, other 0 ns
         \\gc: minor young-at-start mean 2, max 34
-        \\gc: conservative-only young unavailable (set ZJS_GC_VERIFY_MINOR=1)
-        \\gc: exact-target marking barrier calls 102, exit marked-target 103, exit unpublished-owner 104, exit unpublished-target 105, requeued-owner 106, shaded-target 101
-        \\gc: incremental doomed condemned headers 121, destroyed counted objects 122
-        \\gc: incremental major cycles completed 107, aborted 108, forced 114, mark steps 109, cycle STW last 110 ns max 113 ns
-        \\gc: cycle envelope measured 115, skipped 116, max-P/T S 117, T 118, B 119, P 120, B/T-x1000000 1008475, P/T-x1000000 1016950, P/S-x1000000 1025642, forced 114
-        \\gc: incremental STW phase-segment max ns begin 0, increment 0, destroy 0, finish 0
-        \\gc: incremental STW phase totals begin 0 ns/0 segments, increment 0 ns/0 segments, destroy 0 ns/0 segments, finish 0 ns/0 segments
+        \\gc: conservative-only young unavailable (set ZJS_GC_VERIFY=1)
+        \\gc: marking barrier calls 101
+        \\gc: destroyed counted objects 112
+        \\gc: major cycles completed 102, cycle STW last 103 ns max 105 ns
+        \\gc: cycle envelope measured 106, skipped 107, max-P/T S 108, T 109, B 110, P 111, B/T-x1000000 1009175, P/T-x1000000 1018349, P/S-x1000000 1027778
         \\
     ;
     try std.testing.expectEqualStrings(expected, writer.buffered());
@@ -1942,7 +1870,6 @@ test "zjs registry diagnostic panels preserve populated snapshot" {
     inline for (@typeInfo(@TypeOf(registry.incremental.stats)).@"struct".fields, 0..) |field, i| {
         if (@typeInfo(field.type) == .int) @field(registry.incremental.stats, field.name) = @intCast(i + 201);
     }
-    registry.incremental.stats.total_stw_by_kind = .{ 10000, 20000, 30000, 40000 };
     registry.space_histogram.record(32);
     registry.space_histogram.record(128);
     registry.space_histogram.record(70000);
@@ -1951,7 +1878,6 @@ test "zjs registry diagnostic panels preserve populated snapshot" {
     try dumpGcSpaceStats(&writer, &registry);
     try dumpGcBlockCensus(&writer, &registry);
     try dumpGcBlockHeapStats(&writer, &registry);
-    try dumpGcPhaseTotals(&writer, &registry);
     var stats: zjs.GCStats = .{};
     inline for (@typeInfo(zjs.GCStats).@"struct".fields, 0..) |field, i| {
         if (@typeInfo(field.type) == .int) @field(stats, field.name) = @intCast(i + 301);
@@ -1973,9 +1899,6 @@ test "zjs registry diagnostic panels preserve populated snapshot" {
         \\gc: block heap medium superblocks returned 127, bytes 128
         \\gc: block heap decommit checks 111, released blocks cumulative 0, current bytes 0, max batch bytes 112
         \\gc: process heap trim attempts 113, successes 114
-        \\gc: incremental subphase ns totals begin-clear 224, begin-precise-seed 225, begin-conservative-seed 226, begin-retire 227, finish-remark-total 228, finish-conservative-seed-subset 229, finish-weak 230, finish-condemn 231
-        \\gc: incremental subphase reconciliation finish-init 232, finish-tail 233; begin STW 10000 - subphases 902 = other 9098 ns; finish STW 40000 - subphases 1154 = other 38846 ns
-        \\gc: incremental subphase work totals retired non-block headers 234, retired young blocks 235, retired remembered sets 236, clearMarks non-block headers 237
         \\gc: collection entries total 321, major completed 322, minor completed 0, failed 326
         \\gc: collector counted objects freed 328 (excludes bytecode)
         \\gc: heap live 303 bytes, account peak 302 bytes

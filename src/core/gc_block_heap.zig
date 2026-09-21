@@ -15,12 +15,9 @@ const builtin = @import("builtin");
 const gc_representation = @import("gc_representation_constants.zig");
 const gc = @import("gc.zig");
 const carrier = @import("gc_carrier.zig");
+const carrier_audit_enabled = carrier.audit_enabled;
 const space = @import("gc_space.zig");
-const gc_audit_print = @import("gc_audit_print.zig");
 
-const block_generation_enabled = carrier.block_generation_enabled;
-const lifecycle_state_enabled = carrier.lifecycle_state_enabled;
-const block_tracking_enabled = carrier.block_tracking_enabled;
 
 /// Test-only proof that a young-only morgue close does not accidentally run
 /// the major-only whole-heap publication scan.
@@ -361,12 +358,12 @@ const Superblock = struct {
     free_slot_next: u32 = bucket_nil,
     /// Generation and lifecycle are separate components.  A generation-only
     /// production switch cannot silently allocate/write lifecycle storage.
-    block_incarnations: if (block_generation_enabled) [blocks_per_superblock]u32 else void =
-        if (block_generation_enabled) @splat(0) else {},
-    cell_generations: if (block_generation_enabled) [blocks_per_superblock][]u32 else void =
-        if (block_generation_enabled) @splat(&.{}) else {},
-    cell_lifecycles: if (lifecycle_state_enabled) [blocks_per_superblock][]CellLifecycle else void =
-        if (lifecycle_state_enabled) @splat(&.{}) else {},
+    block_incarnations: if (carrier_audit_enabled) [blocks_per_superblock]u32 else void =
+        if (carrier_audit_enabled) @splat(0) else {},
+    cell_generations: if (carrier_audit_enabled) [blocks_per_superblock][]u32 else void =
+        if (carrier_audit_enabled) @splat(&.{}) else {},
+    cell_lifecycles: if (carrier_audit_enabled) [blocks_per_superblock][]CellLifecycle else void =
+        if (carrier_audit_enabled) @splat(&.{}) else {},
 };
 
 /// Extent mark storage (TGC S2). Neither extent kind has a block bitmap, so
@@ -1065,10 +1062,10 @@ pub const Heap = struct {
     /// Round-robin cursor into `superblocks` for the minor-time hot-block
     /// publication slice (`publishCompletedHotBlocksSlice`, S4-f (2)).
     hot_publish_cursor: usize = 0,
-    next_block_incarnation: if (block_generation_enabled) u32 else void =
-        if (block_generation_enabled) 1 else {},
-    block_generation_exhausted: if (block_generation_enabled) bool else void =
-        if (block_generation_enabled) false else {},
+    next_block_incarnation: if (carrier_audit_enabled) u32 else void =
+        if (carrier_audit_enabled) 1 else {},
+    block_generation_exhausted: if (carrier_audit_enabled) bool else void =
+        if (carrier_audit_enabled) false else {},
 
     pub fn init(backing: std.mem.Allocator) Heap {
         return .{ .backing = backing };
@@ -1088,10 +1085,10 @@ pub const Heap = struct {
             // A tombstone's mapping is already back with the backing allocator
             // and its per-block side tables were never allocated (medium only).
             if (sb.kind == .tombstone) continue;
-            if (comptime block_generation_enabled) {
+            if (comptime carrier_audit_enabled) {
                 for (sb.cell_generations) |generations| self.backing.free(generations);
             }
-            if (comptime lifecycle_state_enabled) {
+            if (comptime carrier_audit_enabled) {
                 for (sb.cell_lifecycles) |lifecycles| self.backing.free(lifecycles);
             }
             self.backing.free(sb.bytes);
@@ -1597,7 +1594,7 @@ pub const Heap = struct {
     }
 
     fn generationFor(self: *Heap, block: *const Block, index: u32) *u32 {
-        comptime std.debug.assert(block_generation_enabled);
+        comptime std.debug.assert(carrier_audit_enabled);
         const sb = &self.superblocks.items[block.super_index];
         const block_index = (@intFromPtr(block) - @intFromPtr(sb.bytes.ptr)) / block_bytes;
         std.debug.assert(block_index < blocks_per_superblock);
@@ -1606,7 +1603,7 @@ pub const Heap = struct {
     }
 
     fn generationForConst(self: *const Heap, block: *const Block, index: u32) *const u32 {
-        comptime std.debug.assert(block_generation_enabled);
+        comptime std.debug.assert(carrier_audit_enabled);
         const sb = &self.superblocks.items[block.super_index];
         const block_index = (@intFromPtr(block) - @intFromPtr(sb.bytes.ptr)) / block_bytes;
         std.debug.assert(block_index < blocks_per_superblock);
@@ -1615,7 +1612,7 @@ pub const Heap = struct {
     }
 
     fn lifecycleFor(self: *Heap, block: *const Block, index: u32) *CellLifecycle {
-        comptime std.debug.assert(lifecycle_state_enabled);
+        comptime std.debug.assert(carrier_audit_enabled);
         const sb = &self.superblocks.items[block.super_index];
         const block_index = (@intFromPtr(block) - @intFromPtr(sb.bytes.ptr)) / block_bytes;
         std.debug.assert(block_index < blocks_per_superblock);
@@ -1624,7 +1621,7 @@ pub const Heap = struct {
     }
 
     fn lifecycleForConst(self: *const Heap, block: *const Block, index: u32) *const CellLifecycle {
-        comptime std.debug.assert(lifecycle_state_enabled);
+        comptime std.debug.assert(carrier_audit_enabled);
         const sb = &self.superblocks.items[block.super_index];
         const block_index = (@intFromPtr(block) - @intFromPtr(sb.bytes.ptr)) / block_bytes;
         std.debug.assert(block_index < blocks_per_superblock);
@@ -1633,14 +1630,14 @@ pub const Heap = struct {
     }
 
     fn blockIncarnation(self: *const Heap, block: *const Block) u32 {
-        comptime std.debug.assert(block_generation_enabled);
+        comptime std.debug.assert(carrier_audit_enabled);
         const sb = &self.superblocks.items[block.super_index];
         const block_index = (@intFromPtr(block) - @intFromPtr(sb.bytes.ptr)) / block_bytes;
         return sb.block_incarnations[block_index];
     }
 
     fn reserveCellGeneration(self: *Heap, block: *Block, index: u32) std.mem.Allocator.Error!u64 {
-        comptime std.debug.assert(block_generation_enabled);
+        comptime std.debug.assert(carrier_audit_enabled);
         const sequence = self.generationFor(block, index);
         if (sequence.* == std.math.maxInt(u32)) return error.OutOfMemory;
         sequence.* += 1;
@@ -1648,12 +1645,12 @@ pub const Heap = struct {
     }
 
     inline fn popTrackedCell(self: *Heap, block: *Block) ?u32 {
-        if (comptime !block_tracking_enabled) return popCell(block);
+        if (comptime !carrier_audit_enabled) return popCell(block);
         while (popCell(block)) |index| {
-            if (comptime block_generation_enabled) {
+            if (comptime carrier_audit_enabled) {
                 _ = self.reserveCellGeneration(block, index) catch continue;
             }
-            if (comptime lifecycle_state_enabled) {
+            if (comptime carrier_audit_enabled) {
                 const lifecycle = self.lifecycleFor(block, index);
                 lifecycle.state = .constructing;
                 lifecycle.accounted_bytes = 0;
@@ -1664,7 +1661,7 @@ pub const Heap = struct {
     }
 
     pub fn generationHandle(self: *const Heap, object_base: usize, prefix_bytes: usize) ?carrier.AllocationHandle {
-        comptime std.debug.assert(block_generation_enabled);
+        comptime std.debug.assert(carrier_audit_enabled);
         if (object_base < prefix_bytes) return null;
         const cell_base = object_base - prefix_bytes;
         const block = self.blockOf(@ptrFromInt(cell_base)) orelse return null;
@@ -1699,7 +1696,7 @@ pub const Heap = struct {
         allowed_states: carrier.StateMask,
         skip_generation_check: bool,
     ) carrier.ResolveError!ResolvedCell {
-        comptime std.debug.assert(block_generation_enabled and lifecycle_state_enabled);
+        comptime std.debug.assert(carrier_audit_enabled and carrier_audit_enabled);
         if (handle.base < prefix_bytes) return error.NotFound;
         const cell_base = handle.base - prefix_bytes;
         const block = self.blockOf(@ptrFromInt(cell_base)) orelse return error.NotFound;
@@ -1714,7 +1711,7 @@ pub const Heap = struct {
     }
 
     pub fn transitionCell(self: *Heap, object_base: usize, prefix_bytes: usize, state: carrier.LifecycleState) carrier.ResolveError!void {
-        comptime std.debug.assert(lifecycle_state_enabled);
+        comptime std.debug.assert(carrier_audit_enabled);
         if (object_base < prefix_bytes) return error.NotFound;
         const cell_base = object_base - prefix_bytes;
         const block = self.blockOf(@ptrFromInt(cell_base)) orelse return error.NotFound;
@@ -1724,7 +1721,7 @@ pub const Heap = struct {
     }
 
     pub fn publishCell(self: *Heap, object_base: usize, prefix_bytes: usize, accounted_bytes: usize) carrier.ResolveError!void {
-        comptime std.debug.assert(lifecycle_state_enabled);
+        comptime std.debug.assert(carrier_audit_enabled);
         try self.transitionCell(object_base, prefix_bytes, .published);
         const cell_base = object_base - prefix_bytes;
         const block = self.blockOf(@ptrFromInt(cell_base)) orelse return error.NotFound;
@@ -1741,7 +1738,7 @@ pub const Heap = struct {
 
     pub fn setReuseSequenceForTest(self: *Heap, cell: [*]u8, sequence: u32) void {
         if (!builtin.is_test) @compileError("test-only helper");
-        comptime std.debug.assert(block_generation_enabled);
+        comptime std.debug.assert(carrier_audit_enabled);
         const block = Block.fromCellTrusted(@intFromPtr(cell));
         const index = block.cellIndex(@intFromPtr(cell)).?;
         self.generationFor(block, index).* = sequence;
@@ -1753,7 +1750,7 @@ pub const Heap = struct {
         context: *anyopaque,
         visit: *const fn (*anyopaque, carrier.AllocationHandle, carrier.LifecycleState) void,
     ) void {
-        comptime std.debug.assert(block_generation_enabled and lifecycle_state_enabled);
+        comptime std.debug.assert(carrier_audit_enabled and carrier_audit_enabled);
         for (self.superblocks.items) |sb| {
             if (sb.kind != .classed) continue;
             var block_index: usize = 0;
@@ -1774,7 +1771,7 @@ pub const Heap = struct {
     }
 
     pub fn verifyGenerationAuthority(self: *const Heap) VerifyError!void {
-        comptime std.debug.assert(block_generation_enabled);
+        comptime std.debug.assert(carrier_audit_enabled);
         for (self.superblocks.items) |sb| {
             if (sb.kind != .classed) continue;
             var block_index: usize = 0;
@@ -1794,7 +1791,7 @@ pub const Heap = struct {
     }
 
     pub fn verifyLifecycleAuthority(self: *const Heap) VerifyError!void {
-        comptime std.debug.assert(lifecycle_state_enabled);
+        comptime std.debug.assert(carrier_audit_enabled);
         for (self.superblocks.items) |sb| {
             if (sb.kind != .classed) continue;
             var block_index: usize = 0;
@@ -1838,7 +1835,7 @@ pub const Heap = struct {
             std.debug.assert(freed == doomed_total);
             return freed;
         }
-        if (comptime lifecycle_state_enabled) {
+        if (comptime carrier_audit_enabled) {
             var index: u32 = 0;
             while (index < block.cell_count) : (index += 1) {
                 if (!block.isDoomed(index)) continue;
@@ -2522,14 +2519,10 @@ pub const Heap = struct {
                 if (!hot_unprepared and !bitmap_canonical and
                     block.free_list >= block.cell_count and block.free_list != free_nil)
                 {
-                    gc_audit_print.print(&.{
-                        .{ .text = "gc: BLOCK HEAP AUDIT free head out of range block=0x" },
-                        .{ .hex = @intFromPtr(block) },
-                        .{ .text = " head=" },
-                        .{ .dec = block.free_list },
-                        .{ .text = " cells=" },
-                        .{ .dec = block.cell_count },
-                        .{ .text = "\n" },
+                    std.debug.print("gc: BLOCK HEAP AUDIT free head out of range block=0x{x} head={d} cells={d}\n", .{
+                        @intFromPtr(block),
+                        block.free_list,
+                        block.cell_count,
                     });
                     return error.FreeChainCorrupt;
                 }
@@ -2597,14 +2590,10 @@ pub const Heap = struct {
                     while (link != free_nil) {
                         if (link >= block.cell_count) return error.FreeChainCorrupt;
                         if (testBitPlain(block.bitmaps().alloc, link)) {
-                            gc_audit_print.print(&.{
-                                .{ .text = "gc: BLOCK HEAP AUDIT free link names allocated cell block=0x" },
-                                .{ .hex = @intFromPtr(block) },
-                                .{ .text = " link=" },
-                                .{ .dec = link },
-                                .{ .text = " walked=" },
-                                .{ .dec = walked },
-                                .{ .text = "\n" },
+                            std.debug.print("gc: BLOCK HEAP AUDIT free link names allocated cell block=0x{x} link={d} walked={d}\n", .{
+                                @intFromPtr(block),
+                                link,
+                                walked,
                             });
                             return error.FreeChainCorrupt;
                         }
@@ -2612,22 +2601,14 @@ pub const Heap = struct {
                         if (walked > block.cell_count) return error.FreeChainCorrupt; // cycle
                         const raw = @as(*const u32, @ptrCast(@alignCast(block.cellPtr(link)))).*;
                         if (raw & ~free_link_mask != free_poison) {
-                            gc_audit_print.print(&.{
-                                .{ .text = "gc: BLOCK HEAP AUDIT free poison mismatch block=0x" },
-                                .{ .hex = @intFromPtr(block) },
-                                .{ .text = " link=" },
-                                .{ .dec = link },
-                                .{ .text = " raw=0x" },
-                                .{ .hex = raw },
-                                .{ .text = " walked=" },
-                                .{ .dec = walked },
-                                .{ .text = " head=" },
-                                .{ .dec = block.free_list },
-                                .{ .text = " bump=" },
-                                .{ .dec = block.bump },
-                                .{ .text = " allocated=" },
-                                .{ .dec = block.allocated_count },
-                                .{ .text = "\n" },
+                            std.debug.print("gc: BLOCK HEAP AUDIT free poison mismatch block=0x{x} link={d} raw=0x{x} walked={d} head={d} bump={d} allocated={d}\n", .{
+                                @intFromPtr(block),
+                                link,
+                                raw,
+                                walked,
+                                block.free_list,
+                                block.bump,
+                                block.allocated_count,
                             });
                             return error.FreeCellPoisonMismatch;
                         }
@@ -2636,20 +2617,13 @@ pub const Heap = struct {
                     // Completeness, not just validity: every cell handed out
                     // by the bump pointer and since freed is reachable.
                     if (walked != block.bump - block.allocated_count) {
-                        gc_audit_print.print(&.{
-                            .{ .text = "gc: BLOCK HEAP AUDIT incomplete free chain block=0x" },
-                            .{ .hex = @intFromPtr(block) },
-                            .{ .text = " walked=" },
-                            .{ .dec = walked },
-                            .{ .text = " expected=" },
-                            .{ .dec = block.bump - block.allocated_count },
-                            .{ .text = " head=" },
-                            .{ .dec = block.free_list },
-                            .{ .text = " bump=" },
-                            .{ .dec = block.bump },
-                            .{ .text = " allocated=" },
-                            .{ .dec = block.allocated_count },
-                            .{ .text = "\n" },
+                        std.debug.print("gc: BLOCK HEAP AUDIT incomplete free chain block=0x{x} walked={d} expected={d} head={d} bump={d} allocated={d}\n", .{
+                            @intFromPtr(block),
+                            walked,
+                            block.bump - block.allocated_count,
+                            block.free_list,
+                            block.bump,
+                            block.allocated_count,
                         });
                         return error.FreeChainCorrupt;
                     }
@@ -2876,26 +2850,16 @@ pub const Heap = struct {
                     if (require_young_membership and young and
                         !block.cellPendingDoomed(index) and !block.isYoungListed())
                     {
-                        gc_audit_print.print(&.{
-                            .{ .text = "gc: BLOCK CELL AUDIT young cell 0x" },
-                            .{ .hex = cell },
-                            .{ .text = " index " },
-                            .{ .dec = index },
-                            .{ .text = " in unlisted block 0x" },
-                            .{ .hex = @intFromPtr(block) },
-                            .{ .text = " (flags=0x" },
-                            .{ .hex = flags },
-                            .{ .text = ", block_flags=0x" },
-                            .{ .hex = @as(u8, @bitCast(block.flags)) },
-                            .{ .text = ", marked=" },
-                            .{ .text = gc_audit_print.boolText(block.isMarked(index, self.mark_epoch)) },
-                            .{ .text = ", doomed=0x" },
-                            .{ .hex = block.bitmaps().remember[index / 64] },
-                            .{ .text = ", doomed_cursor=" },
-                            .{ .dec = block.doomed_cursor },
-                            .{ .text = ", doomed_word=0x" },
-                            .{ .hex = block.doomed_word },
-                            .{ .text = ")\n" },
+                        std.debug.print("gc: BLOCK CELL AUDIT young cell 0x{x} index {d} in unlisted block 0x{x} (flags=0x{x}, block_flags=0x{x}, marked={}, doomed=0x{x}, doomed_cursor={d}, doomed_word=0x{x})\n", .{
+                            cell,
+                            index,
+                            @intFromPtr(block),
+                            flags,
+                            @as(u8, @bitCast(block.flags)),
+                            block.isMarked(index, self.mark_epoch),
+                            block.bitmaps().remember[index / 64],
+                            block.doomed_cursor,
+                            block.doomed_word,
                         });
                         return error.YoungCellUnlisted;
                     }
@@ -3100,7 +3064,7 @@ pub const Heap = struct {
     fn freeSmall(self: *Heap, block: *Block, index: u32, cell: [*]u8) void {
         if (!testBitPlain(block.bitmaps().alloc, index)) return;
         block.forgetDoomedCell(index);
-        if (comptime lifecycle_state_enabled) {
+        if (comptime carrier_audit_enabled) {
             self.lifecycleFor(block, index).state = .raw_free_in_progress;
         }
         clearBitPlain(block.bitmaps().alloc, index);
@@ -3112,7 +3076,7 @@ pub const Heap = struct {
         // interval" verdict is out of date (S4-f (2)). The header line is
         // already dirty from `allocated_count`.
         block.flags.hot_rejected = false;
-        if (comptime lifecycle_state_enabled) {
+        if (comptime carrier_audit_enabled) {
             const lifecycle = self.lifecycleFor(block, index);
             lifecycle.state = .free;
             lifecycle.accounted_bytes = 0;
@@ -3201,21 +3165,21 @@ pub const Heap = struct {
             // `cell_generations[block_index]` allocated while `used_blocks`
             // stayed put, and the next `takeClassedBlock` for that superblock
             // tripped the `len == 0` assertion on the very same slot.
-            if (comptime block_generation_enabled) {
+            if (comptime carrier_audit_enabled) {
                 std.debug.assert(sb.cell_generations[block_index].len == 0);
                 sb.cell_generations[block_index] = try self.backing.alloc(u32, geometry.cell_count);
                 @memset(sb.cell_generations[block_index], 0);
             }
-            errdefer if (comptime block_generation_enabled) {
+            errdefer if (comptime carrier_audit_enabled) {
                 self.backing.free(sb.cell_generations[block_index]);
                 sb.cell_generations[block_index] = &.{};
             };
-            if (comptime lifecycle_state_enabled) {
+            if (comptime carrier_audit_enabled) {
                 std.debug.assert(sb.cell_lifecycles[block_index].len == 0);
                 sb.cell_lifecycles[block_index] = try self.backing.alloc(CellLifecycle, geometry.cell_count);
                 @memset(sb.cell_lifecycles[block_index], .{});
             }
-            errdefer if (comptime lifecycle_state_enabled) {
+            errdefer if (comptime carrier_audit_enabled) {
                 self.backing.free(sb.cell_lifecycles[block_index]);
                 sb.cell_lifecycles[block_index] = &.{};
             };
@@ -3233,7 +3197,7 @@ pub const Heap = struct {
             self.unreserveSuperblock(slot);
             return err;
         };
-        if (comptime block_generation_enabled) {
+        if (comptime carrier_audit_enabled) {
             self.superblocks.items[slot].cell_generations[0] =
                 self.backing.alloc(u32, geometry.cell_count) catch |err| {
                     self.unreserveSuperblock(slot);
@@ -3241,10 +3205,10 @@ pub const Heap = struct {
                 };
             @memset(self.superblocks.items[slot].cell_generations[0], 0);
         }
-        if (comptime lifecycle_state_enabled) {
+        if (comptime carrier_audit_enabled) {
             self.superblocks.items[slot].cell_lifecycles[0] =
                 self.backing.alloc(CellLifecycle, geometry.cell_count) catch |err| {
-                    if (comptime block_generation_enabled) {
+                    if (comptime carrier_audit_enabled) {
                         self.backing.free(self.superblocks.items[slot].cell_generations[0]);
                         self.superblocks.items[slot].cell_generations[0] = &.{};
                     }
@@ -3266,9 +3230,9 @@ pub const Heap = struct {
     /// `items.len - 1` is a valid way for a caller to name what it just got.
     fn reserveSuperblock(self: *Heap, kind: SuperblockKind) std.mem.Allocator.Error!u32 {
         std.debug.assert(kind != .tombstone);
-        var incarnations: if (block_generation_enabled) [blocks_per_superblock]u32 else void =
-            if (block_generation_enabled) @splat(0) else {};
-        if (comptime block_generation_enabled) {
+        var incarnations: if (carrier_audit_enabled) [blocks_per_superblock]u32 else void =
+            if (carrier_audit_enabled) @splat(0) else {};
+        if (comptime carrier_audit_enabled) {
             if (kind == .classed) {
                 for (0..blocks_per_superblock) |i| {
                     if (self.block_generation_exhausted or self.next_block_incarnation == std.math.maxInt(u32)) {
@@ -3285,7 +3249,7 @@ pub const Heap = struct {
         const fresh: Superblock = .{
             .bytes = bytes,
             .kind = kind,
-            .block_incarnations = if (block_generation_enabled) incarnations else {},
+            .block_incarnations = if (carrier_audit_enabled) incarnations else {},
         };
         const slot: u32 = blk: {
             const head = self.free_superblock_slots;
@@ -3417,10 +3381,10 @@ pub const Heap = struct {
         std.debug.assert(geometry.bitmap_words <= max_bitmap_words);
         const sb = &self.superblocks.items[super_index];
         const block_index = (@intFromPtr(block) - @intFromPtr(sb.bytes.ptr)) / block_bytes;
-        if (comptime block_generation_enabled) {
+        if (comptime carrier_audit_enabled) {
             std.debug.assert(sb.cell_generations[block_index].len == geometry.cell_count);
         }
-        if (comptime lifecycle_state_enabled) {
+        if (comptime carrier_audit_enabled) {
             std.debug.assert(sb.cell_lifecycles[block_index].len == geometry.cell_count);
             for (sb.cell_lifecycles[block_index]) |lifecycle| std.debug.assert(lifecycle.state == .free);
         }

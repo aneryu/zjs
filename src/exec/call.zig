@@ -792,7 +792,7 @@ test "createPromiseCombinatorState roots direct function bytecode resolve while 
     // direct destructor below, so first close that epoch and drain the entry
     // which may name `state`; freeing it while queued is exactly the O2-B
     // raw-pointer lifetime violation.
-    rt.gc.abortIncrementalCycle();
+    rt.gc.abortCycle();
     core.Object.destroyFromHeader(rt, state.gcHeader());
     state_alive = false;
     _ = rt.runObjectCycleRemoval();

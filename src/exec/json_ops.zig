@@ -593,8 +593,7 @@ fn JsonUnitParser(comptime T: type) type {
 
         fn parseObject(self: *Self, record: ?*JsonParseRecord) JsonParseError!core.JSValue {
             self.index += 1; // '{'
-            const object = try core.Object.create(self.rt, core.class.ids.object, objectPrototypeFromGlobal(self.rt, self.global));
-            var object_value = object.value();
+            var object_value = (try core.Object.create(self.rt, core.class.ids.object, objectPrototypeFromGlobal(self.rt, self.global))).value();
             var root_values = [_]core.runtime.ValueRootValue{.{ .value = &object_value }};
             var root_frame = core.runtime.ValueRootFrame{ .values = &root_values };
             root_frame.activate(self.rt);
@@ -653,7 +652,11 @@ fn JsonUnitParser(comptime T: type) type {
                     };
                     pending_frame.pending = null;
                 }
-                try object.defineJsonParseDataProperty(self.rt, key_atom, child);
+                // Re-derived from the ROOTED value rather than from a pointer
+                // taken before the recursive parse: that parse allocates, and a
+                // moving young generation updates the slot, not a bare local.
+                try core.Object.fromHeader(object_value.refHeaderAssumeObject())
+                    .defineJsonParseDataProperty(self.rt, key_atom, child);
                 self.skipWhitespace();
                 const next = self.peek() orelse return error.SyntaxError;
                 if (next == '}') {
@@ -1822,15 +1825,20 @@ pub fn jsonCreateDataProperty(
     var root_frame = core.runtime.rootValues(.{ &rooted_holder_value, &rooted_value });
     root_frame.activate(ctx.runtime);
     defer root_frame.deactivate(ctx.runtime);
+    // The caller hands over both the value and a convenience pointer to the
+    // same object. Only the value is a root, so the pointer is re-derived
+    // after the frame is live; `revive` above it allocates freely.
+    _ = holder;
+    const live_holder = objectFromValue(rooted_holder_value) orelse return;
 
-    if (holder.proxyTarget() != null) {
-        object_ops.createDataPropertyOrThrow(ctx, output, global, rooted_holder_value, holder, key, rooted_value, caller_function, caller_frame) catch |err| switch (err) {
+    if (live_holder.proxyTarget() != null) {
+        object_ops.createDataPropertyOrThrow(ctx, output, global, rooted_holder_value, live_holder, key, rooted_value, caller_function, caller_frame) catch |err| switch (err) {
             error.TypeError => return,
             else => return err,
         };
         return;
     }
-    holder.defineOwnProperty(ctx.runtime, key, core.Descriptor.data(rooted_value, .all)) catch |err| switch (err) {
+    live_holder.defineOwnProperty(ctx.runtime, key, core.Descriptor.data(rooted_value, .all)) catch |err| switch (err) {
         error.IncompatibleDescriptor, error.NotExtensible, error.ReadOnly => return,
         else => return err,
     };

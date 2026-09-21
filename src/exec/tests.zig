@@ -375,7 +375,7 @@ test "fused cmp_if_false8 interrupt poll stays uncatchable in a for loop" {
 
 test "interrupt budget survives Machine replacement and bypasses catch markers" {
     // Exact interrupt-poll arithmetic; `ZJS_GC_STRESS` overrides the cadence.
-    if (core.gc.stress_collect) return error.SkipZigTest;
+    if (core.gc.forensics.stressing()) return error.SkipZigTest;
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -2555,7 +2555,7 @@ test "Promise executor reuses the active Machine while reactions remain roots" {
 
 test "nested calls and generator resumes share one Realm interrupt cadence" {
     // Exact interrupt-poll arithmetic; `ZJS_GC_STRESS` overrides the cadence.
-    if (core.gc.stress_collect) return error.SkipZigTest;
+    if (core.gc.forensics.stressing()) return error.SkipZigTest;
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -2791,7 +2791,7 @@ test "initial async resume rejects with the caller-Realm interrupt exception" {
 
 test "cross-Realm interrupt polls charge caller entry and callee body separately" {
     // Exact interrupt-poll arithmetic; `ZJS_GC_STRESS` overrides the cadence.
-    if (core.gc.stress_collect) return error.SkipZigTest;
+    if (core.gc.forensics.stressing()) return error.SkipZigTest;
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
@@ -13653,7 +13653,7 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     var l0_stack = engine.exec.stack.Stack.init(&rt.memory, rt.stackSize());
     defer l0_stack.deinit(rt);
     var catch_target: ?usize = null;
-    const l0 = inline_calls.L0State{ .level = .{
+    var l0 = inline_calls.L0State{ .level = .{
         .frame = &l0_frame,
         .stack = &l0_stack,
         .catch_target = &catch_target,
@@ -13914,7 +13914,7 @@ test "method empty leaf warm constructor moves receiver ownership" {
     var l0_stack = engine.exec.stack.Stack.init(&rt.memory, rt.stackSize());
     defer l0_stack.deinit(rt);
     var catch_target: ?usize = null;
-    const l0 = inline_calls.L0State{ .level = .{
+    var l0 = inline_calls.L0State{ .level = .{
         .frame = &l0_frame,
         .stack = &l0_stack,
         .catch_target = &catch_target,
@@ -14092,7 +14092,7 @@ test "strict empty leaf frame preserves undefined this and borrowed ownership" {
     var l0_stack = engine.exec.stack.Stack.init(&rt.memory, rt.stackSize());
     defer l0_stack.deinit(rt);
     var catch_target: ?usize = null;
-    const l0 = inline_calls.L0State{ .level = .{
+    var l0 = inline_calls.L0State{ .level = .{
         .frame = &l0_frame,
         .stack = &l0_stack,
         .catch_target = &catch_target,
@@ -14146,7 +14146,7 @@ test "inline call teardown releases every escaped storage shape" {
     var l0_stack = engine.exec.stack.Stack.init(&rt.memory, rt.stackSize());
     defer l0_stack.deinit(rt);
     var catch_target: ?usize = null;
-    const l0 = inline_calls.L0State{ .level = .{
+    var l0 = inline_calls.L0State{ .level = .{
         .frame = &l0_frame,
         .stack = &l0_stack,
         .catch_target = &catch_target,
@@ -23212,7 +23212,7 @@ test "sparse array literal length add range fast path collapses loop opcodes" {
     // Under ZJS_GC_STRESS every safepoint collects, and 50 000 trips made this
     // the slowest test of the gc-stress run (46 s on its shard); a tenth of
     // the count exercises the same path.
-    const iterations: usize = if (core.gc.stress_collect) 5_000 else 50_000;
+    const iterations: usize = if (core.gc.forensics.stressing()) 5_000 else 50_000;
     const source = try std.fmt.allocPrint(std.testing.allocator,
         \\let s = 0;
         \\for (let i = 0; i < {d}; i++) {{ const a = [1, , 3]; s += a.length; }}

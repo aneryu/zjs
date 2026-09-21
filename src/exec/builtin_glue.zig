@@ -724,10 +724,17 @@ pub fn defineNativeDataMethodNamedWithNativeId(rt: *core.JSRuntime, global: *cor
     const atom_id = try rt.internAtom(name);
     rt.atoms.pinForHost(atom_id);
     defer rt.atoms.unpinForHost(atom_id);
+    // The receiver has to survive the function-object construction below,
+    // which allocates. It arrives as a bare pointer, so root it here rather
+    // than requiring every caller to.
+    var rooted_object: ?*core.Object = object;
+    var object_roots = core.runtime.rootObjects(.{&rooted_object});
+    object_roots.activate(rt);
+    defer object_roots.deactivate(rt);
     const method = try core.function.nativeFunctionForGlobal(rt, global, name, length);
     const method_object = try property_ops.expectObject(method);
     method_object.setNativeBuiltinIdAndRecord(rt, native_builtin_id);
-    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, .method));
+    try rooted_object.?.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, .method));
 }
 
 // --- Primitive coercion moved to coercion_ops.zig ---

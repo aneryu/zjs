@@ -48,7 +48,7 @@ fn traceMachine(machine: *inline_calls.Machine, visitor: *RootVisitor) RootTrace
     // in terminal layout M, so the prefix's accounting bit is the authority.
     if (machine.l0.generator_state) |generator_state| {
         if (generator_state.gcHeaderConst().metaConst().alloc_info.heap_accounted) {
-            try visitor.constOptionalObject(generator_state);
+            try visitor.optionalObject(&machine.l0.generator_state);
         }
     }
 

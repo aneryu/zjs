@@ -97,8 +97,6 @@ pub fn createForInIterator(
     } else {
         // normal_case.
         const keys = try forInSnapshotOwnStringKeys(ctx, output, global, source, iterator);
-        // TGC S3 §2.3: the key snapshot moves into a published iterator payload.
-        for (keys) |key| rt.atoms.shadeAtomIfMarking(key);
         iterator.iteratorAtomKeysSlot().* = keys;
         iterator.setIteratorLength(std.math.cast(u32, keys.len) orelse return error.OutOfMemory);
     }

@@ -56,6 +56,8 @@ recover them from git history when needed.
 
 - [bench-v8 status](perf/bench-v8-status.md): historical public performance
   snapshot (Octane 2.0, V8 suite v9).
+- [Shipped binary composition](binary-size.md): current stripped
+  ReleaseFast size and functional breakdown.
 - [Performance Workflow](perf/README.md): local diagnostic benches and
   profiling notes. No merge-time performance gate.
 - [Object And Shape Implementation](perf/object-shape-design.md): fixed

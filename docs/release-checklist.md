@@ -62,7 +62,8 @@ shortcuts. Do not rerun them as prerequisites for the aggregate release gate.
   `zig build zjs -Doptimize=ReleaseFast && strip zig-out/bin/zjs`. Do not
   strip a binary you intend to profile: `nm`,
   `addr2line`, and `perf` attribution all need the symbols, which is why no
-  build step strips by default.
+  build step strips by default. Current stripped composition:
+  [binary-size.md](binary-size.md).
 - Shipped ReleaseFast binaries panic with the message only, no stack trace
   (`src/cli/panic_policy.zig`). A stripped binary cannot symbolize a trace
   anyway; Debug `zjs` and every test artifact keep the full handler.

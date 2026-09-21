@@ -1022,14 +1022,17 @@ pub fn callSitePrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !*
         .{ .name = "isNative", .id = .callsite_is_native },
     };
     for (methods) |method| {
-        try builtin_glue.defineNativeDataMethodNamedWithNativeId(rt, global, prototype, method.name, 0, core.function.nativeBuiltinId(.host, @intFromEnum(method.id)));
+        // Through the ROOTED slot, not the local the root was taken from:
+        // defining a method allocates, and a moving young generation updates
+        // the slot the frame knows about, not a bare pointer beside it.
+        try builtin_glue.defineNativeDataMethodNamedWithNativeId(rt, global, rooted_prototype.?, method.name, 0, core.function.nativeBuiltinId(.host, @intFromEnum(method.id)));
     }
-    try defineToStringTag(rt, prototype, "CallSite");
+    try defineToStringTag(rt, rooted_prototype.?, "CallSite");
 
-    const prototype_value = prototype.value();
+    const prototype_value = rooted_prototype.?.value();
     prototype_raw_owned = false;
     try storeRealmValue(rt, global, .callsite_prototype, prototype_value);
-    return prototype;
+    return rooted_prototype.?;
 }
 
 pub fn regExpPrototypeMethodIsDefault(_: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, expected_id: u32) bool {

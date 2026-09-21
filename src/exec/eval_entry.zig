@@ -268,12 +268,12 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
             // is honoured by the production container-only policy, a scalar
             // one is not.
             //
-            // Measured: this does NOT move the R3 census share attributed to
-            // this call site (158,240 -> 158,214 over the R1-a test262 corpus).
-            // That share is not the call env at all -- it is stale words in
-            // eval's own 2 KiB frame, in slots the compile/diagnostic phase
-            // used and the VM phase never rewrites (an `Io.Writer` buffer slot
-            // and a dead JSValue slot, both re-resolving to recycled cells).
+            // Measured: rooting these does not shrink what the conservative
+            // scan keeps alive here. That residue is not the call env at all
+            // -- it is stale words in eval's own 2 KiB frame, in slots the
+            // compile phase used and the VM phase never rewrites (an
+            // `Io.Writer` buffer slot and a dead JSValue slot, both
+            // re-resolving to recycled cells).
             // Residue needs scrubbing or a smaller frame, not a root.
             var env_values = [_]core.JSValue{ root_function_value, initial_this, realm_global.value() };
             var env_slices = [_]core.runtime.ValueRootSlice{

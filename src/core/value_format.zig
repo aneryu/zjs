@@ -215,6 +215,27 @@ fn jsWhitespaceSuffixLen(bytes: []const u8) ?usize {
     return null;
 }
 
+/// The four lowercase hex digits of a `\uXXXX` escape. Both JSON
+/// serialization and the inspector emit these per escaped code unit, which is
+/// hot enough to stay out of `std.fmt`.
+pub fn hex4(unit: u16) [4]u8 {
+    const digits = "0123456789abcdef";
+    return .{
+        digits[(unit >> 12) & 0xf],
+        digits[(unit >> 8) & 0xf],
+        digits[(unit >> 4) & 0xf],
+        digits[unit & 0xf],
+    };
+}
+
+test "hex4 zero-pads every code unit to four digits" {
+    try std.testing.expectEqualStrings("0000", &hex4(0));
+    try std.testing.expectEqualStrings("000f", &hex4(0xf));
+    try std.testing.expectEqualStrings("00ab", &hex4(0xab));
+    try std.testing.expectEqualStrings("1f60", &hex4(0x1f60));
+    try std.testing.expectEqualStrings("ffff", &hex4(0xffff));
+}
+
 fn startsWith(bytes: []const u8, prefix: []const u8) bool {
     return bytes.len >= prefix.len and std.mem.eql(u8, bytes[0..prefix.len], prefix);
 }

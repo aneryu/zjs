@@ -54,13 +54,15 @@ pub const profile = @import("profile.zig");
 pub const gc_address_registry = @import("gc_address_registry.zig");
 /// Measured size-class table and publication histogram.
 pub const gc_space = @import("gc_space.zig");
+pub const gc_nursery = @import("gc_nursery.zig");
+pub const local = @import("local.zig");
+pub const Local = local.Local;
 pub const gc_block_heap = @import("gc_block_heap.zig");
 pub const gc_carrier = @import("gc_carrier.zig");
 pub const gc_visit = @import("gc_visit.zig");
 pub const generator_state = @import("generator_state.zig");
 pub const gc_trace_stw = @import("gc_trace_stw.zig");
 pub const gc_conservative = @import("gc_conservative.zig");
-pub const gc_conservative_diag = @import("gc_conservative_diag.zig");
 
 pub const JSValue = value.JSValue;
 pub const JSString = JSValue.String;

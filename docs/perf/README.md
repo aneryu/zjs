@@ -8,6 +8,8 @@ is the authority.
 Current design notes:
 
 - [bench-v8 status](bench-v8-status.md) — historical snapshot
+- [Shipped binary composition](../binary-size.md) — ReleaseFast size by
+  section, layer, and function (diagnostic, not a gate)
 - [Object and shape implementation](object-shape-design.md)
 - [`exec/call_runtime.zig` candidate domains and move criteria](../backlog.md)
 - Frozen subsystem baseline (historical):

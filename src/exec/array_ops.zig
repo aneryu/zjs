@@ -4780,9 +4780,9 @@ const SortEntryRootWindow = struct {
 
     fn deactivate(self: *@This(), rt: *core.JSRuntime) void {
         // `activate` links nothing for an empty receiver; deactivating a frame
-        // that was never pushed is a LIFO violation under precise-root
-        // builds (found by the `-Dzjs_gc_roots_diag` test262 run on
-        // `[].sort()`; production's containers-only policy masked it).
+        // that was never pushed is a LIFO violation under the scalar-root
+        // linking policy tests use (found on `[].sort()`; production's
+        // containers-only policy masked it).
         if (self.rooted_values.items.len == 0) return;
         self.frame.deactivate(rt);
         self.rooted_values.release(rt);

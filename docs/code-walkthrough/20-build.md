@@ -171,7 +171,7 @@ gates.addGates(ctx, artifacts, test_graph)
   1. **`zjs` 模块**（`src/root.zig`）。`addModule`，不进返回值。
   2. **`internal_mod`**：`internal_root`，`omit_frame_pointer` 见上。
   3. **`zjs` exe**：CLI import 上述模块，热布局。步骤 `zjs`；默认 `install` 依赖它。
-  4. **`zjs-size`**：同一引擎模块的第二安装名，避免后续 `ReleaseSmall` 覆盖已装的 `zjs`。步骤 `zjs-size`。
+  4. **`zjs-size`**：同一引擎模块的第二安装名，避免后续 `ReleaseSmall` 覆盖已装的 `zjs`。步骤 `zjs-size`。发货体积功能分布见 [`docs/binary-size.md`](../binary-size.md)。
   5. **`zjs-profile`**：同一优化模式，但 `enable_opcode_profile=true`。步骤 `zjs-profile`。
   6. **`run-test262`**：import `internal_mod`。步骤 `run-test262`。
 - **所有权 / 错误 / 调用**：返回的指针由构建图持有。`addTestGraph` / `addPerfSteps` / `addGates` 消费。非法配置在 `build` 里已退出。

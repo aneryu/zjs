@@ -288,7 +288,30 @@ pub const CallEnv = struct {
     copy_argv: bool = false,
 };
 
+/// Keep the realm global at a fixed address for the length of an invocation.
+///
+/// The interpreter carries `global` as a bare pointer and reads it from 113
+/// places, none of which is a root the collector can rewrite. Threading a slot
+/// through all of them is the right end state (T6); until then, one pin at the
+/// entry buys the same guarantee for the whole invocation. It costs a hash
+/// operation only while the copying young generation is on, and only until the
+/// global's first promotion, after which it is not in the nursery at all.
+fn pinGlobalForInvocation(env: CallEnv) ?*core.Object {
+    const rt = env.ctx.runtime;
+    if (!rt.gc.nursery.enabled) return null;
+    if (!core.gc.Registry.isNurseryHeader(env.global.gcHeader())) return null;
+    rt.gc.pins.pin(rt.gc.memory, env.global.gcHeader()) catch return null;
+    return env.global;
+}
+
+fn unpinGlobalForInvocation(env: CallEnv, pinned: ?*core.Object) void {
+    const object = pinned orelse return;
+    env.ctx.runtime.gc.pins.unpin(object.gcHeader());
+}
+
 pub fn runWithCallEnv(env: CallEnv) HostError!core.JSValue {
+    const pinned_global = pinGlobalForInvocation(env);
+    defer unpinGlobalForInvocation(env, pinned_global);
     if (env.generator_state != null and !env.call_depth_precharged) {
         // async_func_resume performs js_check_stack_overflow(rt, 0) before
         // its inner JS_CallInternal poll. Cover generator/async/module
@@ -392,7 +415,7 @@ fn runWithArgsState(env: CallEnv) HostError!core.JSValue {
         }
     }
     var catch_target_storage: ?usize = null;
-    const l0_state = inline_calls.L0State{
+    var l0_state = inline_calls.L0State{
         .level = .{
             .frame = &frame_storage,
             .stack = env.stack,

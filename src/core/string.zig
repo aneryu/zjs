@@ -1826,7 +1826,7 @@ pub fn traceRopeEdges(rt: *JSRuntime, visitor: anytype, header: *gc.Header) !voi
     // visits below stay unconditional and branch-free.
     if (node.buffer) |buf| {
         std.debug.assert(buf.header().metaConst().flags.kind == .string_buffer);
-        try gc_visit.storageCell(visitor, buf.header());
+        try gc_visit.storageCell(visitor, .{ .slot = @ptrCast(&node.buffer) });
     }
     try gc_visit.value(visitor, &node.left);
     try gc_visit.value(visitor, &node.right);

@@ -488,11 +488,39 @@ test "promiseReactionRecord roots direct symbol fields while allocating slots" {
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
 
-    const on_fulfilled_value = try rt.takeSymbolValue(on_fulfilled_symbol);
-    const on_rejected_value = try rt.takeSymbolValue(on_rejected_symbol);
-    const resolve_value = try rt.takeSymbolValue(resolve_symbol);
-    const reject_value = try rt.takeSymbolValue(reject_symbol);
-    const record_value = try promiseReactionRecord(rt, on_fulfilled_value, on_rejected_value, resolve_value, reject_value);
+    // An atom id is an integer, so nothing but a declared atom root keeps the
+    // four entries alive across each other's body allocation (gc-invariants,
+    // class B); and each `takeSymbolValue` mints a body, which allocates, so
+    // the values already taken need their frame before the next call rather
+    // than after the last one. Both frames close before the collection below,
+    // which is the one that has to find the symbols unreachable.
+    const record_value = blk: {
+        var atom_roots = core.runtime.rootAtoms(.{
+            &on_fulfilled_symbol,
+            &on_rejected_symbol,
+            &resolve_symbol,
+            &reject_symbol,
+        });
+        atom_roots.activate(rt);
+        defer atom_roots.deactivate(rt);
+        var on_fulfilled_value = core.JSValue.undefinedValue();
+        var on_rejected_value = core.JSValue.undefinedValue();
+        var resolve_value = core.JSValue.undefinedValue();
+        var reject_value = core.JSValue.undefinedValue();
+        var root_frame = core.runtime.rootValues(.{
+            &on_fulfilled_value,
+            &on_rejected_value,
+            &resolve_value,
+            &reject_value,
+        });
+        root_frame.activate(rt);
+        defer root_frame.deactivate(rt);
+        on_fulfilled_value = try rt.takeSymbolValue(on_fulfilled_symbol);
+        on_rejected_value = try rt.takeSymbolValue(on_rejected_symbol);
+        resolve_value = try rt.takeSymbolValue(resolve_symbol);
+        reject_value = try rt.takeSymbolValue(reject_symbol);
+        break :blk try promiseReactionRecord(rt, on_fulfilled_value, on_rejected_value, resolve_value, reject_value);
+    };
     const record = objectFromValue(record_value) orelse return error.TypeError;
 
     try std.testing.expect(rt.atoms.name(on_fulfilled_symbol) != null);
@@ -669,18 +697,26 @@ pub fn preparePromiseReactionJobs(
     value: core.JSValue,
     rejected: bool,
 ) !PreparedPromiseReactionJobs {
-    const reactions = promise.promiseReactions();
-    if (reactions.len == 0) return .{};
+    if (promise.promiseReactions().len == 0) return .{};
     var rooted_value = value;
+    // The promise is a bare parameter and every iteration below allocates a
+    // reaction job; re-read its reaction array through the rooted slot rather
+    // than caching a slice that names the object's storage from before.
+    var rooted_promise: ?*core.Object = promise;
     var root_frame = core.runtime.rootValues(.{&rooted_value});
+    var promise_roots = core.runtime.rootObjects(.{&rooted_promise});
     root_frame.activate(ctx.runtime);
     defer root_frame.deactivate(ctx.runtime);
+    promise_roots.activate(ctx.runtime);
+    defer promise_roots.deactivate(ctx.runtime);
 
-    const jobs = try ctx.runtime.memory.alloc(jobs_mod.Job, reactions.len);
+    const jobs = try ctx.runtime.memory.alloc(jobs_mod.Job, rooted_promise.?.promiseReactions().len);
     var prepared = PreparedPromiseReactionJobs{ .jobs = jobs };
     errdefer prepared.deinit(ctx.runtime);
 
-    for (reactions) |reaction_value| {
+    var reaction_index: usize = 0;
+    while (reaction_index < rooted_promise.?.promiseReactions().len) : (reaction_index += 1) {
+        const reaction_value = rooted_promise.?.promiseReactions()[reaction_index];
         const reaction = objectFromValue(reaction_value) orelse return error.TypeError;
         prepared.jobs[prepared.initialized] = try promiseReactionJob(ctx, reaction, rooted_value, rejected);
         prepared.initialized += 1;
@@ -1923,7 +1959,9 @@ test "promiseKeyedResult roots direct symbol values while defining keyed result"
     try std.testing.expect(rt.atoms.name(value_symbol) != null);
     const answer_atom = try rt.internAtom("answer");
     {
-        const stored = try result.getProperty(answer_atom);
+        // Through the rooted slot: the collection above may have relocated the
+        // holder, and only the slot is updated.
+        const stored = try result_slot.?.getProperty(answer_atom);
         try std.testing.expectEqual(value_symbol, stored.asSymbolAtom().?);
     }
 
@@ -2004,7 +2042,7 @@ test "promiseCombinatorState roots direct function bytecode resolve while creati
     // direct destructor below, so first close that epoch and drain the entry
     // which may name `state`; freeing it while queued is exactly the O2-B
     // raw-pointer lifetime violation.
-    rt.gc.abortIncrementalCycle();
+    rt.gc.abortCycle();
     core.Object.destroyFromHeader(rt, state.gcHeader());
     state_alive = false;
     _ = rt.runObjectCycleRemoval();

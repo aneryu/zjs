@@ -32,7 +32,6 @@ const function_bytecode_mod = @import("../bytecode.zig").function_bytecode;
 const FunctionBytecode = function_bytecode_mod.FunctionBytecode;
 const memory_mod = @import("memory.zig");
 const array_list_erased = @import("array_list_erased.zig");
-const gc_audit_print = @import("gc_audit_print.zig");
 const block_heap = @import("gc_block_heap.zig");
 const std = @import("std");
 const typed_array_names = @import("typed_array_names.zig");
@@ -542,6 +541,12 @@ pub const Object = extern struct {
 
     pub inline fn fromHeader(header: *gc.Header) *Object {
         if (comptime std.debug.runtime_safety) {
+            // Reaching an object through a forwarded husk means somebody kept
+            // a bare pointer across a collection. Failing here names the use,
+            // which is the only place the missing root is visible.
+            if (gc.headerForwarded(header)) {
+                @panic("gc: object reached through a forwarding husk -- a bare pointer outlived a collection");
+            }
             std.debug.assert(header.metaConst().flags.kind == .object);
             std.debug.assert(gc.bodyOffsetFromHeader(.object) == 0);
         }
@@ -1155,7 +1160,7 @@ pub const Object = extern struct {
         // after it, which meant the frame's `defer deactivate` had already run
         // and the Shape was unrooted for exactly the window the frame exists
         // to cover. The conservative arm hid that; a precise-only scan would
-        // not have (R3 census item 5).
+        // not have.
         if (comptime !runtime_mod.value_root_link_containers_only) {
             var header_roots = [_]runtime_mod.HeaderRootValue{.{ .header = &shape_ref.header }};
             var frame = runtime_mod.ValueRootFrame{ .headers = &header_roots };
@@ -1641,12 +1646,12 @@ pub const Object = extern struct {
             // shadow carrier record before taking raw bytes; shipped builds do
             // no carrier-authority work until a real consumer migrates.
             try rt.gc.prepareNonBlockObjectAuthority();
-            const carrier_reservation = if (comptime gc.extent_tracking_enabled)
+            const carrier_reservation = if (comptime gc.carrier_audit_enabled)
                 try rt.memory.reserveGcExtent()
             else {};
             const bytes = try rt.memory.allocAlignedBytesNoTrigger(layout.allocation_size, layout.allocation_alignment);
             const object_base = @intFromPtr(bytes.ptr) + layout.object_offset;
-            if (comptime gc.extent_tracking_enabled) {
+            if (comptime gc.carrier_audit_enabled) {
                 rt.memory.commitGcExtent(
                     carrier_reservation,
                     object_base,
@@ -1665,9 +1670,9 @@ pub const Object = extern struct {
                 destroyFromHeader(rt, self.gcHeader());
             } else if (inline_layout) |layout| {
                 const bytes: [*]u8 = @ptrFromInt(@intFromPtr(self) - layout.object_offset);
-                if (comptime gc.extent_tracking_enabled) rt.memory.beginGcRawFree(@intFromPtr(self));
+                if (comptime gc.carrier_audit_enabled) rt.memory.beginGcRawFree(@intFromPtr(self));
                 rt.memory.freeAlignedBytes(bytes[0..layout.allocation_size], layout.allocation_alignment);
-                if (comptime gc.extent_tracking_enabled) rt.memory.finishExtentGcRawFree(@intFromPtr(self));
+                if (comptime gc.carrier_audit_enabled) rt.memory.finishExtentGcRawFree(@intFromPtr(self));
             } else {
                 freeRawCell(rt, self, class_id, false);
             }
@@ -2159,9 +2164,9 @@ pub const Object = extern struct {
     noinline fn freeInlinePayloadObjectAllocation(rt: *JSRuntime, self: *Object, definition: class.Table.DefinitionPlan) void {
         const layout = inlineClassPayloadLayoutForDefinition(definition).?;
         const bytes: [*]u8 = @ptrFromInt(@intFromPtr(self) - layout.object_offset);
-        if (comptime gc.extent_tracking_enabled) rt.memory.beginGcRawFree(@intFromPtr(self));
+        if (comptime gc.carrier_audit_enabled) rt.memory.beginGcRawFree(@intFromPtr(self));
         rt.memory.freeAlignedBytes(bytes[0..layout.allocation_size], layout.allocation_alignment);
-        if (comptime gc.extent_tracking_enabled) rt.memory.finishExtentGcRawFree(@intFromPtr(self));
+        if (comptime gc.carrier_audit_enabled) rt.memory.finishExtentGcRawFree(@intFromPtr(self));
     }
 
     /// `InlineClassPayloadLayout.object_size` (== the byte count the register
@@ -2664,18 +2669,12 @@ pub const Object = extern struct {
         const stamped = gc.headerNeedsFinalizer(self.gcHeader());
         if (owesFinalizerWork(rt, self)) {
             if (!stamped) {
-                gc_audit_print.print(&.{
-                    .{ .text = "gc: TGC S4-d FINALIZER-BIT AUDIT: object=0x" },
-                    .{ .hex = @intFromPtr(self) },
-                    .{ .text = " class_id=" },
-                    .{ .dec = self.class_id },
-                    .{ .text = " payload=" },
-                    .{ .text = @tagName(self.flags.class_payload_kind) },
-                    .{ .text = " weak_id=" },
-                    .{ .text = gc_audit_print.boolText(self.flags.has_weak_id) },
-                    .{ .text = " borrowed=" },
-                    .{ .text = gc_audit_print.boolText(self.flags.is_borrowed_reference_holder) },
-                    .{ .text = " reached teardown unstamped\n" },
+                std.debug.print("gc: TGC S4-d FINALIZER-BIT AUDIT: object=0x{x} class_id={d} payload={s} weak_id={} borrowed={} reached teardown unstamped\n", .{
+                    @intFromPtr(self),
+                    self.class_id,
+                    @tagName(self.flags.class_payload_kind),
+                    self.flags.has_weak_id,
+                    self.flags.is_borrowed_reference_holder,
                 });
                 @panic("gc: an object owing destructor work has no needs_finalizer bit");
             }
@@ -6087,15 +6086,6 @@ pub const Object = extern struct {
         return @ptrFromInt(@intFromPtr(self) + @sizeOf(Object));
     }
 
-    /// Test-only deletion mutant: skip the TGC S4-c spill, so a slots2
-    /// object's payload pointer would be written on top of its first inline
-    /// property entry. `verifyObjectPropertyStorageLayouts` is the production
-    /// audit boundary for that state.
-    pub fn injectSlots2PayloadArmMutationForTest(self: *Object) void {
-        if (comptime !builtin.is_test) @compileError("test-only M-cut slots2 payload-spill mutation");
-        if (gc.mCutInjection(2)) self.setPropertyStorageInline();
-    }
-
     /// Read-only view for the minor audit's edge naming (`gc_trace_stw`).
     pub fn ordinaryPayloadForAudit(self: *const Object) ?*const OrdinaryPayload {
         return self.ordinaryPayloadConst();
@@ -6880,7 +6870,7 @@ pub const Object = extern struct {
         // early return and the general path funnel through this one call.
         const storage = self.prop_values;
         if (propertyStoragePointerIsExternal(self, storage)) {
-            try gc_visit.storageCell(visitor, propertyStorageCellHeader(storage));
+            try gc_visit.storageCell(visitor, .{ .slot = @ptrCast(&self.prop_values) });
         }
         // A mutator barrier may publish remembered bit7 between open
         // incremental mark slices. The semantic accessor masks
@@ -6929,8 +6919,7 @@ pub const Object = extern struct {
         // walked by the payload's own `traceChildEdges` in the dispatch below,
         // which is why one report here covers every a-class kind.
         if (self.hasTracerOwnedPayloadCell()) {
-            if (self.payloadSlot().*) |payload_ptr|
-                try gc_visit.storageCell(visitor, payloadCellHeader(payload_ptr));
+            try gc_visit.storageCell(visitor, .{ .slot = @ptrCast(self.payloadSlot()) });
         }
         if (self.flags.class_payload_kind == .realm_record) {
             const ptr = self.payloadArm().*.?;
@@ -6973,10 +6962,7 @@ pub const Object = extern struct {
         // predicate `recordTraceStorageFootprint` and the property-storage
         // audit use.
         if (self.denseArmNamesStorageCell()) {
-            try gc_visit.storageCell(
-                visitor,
-                arrayStorageCellHeader(self.arrayArm().*.values),
-            );
+            try gc_visit.storageCell(visitor, .{ .slot = @ptrCast(&self.arrayArm().*.values) });
         }
         for (self.arrayElements()) |*stored| {
             try gc_visit.value(visitor, stored);
@@ -7015,7 +7001,7 @@ pub const Object = extern struct {
             // TGC S4-d step 0: the capture array is a subordinate `.payload`
             // cell; report the cell before walking its contents.
             if (captures.len != 0)
-                try gc_visit.storageCell(visitor, object_payloads.payloadSliceCellHeader(captures.ptr));
+                try gc_visit.storageCell(visitor, .{ .slot = @ptrCast(&self.bytecodeArm().*.var_refs) });
             for (captures) |maybe_cell| {
                 const cell = maybe_cell orelse continue;
                 var cell_value = cell.valueRef();
@@ -7041,7 +7027,10 @@ pub const Object = extern struct {
             // class mark is done. TGC S4-c: the aux record is a `.payload`
             // cell, so report the cell before walking its contents.
             if (self.bytecodeFunctionAux()) |aux| {
-                try gc_visit.storageCell(visitor, payloadCellHeader(aux));
+                try gc_visit.storageCell(visitor, .{
+                    .slot = @ptrCast(&self.bytecodeArm().*.home_or_aux),
+                    .tag = bytecode_function_aux_tag,
+                });
                 try aux.rare.traceChildEdges(visitor);
             }
             return;
@@ -10211,6 +10200,32 @@ pub const Object = extern struct {
     /// assert below reads -- see the field-order comment there. Apart from that
     /// assert this is a pure address computation; the "only `ids.object` owns a
     /// trailing FAM" rule is checked by `verifyObjectPropertyStorageLayouts`.
+    /// Re-point the pointers this object holds into ITSELF after a copying
+    /// collector relocated it.
+    ///
+    /// A copy moves bytes; a pointer that named an address inside the source
+    /// still names the source afterwards. The slots2 layout keeps its property
+    /// entries in the object's own tail, and an inline class payload trails the
+    /// header, so both are self-references. The test is positional rather than
+    /// per-field -- "did this pointer land inside the body we just copied" --
+    /// which is the only form that stays correct as layouts are added.
+    pub fn rebindAfterRelocation(self: *Object, old_base: usize, body_bytes: usize) void {
+        const new_base = @intFromPtr(self);
+        if (relocatedSelfPointer(@intFromPtr(self.prop_values), old_base, new_base, body_bytes)) |moved| {
+            self.prop_values = @ptrFromInt(moved);
+        }
+        if (self.payloadSlot().*) |payload| {
+            if (relocatedSelfPointer(@intFromPtr(payload), old_base, new_base, body_bytes)) |moved| {
+                self.payloadSlot().* = @ptrFromInt(moved);
+            }
+        }
+    }
+
+    inline fn relocatedSelfPointer(addr: usize, old_base: usize, new_base: usize, body_bytes: usize) ?usize {
+        if (addr < old_base or addr >= old_base + body_bytes) return null;
+        return new_base + (addr - old_base);
+    }
+
     pub inline fn trailingPropertyStorageBase(self: *const Object) [*]property.Entry {
         std.debug.assert(self.hasSlots2Layout());
         return @ptrFromInt(@intFromPtr(self) + slots2_property_storage_offset);

@@ -85,6 +85,14 @@ reproduction and no remaining merge-time performance gate.
   the directory was deleted in the release commit itself, so the `v0.1.0`
   tag does not contain it).
 
+## Binary size
+
+Diagnostic snapshot, not a gate. Stripped ReleaseFast `zjs` on aarch64 is
+3.16 MiB (`9e915ba0`, 2026-09-21). Machine code is 2.60 MiB; `exec/` is
+56% of it. Composition:
+[docs/binary-size.md](docs/binary-size.md). The 2026-08-21 owner ruling
+closed the size campaign at 4.26 MiB; that figure is historical.
+
 ## Gates
 
 The dated cells below are snapshots from the runs they name, not continuous

@@ -24,13 +24,18 @@ const readInt = call_runtime.readInt;
 fn PoppedWindow(comptime n: usize) type {
     return struct {
         slots: [n]core.JSValue = undefined,
+        /// Slice header over `slots`, so the frame roots the array as a
+        /// MUTABLE window: a visitor that relocates a body writes the new
+        /// address back into the slot this window will hand to the caller.
+        slot_view: []core.JSValue = &.{},
         slices: [1]core.runtime.ValueRootSlice = undefined,
         frame: core.runtime.ValueRootFrame = .{},
 
         inline fn activate(self: *@This(), rt: *core.JSRuntime, values: [n]core.JSValue) void {
             if (comptime !core.runtime.value_root_frames_enabled) return;
             self.slots = values;
-            self.slices[0] = .{ .borrowed = self.slots[0..] };
+            self.slot_view = self.slots[0..];
+            self.slices[0] = .{ .mutable = &self.slot_view };
             self.frame.slices = &self.slices;
             self.frame.activate(rt);
         }

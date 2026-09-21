@@ -466,6 +466,11 @@ pub const JSContext = struct {
 
     fn createWithPublication(rt: *JSRuntime, options: ContextOptions, publish_immediately: bool) !*JSContext {
         try rt.requireOwnerThread();
+        // A realm's intrinsics are long-lived by definition and are held as
+        // bare pointers all over the engine; build them in the old generation.
+        const nursery_was_suspended = rt.gc.nursery.suspended;
+        rt.gc.nursery.suspended = true;
+        defer rt.gc.nursery.suspended = nursery_was_suspended;
         const ctx = try rt.createRuntime(JSContext);
         var initialized = false;
         errdefer if (initialized) ctx.destroy() else rt.destroyRuntime(JSContext, ctx);
@@ -606,7 +611,7 @@ pub const JSContext = struct {
         }
         // Stress mode wants the collection window everywhere, not once per
         // 10k ticks; the cadence is the other half of the knob.
-        if (gc.stress_collect) self.interrupt_counter = gc.stress_cadence;
+        if (gc.forensics.stress_cadence) |cadence| self.interrupt_counter = cadence;
         return self.runtime.runInterruptHandler();
     }
 
@@ -776,8 +781,8 @@ pub const JSContext = struct {
         // arguments / RegExp literal can land long after the realm went old
         // (or after an incremental major already blackened it). Without the
         // barrier the next minor condemns the five young shapes while the
-        // realm still points at them; the S0 `-Dzjs_gc_roots_diag` unit-test
-        // run caught exactly that as a shape rc underflow at realm teardown.
+        // realm still points at them; TGC S0 caught exactly that as a shape
+        // rc underflow at realm teardown.
         // Only once the realm is published: a barrier on an unpublished
         // owner remembers a half-built realm and the next minor traces its
         // uninitialised fields (gc-invariants.md "Write barriers"). During

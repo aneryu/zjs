@@ -10,17 +10,13 @@ const builtin = @import("builtin");
 const build_options = @import("build_options");
 
 /// Tests and explicit ownership-audit builds carry the shadow carrier
-/// authorities (block generation, extent identity, lifecycle state, and the
-/// heap-accounting oracle); shipped builds carry none of them. The
-/// per-component "production selection" lattice that used to sit here never
-/// had a production point and was removed in the 2026-09-03 ablation.
-pub const authority_audit_enabled: bool = builtin.is_test or build_options.zjs_ownership_audit;
-pub const block_generation_enabled: bool = authority_audit_enabled;
-pub const extent_identity_enabled: bool = authority_audit_enabled;
-pub const lifecycle_state_enabled: bool = authority_audit_enabled;
-pub const audit_oracle_enabled: bool = authority_audit_enabled;
-pub const block_tracking_enabled: bool = authority_audit_enabled;
-pub const extent_tracking_enabled: bool = authority_audit_enabled;
+/// authorities -- block generation, extent identity, lifecycle state, extent
+/// tracking and the heap-accounting oracle -- and shipped builds carry none
+/// of them. They were six separately-named gates so a "production selection"
+/// lattice could turn them on one at a time; that lattice never had a
+/// production point and was removed in the 2026-09-03 ablation, leaving six
+/// names for one answer.
+pub const audit_enabled: bool = builtin.is_test or build_options.zjs_ownership_audit;
 
 pub const CurrentMembershipKey = extern struct {
     base: usize,

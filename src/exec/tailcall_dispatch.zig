@@ -5867,6 +5867,13 @@ inline fn reloadAfterPop(vm: *Vm, caller_entry: ?*inline_calls.Entry) Regs {
 /// outcome switch stays inline; the `.returned` / `.tail` arms are outlined so
 /// their temporaries do not enlarge every driver entry.
 pub fn runDispatchLoop(vm: *Vm) HostError!void {
+    // `return_value` carries a completed call's result across the outcome
+    // switch below, and nothing else holds it: the callee's frame and operand
+    // stack -- which are roots -- are gone by then. A non-moving collector
+    // never noticed, because the object stayed where the dead frame left it.
+    var return_value_root = core.runtime.rootValues(.{&vm.return_value});
+    return_value_root.activate(vm.ctx.runtime);
+    defer return_value_root.deactivate(vm.ctx.runtime);
     // qjs prologue hoist: `var_refs = p->u.func.var_refs`.
     vm.var_refs_base = vm.frame.var_refs.ptr;
     vm.local_fast_blocked = vm.machine.depth == 0 and vm.machine.l0.stop_before_pc != null;

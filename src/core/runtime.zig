@@ -520,11 +520,8 @@ pub const AtomRootSlot = union(enum) {
 pub const value_root_frames_enabled = true;
 
 /// Production (non-test) does not list-link scalar Zig locals; those wait for
-/// conservative stack/register capture. Tests link every activate, and so
-/// does the R3 roots-diagnosis build (`-Dzjs_gc_roots_diag=true`), whose
-/// whole point is to measure what the conservative scan still has to cover
-/// once every declared scalar root is honoured.
-pub const value_root_link_containers_only = !builtin.is_test and !build_options.zjs_gc_roots_diag;
+/// conservative stack/register capture. Tests link every activate.
+pub const value_root_link_containers_only = !builtin.is_test;
 
 /// Scalar scope helpers exist only when scalar frames can actually be linked.
 /// In production tracing builds the policy above rejects them, so keeping their
@@ -617,10 +614,6 @@ pub const ValueRootFrame = struct {
         if (comptime value_root_frames_enabled) {
             if (comptime value_root_link_containers_only) {
                 if (rt.active_value_roots != self) return;
-            } else if (comptime build_options.zjs_gc_roots_diag) {
-                // The diag binary is ReleaseFast: a LIFO slip on a CLI-only
-                // path must trap, not silently corrupt the root chain.
-                if (rt.active_value_roots != self) @panic("ValueRootFrame LIFO violation under -Dzjs_gc_roots_diag");
             } else {
                 std.debug.assert(rt.active_value_roots == self);
             }
@@ -818,6 +811,27 @@ pub const RootVisitor = struct {
     pub fn constValue(self: *RootVisitor, stored: JSValue) RootTraceError!void {
         var slot = stored;
         try self.value(&slot);
+    }
+
+    /// A cache slot that holds a bare `*String` rather than a `JSValue`.
+    ///
+    /// The round trip through a `JSValue` is what makes it a real slot: a
+    /// visitor that relocates the body writes the new address back into the
+    /// value, and this stores it. Passing the pointer by value instead
+    /// (`constValue`) leaves the cache naming the old address, which is a
+    /// dangling read the moment anything moves.
+    pub fn stringSlot(self: *RootVisitor, slot: *?*string.String) RootTraceError!void {
+        const stored = slot.* orelse return;
+        var boxed = JSValue.string(stored.header());
+        try self.value(&boxed);
+        slot.* = boxed.asStringBodyRaw();
+    }
+
+    /// Same contract for a slot whose `*String` sits inside a cache record.
+    pub fn stringField(self: *RootVisitor, slot: *(*string.String)) RootTraceError!void {
+        var boxed = JSValue.string(slot.*.header());
+        try self.value(&boxed);
+        if (boxed.asStringBodyRaw()) |moved| slot.* = moved;
     }
 
     pub fn constValues(self: *RootVisitor, stored: []const JSValue) RootTraceError!void {
@@ -1333,14 +1347,11 @@ pub const JSRuntime = struct {
     gc_mark_footprint: @import("gc_trace_stw.zig").MarkFootprint = .{},
     /// Allocation-debt pacing for object-boundary incremental mark/destruction
     /// assists. Scheduler/callback/idle polls bypass this counter.
-    gc_assist_debt_bytes: usize = 0,
     /// Account immediately after the previous major slice. During destruction,
     /// net growth catches backing/storage allocations between safe object
     /// boundaries without polling inside an unpublished backing allocation.
-    gc_assist_accounted_bytes: usize = 0,
     /// Force a partial destruction slice in route-asserting tests. Absent
     /// from production layout and code; shipped slices always use GC policy.
-    gc_destroy_budget_for_test: if (builtin.is_test) ?u64 else void = if (builtin.is_test) null else {},
     atoms: atom.AtomTable,
     classes: class.Table,
     shapes: shape.Registry,
@@ -2346,6 +2357,12 @@ pub const JSRuntime = struct {
         }
     }
 
+    /// Collections since this runtime started. `core.Local` compares against
+    /// it to decide whether a native-held reference is still current.
+    pub inline fn collectionEpoch(self: *const JSRuntime) u64 {
+        return self.gc.collection_epoch;
+    }
+
     pub fn traceRoots(self: *JSRuntime, roots: ?*const ValueRootFrame, visitor: *RootVisitor) RootTraceError!void {
         try self.traceValueRootFrames(roots, visitor);
         try visitor.value(&self.current_exception);
@@ -2391,19 +2408,13 @@ pub const JSRuntime = struct {
     /// TGC S2: the runtime's interned/cached flat strings are roots while the
     /// string family is tracer-owned (they used to hold a +1 count each).
     fn traceStringCacheRoots(self: *JSRuntime, visitor: *RootVisitor) RootTraceError!void {
-        for (self.single_byte_strings) |cached| {
-            if (cached) |stored| try visitor.constValue(JSValue.string(stored.header()));
-        }
-        for (self.percent_hex_strings) |cached| {
-            if (cached) |stored| try visitor.constValue(JSValue.string(stored.header()));
-        }
-        for (self.small_int_strings) |cached| {
-            if (cached) |stored| try visitor.constValue(JSValue.string(stored.header()));
-        }
-        if (self.empty_string) |stored| try visitor.constValue(JSValue.string(stored.header()));
-        if (self.recent_two_unit_string) |cached| try visitor.constValue(JSValue.string(cached.string.header()));
-        for (self.recent_atom_strings) |cached| {
-            if (cached) |stored| try visitor.constValue(JSValue.string(stored.string.header()));
+        for (&self.single_byte_strings) |*slot| try visitor.stringSlot(slot);
+        for (&self.percent_hex_strings) |*slot| try visitor.stringSlot(slot);
+        for (&self.small_int_strings) |*slot| try visitor.stringSlot(slot);
+        try visitor.stringSlot(&self.empty_string);
+        if (self.recent_two_unit_string) |*cached| try visitor.stringField(&cached.string);
+        for (&self.recent_atom_strings) |*cached| {
+            if (cached.*) |*stored| try visitor.stringField(&stored.string);
         }
         try self.atoms.traceRoots(visitor);
     }
@@ -3009,7 +3020,7 @@ pub const JSRuntime = struct {
                 self.gc_running = false;
                 _ = self.finishDoomedCompletion(0);
             }
-            self.gc.abortIncrementalCycle();
+            self.gc.abortCycle();
         }
         // `gc_running` covers the major driver. The refcount/cycle phases also
         // invoke allocation and callback boundaries, and a previously queued
@@ -3071,33 +3082,14 @@ pub const JSRuntime = struct {
         self.assertOwnerThread();
         if (self.active_deferred_class_payload_finalizer != null) return .{};
         self.drainDeferredClassPayloadFinalizersAtSafeBoundary();
-        // An incremental major cycle in progress claims every ordinary poll as
-        // a marking increment (§8.6: "allocation debt causes bounded mutator
-        // mark assist on slow paths/polls"). Urgent polls abort the cycle
-        // instead and fall through to the full STW collector: urgency means
-        // maximum reclaim now, and a finished-early cycle would honor its
-        // floating garbage.
-        // Sliced destruction first: a morgue can only exist after a cycle
-        // finished, so the two branches are mutually exclusive, and the
-        // reclaim in progress should complete before anything new begins.
-        // Destruction is irreversible, so urgency FINISHES it (one pause)
-        // where it merely aborts an open marking cycle.
+        // A morgue can only be non-empty if a collection was interrupted
+        // mid-destruction by an allocation failure; finish it before starting
+        // anything new. Destruction is irreversible.
         if (self.gc.morgue.pending and !self.gc_running and self.gc.hot.phase == .none) {
-            if (mode == .urgent) {
-                self.gc_running = true;
-                @import("gc_trace_stw.zig").finishPendingDestruction(self);
-                self.gc_running = false;
-                _ = self.finishDoomedCompletion(0);
-            } else {
-                return self.destroySlicePoll();
-            }
-        }
-        if (self.gc.incremental.markingActive() and !self.gc_running and self.gc.hot.phase == .none) {
-            if (mode == .urgent) {
-                self.gc.abortIncrementalCycle();
-            } else {
-                return self.incrementalMarkPoll(roots, mode);
-            }
+            self.gc_running = true;
+            @import("gc_trace_stw.zig").finishPendingDestruction(self);
+            self.gc_running = false;
+            _ = self.finishDoomedCompletion(0);
         }
         // Is the whole-heap threshold already crossed? The crossing decides
         // the ORDER of the two collections below, and it is asked TWICE: once
@@ -3284,171 +3276,8 @@ pub const JSRuntime = struct {
             gc.RequestReason.allocation_threshold
         else
             gc.RequestReason.manual;
-        // A pure threshold crossing opens an incremental cycle and returns;
-        // the collection's result arrives at the poll whose increment empties
-        // the frontier. Everything with a REQUEST behind it -- host manual,
-        // memory pressure, collection-failed retries, any urgency -- keeps the
-        // STW collector and its complete-at-this-poll semantics: a request is
-        // a promise to someone, and "begun" is not "kept". The threshold has
-        // no requester; it is the collector pacing itself, which is exactly
-        // the case incrementality exists for.
-        // "Pure threshold" includes the request form: an over-threshold
-        // allocation boundary records `.allocation_threshold`/`.soon`
-        // before any poll can see the crossing, and that request is still
-        // the collector pacing itself, not a promise to a host. Manual,
-        // pressure, failure-retry, and anything urgent keep STW.
-        const self_paced = major_request == null or
-            (major_request.?.reason == .allocation_threshold and
-                major_request.?.urgency != .urgent);
-        if (mode != .urgent and self_paced) {
-            self.gc_running = true;
-            self.gc_assist_debt_bytes = 0;
-            self.gc.beginCycleEnvelope(self.malloc_gc_threshold);
-            const began = profile.nowNanos();
-            @import("gc_trace_stw.zig").beginIncrementalCycle(self, null, mode.rootScan()) catch |err| {
-                self.gc_running = false;
-                self.gc.abortIncrementalCycle();
-                const mapped: gc.CollectionError = switch (err) {
-                    error.OutOfMemory => error.OutOfMemory,
-                    error.PayloadMarkFailed => error.PayloadMarkFailed,
-                };
-                self.gc.recordFailure(mapped);
-                self.gc.requestGC(.collection_failed, .soon);
-                return mapped;
-            };
-            self.gc_running = false;
-            const ended = profile.nowNanos();
-            self.gc.recordMajorSlicePause(if (ended > began) ended - began else 0, .begin);
-            self.gc_assist_accounted_bytes = self.memory.allocated_bytes;
-            return .{};
-        }
         self.gc.scheduler.beginMajorCycle(reason);
         return try self.tryRunObjectCycleRemovalWithValueRoots(null, mode.rootScan());
-    }
-
-    /// One bounded marking increment, and the final remark when the frontier
-    /// runs dry. The safety valve: once the account outgrows the threshold by
-    /// half again, the cycle finishes in this poll regardless of budget --
-    /// one large pause, counted, instead of an unbounded heap.
-    fn incrementalMarkPoll(
-        self: *JSRuntime,
-        roots: ?*const ValueRootFrame,
-        mode: GCPollMode,
-    ) gc.CollectionError!gc.CollectionResult {
-        const stw = @import("gc_trace_stw.zig");
-        self.gc_running = true;
-        defer self.gc_running = false;
-        defer {
-            self.gc_assist_accounted_bytes = self.memory.allocated_bytes;
-            // A scheduler-driven slice pays the same outstanding allocation
-            // debt as an object-boundary slice. Consume only one interval.
-            self.gc_assist_debt_bytes -|= gc.incremental_assist_interval_bytes;
-        }
-
-        const forced = self.memory.allocated_bytes >
-            std.math.add(usize, self.malloc_gc_threshold, self.malloc_gc_threshold >> 1) catch std.math.maxInt(usize);
-        const began = profile.nowNanos();
-        var frontier_empty = stw.incrementalMarkStep(self, gc.incremental_mark_budget_ns) catch |err| {
-            self.gc.abortIncrementalCycle();
-            const mapped: gc.CollectionError = switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
-                error.PayloadMarkFailed => error.PayloadMarkFailed,
-            };
-            self.gc.recordFailure(mapped);
-            self.gc.requestGC(.collection_failed, .soon);
-            return mapped;
-        };
-        if (forced and !frontier_empty) {
-            self.gc.incremental.stats.forced_finishes += 1;
-            while (!frontier_empty) {
-                frontier_empty = stw.incrementalMarkStep(self, std.math.maxInt(u64)) catch |err| {
-                    self.gc.abortIncrementalCycle();
-                    const mapped: gc.CollectionError = switch (err) {
-                        error.OutOfMemory => error.OutOfMemory,
-                        error.PayloadMarkFailed => error.PayloadMarkFailed,
-                    };
-                    self.gc.recordFailure(mapped);
-                    self.gc.requestGC(.collection_failed, .soon);
-                    return mapped;
-                };
-            }
-        }
-        // Marking time is marking time whether or not this slice happened to
-        // empty the frontier. Attributing the emptying slice's marking to
-        // `.finish` made earley-boyer read as 64 ms of marking against 1.44 s
-        // of finish, when in fact most of that finish WAS marking -- and a
-        // decision about future parallel marking turns on exactly that split.
-        const marked_until = profile.nowNanos();
-        if (!frontier_empty) {
-            self.gc.recordMajorSlicePause(marked_until -| began, .increment);
-            return .{};
-        }
-
-        // The final poll is one PAUSE with two attributable phase segments:
-        // marking followed by finish. Keep it one sample in the pause ring,
-        // but give both phases time/count/max ownership below.
-        const mark_ns = marked_until -| began;
-        const increment_index = @intFromEnum(gc.Registry.SliceKind.increment);
-        self.gc.incremental.stats.total_stw_by_kind[increment_index] +|= mark_ns;
-        self.gc.incremental.stats.total_segments_by_kind[increment_index] +|= 1;
-        self.gc.incremental.stats.segment_max_ns[increment_index] =
-            @max(self.gc.incremental.stats.segment_max_ns[increment_index], mark_ns);
-
-        // Frontier empty: final remark and weak processing, then CONDEMN --
-        // destruction runs in bounded slices at later polls, because the
-        // phase probe put it at 99.5% of this slice's cost. The cycle's
-        // result and the threshold reset land at the destruction-completion
-        // poll; the account has not shrunk yet, so resetting here would price
-        // the next cycle off a heap full of corpses.
-        self.memory.samplePeakAtCollection();
-        _ = stw.finishIncrementalCycle(self, roots, mode.rootScan()) catch |err| {
-            self.gc.abortIncrementalCycle();
-            const mapped: gc.CollectionError = switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
-                error.PayloadMarkFailed => error.PayloadMarkFailed,
-            };
-            self.gc.recordFailure(mapped);
-            self.gc.requestGC(.collection_failed, .soon);
-            return mapped;
-        };
-        if (forced) {
-            // The safety valve wanted memory back, not a promise: destroy now.
-            stw.finishPendingDestruction(self);
-        }
-        const ended = profile.nowNanos();
-        // Charge the census walks to whoever asked for them, not to the pause
-        // -- the same deduction `tryRunObjectCycleRemovalWithValueRoots` makes
-        // for the synchronous major. It was missing here, so with a census
-        // enabled the STW path reported an honest pause and the incremental
-        // path (the one that actually runs) reported an inflated one, from the
-        // same flag, in the same panel.
-        const census = self.gc.last_census_ns;
-        const slice = (ended -| began) -| census;
-        // The slice's own pause sample is the whole stop, which is what the
-        // pause gate measures; the cumulative-by-kind account splits the
-        // marking out of it (added above) so the two questions -- "how long
-        // is one stop" and "which phase owns the stopped time" -- get
-        // different, correct answers.
-        const finish_index = @intFromEnum(gc.Registry.SliceKind.finish);
-        const prior_finish_max = self.gc.incremental.stats.segment_max_ns[finish_index];
-        self.gc.recordMajorSlicePause(slice, .finish);
-        self.gc.incremental.stats.total_stw_by_kind[finish_index] -|= mark_ns;
-        // `recordMajorSlicePause` sees the whole pause so the pause ring and
-        // per-cycle STW stay honest. Its generic max update therefore also
-        // sees the whole pause; restore the prior maximum and compare it with
-        // only the finish-owned tail, just as the cumulative row does above.
-        self.gc.incremental.stats.segment_max_ns[finish_index] =
-            @max(prior_finish_max, slice -| mark_ns);
-        if (!self.gc.morgue.pending) return self.finishDoomedCompletion(slice);
-        // Reset the threshold NOW, pricing the morgue's bytes as already
-        // reclaimed. Waiting for the destruction slices left the account
-        // over-threshold for the whole window, and worse, the eventual reset
-        // included every byte the window allocated: the 1.75x factor
-        // amplified that into a compounding loop that peaked an 841 MB heap
-        // over a ~50 MB live set. The completion poll refines this from the
-        // truly-shrunk account.
-        self.resetGCThresholdExcludingDoomed();
-        return .{};
     }
 
     fn resetGCThresholdExcludingDoomed(self: *JSRuntime) void {
@@ -3461,31 +3290,6 @@ pub const JSRuntime = struct {
         self.memory.allocated_bytes = saved;
     }
 
-    /// One bounded destruction slice; the cycle's result lands at the poll
-    /// whose slice empties the morgue.
-    fn destroySlicePoll(self: *JSRuntime) gc.CollectionError!gc.CollectionResult {
-        const stw = @import("gc_trace_stw.zig");
-        self.gc_running = true;
-        defer self.gc_running = false;
-        defer {
-            self.gc_assist_accounted_bytes = self.memory.allocated_bytes;
-            self.gc.morgue.consumeAssistDebt(&self.gc_assist_debt_bytes);
-        }
-        const budget = if (comptime builtin.is_test)
-            self.gc_destroy_budget_for_test orelse gc.incremental_mark_budget_ns
-        else
-            gc.incremental_mark_budget_ns;
-        const account_before = self.memory.allocated_bytes;
-        const began = profile.nowNanos();
-        _ = stw.destroyDoomedSlice(self, budget);
-        const ended = profile.nowNanos();
-        self.gc.morgue.recordAssistReclaim(account_before, self.memory.allocated_bytes);
-        const slice = if (ended > began) ended - began else 0;
-        self.gc.recordMajorSlicePause(slice, .destroy);
-        if (!self.gc.morgue.pending) return self.finishDoomedCompletion(slice);
-        return .{};
-    }
-
     /// The morgue is empty: deliver the cycle's CollectionResult and reset the
     /// growth threshold from the account the destruction actually shrank.
     fn finishDoomedCompletion(self: *JSRuntime, last_slice_ns: u64) gc.CollectionResult {
@@ -3496,8 +3300,7 @@ pub const JSRuntime = struct {
             .duration_ns = last_slice_ns,
         };
         self.gc.morgue.destroyed = 0;
-        self.gc.morgue.clearAssistCredit();
-        self.gc.recordIncrementalCycleSuccess(result);
+        self.gc.recordCycleSuccess(result);
         self.resetGCThreshold();
         _ = self.gc.block_heap.releaseFreeBlockPages(profile.nowNanos());
         return result;
@@ -3925,25 +3728,6 @@ pub const JSRuntime = struct {
         // the account may be UNDER it while the morgue still holds memory --
         // the explicit `doomed_pending` term is what keeps the slices moving.
         if (!self.gc.morgue.pending and !self.gc.hasPendingMajorRequest()) return;
-        const cycle_open = self.gc.morgue.pending or self.gc.incremental.markingActive();
-        if (cycle_open) {
-            self.gc_assist_debt_bytes +|= size;
-            // Backing growth is observed only at this safe boundary. It may
-            // advance destruction only with finite reclaimed/deferred-byte
-            // credit; bitmap-only corpses were already debited at condemn.
-            // Marking keeps requested-byte pacing over the live graph.
-            const accounted_growth = if (self.gc.morgue.pending)
-                prospective -| self.gc_assist_accounted_bytes
-            else
-                0;
-            if (self.gc_assist_debt_bytes < gc.incremental_assist_interval_bytes and
-                (accounted_growth < gc.incremental_assist_interval_bytes or
-                    self.gc_assist_debt_bytes +| self.gc.morgue.assist_credit_bytes < gc.incremental_assist_interval_bytes)) return;
-        } else {
-            // A pending threshold request is about to open a fresh cycle. Its
-            // first boundary is immediate; later assists start from zero debt.
-            self.gc_assist_debt_bytes = 0;
-        }
         return self.pollGCBeforeObjectAllocation();
     }
 

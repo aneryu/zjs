@@ -41,8 +41,8 @@ fn runUnifiedTests(
     const run = build_config.runArtifactOnCpus(ctx.b, ctx.gate_run_cpus, exe);
     if (gc_stress) {
         run.setEnvironmentVariable("ZJS_GC_STRESS", "1");
-        run.setEnvironmentVariable("ZJS_GC_VERIFY_MINOR", "fatal");
-        run.setEnvironmentVariable("ZJS_MINOR_AUDIT", "fatal");
+        run.setEnvironmentVariable("ZJS_GC_VERIFY", "fatal");
+        run.setEnvironmentVariable("ZJS_GC_AUDIT", "fatal");
     }
     return run;
 }
@@ -134,7 +134,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         fast_test_step.dependOn(&b.addFail(missing_fast_filter).step);
     }
 
-    const gc_stress_step = b.step("test-gc-stress", "Run the unified suite under ZJS_GC_STRESS=1 ZJS_GC_VERIFY_MINOR=fatal ZJS_MINOR_AUDIT=fatal (~1 min; part of checkpoint-gate)");
+    const gc_stress_step = b.step("test-gc-stress", "Run the unified suite under ZJS_GC_STRESS=1 ZJS_GC_VERIFY=fatal ZJS_GC_AUDIT=fatal (~1 min; part of checkpoint-gate)");
     gc_stress_step.dependOn(&runUnifiedTests(ctx, unified_tests, true).step);
 
     // Stress tier is compiled into the unified binary but SkipZigTest unless

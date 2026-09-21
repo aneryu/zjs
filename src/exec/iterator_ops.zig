@@ -799,8 +799,6 @@ pub noinline fn forInNext(
             // snapshot the prototype's own string keys.
             const keys = try forof_ops.forInSnapshotOwnStringKeys(ctx, output, global, proto, iterator);
             core.atom.freeAtomList(rt, iterator.iteratorAtomKeysSlot().*);
-            // TGC S3 §2.3: the key snapshot moves into a published payload.
-            for (keys) |key| rt.atoms.shadeAtomIfMarking(key);
             iterator.iteratorAtomKeysSlot().* = keys;
             iterator.setIteratorLength(std.math.cast(u32, keys.len) orelse return error.OutOfMemory);
             iterator.iteratorIndexSlot().* = 0;

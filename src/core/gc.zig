@@ -7,7 +7,6 @@ pub const representation = @import("gc_representation_constants.zig");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
 const memory = @import("memory.zig");
-const gc_audit_print = @import("gc_audit_print.zig");
 const carrier = @import("gc_carrier.zig");
 const bigint = @import("bigint.zig");
 const object = @import("object.zig");
@@ -26,12 +25,6 @@ const value_format = @import("value_format.zig");
 const KB: usize = 1024;
 const MB: usize = 1024 * KB;
 
-/// R3 roots diagnosis (`-Dzjs_gc_roots_diag=true`): production links scalar
-/// `ValueRootFrame`s, the verify probe records
-/// every object only a conservative word kept alive, and the L3 store probe
-/// is armed regardless of optimize mode. Off in every shipped artifact.
-pub const roots_diag_enabled: bool = build_options.zjs_gc_roots_diag;
-
 const BlockHeapMod = @import("gc_block_heap.zig");
 const gc_space = @import("gc_space.zig");
 
@@ -45,11 +38,7 @@ pub const CarrierStateMask = carrier.StateMask;
 pub const carrier_state_masks = carrier.state_masks;
 pub const CarrierLifecycleState = carrier.LifecycleState;
 pub const CarrierResolveError = carrier.ResolveError;
-pub const block_generation_enabled = carrier.block_generation_enabled;
-pub const extent_identity_enabled = carrier.extent_identity_enabled;
-pub const lifecycle_state_enabled = carrier.lifecycle_state_enabled;
-pub const block_tracking_enabled = carrier.block_tracking_enabled;
-pub const extent_tracking_enabled = carrier.extent_tracking_enabled;
+pub const carrier_audit_enabled = carrier.audit_enabled;
 pub const ResolvedExact = union(enum) {
     tracing: *Header,
 };
@@ -57,174 +46,131 @@ pub const ResolvedCurrentMember = union(enum) {
     tracing: *Header,
 };
 
-/// Set from the `ZJS_GC_STRESS` environment variable. Collect at every
-/// safepoint that has anything young, instead of waiting for the young
-/// threshold, and shorten the safepoint cadence itself
-/// (`JSContext.pollInterruptSlow`).
-///
-/// This exists because a missing root or a missing write barrier is only
+/// Defect forensics. A missing root or a missing write barrier is only
 /// observable when a collection lands inside the exact window the reference is
 /// unreachable from the trace. At the production cadence that window is hit by
 /// accident, so the same binary passes or fails depending on allocation
 /// history, and adding a `print` to find out where moves the collection and the
-/// failure disappears. Under stress the window is hit every time.
-pub var stress_collect: bool = false;
-
-/// Safepoint cadence under stress, in interpreter ticks. `ZJS_GC_STRESS=1`
-/// takes the default; `ZJS_GC_STRESS=<n>` for n > 1 sets it directly, which is
-/// how a full test262 sweep stays affordable -- 64 is thorough but roughly two
-/// orders of magnitude slower than the production 10_000.
-pub var stress_cadence: i32 = 64;
-
-/// `ZJS_MINOR_AUDIT=1`: after the minor picks its condemned set, report any
-/// live object still holding an edge into it. Parsed once here rather than
-/// read at the check, because the minor path is exactly where a `getenv` per
-/// collection is the probe that hides the bug -- regexp performs 794 minors in
-/// a two-second script.
-pub var minor_audit: bool = false;
-/// `ZJS_MINOR_AUDIT=fatal`: the audit above panics on its first hit instead
-/// of only printing, so a gate that runs the suite under it turns red.
-pub var minor_audit_fatal: bool = false;
-/// `ZJS_ATOM_AUDIT=fatal`: a holder edge that names an atom entry the sweep
-/// already retired panics on the spot instead of only printing. The default
-/// Debug behaviour is the print plus the `atom_audit_stale_edge` counter, so a
-/// latent site surfaces in the suite output without turning every unrelated
-/// test in the same binary red.
-pub var atom_audit_fatal: bool = false;
-
-/// `ZJS_GC_VERIFY_MINOR=fatal`: a PRECISE condemned-but-reachable violation
-/// panics. Conservative-only violations are not violations at all: the
-/// verifier's probe runs on a deeper native frame than the minor it checks,
-/// so register and stack residue differ between the two scans by
-/// construction.
-pub var verify_minor_fatal: bool = false;
-
-/// `ZJS_GC_VERIFY_MINOR=verbose` (or any roots-diag build): print the
-/// conservative-only condemned-but-reachable reports too.
+/// failure disappears. These three widen the window and then check the verdict.
 ///
-/// They are the overwhelming majority -- a `test-gc-stress` run emits ~1000
-/// such lines and zero precise ones -- and by the paragraph above every one
-/// of them is expected. A gate whose normal output is a thousand lines of
-/// expected noise is a gate nobody reads, so the default is: report precise
-/// violations (which is what `fatal` acts on), stay silent otherwise. The
-/// verdict itself is unchanged; only the printing is gated.
-pub var verify_minor_verbose: bool = roots_diag_enabled;
+/// Read once at `Registry.init` rather than at each check: the minor path is
+/// exactly where a `getenv` per collection is the probe that hides the bug --
+/// regexp performs 794 minors in a two-second script.
+pub const Forensics = struct {
+    /// How loud a check is when it fires.
+    pub const Level = enum {
+        off,
+        /// Print and keep going, so a latent site surfaces in the suite
+        /// output without turning every unrelated test in the binary red.
+        report,
+        /// Panic on the first hit, so a gate running the suite turns red.
+        fatal,
 
-/// TGC S0 L3: sites of stores that static reading found unbarriered. The
-/// probe below counts, per site, the state the generational barrier exists
-/// to prevent -- an old, unremembered, published owner gaining a young child.
+        pub fn enabled(self: Level) bool {
+            return self != .off;
+        }
+    };
+
+    /// `ZJS_GC_STRESS`: collect at every safepoint that has anything young
+    /// instead of waiting for the young threshold, and shorten the safepoint
+    /// cadence itself (`JSContext.pollInterruptSlow`) to this many interpreter
+    /// ticks. `=1` takes the 64-tick default, which is thorough and roughly
+    /// two orders of magnitude slower than the production 10_000; `=<n>` for
+    /// n > 1 sets the cadence directly, which is how a full test262 sweep
+    /// stays affordable.
+    stress_cadence: ?i32 = null,
+
+    /// `ZJS_GC_AUDIT`: report edges that should not exist -- a live object
+    /// still holding an edge into the minor's condemned set, an unbarriered
+    /// store that left an old unremembered owner holding a young child, or a
+    /// holder edge naming an atom entry the sweep already retired.
+    ///
+    /// Cheap, and correspondingly partial: it asks "does some live object
+    /// still name this?", which finds a missing barrier only when the owner
+    /// is itself reachable AND the edge is one `traceChildEdges` enumerates.
+    audit: Level = .off,
+
+    /// `ZJS_GC_VERIFY`: check what a collection is about to condemn against
+    /// what a full trace from freshly cleared marks would keep -- every minor
+    /// in `collectMinor`, every incremental finish in `finishIncrementalCycle`.
+    ///
+    /// This asks the question the collector is really answering, "is this
+    /// garbage?", so unlike `audit` it is not blind to references the tracer
+    /// does not know about at all. Only PRECISE disagreements are violations:
+    /// the verifier's probe runs on a deeper native frame than the collection
+    /// it checks, so register and stack residue differ between the two
+    /// conservative scans by construction, and a `test-gc-stress` run reports
+    /// ~1000 such expected hits against zero precise ones. Conservative-only
+    /// hits are therefore counted and never printed.
+    verify: Level = .off,
+
+    fn read(name: [*:0]const u8) ?Level {
+        const raw = std.c.getenv(name) orelse return null;
+        const text = std.mem.span(raw);
+        if (text.len == 0 or std.mem.eql(u8, text, "0")) return .off;
+        if (std.mem.eql(u8, text, "fatal")) return .fatal;
+        return .report;
+    }
+
+    fn readFromEnv(self: *Forensics) void {
+        if (comptime std.debug.runtime_safety) {
+            if (read("ZJS_GC_AUDIT")) |level| self.audit = level;
+            if (read("ZJS_GC_VERIFY")) |level| self.verify = level;
+        }
+
+        const raw = std.c.getenv("ZJS_GC_STRESS") orelse return;
+        const text = std.mem.span(raw);
+        if (text.len == 0 or std.mem.eql(u8, text, "0")) return;
+        const parsed = value_format.parseAsciiInt(i32, text, 10) catch 1;
+        self.stress_cadence = if (parsed > 1) parsed else 64;
+    }
+
+    /// Stress is available everywhere: the release binary is what a full
+    /// test262 stress sweep runs.
+    pub fn stressing(self: Forensics) bool {
+        return self.stress_cadence != null;
+    }
+
+    /// The two checking arms are safety-build machinery -- each walks the
+    /// whole heap per collection and reports through `std.debug.print` -- so
+    /// a shipped ReleaseFast binary carries neither the walk nor its
+    /// reporting. Reading the fields through these is what erases them.
+    pub inline fn auditing(self: Forensics) bool {
+        if (comptime !std.debug.runtime_safety) return false;
+        return self.audit.enabled();
+    }
+
+    pub inline fn auditIsFatal(self: Forensics) bool {
+        if (comptime !std.debug.runtime_safety) return false;
+        return self.audit == .fatal;
+    }
+
+    pub inline fn verifying(self: Forensics) bool {
+        if (comptime !std.debug.runtime_safety) return false;
+        return self.verify.enabled();
+    }
+
+    pub inline fn verifyIsFatal(self: Forensics) bool {
+        if (comptime !std.debug.runtime_safety) return false;
+        return self.verify == .fatal;
+    }
+};
+
+pub var forensics: Forensics = .{};
+
+/// Sites of stores that static reading found unbarriered. `auditUnbarrieredStore`
+/// counts, per site, the state the generational barrier exists to prevent --
+/// an old, unremembered, published owner gaining a young child.
 pub const UnbarrieredStoreSite = enum(u8) {
     set_property_data_overwrite,
     dense_array_in_capacity_append,
     global_lexical_cell_replace,
 };
 
-/// `ZJS_GC_ARENA_AUDIT=1`: after every collection, check that a slab block
-/// reads as a live GC object exactly when it holds one.
-///
-/// That biconditional is what conservative candidate validation resolves
-/// against, and it is maintained by scattered stores in two modules rather
-/// than by any one owner -- both stamps that fix it could be deleted with a
-/// green suite. A checker is the answer to an invariant with no owner: it does
-/// not care which store was forgotten.
-pub var arena_audit: bool = false;
-
-/// Expensive whole-heap invariants belong to safety/audit builds only. In the
-/// shipped ReleaseFast configuration this folds to the existing, normally
-/// false arena-audit flag; no allocation/mark/free hot path calls it.
+/// Whole-heap invariant walks belong to safety builds. No allocation, mark or
+/// free hot path calls one, and the shipped ReleaseFast binary carries none.
 pub inline fn invariantChecksEnabled() bool {
-    if (comptime std.debug.runtime_safety) return true;
-    return arena_audit;
-}
-
-/// `ZJS_GC_VERIFY_MINOR=1`: check every minor's condemned set against what a
-/// full trace would keep. See `gc_trace_stw.computeFullReachable`.
-pub var verify_minor: bool = false;
-
-/// `ZJS_GC_VERIFY_MAJOR_ALL=1` (roots-diag builds): re-derive reachability
-/// from freshly cleared marks at every incremental finish and reject any
-/// object the fresh precise roots reach but the cycle is about to condemn.
-pub var verify_major_all: bool = false;
-
-/// `ZJS_GC_M_CUT_INJECT=N`: terminal Object-layout deletion mutants.
-/// 1 borrows the still-live scalar word for the parked successor; 2 sends a
-/// slots2 Object through its absent resident payload arm; 3 skips removal of
-/// its sparse payload entry at destruction; 4 applies the historical uniform-
-/// header body offset to Object. Test binaries only.
-pub var m_cut_inject: u8 = 0;
-
-pub inline fn mCutInjection(comptime mutation: u8) bool {
-    if (comptime !builtin.is_test) return false;
-    return m_cut_inject == mutation;
-}
-
-/// One `ZJS_*` audit switch as spelled in the environment: unset, off
-/// ("" / "0"), on (anything else), or the two escalations "fatal" and
-/// "verbose", which also count as on.
-const EnvSwitch = enum {
-    unset,
-    off,
-    on,
-    fatal,
-    verbose,
-
-    fn read(name: [*:0]const u8) EnvSwitch {
-        const raw = std.c.getenv(name) orelse return .unset;
-        const text = std.mem.span(raw);
-        if (text.len == 0 or std.mem.eql(u8, text, "0")) return .off;
-        if (std.mem.eql(u8, text, "fatal")) return .fatal;
-        if (std.mem.eql(u8, text, "verbose")) return .verbose;
-        return .on;
-    }
-
-    fn enabled(self: EnvSwitch) bool {
-        return self != .unset and self != .off;
-    }
-};
-
-/// Read once at `Registry.init`. "0" or empty disables; "1" enables at the
-/// default cadence; any other integer enables at that cadence.
-fn readStressFromEnv() void {
-    switch (EnvSwitch.read("ZJS_MINOR_AUDIT")) {
-        .unset => {},
-        else => |value| {
-            minor_audit = value.enabled();
-            minor_audit_fatal = value == .fatal;
-        },
-    }
-    switch (EnvSwitch.read("ZJS_ATOM_AUDIT")) {
-        .unset => {},
-        else => |value| atom_audit_fatal = value == .fatal,
-    }
-    switch (EnvSwitch.read("ZJS_GC_ARENA_AUDIT")) {
-        .unset => {},
-        else => |value| arena_audit = value.enabled(),
-    }
-    switch (EnvSwitch.read("ZJS_GC_VERIFY_MINOR")) {
-        .unset => {},
-        else => |value| {
-            verify_minor = value.enabled();
-            verify_minor_fatal = value == .fatal;
-            verify_minor_verbose = roots_diag_enabled or value == .verbose;
-        },
-    }
-    if (comptime roots_diag_enabled) {
-        switch (EnvSwitch.read("ZJS_GC_VERIFY_MAJOR_ALL")) {
-            .unset => {},
-            else => |value| verify_major_all = value.enabled(),
-        }
-    }
-    if (comptime builtin.is_test) {
-        if (std.c.getenv("ZJS_GC_M_CUT_INJECT")) |raw| {
-            m_cut_inject = value_format.parseAsciiInt(u8, std.mem.span(raw), 10) catch 0;
-        }
-    }
-    const raw = std.c.getenv("ZJS_GC_STRESS") orelse return;
-    const text = std.mem.span(raw);
-    if (text.len == 0 or std.mem.eql(u8, text, "0")) return;
-    stress_collect = true;
-    const parsed = value_format.parseAsciiInt(i32, text, 10) catch return;
-    if (parsed > 1) stress_cadence = parsed;
+    return std.debug.runtime_safety;
 }
 
 /// Incremental-major barrier state and stats (§8.4). Marking is driven to
@@ -232,7 +178,6 @@ fn readStressFromEnv() void {
 /// separately.
 pub const incremental = @import("gc_incremental.zig");
 /// Unbounded segmented private/shared mark frontier (§8.4).
-pub const mark_queue = @import("gc_mark_queue.zig");
 pub const registry_pins = @import("gc_registry_pins.zig");
 pub const registry_scheduler = @import("gc_registry_scheduler.zig");
 pub const registry_lists = @import("gc_registry_lists.zig");
@@ -245,6 +190,13 @@ pub const registry_diagnostics = @import("gc_registry_diagnostics.zig");
 const gc_trace_stw_reports = @import("gc_trace_stw.zig");
 const JSRuntime = @import("runtime.zig").JSRuntime;
 pub const generation = @import("gc_generation.zig");
+pub const nursery_mod = @import("gc_nursery.zig");
+
+/// Migration switch for the copying young generation. While it is false the
+/// nursery is never allocated from and every carrier fork keeps its old
+/// shape; the collector's young path is unchanged. Delete it once the
+/// bump-allocated young generation is the only one.
+pub var nursery_enabled: bool = false;
 const IncrementalState = incremental.State;
 
 /// Young objects required before a minor is worth its root scan.
@@ -383,9 +335,7 @@ const NonBlockObjectAuthority = registry_heap.NonBlockObjectAuthority;
 /// still-accounted allocation from both sides. This shadow follows lifecycle
 /// publication/free events instead, and is entirely absent from shipped
 /// ReleaseFast builds.
-pub const heap_accounting_oracle_enabled: bool = carrier.audit_oracle_enabled;
-
-pub const HeapAccountingOracle = if (heap_accounting_oracle_enabled)
+pub const HeapAccountingOracle = if (carrier_audit_enabled)
     carrier.HeapAccountingOracle
 else
     void;
@@ -593,53 +543,6 @@ pub const GcKind = RefKind;
 
 pub const gc_kind_count: usize = @typeInfo(GcKind).@"enum".fields.len;
 
-/// O2-B's marking-epoch exemption. Only kinds whose lifetime is owned by the
-/// tracer AND whose struct never moves under the mutator may persist as raw
-/// pointers in a private or shared mark frontier. Shape is tracer-owned (no
-/// refcount) but `relocateShape` frees and re-creates the struct on inline
-/// FAM growth, so a queued raw pointer could dangle; it is shaded
-/// synchronously instead (`Collector.shade` non-frontier branch). Realm is
-/// tracer-owned too and keeps the synchronous route for now (its edges are
-/// few; S1-b left the queue admission for a later measurement).
-/// Keep this separate from enum ranges: Realm sits between VarRef and Module.
-pub inline fn frontierEpochSafe(kind: GcKind) bool {
-    return switch (kind) {
-        .object,
-        .function_bytecode,
-        .var_ref,
-        .module,
-        .string,
-        .rope,
-        .string_buffer,
-        .big_int,
-        .property_storage,
-        .array_storage,
-        .payload,
-        => true,
-        .realm_context, .shape => false,
-    };
-}
-
-comptime {
-    for (std.meta.tags(GcKind)) |kind| {
-        const expected = switch (kind) {
-            .object,
-            .function_bytecode,
-            .var_ref,
-            .module,
-            .string,
-            .rope,
-            .string_buffer,
-            .big_int,
-            .property_storage,
-            .array_storage,
-            .payload,
-            => true,
-            .realm_context, .shape => false,
-        };
-        std.debug.assert(frontierEpochSafe(kind) == expected);
-    }
-}
 pub const Phase = enum(u8) {
     none,
     /// The tracer is running a destruction slice. It used to share this role
@@ -772,7 +675,11 @@ pub const AllocInfo = packed struct(u8) {
     /// free paths read it back instead of re-deriving the class from the byte
     /// size (qjs `__js_free`, quickjs.c).
     block_size_idx: u5 = 0,
-    reserved: bool = false,
+    /// Bump-allocated young cell: no block, no allocation bitmap, no
+    /// individual free. It cannot be spelled in `block_size_idx` -- the slab's
+    /// 31 classes and the block-cell discriminator fill all 32 values -- so it
+    /// takes the byte's one spare bit.
+    nursery: bool = false,
     /// The allocation has been published to the live heap. Kept separate from
     /// size_class because slab-overlaid metadata reserves that field.
     heap_accounted: bool = false,
@@ -783,7 +690,6 @@ pub const AllocInfo = packed struct(u8) {
     standalone: bool = false,
 };
 
-pub const MarkStack = mark_queue.MarkStack;
 
 /// Tracer-owned lifetime state in the tail of Metadata. Epoch 0 is reserved
 /// for newborn/unmarked; the Registry epoch starts at 1.
@@ -1012,13 +918,10 @@ pub inline fn bodyOffsetFromHeader(comptime kind: GcKind) usize {
 }
 
 /// Typed header-to-body arithmetic. Object's zero displacement is asserted at
-/// the only conversion boundary it owns; mutation 4 proves a reintroduced
-/// uniform eight-byte offset stops here before a body field is dereferenced.
+/// the only conversion boundary it owns, so a reintroduced uniform eight-byte
+/// offset stops here before a body field is dereferenced.
 pub inline fn bodyAddressFromHeader(comptime kind: GcKind, header: *const Header) usize {
-    const offset = if (mCutInjection(4) and kind == .object)
-        @sizeOf(TraceHeader)
-    else
-        bodyOffsetFromHeader(kind);
+    const offset = bodyOffsetFromHeader(kind);
     if (comptime std.debug.runtime_safety) {
         if (kind == .object and offset != 0)
             @panic("gc: M-CUT BODY OFFSET: Object handle must equal body start");
@@ -1083,6 +986,38 @@ pub inline fn headerNeedsFinalizer(h: *const Header) bool {
 /// `snapshotDoomed`, so it is not a stable predicate, and
 /// `nonblock_objects.doomed` is an ArrayList whose membership test is O(n).
 pub const condemned_mark_epoch: u16 = std.math.maxInt(u16);
+
+/// The relocation stamp, in the same field and for the same reason as
+/// `condemned_mark_epoch`: "forwarded", "condemned" and "marked" are mutually
+/// exclusive by construction, so they are one tri-state rather than three
+/// bits. A minor writes it over a young cell it has just copied out; the
+/// forwarding ADDRESS goes in the body's first word, which a copied-out cell
+/// no longer needs.
+pub const forwarded_mark_epoch: u16 = condemned_mark_epoch - 1;
+
+pub inline fn headerForwarded(h: *const Header) bool {
+    return @atomicLoad(u16, &h.metaConst().lifetime.mark_epoch, .monotonic) == forwarded_mark_epoch;
+}
+
+/// Where a forwarded cell went. Only valid while `headerForwarded` holds.
+pub inline fn forwardingTarget(h: *const Header) *Header {
+    return @ptrFromInt(@as(*const usize, @ptrCast(@alignCast(h))).*);
+}
+
+/// `body_bytes` is stored alongside the address because the body's first word
+/// is where the address goes: once it is written the object can no longer
+/// describe its own size, and the page walk that finds the corpses needs a
+/// size for every cell, forwarded or not.
+pub inline fn setForwarding(h: *Header, target: *Header, body_bytes: usize) void {
+    @as(*usize, @ptrCast(@alignCast(h))).* = @intFromPtr(target);
+    h.meta().size_class = @intCast(@min(body_bytes, large_heap_size_class));
+    @atomicStore(u16, &h.meta().lifetime.mark_epoch, forwarded_mark_epoch, .monotonic);
+}
+
+/// The body size of a forwarded cell, read back from the stamp above.
+pub inline fn forwardedBodyBytes(h: *const Header) usize {
+    return h.metaConst().size_class;
+}
 
 /// O(1) condemnation test, valid for every kind: block cell, extent, non-block
 /// Object and list carrier alike.
@@ -1214,6 +1149,18 @@ pub fn verifyMetadataSemantics(
     if (meta.flags.kind != expected_kind) return error.RepresentationKindMismatch;
     const descriptor = representationKindDescriptor(expected_kind);
 
+    // A bump-allocated young cell is its own carrier: class field unused,
+    // standalone clear, no block. Checking it against the slab's class domain
+    // would read the unused field as class 0.
+    if (meta.alloc_info.nursery) {
+        if (meta.alloc_info.standalone or
+            meta.alloc_info.block_size_idx != 0 or
+            expected_kind != .object)
+        {
+            return error.RepresentationAllocationCarrierMismatch;
+        }
+        return verifyMetadataLifetime(meta, expected_kind, state);
+    }
     const is_block_cell = meta.alloc_info.block_size_idx == representation.block_cell_size_class;
     switch (descriptor.allocation) {
         .block_slab_or_standalone => {},
@@ -1228,6 +1175,17 @@ pub fn verifyMetadataSemantics(
     } else if (!is_block_cell and meta.alloc_info.block_size_idx >= memory.SmallObjectSlab.class_count) {
         return error.RepresentationAllocationCarrierMismatch;
     }
+    return verifyMetadataLifetime(meta, expected_kind, state);
+}
+
+/// The state half of `verifyMetadataSemantics`: what the lifetime word and the
+/// accounting bits must say, independent of which carrier holds the object.
+fn verifyMetadataLifetime(
+    meta: *const Metadata,
+    expected_kind: GcKind,
+    state: MetadataSemanticState,
+) InvariantError!void {
+    const is_block_cell = meta.alloc_info.block_size_idx == representation.block_cell_size_class;
     switch (state) {
         .registry_published => {
             if (!meta.alloc_info.heap_accounted)
@@ -1486,6 +1444,16 @@ pub const Registry = struct {
     /// Page-radix map of published GC objects.
     address_registry: AddressRegistryTable = .{},
     nonblock_objects: ?*NonBlockObjectAuthority = null,
+    /// Bump-allocated young generation. Empty unless `nursery_enabled`.
+    nursery: nursery_mod.Nursery = .{},
+    /// Bumped by every collection that can move or free an object.
+    ///
+    /// This is the `Effect.may_alloc` discipline made checkable at runtime:
+    /// native code that holds a heap pointer across a collection is holding a
+    /// stale one, and `Local` compares this counter to decide. A function
+    /// that cannot allocate cannot bump it, which is exactly why such a
+    /// function may hold bare pointers freely.
+    collection_epoch: u64 = 0,
     /// The slab whose arena lifetimes the address registry observes, for
     /// recovery.
     arena_slab: ?*memory.SmallObjectSlab = null,
@@ -1504,8 +1472,8 @@ pub const Registry = struct {
 
     /// Independent byte oracle for tests and ownership-audit builds; void in
     /// shipped builds.
-    heap_accounting_oracle: if (heap_accounting_oracle_enabled) HeapAccountingOracle else void =
-        if (heap_accounting_oracle_enabled) .{} else {},
+    heap_accounting_oracle: if (carrier_audit_enabled) HeapAccountingOracle else void =
+        if (carrier_audit_enabled) .{} else {},
 
     // Cold tail. The verification and statistics surface that reads these
     // lives in `gc_registry_diagnostics.zig`.
@@ -1566,7 +1534,7 @@ pub const Registry = struct {
     /// `JSRuntime` construction can fail after this returns -- which is why
     /// each sub-structure's `deinit` is idempotent instead.
     pub fn init(account: *memory.MemoryAccount, policy: Policy) Registry {
-        readStressFromEnv();
+        forensics.readFromEnv();
         return .{
             .memory = account,
             .scheduler = .{ .policy = policy },
@@ -1589,9 +1557,6 @@ pub const Registry = struct {
     pub fn deinit(self: *Registry, rt: *JSRuntime) void {
         self.abortCycleEnvelope();
         self.invalidateCycleEnvelopeBaseline();
-        // Close the epoch before any destructor can condemn or raw-free a
-        // queued address, then return every private/shared segment.
-        self.closeMarkingAndDrainFrontier();
         self.hot.phase = .deinit;
 
         // Phase 0: unpublished construction-root shells (detached generator
@@ -1633,6 +1598,31 @@ pub const Registry = struct {
         // after JSRuntime's host-quiescent teardown collections; the explicit
         // side authority is nevertheless a complete fallback for every
         // non-block Object still owned at this boundary.
+        // Nursery residents. Teardown has no collection to evacuate them, so
+        // nothing else will ever reach them: they are in no list, no bitmap
+        // and no side authority -- their membership is the page, and the page
+        // is about to go back whole. Release their resources here or the
+        // carrier ledger ends the run holding their payload cells.
+        if (self.nursery.enabled) {
+            for (self.nursery.pages.items) |page| {
+                var cursor = page.base;
+                while (cursor < page.top) {
+                    const resident: *Header = @ptrFromInt(cursor + metadata_prefix_size);
+                    const forwarded = headerForwarded(resident);
+                    const body_bytes = if (forwarded)
+                        forwardedBodyBytes(resident)
+                    else
+                        heapByteSizeFromHeader(rt, resident);
+                    if (!forwarded and resident.metaConst().alloc_info.heap_accounted) {
+                        self.recordHeapFreeWithBytes(resident, body_bytes);
+                        resident.meta().flags.finalizing = true;
+                        object.Object.destroyFromHeader(rt, resident);
+                        rt.drainDeferredClassPayloadFinalizers();
+                    }
+                    cursor += std.mem.alignForward(usize, body_bytes + metadata_prefix_size, 8);
+                }
+            }
+        }
         if (self.nonblock_objects) |authority| {
             while (authority.items.items.len != 0) {
                 const h = authority.items.items[authority.items.items.len - 1];
@@ -1737,13 +1727,13 @@ pub const Registry = struct {
         }
         self.address_registry.deinit(addressRegistryAllocator());
         self.generation.deinit(addressRegistryAllocator());
-        self.marking.deinit();
+        self.nursery.deinit(self.nursery.page_allocator);
         self.block_heap.deinit();
-        if (comptime heap_accounting_oracle_enabled) {
+        if (comptime carrier_audit_enabled) {
             std.debug.assert(self.heap_accounting_oracle.raw.count() == 0);
             self.heap_accounting_oracle.deinit(std.heap.page_allocator);
         }
-        if (comptime carrier.block_tracking_enabled or carrier.extent_tracking_enabled) {
+        if (comptime carrier.audit_enabled or carrier.audit_enabled) {
             self.memory.deinitGcCarrier();
         }
 
@@ -1846,7 +1836,7 @@ pub const Registry = struct {
     }
 
     pub inline fn addInitializedWithSize(self: *Registry, h: *Header, bytes: usize) !void {
-        if (h.metaConst().flags.kind == .object and !isBlockCellHeader(h)) {
+        if (h.metaConst().flags.kind == .object and !isBlockCellHeader(h) and !isNurseryHeader(h)) {
             try self.prepareNonBlockObjectAuthority();
         }
         self.addInitializedWithSizeNoFail(h, bytes);
@@ -1891,10 +1881,8 @@ pub const Registry = struct {
     /// histogram, sweep-model stats) needs no gate: those arms are already
     /// absent from production builds, and `detailed_reports` is reached by a
     /// tail call that costs the frame nothing.
-    inline fn publicationNeedsColdArm(self: *const Registry, is_large: bool, standalone: bool) bool {
-        if (is_large or standalone) return true;
-        if (self.incremental.markingActive()) return true;
-        return false;
+    inline fn publicationNeedsColdArm(is_large: bool, standalone: bool) bool {
+        return is_large or standalone;
     }
 
     inline fn publishInitialized(
@@ -1924,7 +1912,7 @@ pub const Registry = struct {
         const info_at_entry = h.metaConst().alloc_info;
         const is_block_cell = info_at_entry.block_size_idx == representation.block_cell_size_class;
         if (comptime arm == .fast) {
-            if (self.publicationNeedsColdArm(is_large, info_at_entry.standalone)) {
+            if (publicationNeedsColdArm(is_large, info_at_entry.standalone)) {
                 @branchHint(.unlikely);
                 self.publishInitializedCold(h, bytes);
                 return;
@@ -1938,12 +1926,19 @@ pub const Registry = struct {
         } else info_at_entry.standalone;
         if (standalone) h.meta().size_class = encodeHeapBytes(bytes);
         h.meta().alloc_info.heap_accounted = true;
-        if (comptime heap_accounting_oracle_enabled) {
-            self.heap_accounting_oracle.recordPublish(@intFromPtr(h), bytes, is_large);
+        // A nursery cell has no raw allocation record to pair with: the page
+        // was charged, not the cell. Both audits describe the raw-alloc /
+        // publish seam, which a bump pointer does not have.
+        if (comptime carrier_audit_enabled) {
+            if (!h.metaConst().alloc_info.nursery) {
+                self.heap_accounting_oracle.recordPublish(@intFromPtr(h), bytes, is_large);
+            }
         }
-        if (comptime carrier.lifecycle_state_enabled) {
-            self.memory.carrierPublish(@intFromPtr(h), bytes) catch
-                @panic("gc: CARRIER IDENTITY: publication missing carrier record");
+        if (comptime carrier.audit_enabled) {
+            if (!h.metaConst().alloc_info.nursery) {
+                self.memory.carrierPublish(@intFromPtr(h), bytes) catch
+                    @panic("gc: CARRIER IDENTITY: publication missing carrier record");
+            }
         }
         // qjs add_gc_object writes header bookkeeping once and then
         // list_add_tail's. No membership flag. GC pacing
@@ -1965,14 +1960,18 @@ pub const Registry = struct {
         // no `Table.remove` since S2-h1, so any extent kind that took an
         // occupant here would leave a stale entry resolving freed pages.
         const is_extent_carrier = kindIsExtentCapable(h.metaConst().flags.kind);
-        const is_nonblock_object = tracked and !is_block_cell and
+        // A nursery cell's membership IS its page: no list, no side
+        // authority, no allocation bitmap. A minor either copies it out or
+        // drops the page, and neither reads a membership structure.
+        const is_nursery = isNurseryHeader(h);
+        const is_nonblock_object = tracked and !is_block_cell and !is_nursery and
             h.metaConst().flags.kind == .object;
         // TGC S2: a string that is neither a block cell nor a non-block
         // Object is an extent (standalone prefix). Strings carry no
         // TraceHeader link word, so `lists.objects` cannot hold them; the
         // heap's medium/large extent tables are their enumeration (marked
         // through `extentSetMark`, swept by `Heap.sweepExtents`).
-        const is_list_carrier = tracked and !is_block_cell and
+        const is_list_carrier = tracked and !is_block_cell and !is_nursery and
             !kindIsPrefixCarrier(h.metaConst().flags.kind);
         {
             if (is_nonblock_object) {
@@ -1988,7 +1987,7 @@ pub const Registry = struct {
             // `Table.remove +308 / insert +61` of the S2/S3 close-out symbol
             // diff. The range gate those inserts also widened is now merged
             // from `Heap.extent_bounds_lo/hi` in `rebuildScanFilter`.
-            self.registerLiveAddressClassified(h, bytes, .{ .tracked = tracked, .needs_occupant = standalone and !is_extent_carrier, .is_block_cell = is_block_cell }, arm);
+            self.registerLiveAddressClassified(h, bytes, .{ .tracked = tracked, .needs_occupant = standalone and !is_extent_carrier, .is_block_cell = is_block_cell });
             self.observeNewPublication(h, bytes);
         }
     }
@@ -2006,16 +2005,16 @@ pub const Registry = struct {
             return;
         }
         h.meta().alloc_info.heap_accounted = true;
-        if (comptime heap_accounting_oracle_enabled) {
+        if (comptime carrier_audit_enabled) {
             self.heap_accounting_oracle.recordPublish(@intFromPtr(h), bytes, false);
         }
-        if (comptime carrier.lifecycle_state_enabled) {
+        if (comptime carrier.audit_enabled) {
             self.memory.carrierPublish(@intFromPtr(h), bytes) catch
                 @panic("gc: CARRIER IDENTITY: publication missing carrier record");
         }
         self.lists.linkTail(h);
         const info = h.metaConst().alloc_info;
-        self.registerLiveAddressClassified(h, bytes, .{ .tracked = true, .needs_occupant = info.standalone, .is_block_cell = isBlockCellHeader(h) }, .cold);
+        self.registerLiveAddressClassified(h, bytes, .{ .tracked = true, .needs_occupant = info.standalone, .is_block_cell = isBlockCellHeader(h) });
         self.observeNewPublication(h, bytes);
     }
 
@@ -2099,17 +2098,24 @@ pub const Registry = struct {
 
     fn recordHeapFreeWithBytes(self: *Registry, header: *Header, bytes: usize) void {
         if (!header.meta().alloc_info.heap_accounted or bytes == 0) return;
-        self.assertFrontierAllowsReclaimKind(header.metaConst().flags.kind);
         // Production restores the publication bit; test/audit builds also
         // debit the independent lifecycle oracle compiled above.
         const is_large = self.isLargeAllocation(bytes);
-        if (comptime heap_accounting_oracle_enabled) {
-            self.heap_accounting_oracle.recordUnpublish(@intFromPtr(header), bytes, is_large);
+        // A nursery cell never entered either ledger -- publication skips both
+        // because a bump pointer has no raw-alloc/publish seam -- so retiring
+        // one must not look for a record that was never written.
+        const in_carrier_ledgers = !header.metaConst().alloc_info.nursery;
+        if (comptime carrier_audit_enabled) {
+            if (in_carrier_ledgers) {
+                self.heap_accounting_oracle.recordUnpublish(@intFromPtr(header), bytes, is_large);
+            }
         }
         header.meta().alloc_info.heap_accounted = false;
-        if (comptime carrier.lifecycle_state_enabled) {
-            self.memory.carrierTransition(@intFromPtr(header), .doomed) catch
-                @panic("gc: CARRIER IDENTITY: retirement missing carrier record");
+        if (comptime carrier.audit_enabled) {
+            if (in_carrier_ledgers) {
+                self.memory.carrierTransition(@intFromPtr(header), .doomed) catch
+                    @panic("gc: CARRIER IDENTITY: retirement missing carrier record");
+            }
         }
         if (header.meta().alloc_info.standalone) header.meta().size_class = 0;
     }
@@ -2145,7 +2151,7 @@ pub const Registry = struct {
         if (headerCondemned(h)) return;
         if (!isCycleCandidate(h)) return;
         if (h.metaConst().flags.kind == .object) {
-            if (!isBlockCellHeader(h)) self.removeNonBlockObject(h);
+            if (!isBlockCellHeader(h) and !isNurseryHeader(h)) self.removeNonBlockObject(h);
             return;
         }
         // Already unlinked, or condemned onto a morgue bucket.
@@ -2212,7 +2218,7 @@ pub const Registry = struct {
     ///     Empty is the steady state (earley-boyer holds two entries; a major
     ///     retires the whole map at cycle begin).
     pub fn reclaimDoomedBlock(self: *Registry, block: *BlockHeapMod.Block) usize {
-        const audit_walk = comptime lifecycle_state_enabled;
+        const audit_walk = comptime carrier_audit_enabled;
         if (audit_walk or self.generation.rememberedCount() != 0) {
             const accounted = block.cell_size - metadata_prefix_size;
             const cells_base = @intFromPtr(block) + block.cells_offset + metadata_prefix_size;
@@ -2628,6 +2634,13 @@ pub const Registry = struct {
 
     /// Served from the collector's block heap: enumerated by block bitmaps,
     /// never linked on `lists.objects`, young-tracked at block granularity.
+    /// A bump-allocated young cell: no block, no allocation bitmap, no
+    /// individual free. Its membership IS the nursery page it sits in, and a
+    /// minor either copies it out or drops the whole page.
+    pub inline fn isNurseryHeader(h: *const Header) bool {
+        return h.metaConst().alloc_info.nursery;
+    }
+
     pub inline fn isBlockCellHeader(h: *const Header) bool {
         // The CLASS FIELD is the marker, not the whole byte: publication sets
         // `heap_accounted` on top of it (0x1F becomes 0x5F), and comparing
@@ -2640,6 +2653,7 @@ pub const Registry = struct {
     fn unregisterNonBlockObject(self: *Registry, header: *Header) void {
         std.debug.assert(header.metaConst().flags.kind == .object);
         std.debug.assert(!isBlockCellHeader(header));
+        std.debug.assert(!isNurseryHeader(header));
         if (header.metaConst().alloc_info.standalone) {
             self.address_registry.remove(addressRegistryAllocator(), header);
         }
@@ -2656,9 +2670,9 @@ pub const Registry = struct {
     /// lane. Publication pre-reserves the lane for the whole extant Object
     /// population, so the collector-side move cannot allocate.
     pub fn condemnNonBlockObject(self: *Registry, header: *Header) void {
-        self.assertFrontierAllowsReclaimKind(.object);
         std.debug.assert(header.metaConst().flags.kind == .object);
         std.debug.assert(!isBlockCellHeader(header));
+        std.debug.assert(!isNurseryHeader(header));
         std.debug.assert(!headerCondemned(header));
         const authority = self.nonblock_objects.?;
         authority.condemn(header);
@@ -2687,88 +2701,6 @@ pub const Registry = struct {
         if (removed_predecessor) self.lists.young_predecessor = previous;
         if (self.lists.young_head == null) self.lists.young_predecessor = null;
         self.lists.objects.delAfter(previous, header);
-    }
-
-    /// Mark accessors, split by population.
-    ///
-    /// Block cells keep their mark in the BLOCK's bitmap under the heap's
-    /// mark epoch: bumping the epoch at a major's begin makes every block's
-    /// bitmap stale -- read as unmarked -- in O(1), which is what the single
-    /// global parity bit could not soundly do and
-    /// what the whole-heap `clearMarks` walk used to cost ~milliseconds per
-    /// cycle to do by hand. The epoch never moves between majors, so sticky
-    /// marks survive for the minors exactly as before. Everything not in a
-    /// block cell uses the fixed `Metadata.lifetime` epoch at payload
-    /// minus 4; Shape and Realm keep their ownership counts in their bodies.
-    ///
-    /// Dispatch cost is one byte read (`alloc_info`, which shares the cell's
-    /// first cache line with the header) and a mask; the bitmap word is
-    /// shared by 64 neighbours, which is better locality than 64 scattered
-    /// header bytes.
-    pub inline fn frontierSafeHeaderAfterMarkClaim(
-        self: *const Registry,
-        header: *Header,
-    ) *Header {
-        // All proof checks are compiled only into safety/test binaries.
-        if (comptime std.debug.runtime_safety) {
-            const meta = header.metaConst();
-            if (!frontierEpochSafe(meta.flags.kind))
-                @panic("gc: FRONTIER SAFETY: unsafe kind entered frontier");
-            if (!meta.alloc_info.heap_accounted or headerCondemned(header))
-                @panic("gc: FRONTIER SAFETY: unpublished header entered frontier");
-            // Frontier agreement covers the immutable/shared carrier prefix.
-            // The whole representation audit additionally checks Object's
-            // mutable Shape projection, but owner requeue legitimately occurs
-            // between the shape-slot store and that projection's commit.
-            verifyMetadataSemantics(meta, meta.flags.kind, .registry_published) catch
-                @panic("gc: FRONTIER SAFETY: carrier/header agreement failed");
-            if (!self.headerMarked(header))
-                @panic("gc: FRONTIER SAFETY: queue admission preceded mark claim");
-        }
-        return header;
-    }
-
-    /// Admission for an owner that would be re-traced after a mutator write.
-    /// A white owner does not need requeueing: if reachable, its first normal
-    /// mark claim will expand the updated edges; if unreachable, preserving
-    /// those edges is unnecessary. Only an owner whose earlier claim already
-    /// made it black may enter the frontier again.
-    ///
-    /// This is deliberately a mark CHECK, not a mark execution. The original
-    /// exact-target shade keeps its existing `setHeaderMarked(target)` call;
-    /// requeue adds no ReleaseFast mark RMW relative to the S1 base.
-    pub inline fn frontierSafeHeaderForRequeue(
-        self: *const Registry,
-        header: *Header,
-    ) ?*Header {
-        if (!self.headerMarked(header)) return null;
-        return self.frontierSafeHeaderAfterMarkClaim(header);
-    }
-
-    fn frontierHasEntriesForSafety(self: *Registry) bool {
-        if (self.marking.stack.len != 0 or !self.marking.queue.isEmpty()) return true;
-        // Helper-private stacks share this pool. An active segment is never
-        // empty: the last pop releases it immediately.
-        return self.marking.queue.segmentPool().stats().active_segments != 0;
-    }
-
-    /// Condemnation/raw-free entry guard for O2-B's generation omission. Shape
-    /// and Realm are exempt because they never persist in a frontier; all four
-    /// admitted kinds must retain their address until marking closes and every
-    /// private/shared segment has drained.
-    pub fn assertFrontierAllowsReclaimKind(self: *Registry, kind: GcKind) void {
-        if (comptime !std.debug.runtime_safety) return;
-        if (!frontierEpochSafe(kind)) return;
-        if (self.incremental.markingActive() and self.frontierHasEntriesForSafety())
-            @panic("gc: FRONTIER SAFETY: reclaim began with live frontier");
-    }
-
-    pub fn assertFrontierDrainedBeforeReclaim(self: *Registry) void {
-        if (comptime !std.debug.runtime_safety) return;
-        if (self.incremental.markingActive())
-            @panic("gc: FRONTIER SAFETY: reclaim began while marking active");
-        if (self.frontierHasEntriesForSafety())
-            @panic("gc: FRONTIER SAFETY: reclaim began before frontier drain");
     }
 
     pub inline fn headerMarked(self: *const Registry, h: *const Header) bool {
@@ -2882,6 +2814,9 @@ pub const Registry = struct {
             std.debug.assert(h.metaConst().alloc_info.heap_accounted);
             std.debug.assert(!headerCondemned(h));
         }
+        // A nursery cell's youth ends when its page does. Clearing the bit
+        // here would make a surviving husk look old to the page walk.
+        if (h.metaConst().alloc_info.nursery) return;
         if (h.metaConst().alloc_info.block_size_idx == representation.block_cell_size_class) {
             h.meta().flags.young = false;
         }
@@ -2901,9 +2836,10 @@ pub const Registry = struct {
     /// O(1) whole-population unmark for the ordinary case. One wrap scrub is
     /// required before reusing epoch 1; 0 always remains newborn/unmarked.
     pub fn advanceHeaderMarkEpoch(self: *Registry) void {
-        // One short of `condemned_mark_epoch`: the reserved stamp must never
-        // be produced as a live mark epoch (TGC S4-h).
-        if (self.marking.header_epoch < condemned_mark_epoch - 1) {
+        // Two short of `condemned_mark_epoch`: neither reserved stamp --
+        // condemnation (TGC S4-h) nor forwarding -- may ever be produced as a
+        // live mark epoch.
+        if (self.marking.header_epoch < forwarded_mark_epoch - 1) {
             self.marking.header_epoch += 1;
             return;
         }
@@ -2923,10 +2859,10 @@ pub const Registry = struct {
     }
 
     pub fn detachCycleCandidate(self: *Registry, header: *Header) void {
-        self.assertFrontierAllowsReclaimKind(header.metaConst().flags.kind);
         std.debug.assert(!headerCondemned(header));
         if (header.metaConst().flags.kind == .object) {
-            if (!isBlockCellHeader(header)) self.removeNonBlockObject(header);
+            if (!isBlockCellHeader(header) and !isNurseryHeader(header))
+                self.removeNonBlockObject(header);
         } else {
             self.removeGcObject(header);
         }
@@ -2936,9 +2872,8 @@ pub const Registry = struct {
     /// Detach for a header produced by a block-only iterator. Allocation
     /// bitmap ownership proves there is no intrusive or side membership to
     /// remove, so the production sweep need only stamp the condemnation.
-    pub inline fn detachBlockObjectCandidate(self: *Registry, header: *Header) void {
+    pub inline fn detachBlockObjectCandidate(header: *Header) void {
         if (comptime std.debug.runtime_safety) {
-            self.assertFrontierAllowsReclaimKind(header.metaConst().flags.kind);
             std.debug.assert(!headerCondemned(header));
             const cell_kind = header.metaConst().flags.kind;
             std.debug.assert(kindIsBlockCellKind(cell_kind));
@@ -2950,39 +2885,17 @@ pub const Registry = struct {
     /// Sequential-sweep twin of `detachCycleCandidate`; the predecessor must
     /// still name the live-list node immediately before `header`.
     pub fn detachCycleCandidateAfter(self: *Registry, previous: *Header, header: *Header) void {
-        self.assertFrontierAllowsReclaimKind(header.metaConst().flags.kind);
         std.debug.assert(!headerCondemned(header));
         self.removeGcObjectAfter(previous, header);
         stampHeaderCondemned(header);
     }
 
     /// Discard an open incremental cycle so a full STW collection can run.
-    ///
-    /// Explicit collections abort rather than join: an object marked during
-    /// the increments that has since died is floating garbage the remark
-    /// would honor, and "collect everything" callers -- which is every
-    /// determinism-sensitive test -- require full precision. The STW
-    /// collector's own `clearMarks` re-derives everything the increments
-    /// knew, so nothing is lost but the work already done.
-    pub fn abortIncrementalCycle(self: *Registry) void {
+    /// Discard the pacing envelope a collection was about to be priced
+    /// against. Callers reach this when they give up on a cycle before it
+    /// starts (allocation failure, teardown).
+    pub fn abortCycle(self: *Registry) void {
         self.abortCycleEnvelope();
-        if (!self.incremental.markingActive()) return;
-        self.closeMarkingAndDrainFrontier();
-        // The trace already promoted whatever it reached; the young
-        // structures still describe those cells as young. Minors stay closed
-        // until a major commits and makes the two agree again.
-        self.generation.abandonMajorRetirement();
-        self.incremental.stats.cycles_aborted += 1;
-    }
-
-    fn closeMarkingAndDrainFrontier(self: *Registry) void {
-        // Sequence is the invariant: no reclamation may see marking active
-        // after entries begin disappearing, and teardown may not proceed until
-        // every shared/private segment is back in the pool cache.
-        if (self.incremental.markingActive()) self.setMajorMarkingActive(false);
-        self.marking.stack.reset();
-        self.marking.queue.reset();
-        self.assertFrontierDrainedBeforeReclaim();
     }
 
     /// Publish the settled account and the threshold derived from it for the
@@ -3063,102 +2976,6 @@ pub const Registry = struct {
         }
     }
 
-    /// TGC S3 §2.3: the body half of `AtomTable.shadeAtomIfMarking`. A value
-    /// symbol's body is a tracer-owned string cell with no owner header on the
-    /// barrier's side (the holder stored a bare `u32` id), so this is
-    /// `publishGreyCold`'s mark-and-queue without the owner-requeue arm that
-    /// `shadeForIncrementalMark` needs for rc-managed targets.
-    pub fn shadeCellForAtomBarrier(self: *Registry, header: *Header) void {
-        if (self.headerMarked(header)) return;
-        // An unpublished cell greys itself at publication; naming it now would
-        // put a still-failable construction on the queue.
-        if (!header.meta().alloc_info.heap_accounted) return;
-        self.setHeaderMarked(header);
-        _ = self.marking.queue.push(self.frontierSafeHeaderAfterMarkClaim(header));
-    }
-
-    pub inline fn shadeForIncrementalMark(self: *Registry, owner: *Header, target: *Header) void {
-        // The exit split is a --gc-stats structural guardrail, not collector
-        // policy. Keep the default tracing build's hot barrier at lane-e's
-        // counter-free cost; tests and explicitly requested detailed reports
-        // retain lane-f's complete call accounting.
-        const report = builtin.is_test or gc_trace_stw_reports.detailed_reports;
-        if (report) self.incremental.stats.barrier_calls += 1;
-        if (self.headerMarked(target)) {
-            if (report) self.incremental.stats.barrier_marked_target += 1;
-            return;
-        }
-        // rc-managed targets (shape adoption is the live case: a black object
-        // takes a fresh shape) must not enter the queue -- the mutator can
-        // free them while queued and the entry dangles. Marking without
-        // queuing is the black-without-tracing hole, so instead the OWNER is
-        // re-queued: its re-trace reaches the target through `shade`, whose
-        // queue mode expands rc-managed kinds synchronously. In the
-        // vanishing case where the owner is itself rc-managed cannot retain a
-        // safe queue address. Fail this cycle closed instead of reintroducing
-        // a whole-heap recovery scan.
-        // An UNPUBLISHED owner's stores are construction, not mutation: the
-        // object is queued grey at publication and its trace shades every
-        // initial edge, so the barrier owes these writes nothing. Queueing
-        // the owner here instead was the corpse factory -- a failed
-        // construction's errdefer-destroy left the queue naming a recycled
-        // cell.
-        if (!owner.meta().alloc_info.heap_accounted) {
-            if (report) self.incremental.stats.barrier_unpublished_owner += 1;
-            return;
-        }
-        // Mirror rule for the target: an unpublished target queues itself
-        // grey at publication, and pushing it now would name a cell whose
-        // construction can still fail and free it.
-        if (!target.meta().alloc_info.heap_accounted) {
-            if (report) self.incremental.stats.barrier_unpublished_target += 1;
-            return;
-        }
-        const kind = target.meta().flags.kind;
-        if (kind == .shape or kind == .realm_context) {
-            const owner_kind = owner.meta().flags.kind;
-            if (owner_kind == .shape or owner_kind == .realm_context) {
-                if (kind == .shape) {
-                    // Realm -> Shape is a real production edge: a realm fills
-                    // its five initial shapes lazily (`ensureInitialShapes`),
-                    // possibly while a major is marking and after the realm
-                    // went black. A shape's only child is its proto, so shade
-                    // it synchronously -- mark the shape, queue the proto --
-                    // exactly what `Collector.shade`'s queue mode does for
-                    // rc-managed kinds. Failing the cycle here surfaced as a
-                    // spurious OutOfMemory in test262 `$262.createRealm()`
-                    // tests once the realm barrier existed.
-                    self.setHeaderMarked(target);
-                    const shape_ref: *shape.Shape = @alignCast(@fieldParentPtr("header", target));
-                    if (shape_ref.proto) |proto| {
-                        if (@intFromPtr(proto) != 0) {
-                            const proto_header = proto.gcHeader();
-                            if (!self.headerMarked(proto_header)) {
-                                self.setHeaderMarked(proto_header);
-                                self.incremental.stats.shaded += 1;
-                                _ = self.marking.queue.push(
-                                    self.frontierSafeHeaderAfterMarkClaim(proto_header),
-                                );
-                            }
-                        }
-                    }
-                    return;
-                }
-                self.marking.queue.invalidateBarrier();
-                return;
-            }
-            if (report) self.incremental.stats.barrier_requeued_owner += 1;
-            const frontier_owner = self.frontierSafeHeaderForRequeue(owner) orelse return;
-            _ = self.marking.queue.push(frontier_owner);
-            return;
-        }
-        self.setHeaderMarked(target);
-        self.incremental.stats.shaded += 1;
-        _ = self.marking.queue.push(
-            self.frontierSafeHeaderAfterMarkClaim(target),
-        );
-    }
-
     /// Whether a minor is worth attempting: enough young objects to be worth
     /// the root scan, and no full collection already in flight. Deliberately
     /// simple — the scheduling policy that replaces it belongs with the
@@ -3173,15 +2990,11 @@ pub const Registry = struct {
         // trigger census: its contract is "collect whenever anything is
         // young", and a heap holding only owned storage cells is still a heap
         // a stress run must be able to walk.
-        if (stress_collect) return self.generation.stats.young_count != 0;
+        if (forensics.stressing()) return self.generation.stats.young_count != 0;
         // A minor that keeps coming back empty is a root and stack scan spent
         // to learn that this workload's young objects do not die. Stop asking
         // until a major changes the answer.
         if (self.generation.minorSuspended()) return false;
-        // §8.6 Prepare: "close admission of a new minor request". While a
-        // major cycle is open every young object is black-published anyway,
-        // so a minor would trace roots to reclaim nothing.
-        if (self.incremental.markingActive()) return false;
         // S4-f (1): the size question is asked of `young_trigger_count`, which
         // excludes the owned storage cells S4-b/c/S2-i moved into the heap. A
         // property buffer that grows 4 -> 8 -> 16 entries publishes three
@@ -3197,6 +3010,8 @@ pub const Registry = struct {
         // one point every scan funnels through: `shade` refuses condemned
         // headers, the mark-epoch stamp `detachCycleCandidate` already writes
         // on everything in the morgue.
+        if (self.nursery.enabled and self.nursery.allocated_bytes >= nursery_mod.collection_trigger_bytes)
+            return true;
         return self.generation.stats.young_trigger_count >= minor_young_threshold;
     }
 
@@ -3219,10 +3034,11 @@ pub const Registry = struct {
     pub inline fn shouldTryMinorBeforeMajor(self: *const Registry) bool {
         if (self.hot.phase != .none) return false;
         if (!self.generation.minorsAllowed()) return false;
-        if (stress_collect) return self.generation.stats.young_count != 0;
+        if (forensics.stressing()) return self.generation.stats.young_count != 0;
+        if (self.nursery.enabled and self.nursery.allocated_bytes >= nursery_mod.collection_trigger_bytes)
+            return true;
         if (self.generation.stats.young_trigger_count < minor_crossing_young_floor) return false;
         if (self.generation.minorSuspended()) return false;
-        if (self.incremental.markingActive()) return false;
         return true;
     }
 
@@ -3260,15 +3076,6 @@ pub const Registry = struct {
 
     fn rememberOwnerForBulkWriteSlow(self: *Registry, owner: *Header) void {
         @branchHint(.cold);
-        if (self.incremental.markingActive()) {
-            // Same publication rule as the value barrier: an unpublished
-            // owner's edges are covered by its published-grey trace.
-            if (owner.meta().alloc_info.heap_accounted) {
-                if (self.frontierSafeHeaderForRequeue(owner)) |frontier_owner|
-                    _ = self.marking.queue.push(frontier_owner);
-            }
-            return;
-        }
         // The gate proves the owner old and unremembered -- EXCEPT when
         // `detailed_reports` closed the gate for accounting reasons, in which
         // case nothing has been proven and the young test still has to run.
@@ -3282,10 +3089,7 @@ pub const Registry = struct {
     /// the fast path's safety check re-derives it to prove the published copy
     /// is not stale. Keeping them the same expression is the point -- a gate
     /// computed one way and checked another checks nothing.
-    inline fn expectedBarrierGate(self: *const Registry) u64 {
-        // Marking wants the exact-target shading arm on every store, so no
-        // owner state may buy an exit.
-        if (self.incremental.markingActive()) return 0;
+    inline fn expectedBarrierGate() u64 {
         // `--gc-stats` wants every call counted, including the ones the gate
         // would have retired for free. Closing the gate is how the counter
         // block stays exact without a second global load on the hot path.
@@ -3301,7 +3105,7 @@ pub const Registry = struct {
     /// a silently wrong statistics row, because the fast path re-derives the
     /// expected gate on every barrier (see `barrierOwnerSkips`).
     pub fn refreshBarrierGate(self: *Registry) void {
-        self.hot.barrier_gate = self.expectedBarrierGate();
+        self.hot.barrier_gate = expectedBarrierGate();
     }
 
     /// The only writer of the marking phase flag.
@@ -3315,10 +3119,6 @@ pub const Registry = struct {
     /// bare store leaves the gate stale and the next barrier call panics.
     /// Injection-verified at `beginIncrementalCycle`'s publication, which is
     /// the one whose window really contains mutator stores.
-    pub fn setMajorMarkingActive(self: *Registry, active: bool) void {
-        self.incremental.major_marking_active = active;
-        self.refreshBarrierGate();
-    }
 
     /// JSC's two-step barrier fast path (AssemblyHelpers.h:1438-1445): load the
     /// owner's state, test it against the phase-owned gate, done. True means
@@ -3335,7 +3135,7 @@ pub const Registry = struct {
             // and it is invisible from the slow path: a gate that wrongly
             // permits a skip never reaches it. So check it here, on every
             // barrier call, in every safety build.
-            std.debug.assert(self.hot.barrier_gate == self.expectedBarrierGate());
+            std.debug.assert(self.hot.barrier_gate == expectedBarrierGate());
             // C2. The gate reads byte 6 bit7 as the remembered lease, which is
             // only that for eligible kinds: `.string` has no `Metadata` prefix
             // at all, and `.big_int` aliases the byte onto its live refcount.
@@ -3351,6 +3151,17 @@ pub const Registry = struct {
     /// owners use Metadata byte 6 as a membership cache; the hash map remains
     /// authoritative and every non-object owner keeps the existing fallback.
     inline fn rememberGenerationalOwner(self: *Registry, owner: *Header) void {
+        // A young owner is never remembered: the next minor traces it anyway,
+        // and the set keys on the ADDRESS -- which a copying collection
+        // changes. Remembering one leaves an entry naming a page that the
+        // collection has already handed back, and the minor after that traces
+        // whatever now occupies it.
+        //
+        // The barrier's gate normally makes this unreachable (a young owner
+        // buys an exit), but the gate reads a cached bit and this is the
+        // authority; the nursery is the first carrier where disagreeing is
+        // fatal rather than merely wasteful.
+        if (owner.metaConst().flags.young) return;
         const summary = &owner.meta().lifetime.object_shape_summary;
         if (summary.* & trace_remembered_mask != 0) return;
         if (!self.generation.rememberOwner(addressRegistryAllocator(), owner)) return;
@@ -3443,8 +3254,8 @@ pub const Registry = struct {
         child: ?*Header,
         comptime site: UnbarrieredStoreSite,
     ) void {
-        if (comptime !(std.debug.runtime_safety or roots_diag_enabled)) return;
-        if (!minor_audit) return;
+        if (comptime !std.debug.runtime_safety) return;
+        if (!forensics.auditing()) return;
         const target = child orelse return;
         @call(.never_inline, auditUnbarrieredStoreSlow, .{ self, owner, target, site });
     }
@@ -3468,21 +3279,15 @@ pub const Registry = struct {
             object.Object.fromHeader(owner).class_id
         else
             0;
-        gc_audit_print.print(&.{
-            .{ .text = "UNBARRIERED-STORE site=" },
-            .{ .text = @tagName(site) },
-            .{ .text = " hit=" },
-            .{ .dec = slot.* },
-            .{ .text = " owner_kind=" },
-            .{ .text = @tagName(owner.metaConst().flags.kind) },
-            .{ .text = " owner_class=" },
-            .{ .dec = owner_class },
-            .{ .text = " child_kind=" },
-            .{ .text = @tagName(target.metaConst().flags.kind) },
-            .{ .text = "\n" },
+        std.debug.print("UNBARRIERED-STORE site={s} hit={d} owner_kind={s} owner_class={d} child_kind={s}\n", .{
+            @tagName(site),
+            slot.*,
+            @tagName(owner.metaConst().flags.kind),
+            owner_class,
+            @tagName(target.metaConst().flags.kind),
         });
         if (slot.* == 1) std.debug.dumpCurrentStackTrace(.{});
-        if (minor_audit_fatal) @panic("UNBARRIERED-STORE: old unremembered owner gained a young child without a barrier");
+        if (forensics.auditIsFatal()) @panic("UNBARRIERED-STORE: old unremembered owner gained a young child without a barrier");
     }
 
     /// Header-shaped write barrier. The whole steady-state decision is
@@ -3503,14 +3308,6 @@ pub const Registry = struct {
     /// decision; the arm carries the semantics.
     fn generationalBarrierSlow(self: *Registry, owner: *Header, target: *Header) void {
         @branchHint(.cold);
-        // §8.4: while a major is marking, every strong write shades its exact
-        // new target instead of taking the generational path. The two are
-        // alternatives, not a sequence -- a shaded object is reachable for
-        // this cycle, so remembering its owner as well would be redundant.
-        if (self.incremental.markingActive()) {
-            self.shadeForIncrementalMark(owner, target);
-            return;
-        }
         // The counter block is diagnostic, not policy, and it was two
         // unconditional RMWs on a path that runs tens of millions of times
         // per benchmark. JSC's barrier fast path carries zero counters
@@ -3524,7 +3321,15 @@ pub const Registry = struct {
         // Reached with an open gate only when the owner is old AND not yet
         // remembered, so the owner classification the pre-fold code repeated
         // here is exactly what the gate just did.
-        if (!target.metaConst().flags.young) return;
+        //
+        // An UNPUBLISHED target counts as young. It carries no young bit yet
+        // -- publication is what sets one -- so testing the bit alone lets an
+        // old owner take a reference to an object that becomes young a moment
+        // later, with nothing recording the edge. The next minor then never
+        // traces the owner, and the target is either swept or, under a copying
+        // young generation, left behind as a stale edge into a reclaimed page.
+        const target_info = target.metaConst();
+        if (!target_info.flags.young and target_info.alloc_info.heap_accounted) return;
         self.rememberGenerationalOwner(owner);
     }
 
@@ -3537,9 +3342,20 @@ pub const Registry = struct {
     /// gate-first shape decodes exactly when the pre-fold three-way ordering
     /// did, and the edge-only counters stay comparable with earlier runs.
     pub inline fn generationalBarrierValue(self: *Registry, owner: *Header, child: JSValue) void {
+        if (comptime std.debug.runtime_safety) self.assertStoreIsCurrent(child);
         if (self.barrierOwnerSkips(owner)) return;
         const target = child.cycleMarkHeader() orelse return;
         self.generationalBarrierSlow(owner, target);
+    }
+
+    /// A store of a reference that names a page the last collection handed
+    /// back. The value came from a native local that outlived the collection,
+    /// so this fails at the STORE -- the one place the stack still names the
+    /// code that should have rooted it.
+    fn assertStoreIsCurrent(self: *const Registry, child: JSValue) void {
+        const target = child.cycleMarkHeader() orelse return;
+        if (!self.nursery.wasReclaimed(@intFromPtr(target))) return;
+        @panic("gc: storing a reference to a reclaimed young page -- the value outlived a collection without a root");
     }
 
     /// The mark frontier shares the registry's allocator for the same
@@ -3560,6 +3376,98 @@ pub const Registry = struct {
         // syscall pair -- which profiled at 97% of the tracing build's time.
         // A general-purpose allocator keeps the independence and amortizes
         // the syscalls.
+        return std.heap.smp_allocator;
+    }
+
+    /// Register a young survivor that was just copied into an old-generation
+    /// cell.
+    ///
+    /// Deliberately NOT `publishInitialized`. That path is for an object
+    /// coming into existence, and a promoted object is not: it carries the
+    /// mark the collection just gave it (so the newborn-lifetime assertion
+    /// rejects it), and it is OLD, so setting the young bit and counting it
+    /// into the young census -- which is what publication does -- would put
+    /// it back in the population the collection is retiring.
+    ///
+    /// What it shares with publication is the part that is about the CELL
+    /// rather than the object: the accounting bit, the carrier ledgers, and
+    /// the block heap's live-address bookkeeping.
+    pub fn publishPromotedCell(self: *Registry, h: *Header, bytes: usize) void {
+        std.debug.assert(isBlockCellHeader(h));
+        std.debug.assert(!h.metaConst().alloc_info.heap_accounted);
+        std.debug.assert(!headerCondemned(h));
+        h.meta().alloc_info.heap_accounted = true;
+        const is_large = self.isLargeAllocation(bytes);
+        if (comptime carrier_audit_enabled) {
+            self.heap_accounting_oracle.recordPublish(@intFromPtr(h), bytes, is_large);
+        }
+        if (comptime carrier.audit_enabled) {
+            self.memory.carrierPublish(@intFromPtr(h), bytes) catch
+                @panic("gc: CARRIER IDENTITY: promotion missing carrier record");
+        }
+        self.observeNewPublication(h, bytes);
+    }
+
+    /// Copy a young cell into the old generation and leave a forwarding
+    /// address behind.
+    ///
+    /// The new cell is a block cell, so the copy is not a straight memcpy of
+    /// the whole allocation: the block allocator has already stamped the cell
+    /// INDEX into the prefix's first two bytes, and that stamp belongs to the
+    /// destination, not the source. Body bytes come over whole; the prefix is
+    /// rebuilt from the source's kind and flags with the carrier field set to
+    /// the destination's.
+    ///
+    /// Null means the old generation could not take it. That is not an error:
+    /// the caller pins the object instead, which retains its page and leaves
+    /// the object old in place.
+    pub fn promoteYoungCell(self: *Registry, rt: *JSRuntime, old: *Header) ?*Header {
+        std.debug.assert(isNurseryHeader(old));
+        std.debug.assert(!headerForwarded(old));
+        const body_bytes = heapByteSizeFromHeader(rt, old);
+        const request = body_bytes + metadata_prefix_size;
+        if (!BlockHeapMod.canAllocCellSize(request)) return null;
+        const cell_raw = self.memory.allocPromotedObjectCell(request) orelse return null;
+        const cell = @intFromPtr(cell_raw);
+        const moved: *Header = @ptrFromInt(cell + metadata_prefix_size);
+
+        const source_meta = old.metaConst().*;
+        @memcpy(
+            @as([*]u8, @ptrFromInt(@intFromPtr(moved)))[0..body_bytes],
+            @as([*]const u8, @ptrFromInt(@intFromPtr(old)))[0..body_bytes],
+        );
+        // Carrier field is the destination's; everything else describes the
+        // object and comes across unchanged. `heap_accounted` is cleared so
+        // the publication below is the one that sets it, exactly as it is for
+        // a freshly allocated cell.
+        moved.meta().flags = source_meta.flags;
+        moved.meta().lifetime = source_meta.lifetime;
+        moved.meta().alloc_info = .{ .block_size_idx = representation.block_cell_size_class, .nursery = false };
+        moved.meta().flags.young = false;
+
+        object.Object.fromHeader(moved).rebindAfterRelocation(@intFromPtr(old), body_bytes);
+        setForwarding(old, moved, body_bytes);
+        // Poison what the copy left behind, in safety builds. Without this the
+        // husk still holds the object's old field values, so code that kept a
+        // bare pointer across the collection keeps WORKING for a while and
+        // fails somewhere unrelated -- a corrupt switch value three call
+        // frames away. Poisoned, it fails at the use, which is the only place
+        // the missing root can be read off a stack trace. The first word is
+        // the forwarding address and the metadata prefix is the size, so both
+        // stay readable.
+        if (comptime std.debug.runtime_safety) {
+            const body: [*]u8 = @ptrFromInt(@intFromPtr(old));
+            if (body_bytes > @sizeOf(usize)) {
+                @memset(body[@sizeOf(usize)..body_bytes], 0xDE);
+            }
+        }
+        return moved;
+    }
+
+    /// The nursery's page table shares the address registry's independence
+    /// requirement and its reasoning: it grows on the allocation path and may
+    /// not recurse into the JS heap allocator.
+    inline fn nurseryAllocator() std.mem.Allocator {
         return std.heap.smp_allocator;
     }
 
@@ -3587,7 +3495,10 @@ pub const Registry = struct {
         // now direct-call and specialize `allocCell`; RC comptime-erases both
         // the field and the branch.
         account.gc_object_cell_heap = &self.block_heap;
-        if (comptime heap_accounting_oracle_enabled) {
+        self.nursery.page_allocator = nurseryAllocator();
+        self.nursery.enabled = nursery_enabled;
+        account.gc_nursery = &self.nursery;
+        if (comptime carrier_audit_enabled) {
             account.gc_heap_oracle = &self.heap_accounting_oracle;
         }
         const authority = try addressRegistryAllocator().create(NonBlockObjectAuthority);
@@ -3641,7 +3552,6 @@ pub const Registry = struct {
         header: *Header,
         bytes: usize,
         address_class: LiveAddressClass,
-        comptime arm: PublicationArm,
     ) void {
         if (!address_class.tracked) return;
         // Slab-backed objects need no entry: their arena is registered, the
@@ -3653,7 +3563,7 @@ pub const Registry = struct {
             @branchHint(.unlikely);
             self.insertLiveAddressCold(header, bytes);
         }
-        self.markPublishedYoungClassified(header, address_class.is_block_cell, arm);
+        self.markPublishedYoungClassified(header, address_class.is_block_cell);
     }
 
     /// Outlined so the standalone-prefix arm's call does not have to be
@@ -3685,6 +3595,12 @@ pub const Registry = struct {
     /// question, and an owned storage cell is not part of it -- see
     /// `kindIsOwnedStorageCell`.
     inline fn noteYoungPublicationCensus(self: *Registry, header: *const Header) void {
+        // A nursery cell is young, but it is not in the population
+        // `verifyGenerationInvariants` recounts: no young list, no young
+        // block, no extent table holds it. Counting it here would make the
+        // census disagree with every structure that enumerates it. The
+        // nursery paces its own collection off `allocated_bytes`.
+        if (header.metaConst().alloc_info.nursery) return;
         if (comptime std.debug.runtime_safety) self.generation.stats.young_publications +%= 1;
         self.generation.stats.young_count += 1;
         if (!kindIsOwnedStorageCell(header.metaConst().flags.kind)) {
@@ -3696,30 +3612,7 @@ pub const Registry = struct {
         self: *Registry,
         header: *Header,
         is_block_cell: bool,
-        comptime arm: PublicationArm,
     ) void {
-        // §8.6 incremental mark: "new objects are black-published AND ALL
-        // INITIAL STRONG EDGES ARE SHADED". Both halves, and the second is
-        // load-bearing: field initialisation happens BEFORE publication, so
-        // the write barrier fires on an owner that is not yet a real object
-        // -- and the barrier must skip those (see shadeForIncrementalMark),
-        // because queueing an unpublished owner plants a landmine: its
-        // errdefer-destroy on a failed construction frees the cell while the
-        // queue still names it, and the reused cell is a half-constructed
-        // corpse at pop time (found by a test262 core dump, byte for byte).
-        // Publication queues the object itself instead -- published-grey --
-        // and its one trace covers every construction-time edge at once.
-        if (comptime arm == .fast) {
-            // `publicationNeedsColdArm` already routed an active marker to
-            // the cold twin. This assert is what proves it did -- and it is
-            // spelled with an explicit safety gate because `markingActive`
-            // is an atomic load that ReleaseFast may not delete even with
-            // its result discarded (it left a dead `ldrb wzr` behind).
-            if (comptime std.debug.runtime_safety) std.debug.assert(!self.incremental.markingActive());
-        } else if (self.incremental.markingActive()) {
-            @branchHint(.unlikely);
-            self.publishGreyCold(header);
-        }
         // Extent strings ARE in the generational young set -- a >128 B
         // string body is exactly the kind of short-lived allocation a
         // minor exists to reclaim, and leaving them out made pdfjs hold
@@ -3770,33 +3663,6 @@ pub const Registry = struct {
             // predecessor search (or, worse, make it splice the wrong node).
             std.debug.assert(self.lists.young_predecessor != null);
             self.lists.young_head = header;
-        }
-    }
-
-    /// The published-grey arm of `markPublishedYoungClassified`, outlined.
-    /// `setHeaderMarked` and `pushSingle` are the publication funnel's other
-    /// two calls; incremental marking is inactive for the overwhelming majority
-    /// of publications, so keeping them inline only bought the hot path a
-    /// callee-saved prologue it never used.
-    noinline fn publishGreyCold(self: *Registry, header: *Header) void {
-        // Published-grey applies to PLAIN OBJECTS ONLY. An object is
-        // the one kind a published container can hold before its
-        // construction settles, so its initial edges need the push.
-        // Every other kind becomes reachable through a store made
-        // AFTER its construction completes -- a closure adopting its
-        // FunctionBytecode, a frame linking a var_ref -- and that
-        // store's barrier greys it at a moment it is fully traceable;
-        // until then it stays WHITE, protected by its creator's stack
-        // reference, which the remark's conservative rescan honors.
-        // The first version pushed every kind here and re-planted
-        // both mines this file had just cleared: shapes back in the
-        // queue (mutator-freeable), and FunctionBytecode clones
-        // popped mid-construction.
-        if (header.meta().flags.kind == .object) {
-            self.setHeaderMarked(header);
-            _ = self.marking.queue.push(
-                self.frontierSafeHeaderAfterMarkClaim(header),
-            );
         }
     }
 
@@ -3899,7 +3765,7 @@ pub const Registry = struct {
     pub const recordSuccess = registry_diagnostics.recordSuccess;
     pub const SliceKind = registry_diagnostics.SliceKind;
     pub const recordMajorSlicePause = registry_diagnostics.recordMajorSlicePause;
-    pub const recordIncrementalCycleSuccess = registry_diagnostics.recordIncrementalCycleSuccess;
+    pub const recordCycleSuccess = registry_diagnostics.recordCycleSuccess;
     pub const recordMinorSuccess = registry_diagnostics.recordMinorSuccess;
     pub const verifyIntrusiveList = registry_diagnostics.verifyIntrusiveList;
     pub const verifyConstructionRoots = registry_diagnostics.verifyConstructionRoots;
@@ -3912,6 +3778,9 @@ pub const Registry = struct {
 
     pub fn containsHeader(self: *const Registry, header: *const Header) bool {
         if (self.lists.sweep_current == header) return true;
+        // A young cell's membership is its page. A pinned one did not move,
+        // so its page was retained and that is where the answer lives.
+        if (isNurseryHeader(header)) return self.nursery.contains(@intFromPtr(header));
         // A block cell is answered from its block, in O(1). The `.all`
         // iterator's block phase yields exactly the cells whose alloc bit and
         // `heap_accounted` stamp are both set (`nextInBlock`), and no other
@@ -3967,7 +3836,7 @@ pub const Registry = struct {
     /// Mint a generation-bearing handle (audit builds only: the carrier
     /// authorities behind it exist nowhere else).
     pub fn allocationHandle(self: *const Registry, header: *const Header) ?AllocationHandle {
-        comptime std.debug.assert(carrier.authority_audit_enabled);
+        comptime std.debug.assert(carrier.audit_enabled);
         return self.memory.carrierGenerationHandle(@intFromPtr(header));
     }
 
@@ -3978,7 +3847,7 @@ pub const Registry = struct {
         expected_kind: ?GcKind,
         allowed_states: CarrierStateMask,
     ) CarrierResolveError!ResolvedExact {
-        comptime std.debug.assert(carrier.authority_audit_enabled);
+        comptime std.debug.assert(carrier.audit_enabled);
         if (self.block_heap.blockOf(@ptrFromInt(handle.base -| metadata_prefix_size)) != null) {
             const resolved = try self.block_heap.resolveExactHandle(
                 handle,

@@ -63,7 +63,6 @@ pub const EngineOptionInputs = struct {
     force_gc: bool,
     ownership_audit: bool,
     /// R3 roots diagnosis build. Default false; diag artifacts only.
-    gc_roots_diag: bool,
 
     pub fn withOomInjection(self: EngineOptionInputs, oom_injection: bool) EngineOptionInputs {
         var out = self;
@@ -87,7 +86,6 @@ pub fn addEngineOptions(b: *std.Build, in: EngineOptionInputs) *std.Build.Step.O
     options.addOption(bool, "zjs_unified_test_suite", in.unified_test_suite);
     options.addOption(bool, "zjs_force_gc", in.force_gc);
     options.addOption(bool, "zjs_ownership_audit", in.ownership_audit);
-    options.addOption(bool, "zjs_gc_roots_diag", in.gc_roots_diag);
     return options;
 }
 

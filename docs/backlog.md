@@ -127,12 +127,14 @@ semantics.
 ## Code volume
 
 Status of the code-volume line of the 2026-08-20 three-axis turn
-(maintainability / binary size / code volume). Binary size closed at
-4.26 MB by owner ruling (figure as of `47cf81ef`, 2026-08-21; not
-re-measured after the 2026-08-24 interpreter/runtime code-size reduction
-`71505d11`). This section records **what was ruled unrecoverable and why**
-as much as what is left; three of the categories below look like obvious
-duplication and are load-bearing.
+(maintainability / binary size / code volume). The binary-size *campaign*
+closed at 4.26 MB by owner ruling (`47cf81ef`, 2026-08-21; not re-measured
+after the 2026-08-24 interpreter/runtime code-size reduction `71505d11`).
+Current stripped ReleaseFast composition is
+[binary-size.md](binary-size.md) (3.16 MiB at `9e915ba0`, 2026-09-21) — a
+diagnostic snapshot, not a new ruling. This section records **what was
+ruled unrecoverable and why** as much as what is left; three of the
+categories below look like obvious duplication and are load-bearing.
 
 ### Current composition
 

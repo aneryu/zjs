@@ -475,6 +475,14 @@ pub const JSValue = extern struct {
         return ptrFromPayload(gc.Header, self.payloadBits());
     }
 
+    /// The same value naming a relocated body. Only the payload changes: a
+    /// copying collector moves the allocation without changing what the value
+    /// IS, so the tag prefix is carried over rather than recomputed.
+    pub inline fn withTracedHeader(self: JSValue, header: *gc.Header) JSValue {
+        std.debug.assert(self.isTracerOwned());
+        return .{ .bits = (self.bits & ~payload_mask) | @intFromPtr(header) };
+    }
+
     /// Whether the tracing collector owns this value's lifetime: exactly the
     /// tag set `cycleMarkHeader` accepts. Store/barrier fast paths use the
     /// negation (both sides immediate → skip rooting and the generational barrier).

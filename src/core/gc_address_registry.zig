@@ -8,7 +8,6 @@
 const std = @import("std");
 
 const gc = @import("gc.zig");
-const gc_audit_print = @import("gc_audit_print.zig");
 const memory = @import("memory.zig");
 
 const Slab = memory.SmallObjectSlab;
@@ -283,14 +282,10 @@ pub const Table = struct {
                 audit.free_but_accounted += 1;
                 if (audit.reported < 8) {
                     audit.reported += 1;
-                    gc_audit_print.print(&.{
-                        .{ .text = "gc: ARENA AUDIT free block at 0x" },
-                        .{ .hex = @intFromPtr(user) },
-                        .{ .text = " reads heap_accounted (kind ." },
-                        .{ .text = @tagName(header.metaConst().flags.kind) },
-                        .{ .text = ", lifetime_word 0x" },
-                        .{ .hex = @as(*const u32, @ptrCast(&header.metaConst().lifetime)).* },
-                        .{ .text = ")\n" },
+                    std.debug.print("gc: ARENA AUDIT free block at 0x{x} reads heap_accounted (kind .{s}, lifetime_word 0x{x})\n", .{
+                        @intFromPtr(user),
+                        @tagName(header.metaConst().flags.kind),
+                        @as(*const u32, @ptrCast(&header.metaConst().lifetime)).*,
                     });
                 }
             }

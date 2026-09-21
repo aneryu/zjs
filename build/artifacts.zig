@@ -67,17 +67,16 @@ fn addInstallStep(b: *std.Build, name: []const u8, desc: []const u8, install: *s
     step.dependOn(&install.step);
 }
 
-fn omitFramePointer(optimize: std.builtin.OptimizeMode, keep_frame_pointer: bool) bool {
+fn omitFramePointer(optimize: std.builtin.OptimizeMode) bool {
     return switch (optimize) {
-        .ReleaseFast, .ReleaseSmall => !keep_frame_pointer,
+        .ReleaseFast, .ReleaseSmall => true,
         .Debug, .ReleaseSafe => false,
     };
 }
 
 pub fn addEngineArtifacts(ctx: config.Ctx) Artifacts {
     const b = ctx.b;
-    const keep_frame_pointer = ctx.engine_inputs.gc_roots_diag;
-    const omit_frames = omitFramePointer(ctx.optimize, keep_frame_pointer);
+    const omit_frames = omitFramePointer(ctx.optimize);
 
     // Named public module for downstream `@import("zjs")`. Not returned:
     // embedding tests build their own root, and no other helper reads it.

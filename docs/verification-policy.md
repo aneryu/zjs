@@ -38,7 +38,8 @@ GC safety net。每合并批仍只跑一轮批门禁。
 
 发货 `zjs` 用 `zig build -Doptimize=ReleaseFast`。代码生成实验使用
 `zig build zjs-size -Doptimize=ReleaseSmall`（第二安装名，避免覆盖已装的
-`zjs`）。跨配置的体积比较必须显式声明。
+`zjs`）。跨配置的体积比较必须显式声明。当前 ReleaseFast 剥离体积与功能分布见
+[binary-size.md](binary-size.md)（诊断快照，不是门）。
 
 ## 每合并批(driver 侧)做的
 

@@ -232,7 +232,6 @@ fn publishNativeFunctionMetadataWork(
 
     const dispatch_atom = try rt.internAtom(name);
     // TGC S3 §2.3: this stores an atom id into a published function payload.
-    rt.atoms.shadeAtomIfMarking(dispatch_atom);
     function_object.nativeDispatchNameSlot().* = dispatch_atom;
 }
 

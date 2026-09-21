@@ -14,15 +14,11 @@ const builtin = @import("builtin");
 const build_options = @import("build_options");
 const gc_representation = @import("gc_representation_constants.zig");
 const gc_block_heap = @import("gc_block_heap.zig");
+const gc_nursery_mod = @import("gc_nursery.zig");
 const gc_carrier = @import("gc_carrier.zig");
+const carrier_audit_enabled = gc_carrier.audit_enabled;
 
 const diagnostic_accounting_enabled = builtin.is_test or builtin.mode == .Debug;
-const block_generation_enabled = gc_carrier.block_generation_enabled;
-const extent_identity_enabled = gc_carrier.extent_identity_enabled;
-const lifecycle_state_enabled = gc_carrier.lifecycle_state_enabled;
-const heap_accounting_oracle_enabled = gc_carrier.audit_oracle_enabled;
-const block_tracking_enabled = gc_carrier.block_tracking_enabled;
-const extent_tracking_enabled = gc_carrier.extent_tracking_enabled;
 
 /// OOM-injection coverage (v1), gated by `-Dzjs_oom_coverage` (default
 /// false; the recording branches below are `comptime`-eliminated so the
@@ -689,12 +685,15 @@ pub const MemoryAccount = struct {
     /// pointer nor a dead nullable-function-pointer branch. The Object kind's
     /// byte encoding is part of the shared allocator representation above.
     gc_object_cell_heap: ?*gc_block_heap.Heap = null,
-    gc_extent_identity: if (extent_identity_enabled) gc_carrier.ExtentIdentityAuthority else void =
-        if (extent_identity_enabled) .{} else {},
-    gc_extent_lifecycle: if (lifecycle_state_enabled) gc_carrier.ExtentLifecycleAuthority else void =
-        if (lifecycle_state_enabled) .{} else {},
-    gc_heap_oracle: if (heap_accounting_oracle_enabled) ?*gc_carrier.HeapAccountingOracle else void =
-        if (heap_accounting_oracle_enabled) null else {},
+    /// Bump-allocated young generation, installed alongside the cell heap.
+    /// Null, or present-but-disabled, means every object takes the cell route.
+    gc_nursery: ?*gc_nursery_mod.Nursery = null,
+    gc_extent_identity: if (carrier_audit_enabled) gc_carrier.ExtentIdentityAuthority else void =
+        if (carrier_audit_enabled) .{} else {},
+    gc_extent_lifecycle: if (carrier_audit_enabled) gc_carrier.ExtentLifecycleAuthority else void =
+        if (carrier_audit_enabled) .{} else {},
+    gc_heap_oracle: if (carrier_audit_enabled) ?*gc_carrier.HeapAccountingOracle else void =
+        if (carrier_audit_enabled) null else {},
 
     trigger_gc_fn: ?*const fn (ctx: ?*anyopaque, size: usize) void = null,
     trigger_gc_ctx: ?*anyopaque = null,
@@ -1064,7 +1063,7 @@ pub const MemoryAccount = struct {
         if (l.trigger_gc) {
             self.triggerGCBeforeAllocation(bytes);
         }
-        const track_extent = comptime is_create and extent_tracking_enabled;
+        const track_extent = comptime is_create and carrier_audit_enabled;
         const carrier_reservation = if (comptime track_extent) (if (l.is_gc) try self.reserveGcExtent() else null) else {};
         const raw = if (l.is_gc)
             try self.rawAllocForGc(bytes, l.alignment, slab_index)
@@ -1285,19 +1284,40 @@ pub const MemoryAccount = struct {
         return self.backing_allocator.rawAlloc(bytes, alignment, @returnAddress()) orelse error.OutOfMemory;
     }
 
+    /// Allocate an old-generation cell for a young survivor.
+    ///
+    /// Promotion is an allocation and owes what every allocation owes: the
+    /// limit check, the byte credit, the carrier raw-ledger entry the
+    /// publication will look for, and the diagnostics. Null means the old
+    /// generation declined, which the caller answers by retaining the page
+    /// instead of by failing.
+    pub fn allocPromotedObjectCell(self: *MemoryAccount, request: usize) ?[*]u8 {
+        const heap = self.gc_object_cell_heap orelse return null;
+        const accounted = gc_block_heap.accountedBodyBytesForRequest(request, gc_prefix_size) orelse return null;
+        self.checkAllocation(accounted) catch return null;
+        if (comptime carrier_audit_enabled) self.prepareGcRawAudit() catch return null;
+        const cell = (heap.allocCell(request) catch return null) orelse return null;
+        self.creditAlloc(accounted, null);
+        if (comptime carrier_audit_enabled) {
+            self.recordBlockGcAllocation(@intFromPtr(cell) + gc_prefix_size, accounted);
+        }
+        self.noteAllocDiagnostics(true, accounted, 1, @intFromPtr(cell) + gc_prefix_size);
+        return cell;
+    }
+
     fn prepareGcRawAudit(self: *MemoryAccount) !void {
-        if (comptime heap_accounting_oracle_enabled) {
+        if (comptime carrier_audit_enabled) {
             if (self.gc_heap_oracle) |oracle| try oracle.prepareRawAlloc(std.heap.page_allocator);
         }
     }
 
     pub fn reserveGcExtent(self: *MemoryAccount) !gc_carrier.ExtentReservation {
-        comptime std.debug.assert(extent_tracking_enabled);
+        comptime std.debug.assert(carrier_audit_enabled);
         try self.prepareGcRawAudit();
-        if (comptime lifecycle_state_enabled) {
+        if (comptime carrier_audit_enabled) {
             try self.gc_extent_lifecycle.prepare(std.heap.page_allocator);
         }
-        if (comptime extent_identity_enabled) {
+        if (comptime carrier_audit_enabled) {
             return self.gc_extent_identity.reserve(std.heap.page_allocator);
         }
         return .{ .generation = 0 };
@@ -1313,8 +1333,8 @@ pub const MemoryAccount = struct {
         accounted_bytes: usize,
         kind: u8,
     ) void {
-        comptime std.debug.assert(extent_tracking_enabled);
-        if (comptime extent_identity_enabled) {
+        comptime std.debug.assert(carrier_audit_enabled);
+        if (comptime carrier_audit_enabled) {
             self.gc_extent_identity.commit(reservation, .{
                 .base = base,
                 .raw_base = raw_base,
@@ -1324,8 +1344,8 @@ pub const MemoryAccount = struct {
                 .kind = kind,
             });
         }
-        if (comptime lifecycle_state_enabled) self.gc_extent_lifecycle.commit(base);
-        if (comptime heap_accounting_oracle_enabled) {
+        if (comptime carrier_audit_enabled) self.gc_extent_lifecycle.commit(base);
+        if (comptime carrier_audit_enabled) {
             if (self.gc_heap_oracle) |oracle| oracle.recordRawAlloc(.{
                 .audit_id = 0,
                 .base = base,
@@ -1339,9 +1359,9 @@ pub const MemoryAccount = struct {
     }
 
     fn recordBlockGcAllocation(self: *MemoryAccount, base: usize, payload_bytes: usize) void {
-        if (comptime !heap_accounting_oracle_enabled) return;
+        if (comptime !carrier_audit_enabled) return;
         const heap = self.gc_object_cell_heap.?;
-        const generation = if (comptime block_generation_enabled)
+        const generation = if (comptime carrier_audit_enabled)
             (heap.generationHandle(base, gc_prefix_size).?).generation
         else
             0;
@@ -1358,7 +1378,7 @@ pub const MemoryAccount = struct {
     }
 
     pub fn carrierGenerationHandle(self: *const MemoryAccount, base: usize) ?gc_carrier.AllocationHandle {
-        comptime std.debug.assert(block_generation_enabled and extent_identity_enabled);
+        comptime std.debug.assert(carrier_audit_enabled and carrier_audit_enabled);
         if (self.gc_object_cell_heap) |heap| {
             if (heap.generationHandle(base, gc_prefix_size)) |handle| return handle;
         }
@@ -1366,7 +1386,7 @@ pub const MemoryAccount = struct {
     }
 
     pub fn carrierTransition(self: *MemoryAccount, base: usize, state: gc_carrier.LifecycleState) gc_carrier.ResolveError!void {
-        comptime std.debug.assert(lifecycle_state_enabled);
+        comptime std.debug.assert(carrier_audit_enabled);
         if (self.gc_object_cell_heap) |heap| {
             if (heap.containsAllocatedCell(base, gc_prefix_size)) {
                 return heap.transitionCell(base, gc_prefix_size, state);
@@ -1376,7 +1396,7 @@ pub const MemoryAccount = struct {
     }
 
     pub fn carrierPublish(self: *MemoryAccount, base: usize, accounted_bytes: usize) gc_carrier.ResolveError!void {
-        comptime std.debug.assert(lifecycle_state_enabled);
+        comptime std.debug.assert(carrier_audit_enabled);
         if (self.gc_object_cell_heap) |heap| {
             if (heap.containsAllocatedCell(base, gc_prefix_size)) {
                 return heap.publishCell(base, gc_prefix_size, accounted_bytes);
@@ -1386,43 +1406,43 @@ pub const MemoryAccount = struct {
     }
 
     pub fn beginGcRawFree(self: *MemoryAccount, base: usize) void {
-        comptime std.debug.assert(block_tracking_enabled or extent_tracking_enabled);
-        if (comptime lifecycle_state_enabled) {
+        comptime std.debug.assert(carrier_audit_enabled or carrier_audit_enabled);
+        if (comptime carrier_audit_enabled) {
             self.carrierTransition(base, .raw_free_in_progress) catch
                 @panic("gc: CARRIER IDENTITY: raw free missing lifecycle record");
         }
     }
 
     pub fn finishExtentGcRawFree(self: *MemoryAccount, base: usize) void {
-        comptime std.debug.assert(extent_tracking_enabled);
-        if (comptime lifecycle_state_enabled) {
+        comptime std.debug.assert(carrier_audit_enabled);
+        if (comptime carrier_audit_enabled) {
             self.gc_extent_lifecycle.finishRawFree(base) catch
                 @panic("gc: CARRIER IDENTITY: extent lifecycle removed before raw free commit");
         }
-        if (comptime extent_identity_enabled) {
+        if (comptime carrier_audit_enabled) {
             self.gc_extent_identity.finishRawFree(base) catch
                 @panic("gc: CARRIER IDENTITY: extent identity removed before raw free commit");
         }
-        if (comptime heap_accounting_oracle_enabled) {
+        if (comptime carrier_audit_enabled) {
             if (self.gc_heap_oracle) |oracle| oracle.recordRawFree(base);
         }
     }
 
     pub fn finishBlockGcRawFree(self: *MemoryAccount, base: usize) void {
-        comptime std.debug.assert(block_tracking_enabled);
-        if (comptime heap_accounting_oracle_enabled) {
+        comptime std.debug.assert(carrier_audit_enabled);
+        if (comptime carrier_audit_enabled) {
             if (self.gc_heap_oracle) |oracle| oracle.recordRawFree(base);
         }
     }
 
     pub fn deinitGcCarrier(self: *MemoryAccount) void {
-        if (comptime extent_identity_enabled) {
+        if (comptime carrier_audit_enabled) {
             self.gc_extent_identity.deinit(std.heap.page_allocator);
         }
-        if (comptime lifecycle_state_enabled) {
+        if (comptime carrier_audit_enabled) {
             self.gc_extent_lifecycle.deinit(std.heap.page_allocator);
         }
-        if (comptime heap_accounting_oracle_enabled) self.gc_heap_oracle = null;
+        if (comptime carrier_audit_enabled) self.gc_heap_oracle = null;
     }
 
     /// `alloc_info` value marking a GC object served from the collector's
@@ -1432,12 +1452,23 @@ pub const MemoryAccount = struct {
     /// nothing special with it. The cell is `[8B metadata prefix][object]`,
     /// 16-aligned, and `destroy` routes on this byte back to the block heap.
     pub const alloc_info_block_cell: u8 = gc_representation.block_cell_alloc_info;
+    pub const alloc_info_nursery_cell: u8 = gc_representation.nursery_cell_alloc_info;
 
     /// Byte 2 of the GC prefix (`gc.Metadata.alloc_info`): bits 0..4 slab
     /// class index, bit 6 heap-accounted (registry-owned), bit 7 standalone
     /// prefix. Bit positions are asserted against gc.AllocInfo in gc.zig.
     const alloc_info_standalone: u8 = gc_representation.alloc_info_standalone_mask;
     const alloc_info_class_mask: u8 = gc_representation.alloc_info_class_mask;
+    const alloc_info_nursery: u8 = gc_representation.nursery_alloc_info_mask;
+
+    /// A bump-allocated young cell owns none of its memory: the PAGE is the
+    /// allocation, and the minor returns it whole. Every free path has to ask
+    /// this first, because a nursery cell's class field reads 0 and its
+    /// standalone bit is clear -- which is exactly the encoding of a slab
+    /// class-0 object, and freeing one as such corrupts the slab.
+    inline fn isNurseryCell(ptr: *const anyopaque) bool {
+        return gcAllocInfoByte(ptr) & alloc_info_nursery != 0;
+    }
 
     /// Reads back byte 2 of a live GC object's prefix. For slab-backed objects
     /// it carries the allocator's class index (qjs `__js_free` reads
@@ -1449,6 +1480,16 @@ pub const MemoryAccount = struct {
 
     /// Prefix writer for a block-heap cell: same field layout as
     /// `initGcPrefix`, info byte fixed to the block-cell marker.
+    /// Prefix writer for a bump-allocated young cell. Unlike a block cell
+    /// there is no cell index to preserve -- the nursery has no bitmap -- so
+    /// the whole prefix is written here.
+    inline fn initGcPrefixNursery(comptime T: type, meta: [*]u8) void {
+        comptime std.debug.assert(T.gc_kind_tag <= gc_representation.kind_mask);
+        @as(*align(8) u32, @ptrCast(@alignCast(meta))).* = 0;
+        std.mem.writeInt(u16, meta[2..4], @as(u16, alloc_info_nursery_cell) | (@as(u16, T.gc_kind_tag) << 8), .little);
+        @as(*align(4) u32, @ptrCast(@alignCast(meta + 4))).* = 0;
+    }
+
     inline fn initGcPrefixBlockCell(comptime T: type, meta: [*]u8) void {
         comptime std.debug.assert(T.gc_kind_tag <= gc_representation.kind_mask);
         // Bytes 0..2 carry the CELL INDEX, stamped by the block allocator so
@@ -1524,12 +1565,27 @@ pub const MemoryAccount = struct {
                         ).?;
                         try self.checkAllocation(prospective_accounted);
                         if (comptime trigger_gc) self.triggerGCBeforeAllocation(prospective_accounted);
-                        if (comptime block_tracking_enabled) try self.prepareGcRawAudit();
+                        if (comptime carrier_audit_enabled) try self.prepareGcRawAudit();
+                        // A nursery cell is deliberately OUTSIDE the byte
+                        // account and the carrier ledger. It has no raw
+                        // allocation to pair a publication with (the page was
+                        // charged once), and charging it here would bill the
+                        // same object twice: once now and again when
+                        // promotion allocates its old-generation cell.
+                        // `Nursery.allocated_bytes` is what paces the minor.
+                        if (self.gc_nursery) |nursery| {
+                            if (nursery.serving()) {
+                                if (nursery.alloc(nursery.page_allocator, gc_prefix_size + bytes)) |cell| {
+                                    initGcPrefixNursery(T, cell);
+                                    return @ptrFromInt(@intFromPtr(cell) + gc_prefix_size);
+                                }
+                            }
+                        }
                         const cell_class = comptime gc_block_heap.cellClassForPayload(gc_prefix_size + bytes);
                         if (heap.allocCellFixedPtr(cell_class.idx, cell_class.size)) |cell| {
                             initGcPrefixBlockCell(T, cell);
                             self.creditAlloc(prospective_accounted, null);
-                            if (comptime block_tracking_enabled) {
+                            if (comptime carrier_audit_enabled) {
                                 self.recordBlockGcAllocation(@intFromPtr(cell) + gc_prefix_size, prospective_accounted);
                             }
                             self.noteAllocDiagnostics(true, payload_size, 1, @intFromPtr(cell) + gc_prefix_size);
@@ -1549,14 +1605,14 @@ pub const MemoryAccount = struct {
                 const bytes: usize = payload_size;
                 try self.checkAllocation(bytes);
                 if (comptime trigger_gc) self.triggerGCBeforeAllocation(bytes);
-                const carrier_reservation = if (comptime is_gc and extent_tracking_enabled)
+                const carrier_reservation = if (comptime is_gc and carrier_audit_enabled)
                     try self.reserveGcExtent()
                 else {};
                 const raw = self.slabPopHot(comptime slab_class.?, !is_gc) orelse
                     return self.createInternalSlow(T, fam_bytes, trigger_gc);
                 if (comptime is_gc) initGcPrefix(T, @ptrFromInt(@intFromPtr(raw) - gc_prefix_size), comptime slab_class.?);
                 self.creditAlloc(bytes, comptime slab_class);
-                if (comptime is_gc and extent_tracking_enabled) self.commitGcExtent(
+                if (comptime is_gc and carrier_audit_enabled) self.commitGcExtent(
                     carrier_reservation,
                     @intFromPtr(raw),
                     @intFromPtr(raw),
@@ -1633,16 +1689,17 @@ pub const MemoryAccount = struct {
     /// copies. `destroyWithFam` stays specialized (runtime FAM size).
     noinline fn destroyErased(self: *MemoryAccount, ptr: [*]u8, l: DestroyLayout) void {
         if (comptime diagnostic_accounting_enabled) self.traceFree(@intFromPtr(ptr));
+        if (l.is_gc and isNurseryCell(ptr)) return;
         // Collector-served cell goes home first: the marker byte is in the
         // prefix this free is already about to touch.
         if (l.can_block_cell) {
             if (gcAllocInfoByte(ptr) == alloc_info_block_cell) {
                 if (self.gc_object_cell_heap) |heap| {
-                    if (comptime block_tracking_enabled) self.beginGcRawFree(@intFromPtr(ptr));
+                    if (comptime carrier_audit_enabled) self.beginGcRawFree(@intFromPtr(ptr));
                     self.debitAlloc(l.accounted_block, null);
                     self.noteFreeDiagnostics(true);
                     heap.freeSmallCell(@ptrFromInt(@intFromPtr(ptr) - gc_prefix_size));
-                    if (comptime block_tracking_enabled) self.finishBlockGcRawFree(@intFromPtr(ptr));
+                    if (comptime carrier_audit_enabled) self.finishBlockGcRawFree(@intFromPtr(ptr));
                     return;
                 }
             }
@@ -1652,11 +1709,11 @@ pub const MemoryAccount = struct {
         if (l.slab_class) |slab_class| {
             if (self.small_slab_enabled) {
                 if (l.is_gc) std.debug.assert(gcAllocInfoByte(ptr) & (alloc_info_standalone | alloc_info_class_mask) == slab_class);
-                if (l.is_gc and comptime extent_tracking_enabled) self.beginGcRawFree(@intFromPtr(ptr));
+                if (l.is_gc and comptime carrier_audit_enabled) self.beginGcRawFree(@intFromPtr(ptr));
                 self.debitAlloc(l.payload_size, slab_class);
                 self.noteFreeDiagnostics(true);
                 self.small_slab.freeAtIndex(&self.backing_allocator, ptr, slab_class);
-                if (l.is_gc and comptime extent_tracking_enabled) self.finishExtentGcRawFree(@intFromPtr(ptr));
+                if (l.is_gc and comptime carrier_audit_enabled) self.finishExtentGcRawFree(@intFromPtr(ptr));
                 return;
             }
         }
@@ -1664,9 +1721,9 @@ pub const MemoryAccount = struct {
         self.debitAlloc(bytes, null);
         self.noteFreeDiagnostics(true);
         const base: [*]u8 = @ptrFromInt(@intFromPtr(ptr) - l.standalone_prefix);
-        if (l.is_gc and comptime extent_tracking_enabled) self.beginGcRawFree(@intFromPtr(ptr));
+        if (l.is_gc and comptime carrier_audit_enabled) self.beginGcRawFree(@intFromPtr(ptr));
         self.backing_allocator.rawFree(base[0..bytes], l.alignment, @returnAddress());
-        if (l.is_gc and comptime extent_tracking_enabled) self.finishExtentGcRawFree(@intFromPtr(ptr));
+        if (l.is_gc and comptime carrier_audit_enabled) self.finishExtentGcRawFree(@intFromPtr(ptr));
     }
 
     /// Variable-size GC allocation: the `T` struct immediately followed by
@@ -1692,14 +1749,14 @@ pub const MemoryAccount = struct {
             if (self.small_slab_enabled) {
                 try self.checkAllocation(payload_bytes);
                 if (comptime allocation_gc_trigger_enabled) self.triggerGCBeforeAllocation(payload_bytes);
-                const carrier_reservation = if (comptime extent_tracking_enabled)
+                const carrier_reservation = if (comptime carrier_audit_enabled)
                     try self.reserveGcExtent()
                 else {};
                 const raw = self.slabPopHot(slab_class, false) orelse
                     return self.createWithFamInternalSlow(T, fam_bytes, true);
                 initGcPrefix(T, @ptrFromInt(@intFromPtr(raw) - gc_prefix_size), slab_class);
                 self.creditAlloc(payload_bytes, slab_class);
-                if (comptime extent_tracking_enabled) self.commitGcExtent(
+                if (comptime carrier_audit_enabled) self.commitGcExtent(
                     carrier_reservation,
                     @intFromPtr(raw),
                     @intFromPtr(raw),
@@ -1750,11 +1807,11 @@ pub const MemoryAccount = struct {
                 ).?;
                 try self.checkAllocation(prospective_accounted);
                 if (comptime trigger_gc) self.triggerGCBeforeAllocation(prospective_accounted);
-                if (comptime block_tracking_enabled) try self.prepareGcRawAudit();
+                if (comptime carrier_audit_enabled) try self.prepareGcRawAudit();
                 if ((heap.allocCell(gc_prefix_size + payload_bytes) catch null)) |cell| {
                     initGcPrefixBlockCell(T, cell);
                     self.creditAlloc(prospective_accounted, null);
-                    if (comptime block_tracking_enabled) {
+                    if (comptime carrier_audit_enabled) {
                         self.recordBlockGcAllocation(@intFromPtr(cell) + gc_prefix_size, prospective_accounted);
                     }
                     self.noteAllocDiagnostics(true, 1, prospective_accounted, @intFromPtr(cell) + gc_prefix_size);
@@ -1773,14 +1830,14 @@ pub const MemoryAccount = struct {
             if (SmallObjectSlab.classIndex(payload_bytes, comptime gcAlignment(T))) |slab_class| {
                 try self.checkAllocation(payload_bytes);
                 if (comptime trigger_gc) self.triggerGCBeforeAllocation(payload_bytes);
-                const carrier_reservation = if (comptime extent_tracking_enabled)
+                const carrier_reservation = if (comptime carrier_audit_enabled)
                     try self.reserveGcExtent()
                 else {};
                 const raw = self.slabPopHot(slab_class, false) orelse
                     return self.createWithFamInternalSlow(T, fam_bytes, trigger_gc);
                 initGcPrefix(T, @ptrFromInt(@intFromPtr(raw) - gc_prefix_size), slab_class);
                 self.creditAlloc(payload_bytes, slab_class);
-                if (comptime extent_tracking_enabled) {
+                if (comptime carrier_audit_enabled) {
                     self.commitGcExtent(
                         carrier_reservation,
                         @intFromPtr(raw),
@@ -1822,6 +1879,7 @@ pub const MemoryAccount = struct {
     /// qjs `__js_free` never re-derives size from JSShape.prop_size.
     pub fn gcSlabAccountedPayload(ptr: *const anyopaque) ?usize {
         const info = gcAllocInfoByte(ptr);
+        if (info & alloc_info_nursery != 0) return null;
         if (info & alloc_info_class_mask == alloc_info_block_cell) return null;
         if (info & alloc_info_standalone != 0) return null;
         return SmallObjectSlab.usablePayloadFromClass(info & alloc_info_class_mask);
@@ -1835,6 +1893,7 @@ pub const MemoryAccount = struct {
     pub fn destroyWithFam(self: *MemoryAccount, comptime T: type, ptr: *T, fam_bytes: usize) void {
         comptime std.debug.assert(@hasDecl(T, "gc_kind_tag"));
         if (comptime diagnostic_accounting_enabled) self.traceFree(@intFromPtr(ptr));
+        if (isNurseryCell(ptr)) return;
         const payload_bytes = @sizeOf(T) + fam_bytes;
         const alignment = comptime gcAlignment(T);
         const info = gcAllocInfoByte(ptr);
@@ -1849,11 +1908,11 @@ pub const MemoryAccount = struct {
                         gc_prefix_size + payload_bytes,
                         gc_prefix_size,
                     ).?;
-                    if (comptime block_tracking_enabled) self.beginGcRawFree(@intFromPtr(ptr));
+                    if (comptime carrier_audit_enabled) self.beginGcRawFree(@intFromPtr(ptr));
                     self.debitAlloc(accounted, null);
                     self.noteFreeDiagnostics(true);
                     heap.freeSmallCell(@ptrFromInt(@intFromPtr(ptr) - gc_prefix_size));
-                    if (comptime block_tracking_enabled) self.finishBlockGcRawFree(@intFromPtr(ptr));
+                    if (comptime carrier_audit_enabled) self.finishBlockGcRawFree(@intFromPtr(ptr));
                     return;
                 }
             }
@@ -1864,11 +1923,11 @@ pub const MemoryAccount = struct {
         if (info & alloc_info_standalone == 0) {
             const slab_class: usize = info & alloc_info_class_mask;
             std.debug.assert(self.small_slab_enabled);
-            if (comptime extent_tracking_enabled) self.beginGcRawFree(@intFromPtr(ptr));
+            if (comptime carrier_audit_enabled) self.beginGcRawFree(@intFromPtr(ptr));
             self.debitAlloc(payload_bytes, slab_class);
             self.noteFreeDiagnostics(true);
             self.small_slab.freeAtIndex(&self.backing_allocator, @ptrCast(ptr), slab_class);
-            if (comptime extent_tracking_enabled) self.finishExtentGcRawFree(@intFromPtr(ptr));
+            if (comptime carrier_audit_enabled) self.finishExtentGcRawFree(@intFromPtr(ptr));
             return;
         }
         const prefix = comptime gcPrefixSize(T);
@@ -1876,9 +1935,9 @@ pub const MemoryAccount = struct {
         self.debitAlloc(bytes, null);
         self.noteFreeDiagnostics(true);
         const base: [*]u8 = @ptrFromInt(@intFromPtr(ptr) - prefix);
-        if (comptime extent_tracking_enabled) self.beginGcRawFree(@intFromPtr(ptr));
+        if (comptime carrier_audit_enabled) self.beginGcRawFree(@intFromPtr(ptr));
         self.backing_allocator.rawFree(base[0..bytes], alignment, @returnAddress());
-        if (comptime extent_tracking_enabled) self.finishExtentGcRawFree(@intFromPtr(ptr));
+        if (comptime carrier_audit_enabled) self.finishExtentGcRawFree(@intFromPtr(ptr));
     }
 
     /// TGC S2: a string-family carrier from the collector's block heap.
@@ -1899,12 +1958,12 @@ pub const MemoryAccount = struct {
         const heap = self.gc_object_cell_heap orelse return null;
         const accounted = gc_block_heap.accountedBodyBytesForRequest(total_bytes, gc_prefix_size).?;
         try self.checkAllocation(accounted);
-        if (comptime block_tracking_enabled) try self.prepareGcRawAudit();
+        if (comptime carrier_audit_enabled) try self.prepareGcRawAudit();
         const cell = (try heap.allocCell(total_bytes)) orelse return null;
         std.mem.writeInt(u16, cell[2..4], @as(u16, alloc_info_block_cell) | (@as(u16, kind_tag) << 8), .little);
         @as(*align(4) u32, @ptrCast(@alignCast(cell + 4))).* = 0;
         self.creditAlloc(accounted, null);
-        if (comptime block_tracking_enabled) {
+        if (comptime carrier_audit_enabled) {
             self.recordBlockGcAllocation(@intFromPtr(cell) + gc_prefix_size, accounted);
         }
         self.noteAllocDiagnostics(false, 1, total_bytes - gc_prefix_size, @intFromPtr(cell) + gc_prefix_size);
@@ -1918,11 +1977,11 @@ pub const MemoryAccount = struct {
         const heap = self.gc_object_cell_heap.?;
         const accounted = gc_block_heap.accountedBodyBytesForRequest(total_bytes, gc_prefix_size).?;
         if (comptime diagnostic_accounting_enabled) self.traceFree(@intFromPtr(payload));
-        if (comptime block_tracking_enabled) self.beginGcRawFree(@intFromPtr(payload));
+        if (comptime carrier_audit_enabled) self.beginGcRawFree(@intFromPtr(payload));
         self.debitAlloc(accounted, null);
         self.noteFreeDiagnostics(true);
         heap.freeSmallCell(@ptrFromInt(@intFromPtr(payload) - gc_prefix_size));
-        if (comptime block_tracking_enabled) self.finishBlockGcRawFree(@intFromPtr(payload));
+        if (comptime carrier_audit_enabled) self.finishBlockGcRawFree(@intFromPtr(payload));
     }
 
     /// TGC S2: a string-family carrier that does not fit a block cell -- a
@@ -1950,7 +2009,7 @@ pub const MemoryAccount = struct {
         std.debug.assert(!gc_block_heap.canAllocCellSize(total_bytes));
         const heap = self.gc_object_cell_heap orelse return error.OutOfMemory;
         try self.checkAllocation(total_bytes);
-        const carrier_reservation = if (comptime extent_tracking_enabled)
+        const carrier_reservation = if (comptime carrier_audit_enabled)
             try self.reserveGcExtent()
         else {};
         const slice = try heap.alloc(total_bytes);
@@ -1962,7 +2021,7 @@ pub const MemoryAccount = struct {
         self.creditAlloc(total_bytes, null);
         const body = @intFromPtr(base) + gc_prefix_size;
         const payload_bytes = total_bytes - gc_prefix_size;
-        if (comptime extent_tracking_enabled) {
+        if (comptime carrier_audit_enabled) {
             self.commitGcExtent(
                 carrier_reservation,
                 body,
@@ -1984,11 +2043,11 @@ pub const MemoryAccount = struct {
         const heap = self.gc_object_cell_heap.?;
         const body = @intFromPtr(payload);
         if (comptime diagnostic_accounting_enabled) self.traceFree(body);
-        if (comptime extent_tracking_enabled) self.beginGcRawFree(body);
+        if (comptime carrier_audit_enabled) self.beginGcRawFree(body);
         self.debitAlloc(total_bytes, null);
         self.noteFreeDiagnostics(true);
         heap.free(@ptrFromInt(body - gc_prefix_size));
-        if (comptime extent_tracking_enabled) self.finishExtentGcRawFree(body);
+        if (comptime carrier_audit_enabled) self.finishExtentGcRawFree(body);
     }
 
     /// A storage cell as the collector sees it: the allocation base (prefix
@@ -2031,9 +2090,9 @@ pub const MemoryAccount = struct {
     /// happened once at condemnation (`debitBlockBytes`).
     pub fn noteBlockCellBitmapReclaim(self: *MemoryAccount, payload: *const anyopaque) void {
         if (comptime diagnostic_accounting_enabled) self.traceFree(@intFromPtr(payload));
-        if (comptime block_tracking_enabled) self.beginGcRawFree(@intFromPtr(payload));
+        if (comptime carrier_audit_enabled) self.beginGcRawFree(@intFromPtr(payload));
         self.noteFreeDiagnostics(true);
-        if (comptime block_tracking_enabled) self.finishBlockGcRawFree(@intFromPtr(payload));
+        if (comptime carrier_audit_enabled) self.finishBlockGcRawFree(@intFromPtr(payload));
     }
 
     /// TGC S4-d spec 2.4: one debit for a whole condemnation's worth of block

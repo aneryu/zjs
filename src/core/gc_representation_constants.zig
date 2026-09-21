@@ -52,6 +52,12 @@ pub const alloc_info_standalone_mask: u8 = 1 << 7;
 pub const block_cell_size_class: u5 = 0x1f;
 pub const block_cell_alloc_info: u8 = block_cell_size_class;
 
+/// A bump-allocated young cell. The slab's 31 classes plus the block-cell
+/// discriminator fill every value of the 5-bit class field, so this is the
+/// byte's one spare BIT rather than another class value.
+pub const nursery_alloc_info_mask: u8 = 1 << 5;
+pub const nursery_cell_alloc_info: u8 = nursery_alloc_info_mask;
+
 /// A freed block cell retains its successor in the low 16 bits.  The entire
 /// high half is poison, chosen so reading the word as live metadata yields an
 /// unaccounted, non-block prefix whose kind reads `.string` (6).  The kind is
@@ -78,6 +84,12 @@ comptime {
     const poison_alloc_info: u8 = @truncate(free_cell_poison >> 16);
     if (poison_alloc_info & alloc_info_class_mask == block_cell_size_class)
         @compileError("free-cell poison impersonates a block-cell header");
+    if (poison_alloc_info & nursery_alloc_info_mask != 0)
+        @compileError("free-cell poison impersonates a nursery header");
+    if (nursery_alloc_info_mask & alloc_info_class_mask != 0)
+        @compileError("the nursery bit must stay out of the slab class field");
+    if (nursery_alloc_info_mask & (alloc_info_heap_accounted_mask | alloc_info_standalone_mask) != 0)
+        @compileError("the nursery bit must not collide with the accounting or allocation bits");
     if (poison_alloc_info & alloc_info_heap_accounted_mask != 0)
         @compileError("free-cell poison reads as heap-accounted");
     const poison_flags: u8 = @truncate(free_cell_poison >> 24);

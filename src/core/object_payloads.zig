@@ -602,9 +602,9 @@ pub const RegExpPayload = extern struct {
         gc_visit.assertClassified(@This());
     }
 
-    pub fn traceChildEdges(self: *const RegExpPayload, visitor: anytype) !void {
-        if (self.source) |body| try gc_visit.stringBody(visitor, body);
-        if (self.compiled_bytecode) |body| try gc_visit.stringBody(visitor, body);
+    pub fn traceChildEdges(self: *RegExpPayload, visitor: anytype) !void {
+        try gc_visit.stringBody(visitor, &self.source);
+        try gc_visit.stringBody(visitor, &self.compiled_bytecode);
     }
 
     comptime {
@@ -629,7 +629,7 @@ pub const BoundFunctionPayload = struct {
         // The argument array is fixed at creation, so a non-empty slice IS the
         // cell (there is no over-allocated capacity to distinguish).
         if (self.args.len != 0)
-            try gc_visit.storageCell(visitor, payloadSliceCellHeader(self.args.ptr));
+            try gc_visit.storageCell(visitor, .{ .slot = @ptrCast(&self.args.ptr) });
         for (self.args) |*stored| try gc_visit.value(visitor, stored);
     }
 };
@@ -660,7 +660,7 @@ pub const ArgumentsPayload = struct {
 
     pub fn traceChildEdges(self: *ArgumentsPayload, visitor: anytype) !void {
         if (self.var_refs.len != 0)
-            try gc_visit.storageCell(visitor, payloadSliceCellHeader(self.var_refs.ptr));
+            try gc_visit.storageCell(visitor, .{ .slot = @ptrCast(&self.var_refs.ptr) });
         for (self.var_refs) |*stored| try gc_visit.value(visitor, stored);
     }
 };
@@ -816,7 +816,7 @@ pub const DisposableStackPayload = struct {
 
     pub fn traceChildEdges(self: *DisposableStackPayload, visitor: anytype) !void {
         if (self.resource_capacity != 0)
-            try gc_visit.storageCell(visitor, payloadSliceCellHeader(self.resources.ptr));
+            try gc_visit.storageCell(visitor, .{ .slot = @ptrCast(&self.resources.ptr) });
         for (self.resources) |*resource| {
             try gc_visit.value(visitor, &resource.value);
             try gc_visit.value(visitor, &resource.method);
@@ -900,7 +900,7 @@ pub const PromisePayload = struct {
         // live prefix may be shorter than the allocation, and an empty list
         // holds the `&.{}` sentinel.
         if (self.reactions_capacity != 0)
-            try gc_visit.storageCell(visitor, payloadSliceCellHeader(self.reactions.ptr));
+            try gc_visit.storageCell(visitor, .{ .slot = @ptrCast(&self.reactions.ptr) });
         for (self.reactions) |*stored| try gc_visit.value(visitor, stored);
     }
 };

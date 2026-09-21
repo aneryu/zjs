@@ -881,7 +881,7 @@ pub fn appendWeakCollectionEntryForValue(rt: *core.JSRuntime, collection: *core.
 /// poll where the result lands.
 pub fn finishGcCycles(rt: anytype) void {
     var polls: usize = 0;
-    while (rt.gc.incremental.markingActive() or rt.gc.morgue.pending) : (polls += 1) {
+    while (rt.gc.morgue.pending) : (polls += 1) {
         std.debug.assert(polls < 100_000);
         _ = rt.pollGC(null, .safepoint) catch return;
     }
