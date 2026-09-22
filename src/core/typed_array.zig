@@ -30,6 +30,7 @@
 //! `exec/buffer_ops.zig` re-exports both. The record dispatch table is owned by
 //! `exec/buffer_ops.zig`.
 
+const mem_ops = @import("memory.zig");
 const std = @import("std");
 
 const atom = @import("atom.zig");
@@ -106,8 +107,8 @@ pub fn createArrayBufferWithPrototype(rt: *JSRuntime, byte_length: usize, max_by
     try validateArrayBufferLength(byte_length);
     if (max_byte_length) |max| try validateArrayBufferLength(max);
     if (!try obj.installInlineByteStorage(rt, byte_length)) {
-        const bytes = try rt.memory.alloc(u8, byte_length);
-        errdefer rt.memory.free(u8, bytes);
+        const bytes = try mem_ops.alloc(rt, u8, byte_length);
+        errdefer mem_ops.free(rt, u8, bytes);
         try obj.installByteStorage(rt, bytes);
     }
     @memset(obj.byteStorage(), 0);
@@ -293,8 +294,8 @@ pub fn arrayBufferResizeLength(rt: *JSRuntime, buffer_value: JSValue, new_length
     const max = buffer.arrayBufferMaxByteLength() orelse return error.TypeError;
     if (new_length > max) return error.RangeError;
     const old = buffer.byteStorage();
-    const next = try rt.memory.alloc(u8, new_length);
-    errdefer rt.memory.free(u8, next);
+    const next = try mem_ops.alloc(rt, u8, new_length);
+    errdefer mem_ops.free(rt, u8, next);
     const copy_len = @min(old.len, new_length);
     if (copy_len != 0) @memcpy(next[0..copy_len], old[0..copy_len]);
     if (new_length > copy_len) @memset(next[copy_len..], 0);
@@ -872,7 +873,7 @@ fn coerceNumber(rt: *JSRuntime, value: JSValue) !f64 {
     if (value.is(.null_value)) return 0;
     if (value.isString()) {
         var bytes = std.ArrayList(u8).empty;
-        defer bytes.deinit(rt.memory.allocator);
+        defer bytes.deinit(rt.nativeAllocator());
         try string.appendValueUtf8(rt, &bytes, value);
         return parseJsNumber(bytes.items);
     }
@@ -1013,18 +1014,18 @@ fn valueToBigInt64Bits(rt: *JSRuntime, value: JSValue) !u64 {
 }
 
 fn toBigIntValue(rt: *JSRuntime, value: JSValue) !bignum.BigInt {
-    if (value.isBigInt()) return value_format.cloneBigIntValue(rt.memory.allocator, value);
+    if (value.isBigInt()) return value_format.cloneBigIntValue(rt.nativeAllocator(), value);
     if (value.isNumber()) return error.TypeError;
-    if (value.as(.boolean)) |bool_value| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, if (bool_value) 1 else 0);
+    if (value.as(.boolean)) |bool_value| return bignum.BigInt.fromIntAlloc(rt.nativeAllocator(), if (bool_value) 1 else 0);
 
     var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(rt.memory.allocator);
+    defer buffer.deinit(rt.nativeAllocator());
     if (value.isString() or value.is(.object)) {
         try appendValueString(rt, &buffer, value);
         // qjs JS_StringToBigInt + skip_spaces.
         const trimmed = value_format.trimJsWhitespace(buffer.items);
-        if (trimmed.len == 0) return bignum.BigInt.fromIntAlloc(rt.memory.allocator, 0);
-        return bignum.parseAutoAlloc(rt.memory.allocator, trimmed) catch |err| switch (err) {
+        if (trimmed.len == 0) return bignum.BigInt.fromIntAlloc(rt.nativeAllocator(), 0);
+        return bignum.parseAutoAlloc(rt.nativeAllocator(), trimmed) catch |err| switch (err) {
             // qjs js_atobigint throws its RangeError through js_atof rather
             // than folding it into the bad-literal SyntaxError.
             error.BigIntTooLarge => error.BigIntTooLarge,
@@ -1041,7 +1042,7 @@ fn toIntegerOrInfinity(rt: *JSRuntime, value: JSValue) !f64 {
     if (value.is(.undefined_value)) return std.math.nan(f64);
 
     var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(rt.memory.allocator);
+    defer buffer.deinit(rt.nativeAllocator());
     try appendValueString(rt, &buffer, value);
     return parseJsNumber(buffer.items);
 }

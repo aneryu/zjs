@@ -636,7 +636,7 @@ fn runEmbeddedEngine(
     stderr_storage: *[stderr_storage_len]u8,
     stderr_out: *[]const u8,
 ) !bool {
-    const rt = try zjs.JSRuntime.create(allocator, .{});
+    const rt = try zjs.JSRuntime.create(.{ .allocator = allocator });
     errdefer rt.destroy();
     const ctx = try zjs.JSContext.create(rt, .{});
     errdefer ctx.destroy();
@@ -700,7 +700,14 @@ fn runEmbeddedEngine(
     };
 
     if (!value.is(.exception)) {
-        try dynamic_import_state.runJobs(ctx.core);
+        dynamic_import_state.runJobs(ctx.core) catch |err| {
+            if (try formatPendingExceptionName(rt, ctx, stderr_storage)) |name| {
+                stderr_out.* = name;
+            } else {
+                stderr_out.* = try std.fmt.bufPrint(stderr_storage, "{s}", .{@errorName(err)});
+            }
+            return false;
+        };
         if (ctx.hasException()) {
             stderr_out.* = "unhandled promise rejection";
             _ = ctx.takePendingException();
@@ -740,13 +747,13 @@ fn formatPendingExceptionName(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, storage: 
 
     if (thrown.is(.object)) {
         var owned_name: ?[]u8 = null;
-        defer if (owned_name) |name| rt.memory.allocator.free(name);
+        defer if (owned_name) |name| rt.nativeAllocator().free(name);
 
         if (try exceptionStringProperty(rt, ctx, thrown, "name")) |name| {
             if (name.len != 0) {
                 owned_name = name;
             } else {
-                rt.memory.allocator.free(name);
+                rt.nativeAllocator().free(name);
             }
         }
 
@@ -754,7 +761,7 @@ fn formatPendingExceptionName(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, storage: 
             const ctor = ctx.getProperty(thrown, "constructor") catch null;
             if (ctor) |constructor| {
                 if (ctx.isCallable(constructor)) {
-                    const maybe_name: ?[]u8 = ctx.functionName(constructor, rt.memory.allocator) catch |err| switch (err) {
+                    const maybe_name: ?[]u8 = ctx.functionName(constructor, rt.nativeAllocator()) catch |err| switch (err) {
                         error.OutOfMemory => return err,
                         else => null,
                     };
@@ -762,7 +769,7 @@ fn formatPendingExceptionName(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, storage: 
                         if (name.len != 0 and !std.mem.eql(u8, name, "Object")) {
                             owned_name = name;
                         } else {
-                            rt.memory.allocator.free(name);
+                            rt.nativeAllocator().free(name);
                         }
                     }
                 }
@@ -771,15 +778,15 @@ fn formatPendingExceptionName(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, storage: 
 
         if (owned_name) |name| {
             if (try exceptionStringProperty(rt, ctx, thrown, "message")) |message| {
-                defer rt.memory.allocator.free(message);
+                defer rt.nativeAllocator().free(message);
                 if (message.len != 0) return try std.fmt.bufPrint(storage, "{s}: {s}", .{ name, message });
             }
             return try std.fmt.bufPrint(storage, "{s}", .{name});
         }
     }
 
-    const formatted = try ctx.formatException(thrown, rt.memory.allocator);
-    defer rt.memory.allocator.free(formatted);
+    const formatted = try ctx.formatException(thrown, rt.nativeAllocator());
+    defer rt.nativeAllocator().free(formatted);
     const name = if (std.mem.indexOfScalar(u8, formatted, ':')) |colon|
         formatted[0..colon]
     else
@@ -791,7 +798,7 @@ fn formatPendingExceptionName(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, storage: 
 fn exceptionStringProperty(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, value: zjs.JSValue, name: []const u8) !?[]u8 {
     const property = ctx.getProperty(value, name) catch return null;
     if (!property.isString()) return null;
-    const bytes = try ctx.toOwnedUtf8(property, rt.memory.allocator);
+    const bytes = try ctx.toOwnedUtf8(property, rt.nativeAllocator());
     return bytes;
 }
 
@@ -1655,7 +1662,7 @@ test "test262 typed array iterator staging source parses after installing global
     defer allocator.free(source);
 
     {
-        const rt = try zjs.JSRuntime.create(allocator, .{});
+        const rt = try zjs.JSRuntime.create(.{ .allocator = allocator });
         defer rt.destroy();
         rt.setNativeStackSize(core_runtime.default_native_stack_size * 4);
         const ctx = try zjs.JSContext.create(rt, .{});
@@ -1671,7 +1678,7 @@ test "test262 typed array iterator staging source parses after installing global
     }
 
     {
-        const rt = try zjs.JSRuntime.create(allocator, .{});
+        const rt = try zjs.JSRuntime.create(.{ .allocator = allocator });
         defer rt.destroy();
         rt.setNativeStackSize(core_runtime.default_native_stack_size * 4);
         const ctx = try zjs.JSContext.create(rt, .{});

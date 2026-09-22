@@ -1,5 +1,6 @@
 //! Out-of-line object payload representations and their ownership teardown.
 
+const mem_ops = @import("memory.zig");
 const atom = @import("atom.zig");
 const gc_visit = @import("gc_visit.zig");
 const class = @import("class.zig");
@@ -101,9 +102,9 @@ pub fn destroyValueSliceWithCapacity(rt: *JSRuntime, slot: *[]JSValue, capacity:
     slot.* = &.{};
     capacity.* = 0;
     if (old_capacity != 0) {
-        rt.memory.free(JSValue, values.ptr[0..old_capacity]);
+        mem_ops.free(rt, JSValue, values.ptr[0..old_capacity]);
     } else if (values.len != 0) {
-        rt.memory.free(JSValue, values);
+        mem_ops.free(rt, JSValue, values);
     }
 }
 
@@ -240,7 +241,7 @@ pub const IteratorPayload = struct {
     pub fn destroy(self: *IteratorPayload, rt: *JSRuntime) void {
         const atom_keys = self.atom_keys;
         self.atom_keys = &.{};
-        if (atom_keys.len != 0) rt.memory.free(atom.Atom, atom_keys);
+        if (atom_keys.len != 0) mem_ops.free(rt, atom.Atom, atom_keys);
     }
 
     pub const gc_edges: gc_visit.Edges = .{
@@ -295,13 +296,13 @@ pub const CollectionPayload = struct {
     /// `weak_holder_link` is deliberately left alone: the payload may still
     /// sit in the runtime's weak-holder list, which unlinks it separately.
     pub fn destroy(self: *CollectionPayload, rt: *JSRuntime) void {
-        self.entries.deinit(rt.memory.persistent_allocator);
+        self.entries.deinit(rt.nativeAllocator());
         const old_bucket_heads = self.bucket_heads;
         self.bucket_heads = &.{};
         self.active_count = 0;
-        if (old_bucket_heads.len != 0) rt.memory.free(usize, old_bucket_heads);
+        if (old_bucket_heads.len != 0) mem_ops.free(rt, usize, old_bucket_heads);
         for (self.weak_entries.items) |entry| rt.releaseWeakIdentity(entry.key_identity);
-        self.weak_entries.deinit(rt.memory.persistent_allocator);
+        self.weak_entries.deinit(rt.nativeAllocator());
     }
 
     pub const gc_edges: gc_visit.Edges = .{
@@ -440,11 +441,11 @@ pub const BufferPayload = struct {
             self.external_memory.release();
             deinit(self.external_context, self.bytes);
         } else if (self.inline_length != 0) {
-            rt.reportExternalFreeUntracked(self.inline_length);
+            rt.gc.reportExternalFreeUntracked(self.inline_length);
             self.inline_length = 0;
         } else {
             self.external_memory.release();
-            if (self.bytes.len != 0) rt.memory.free(u8, self.bytes);
+            if (self.bytes.len != 0) mem_ops.free(rt, u8, self.bytes);
         }
         self.bytes = &.{};
         self.shared_store = null;
@@ -729,7 +730,7 @@ pub const FinalizationRegistryPayload = struct {
     pub fn destroy(self: *FinalizationRegistryPayload, rt: *JSRuntime) void {
         self.realm.deinit();
         for (self.cells.items) |entry| entry.destroy(rt);
-        self.cells.deinit(rt.memory.persistent_allocator);
+        self.cells.deinit(rt.nativeAllocator());
         self.* = .{};
     }
 
@@ -1027,7 +1028,7 @@ pub const FunctionPayload = struct {
     fn destroyRare(self: *FunctionPayload, rt: *JSRuntime) void {
         if (self.rare) |rare| {
             self.rare = null;
-            rt.memory.destroy(FunctionRarePayload, rare);
+            mem_ops.destroy(rt, FunctionRarePayload, rare);
         }
     }
 

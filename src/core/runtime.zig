@@ -8,15 +8,19 @@
 //! quickjs.c. This is core infrastructure: exec/runtime/binding may
 //! import it, while this module must not import those higher layers.
 
+const mem_ops = @import("memory.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
+const platform_memory = @import("../platform_memory.zig");
 const platform_clock = @import("../platform_clock.zig");
 
 const memory = @import("memory.zig");
+const alloc_trace = @import("alloc_trace.zig");
 const atom = @import("atom.zig");
 const class = @import("class.zig");
 const gc = @import("gc.zig");
+const gc_driver = @import("gc_driver.zig");
 const host_function = @import("host_function.zig");
 const native_entry = @import("native_entry.zig");
 const job_mod = @import("jobs.zig");
@@ -31,8 +35,8 @@ const Object = object_mod.Object;
 const profile = @import("profile.zig");
 const property = @import("property.zig");
 const context_mod = @import("context.zig");
+const context_registry = @import("context_registry.zig");
 const errors = @import("errors.zig");
-const value_format = @import("value_format.zig");
 
 extern "c" fn pclose(stream: *std.c.FILE) c_int;
 
@@ -45,7 +49,7 @@ const DeferredStdFileClose = struct {
         const job: *DeferredStdFileClose = @ptrCast(@alignCast(ptr));
         const rt = job.runtime;
         _ = closeStdFileHandle(job.file, job.is_popen);
-        rt.memory.destroy(DeferredStdFileClose, job);
+        mem_ops.destroy(rt, DeferredStdFileClose, job);
     }
 };
 
@@ -70,7 +74,7 @@ pub fn enqueueDeferredStdFileClose(rt: *JSRuntime, file: *std.c.FILE, is_popen: 
     };
     rt.enqueueDeferredNativeCleanup(DeferredStdFileClose.run, @ptrCast(job)) catch {
         _ = closeStdFileHandle(file, is_popen);
-        rt.memory.destroy(DeferredStdFileClose, job);
+        mem_ops.destroy(rt, DeferredStdFileClose, job);
     };
 }
 
@@ -128,28 +132,18 @@ pub const DynamicImportLoaderScope = struct {
 /// bootstrap can run without a core -> exec dependency.
 /// This is the engine bootstrap seam: exec's context/realm initialization calls
 /// the runtime's installer through this neutral interface.
-pub const StandardGlobalsInstaller = *const fn (rt: *JSRuntime, global: *Object) anyerror!void;
+pub const StandardGlobalsInstaller = *const fn (ctx: *context_mod.JSContext, global: *Object) anyerror!void;
 
-/// Process-global default standard-globals installer, registered once by the
-/// exec bootstrap (`standard_globals.registerStandardGlobalsDefault`). New
-/// runtimes copy this into their per-runtime `install_standard_globals_cb` at
-/// `init`, so a bare `core.JSRuntime.create` (e.g. in engine unit tests) still
-/// gets the installer wired without the creator naming builtins. Mirrors the
-/// `profile.setOpcodeNameProvider` process-global registration pattern.
-var default_standard_globals_installer: ?StandardGlobalsInstaller = null;
-var default_standard_global_own_property_capacity: usize = 0;
-
-/// Register (or clear, with `null`) the process-global standard-globals
-/// installer and the own-property capacity its global object reserves. Called by
-/// exec bootstrap during engine setup; idempotent and safe to call more
-/// than once with the same values.
-pub fn setDefaultStandardGlobalsInstaller(
-    installer: ?StandardGlobalsInstaller,
-    own_property_capacity: usize,
-) void {
-    default_standard_globals_installer = installer;
-    default_standard_global_own_property_capacity = own_property_capacity;
-}
+/// Internal implementation seam installed once, from the `engine_hooks`
+/// module, when the runtime is created. Hosts do not supply or replace it.
+pub const EngineHooks = struct {
+    install_standard_globals: StandardGlobalsInstaller,
+    standard_global_own_property_capacity: usize,
+    materialize_builtin_namespace: *const fn (*JSRuntime, *Object, property.AutoInitKind) anyerror!?JSValue,
+    materialize_context_global: *const fn (*context_mod.JSContext) anyerror!*Object,
+    internal_builtins: []const native_entry.EntryTable,
+    run_microtask: *const fn (*JSRuntime) errors.HostError!job_mod.RunOneStatus,
+};
 
 /// Canonical operand-stack backing policy shared by Runtime and the execution
 /// Stack. Runtime owns the configured limit and precomputes the arena-window
@@ -230,7 +224,7 @@ pub const VmStackArena = struct {
     /// Carve `n` slots from the arena. Returns null when the request cannot
     /// be served (oversized window or arena exhausted); callers fall back to
     /// heap storage.
-    pub fn carve(self: *VmStackArena, account: *memory.MemoryAccount, n: usize) ?[]JSValue {
+    pub fn carve(self: *VmStackArena, rt: *JSRuntime, n: usize) ?[]JSValue {
         if (n == 0) return self.chunks[0][0..0];
         if (n > chunk_slots) return null;
         if (self.chunk_count != 0) {
@@ -243,7 +237,7 @@ pub const VmStackArena = struct {
                 return self.chunks[active][used .. used + n];
             }
         }
-        return self.carveSlow(account, n);
+        return self.carveSlow(rt, n);
     }
 
     /// Allocation-free carve from the current chunk only, returning both the
@@ -273,7 +267,7 @@ pub const VmStackArena = struct {
     /// virtually every ordinary call after the first one; keeping backing
     /// allocation and its memory-accounting/error machinery out of `carve`
     /// lets that steady arm remain a leaf, like QJS's `alloca` bump.
-    noinline fn carveSlow(self: *VmStackArena, account: *memory.MemoryAccount, n: usize) ?[]JSValue {
+    noinline fn carveSlow(self: *VmStackArena, rt: *JSRuntime, n: usize) ?[]JSValue {
         const next_index = if (self.chunk_count == 0) 0 else self.active + 1;
         if (next_index >= max_chunks) return null;
         if (next_index >= self.chunk_count) {
@@ -285,7 +279,7 @@ pub const VmStackArena = struct {
                 first_chunk_slots
             else
                 chunk_slots;
-            const chunk = account.alloc(JSValue, allocation_slots) catch return null;
+            const chunk = rt.allocRuntime(JSValue, allocation_slots) catch return null;
             self.chunks[next_index] = chunk;
             self.chunk_count = next_index + 1;
         }
@@ -295,12 +289,12 @@ pub const VmStackArena = struct {
         return self.chunks[next_index][0..n];
     }
 
-    pub fn carveTyped(self: *VmStackArena, account: *memory.MemoryAccount, comptime T: type, n: usize) ?[]T {
+    pub fn carveTyped(self: *VmStackArena, rt: *JSRuntime, comptime T: type, n: usize) ?[]T {
         if (n == 0) return &.{};
         if (@alignOf(T) > @alignOf(JSValue)) return null;
         const byte_count = std.math.mul(usize, @sizeOf(T), n) catch return null;
         const slot_count = std.math.divCeil(usize, byte_count, @sizeOf(JSValue)) catch return null;
-        const value_window = self.carve(account, slot_count) orelse return null;
+        const value_window = self.carve(rt, slot_count) orelse return null;
         const bytes = std.mem.sliceAsBytes(value_window);
         return std.mem.bytesAsSlice(T, bytes[0..byte_count]);
     }
@@ -315,20 +309,28 @@ pub const VmStackArena = struct {
         self.used[m.chunk] = m.used;
     }
 
-    pub fn deinit(self: *VmStackArena, account: *memory.MemoryAccount) void {
+    pub fn deinit(self: *VmStackArena, allocator: std.mem.Allocator) void {
         for (self.chunks[0..self.chunk_count]) |chunk| {
-            if (chunk.len != 0) account.free(JSValue, chunk);
+            if (chunk.len != 0) allocator.free(chunk);
         }
         self.initDefault();
     }
 };
 
+pub const MicrotaskPolicy = job_mod.Policy;
+pub const MicrotaskScope = job_mod.Scope;
+pub const MicrotaskExceptionHandler = job_mod.ExceptionHandler;
+
 pub const RuntimeOptions = struct {
+    allocator: std.mem.Allocator = std.heap.c_allocator,
+    microtask_policy: MicrotaskPolicy = .auto,
     trace_writer: ?*std.Io.Writer = null,
     memory_limit: ?usize = null,
+    /// Initial collection threshold; collections adjust the next threshold.
     gc_threshold: usize = default_gc_threshold,
     gc_policy: gc.Policy = .{},
     stack_size: usize = default_stack_size,
+    native_stack_size: usize = initial_native_stack_size,
     interrupt_handler: ?InterruptHandler = null,
     interrupt_context: ?*anyopaque = null,
     can_block: bool = false,
@@ -337,6 +339,9 @@ pub const RuntimeOptions = struct {
 pub const Options = RuntimeOptions;
 
 pub const MemoryUsage = struct {
+    /// Native allocation counters are unavailable when diagnostic instrumentation is off.
+    allocation_tracking_enabled: bool = alloc_trace.enabled,
+    heap_bytes: usize = 0,
     memory_limit: ?usize,
     allocated_bytes: usize,
     allocation_count: usize,
@@ -347,16 +352,10 @@ pub const MemoryUsage = struct {
     create_calls: usize,
     destroy_calls: usize,
     atom_count: usize,
+    /// Bytes of dynamic atom names. Predefined atoms are not copied here.
     atom_bytes: usize,
-    object_count: usize,
-    object_bytes: usize,
-    shape_count: usize,
-    shape_bytes: usize,
-    module_count: usize,
-    module_bytes: usize,
     registered_class_count: usize,
     class_record_count: usize,
-    class_bytes: usize,
 };
 
 pub const GCPollMode = enum {
@@ -438,8 +437,8 @@ pub const ValueRootBuffer = struct {
     pub fn initCopy(rt: *JSRuntime, source: []const JSValue) !ValueRootBuffer {
         if (source.len == 0) return .{};
 
-        const values = try rt.memory.alloc(JSValue, source.len);
-        errdefer rt.memory.free(JSValue, values);
+        const values = try mem_ops.alloc(rt, JSValue, source.len);
+        errdefer mem_ops.free(rt, JSValue, values);
         for (source, 0..) |value, idx| {
             values[idx] = value;
         }
@@ -449,7 +448,7 @@ pub const ValueRootBuffer = struct {
     pub fn deinit(self: *ValueRootBuffer, rt: *JSRuntime) void {
         const values = self.values;
         self.values = &.{};
-        if (values.len != 0) rt.memory.free(JSValue, values);
+        if (values.len != 0) mem_ops.free(rt, JSValue, values);
     }
 
     pub fn slice(self: *ValueRootBuffer) ValueRootSlice {
@@ -466,7 +465,7 @@ pub const CellRootBuffer = struct {
 
     pub fn initCopy(rt: *JSRuntime, source: []const *var_ref_mod.VarRef) !CellRootBuffer {
         if (source.len == 0) return .{};
-        const cells = try rt.memory.alloc(*var_ref_mod.VarRef, source.len);
+        const cells = try mem_ops.alloc(rt, *var_ref_mod.VarRef, source.len);
         for (source, 0..) |cell, idx| cells[idx] = cell;
         return .{ .cells = cells };
     }
@@ -474,7 +473,7 @@ pub const CellRootBuffer = struct {
     pub fn deinit(self: *CellRootBuffer, rt: *JSRuntime) void {
         const cells = self.cells;
         self.cells = &.{};
-        if (cells.len != 0) rt.memory.free(*var_ref_mod.VarRef, cells);
+        if (cells.len != 0) mem_ops.free(rt, *var_ref_mod.VarRef, cells);
     }
 
     pub fn slice(self: *CellRootBuffer) ValueRootSlice {
@@ -946,196 +945,27 @@ pub var trace_atomics_wait_async: if (value_root_frames_enabled)
 else
     void = if (value_root_frames_enabled) null else {};
 
-pub const RootProvider = struct {
-    context: *anyopaque,
-    trace: *const fn (context: *anyopaque, visitor: *RootVisitor) RootTraceError!void,
-};
-
-pub const RootSlot = struct {
-    value: JSValue = JSValue.undefinedValue(),
-};
-
-pub const WeakPersistentCallback = *const fn (runtime: *JSRuntime, context: ?*anyopaque) void;
-
-pub const WeakRootSlot = struct {
-    identity: ?usize = null,
-    callback: ?WeakPersistentCallback = null,
-    callback_context: ?*anyopaque = null,
-};
-
-pub const JSValueHandle = struct {
-    runtime: ?*JSRuntime = null,
-    slot: ?*RootSlot = null,
-
-    /// Takes ownership of `value`.
-    pub fn init(runtime: *JSRuntime, value: JSValue) !JSValueHandle {
-        const slot = runtime.createPersistentRootSlot(value) catch |err| {
-            return err;
-        };
-        return .{
-            .runtime = runtime,
-            .slot = slot,
-        };
-    }
-
-    /// Duplicates `value` before storing it.
-    pub fn initDup(runtime: *JSRuntime, value: JSValue) !JSValueHandle {
-        return init(runtime, value);
-    }
-
-    pub fn get(self: JSValueHandle) JSValue {
-        const slot = self.slot orelse return JSValue.undefinedValue();
-        return slot.value;
-    }
-
-    pub fn deinit(self: *JSValueHandle) void {
-        const runtime = self.runtime orelse return;
-        const slot = self.slot orelse return;
-        self.runtime = null;
-        self.slot = null;
-        _ = runtime.takePersistentRootSlot(slot);
-    }
-
-    /// Compatibility spelling: by-value wrapper that asserts `rt` matches the
-    /// handle's runtime, then drops the root. Prefer `deinit` on a mutable handle.
-    pub fn destroy(self: JSValueHandle, rt: *JSRuntime) void {
-        if (self.runtime) |runtime| std.debug.assert(runtime == rt);
-        var owned = self;
-        owned.deinit();
-    }
-
-    /// Transfer ownership of the rooted value out of the handle.
-    pub fn take(self: *JSValueHandle) JSValue {
-        const runtime = self.runtime orelse return JSValue.undefinedValue();
-        const slot = self.slot orelse return JSValue.undefinedValue();
-        const value = runtime.takePersistentRootSlot(slot);
-        self.runtime = null;
-        self.slot = null;
-        return value;
-    }
-};
-
-pub const LocalHandle = struct {
-    slot: *RootSlot,
-
-    pub fn get(self: LocalHandle) JSValue {
-        return self.slot.value;
-    }
-
-    pub fn valueSlot(self: LocalHandle) *JSValue {
-        return &self.slot.value;
-    }
-};
-
-pub const HandleScope = struct {
-    runtime: *JSRuntime,
-    start: usize,
-    active: bool = true,
-
-    pub fn enter(runtime: *JSRuntime) HandleScope {
-        return .{
-            .runtime = runtime,
-            .start = runtime.local_root_slots.items.len,
-        };
-    }
-
-    pub fn deinit(self: *HandleScope) void {
-        if (!self.active) return;
-        std.debug.assert(self.start <= self.runtime.local_root_slots.items.len);
-        self.runtime.clearLocalRootSlotsFrom(self.start);
-        self.active = false;
-    }
-
-    /// Takes ownership of `value`.
-    pub fn local(self: *HandleScope, value: JSValue) !LocalHandle {
-        std.debug.assert(self.active);
-        const slot = self.runtime.createLocalRootSlot(value) catch |err| {
-            return err;
-        };
-        return .{ .slot = slot };
-    }
-
-    /// Duplicates `value` before storing it.
-    pub fn localDup(self: *HandleScope, value: JSValue) !LocalHandle {
-        return self.local(value);
-    }
-};
-
-pub const WeakPersistentValue = struct {
-    runtime: ?*JSRuntime = null,
-    slot: ?*WeakRootSlot = null,
-
-    pub fn init(
-        runtime: *JSRuntime,
-        value: JSValue,
-        callback: ?WeakPersistentCallback,
-        callback_context: ?*anyopaque,
-    ) !WeakPersistentValue {
-        const identity = (try object_mod.Object.weakIdentityFromValue(runtime, value)) orelse return error.InvalidWeakTarget;
-        const slot = try runtime.createWeakRootSlot(identity, callback, callback_context);
-        runtime.retainWeakIdentity(identity);
-        return .{
-            .runtime = runtime,
-            .slot = slot,
-        };
-    }
-
-    pub fn get(self: WeakPersistentValue) JSValue {
-        const runtime = self.runtime orelse return JSValue.undefinedValue();
-        const slot = self.slot orelse return JSValue.undefinedValue();
-        const identity = slot.identity orelse return JSValue.undefinedValue();
-        return runtime.valueFromWeakIdentity(identity);
-    }
-
-    pub fn isAlive(self: WeakPersistentValue) bool {
-        const runtime = self.runtime orelse return false;
-        const slot = self.slot orelse return false;
-        const identity = slot.identity orelse return false;
-        return runtime.weakIdentityIsCurrentlyLive(identity);
-    }
-
-    pub fn deinit(self: *WeakPersistentValue) void {
-        const runtime = self.runtime orelse return;
-        const slot = self.slot orelse return;
-        self.runtime = null;
-        self.slot = null;
-        runtime.destroyWeakRootSlot(slot);
-    }
-
-    pub fn destroy(self: WeakPersistentValue, rt: *JSRuntime) void {
-        if (self.runtime) |runtime| std.debug.assert(runtime == rt);
-        var owned = self;
-        owned.deinit();
-    }
-};
-
-pub const WeakPersistent = WeakPersistentValue;
-
-pub const NativePin = struct {
-    runtime: ?*JSRuntime = null,
-    header: ?*gc.Header = null,
-
-    pub fn deinit(self: *NativePin) void {
-        const runtime = self.runtime orelse return;
-        const header = self.header orelse return;
-        self.runtime = null;
-        self.header = null;
-        runtime.gc.unpinHeader(header);
-    }
-};
-
-pub fn pinValueForNative(runtime: *JSRuntime, value: JSValue) !?NativePin {
-    const header = value.refHeader() orelse value.functionBytecodeHeader() orelse return null;
-    return try pinHeaderForNative(runtime, header);
-}
-
-pub fn pinHeaderForNative(runtime: *JSRuntime, header: *gc.Header) !NativePin {
-    try runtime.gc.pinHeader(header);
-    return .{
-        .runtime = runtime,
-        .header = header,
-    };
-}
+const deferred_cleanup = @import("deferred_cleanup.zig");
+const native_bindings = @import("native_bindings.zig");
+const property_state = @import("property_state.zig");
+const string_cache = @import("string_cache.zig");
+const exception_state = @import("exception.zig");
+const execution = @import("execution.zig");
+const gc_weak = @import("gc_weak.zig");
+const roots_mod = @import("roots.zig");
+pub const RootSet = roots_mod.RootSet;
+pub const RootProvider = roots_mod.RootProvider;
+pub const RootSlot = roots_mod.RootSlot;
+pub const WeakPersistentCallback = roots_mod.WeakPersistentCallback;
+pub const WeakRootSlot = roots_mod.WeakRootSlot;
+pub const JSValueHandle = roots_mod.JSValueHandle;
+pub const LocalHandle = roots_mod.LocalHandle;
+pub const HandleScope = roots_mod.HandleScope;
+pub const WeakPersistentValue = roots_mod.WeakPersistentValue;
+pub const WeakPersistent = roots_mod.WeakPersistent;
+pub const NativePin = roots_mod.NativePin;
+pub const pinValueForNative = roots_mod.pinValueForNative;
+pub const pinHeaderForNative = roots_mod.pinHeaderForNative;
 
 pub const NativeCleanupJob = struct {
     finalizer: host_function.ExternalFinalizer,
@@ -1200,44 +1030,53 @@ pub const DeferredClassPayloadFinalizer = struct {
     }
 };
 
-pub const CachedIteratorNextEntry = struct {
-    object: *Object,
-    value: ?JSValue = null,
-};
-
-const RecentTwoUnitString = struct {
-    first: u16,
-    second: u16,
-    string: *string.String,
-};
-
-const RecentAtomString = struct {
-    atom_id: atom.Atom,
-    string: *string.String,
-};
-
-const root_provider_inline_capacity = 1;
+pub const CachedIteratorNextEntry = property_state.CachedIteratorNextEntry;
 
 /// A Runtime and every Realm/heap structure owned by it are mutated only by
 /// the thread that initialized the Runtime. Process-global facilities with
 /// their own synchronization (notably ClassId allocation) are independent of
 /// this contract.
 pub const RuntimeMutationError = error{WrongRuntimeThread};
-pub const RuntimeCollectionError = gc.CollectionError || RuntimeMutationError;
 
-/// Cold runtime bookkeeping whose ranges fit in one byte. The atom-string
-/// cache is four-way, so its cursor needs only two bits; combining it with the
-/// runtime-allocation ownership bit preserves both semantics while freeing the
-/// former usize cursor word for hot VM stack policy state.
-const RuntimeCompactState = packed struct(u8) {
-    recent_atom_string_next: u2 = 0,
-    owns_self_allocation: bool = false,
-    _padding: u5 = 0,
+/// Test injection between construction stages. `none` is the production path.
+/// Each armed stage returns `error.OutOfMemory` after that stage's resources
+/// exist, so rollback has something real to release. The flag clears when it
+/// fires.
+pub const RuntimeConstructionFailpoint = enum(u8) {
+    none = 0,
+    after_object_cells = 1,
+    after_class_table = 2,
+    after_shapes = 3,
 };
+
+var runtime_construction_failpoint: RuntimeConstructionFailpoint = .none;
+
+pub const process_memory = platform_memory;
+
+pub fn setRuntimeConstructionFailpointForTest(point: RuntimeConstructionFailpoint) void {
+    if (comptime !builtin.is_test) return;
+    runtime_construction_failpoint = point;
+}
+
+fn takeRuntimeConstructionFailure(point: RuntimeConstructionFailpoint) !void {
+    if (comptime !builtin.is_test) return;
+    if (runtime_construction_failpoint != point) return;
+    runtime_construction_failpoint = .none;
+    return error.OutOfMemory;
+}
+pub const RuntimeCollectionError = gc.CollectionError || RuntimeMutationError;
 
 pub const NativeEntryFinalizer = struct {
     ptr: *anyopaque,
     finalize: *const fn (*anyopaque) void,
+};
+
+pub const Diagnostics = struct {
+    trace: alloc_trace.Sink = .{},
+    allocations: memory.AllocationDiagnostics = .{},
+    /// Last major's marked-set census. Written only while
+    /// `mark_footprint_census` is set.
+    mark_footprint: @import("gc_trace_stw.zig").MarkFootprint = .{},
 };
 
 pub const JSRuntime = struct {
@@ -1329,22 +1168,17 @@ pub const JSRuntime = struct {
         visit: *const fn (ctx: *anyopaque, id: atom.Atom) void,
     ) void = null,
     owner_thread_id: std.Thread.Id,
-    memory: memory.MemoryAccount,
-    compact_state: RuntimeCompactState = .{},
+    /// Allocator that owns this stable Runtime allocation.
+    allocator: std.mem.Allocator,
+    /// Four-way atom-string cache cursor. Same align-1 slot the old
+    /// `compact_state` packed byte occupied, so `vm_stack` stays put.
+    recent_atom_string_next: u8 = 0,
     gc: gc.Registry,
-    /// Marked-set census of the last major, for `--gc-mark-footprint`.
-    ///
-    /// Diagnostics only: nothing in a shipped run reads it, and only
-    /// `gc_trace_stw.censusMarkedSet` -- itself gated on
-    /// `mark_footprint_census` -- writes it.
-    ///
-    /// It stays a JSRuntime field rather than joining `gc.stats`: at 680
-    /// bytes it displaces `Registry.barrier_gate` off `phase`'s pinned front
-    /// cache line under Zig's auto layout (measured: offset 16 -> 2432),
-    /// which is exactly the K4 regression `phase align(64)` exists to
-    /// prevent. Same reasoning as `gc_conservative.RootsDiagCensus`: a
-    /// diagnostic must not move the hot layout it observes.
-    gc_mark_footprint: @import("gc_trace_stw.zig").MarkFootprint = .{},
+    /// Trace sink and mark census. Not part of `gc.Registry`: the footprint
+    /// is about 680 bytes and was measured to displace `Registry.barrier_gate`
+    /// off `phase`'s pinned front line (offset 16 -> 2432) under auto layout.
+    /// The trace sink and optional allocation observations have one owner.
+    diagnostics: Diagnostics = .{},
     /// Allocation-debt pacing for object-boundary incremental mark/destruction
     /// assists. Scheduler/callback/idle polls bypass this counter.
     /// Account immediately after the previous major slice. During destruction,
@@ -1359,13 +1193,8 @@ pub const JSRuntime = struct {
     auto_init_descriptors: std.ArrayListUnmanaged(*property.AutoInit) = .empty,
     materialize_builtin_namespace_cb: ?*const fn (rt: *JSRuntime, global: *Object, kind: property.AutoInitKind) anyerror!?JSValue = null,
     materialize_context_global_cb: ?*const fn (ctx: *context_mod.JSContext) anyerror!*Object = null,
-    /// Bootstrap install seam: builds the standard global object. Seeded from the
-    /// process-global default at `init`; `exec/standard_globals.zig` registers
-    /// that default. Core invokes it through this callback seam.
-    install_standard_globals_cb: ?StandardGlobalsInstaller = null,
-    /// Own-property count to reserve on a global object before running
-    /// `install_standard_globals_cb`. Seeded alongside the installer at `init`.
-    standard_global_own_property_capacity: usize = 0,
+    /// Immutable engine implementation installed at creation.
+    hooks: *const EngineHooks,
 
     /// QuickJS `context_list`: intrusive membership only.  Realm ownership is
     /// carried by `RealmRef` and the GC header, never by these links.
@@ -1379,14 +1208,12 @@ pub const JSRuntime = struct {
     borrowed_reference_holders: std.ArrayListUnmanaged(*Object) = .empty,
     weak_reference_holder_head: ?*Object = null,
     weak_reference_holder_tail: ?*Object = null,
-    root_providers: []RootProvider = &.{},
-    root_providers_capacity: usize = 0,
-    root_providers_inline: [root_provider_inline_capacity]RootProvider = undefined,
-    local_root_slots: std.ArrayListUnmanaged(*RootSlot) = .empty,
-    persistent_root_slots: std.ArrayListUnmanaged(*RootSlot) = .empty,
-    weak_root_slots: std.ArrayListUnmanaged(*WeakRootSlot) = .empty,
+    /// Host handles and root providers. Bound to this runtime's final address
+    /// by `roots.bindInline` in `initInPlace`.
+    roots: roots_mod.RootSet = .{},
     active_value_roots: ?*const ValueRootFrame = null,
     job_queue: job_mod.Queue = undefined,
+    microtasks: job_mod.Checkpoint = .{},
     /// WeakRef [[KeptAlive]]. Traced as a root
     /// and cleared at job end.
     weakref_kept_alive: std.ArrayListUnmanaged(JSValue) = .empty, // gc-slot: heap
@@ -1426,6 +1253,7 @@ pub const JSRuntime = struct {
     /// FinalizationRegistry/WeakRootSlot) store `weak_id << 1` instead of the
     /// header address, so a recycled allocation can never alias a stale weak
     /// identity and weak lookups are O(1) instead of a full heap scan.
+    /// Register, rollback, and unlink live in `gc_weak.zig`.
     weak_object_ids: std.AutoHashMapUnmanaged(usize, usize) = .empty,
     weak_id_objects: std.AutoHashMapUnmanaged(usize, *Object) = .empty,
     /// TGC S4-c retired the `slots2_payloads` side table: a slots2 object that
@@ -1433,10 +1261,9 @@ pub const JSRuntime = struct {
     /// a `.property_storage` cell, which frees the arm word at body+24 to be
     /// the payload slot every other layout already has. This counter stays as
     /// the observable for that (rare) spill.
-    slots2_payload_attach_count: usize = 0,
     next_weak_id: usize = 1,
     borrowed_weak_cleanup_active: bool = false,
-    malloc_gc_threshold: usize = default_gc_threshold,
+
     gc_running: bool = false,
     current_exception: JSValue = JSValue.uninitialized(),
     /// QuickJS `current_exception_is_uncatchable`. Interrupt termination owns
@@ -1465,6 +1292,7 @@ pub const JSRuntime = struct {
     /// restore) stays in the runtime's front cache lines instead of the
     /// auto-layout 24-26KB tail (M1 dossier K4).
     vm_stack: VmStackArena align(64) = .{},
+    termination_requested: std.atomic.Value(bool) = .init(false),
     interrupt_handler: ?InterruptHandler = null,
     interrupt_context: ?*anyopaque = null,
     can_block: bool = false,
@@ -1495,11 +1323,11 @@ pub const JSRuntime = struct {
     /// `String.fromCharCode(H, L)` for each non-BMP code point; keeping
     /// the most recent pair lets both calls share one immutable string
     /// without retaining the whole sweep.
-    recent_two_unit_string: ?RecentTwoUnitString = null,
+    recent_two_unit_string: ?string_cache.RecentTwoUnit = null,
     /// Tiny cache for atom-to-string materialization. This catches hot
     /// bytecode constants without retaining every atom string in the program;
     /// regexp literals in particular alternate between source and flags atoms.
-    recent_atom_strings: [4]?RecentAtomString = @splat(null),
+    recent_atom_strings: [4]?string_cache.RecentAtom = @splat(null),
     /// Lazy cache for uppercase percent-escaped byte strings (`%00`..`%FF`).
     /// This is a general URI hot-path cache, not a fixture shortcut:
     /// ECMAScript URI helpers and decimal-to-percent harnesses both
@@ -1520,9 +1348,6 @@ pub const JSRuntime = struct {
     /// Ownership registrations for entry `state` pointers (run on the
     /// runtime thread at teardown, like external record finalizers).
     native_entry_finalizers: std.ArrayListUnmanaged(NativeEntryFinalizer) = .empty,
-    /// Bumped whenever an entry is retired (§15 R6); JIT code and call-site
-    /// caches that embedded a target compare against it.
-    native_entry_epoch: u32 = 0,
     /// Shared dispatch record for external host functions (exec-owned
     /// trampoline, installed with the internal builtin tables). Null until
     /// exec registers it; a function published before that keeps the
@@ -1537,68 +1362,66 @@ pub const JSRuntime = struct {
     /// builtins. Empty until standard globals are installed, which is also
     /// the only path that creates native function objects carrying these ids.
     internal_builtins: []const native_entry.EntryTable = &.{},
-    pub fn init(self: *JSRuntime, allocator: std.mem.Allocator, options: RuntimeOptions) !void {
-        const account = if (options.trace_writer) |writer|
-            memory.MemoryAccount.initWithTrace(allocator, writer)
-        else
-            memory.MemoryAccount.init(allocator);
-        try self.initWithAccount(account, options, false);
-    }
-
     /// Returns an owned runtime. Caller must release it with `destroy`.
-    pub fn create(allocator: std.mem.Allocator, options: RuntimeOptions) !*JSRuntime {
-        var account = if (options.trace_writer) |writer|
-            memory.MemoryAccount.initWithTrace(allocator, writer)
-        else
-            memory.MemoryAccount.init(allocator);
-        const rt = try account.create(JSRuntime);
-        errdefer account.destroy(JSRuntime, rt);
-        try rt.initWithAccount(account, options, true);
+    pub fn create(options: RuntimeOptions) !*JSRuntime {
+        const allocator = options.allocator;
+        const rt = try allocator.create(JSRuntime);
+        rt.diagnostics = .{ .trace = .{ .writer = options.trace_writer } };
+        if (comptime alloc_trace.enabled) rt.diagnostics.trace.recordAlloc(@sizeOf(JSRuntime), @intFromPtr(rt));
+        errdefer {
+            if (comptime alloc_trace.enabled) rt.diagnostics.trace.writeFree(@intFromPtr(rt));
+            allocator.destroy(rt);
+        }
+        try rt.initInPlace(allocator, options);
         return rt;
     }
 
-    fn initWithAccount(rt: *JSRuntime, account: memory.MemoryAccount, options: RuntimeOptions, owns_self_allocation: bool) !void {
+    fn initInPlace(rt: *JSRuntime, allocator: std.mem.Allocator, options: RuntimeOptions) !void {
+        rt.allocator = allocator;
         rt.owner_thread_id = std.Thread.getCurrentId();
-        rt.memory = account;
-        rt.compact_state = .{ .owns_self_allocation = owns_self_allocation };
-        // MemoryAccount's std.mem.Allocator facade stores a pointer to the
-        // account, so bind it only after the account reaches this stable field
-        // address. All runtime `.allocator` / `.persistent_allocator` users now
-        // participate in the same limit and live-byte accounting.
-        rt.memory.activateRuntimeAccounting();
-        rt.memory.trigger_gc_fn = null;
-        rt.memory.trigger_gc_ctx = null;
-        rt.memory.limit_gc_fn = null;
-        rt.memory.limit_gc_ctx = null;
-        rt.memory.setLimit(options.memory_limit);
-        rt.gc = gc.Registry.init(&rt.memory, options.gc_policy);
+        // Imported here, not at file scope: this file is reached while the
+        // engine_hooks provider is still resolving the engine module.
+        rt.hooks = @import("engine_hooks").get();
+        // Undefined and recycled storage ignore struct defaults. Subsystem
+        // constructors below do not write the completion event or diagnostics.
+        rt.host_completion_event = .unset;
+        rt.recent_atom_string_next = 0;
+        rt.gc = gc.Registry.init(rt, options.gc_policy);
+        rt.gc.heap_budget.gc_threshold = options.gc_threshold;
+        rt.gc.heap_budget.limit = options.memory_limit;
         rt.gc.initLists();
         // Only now: the observer stores a pointer into `rt.gc`, so it has to be
-        // installed after the registry reaches its stable field address, for
-        // the same reason `activateRuntimeAccounting` waits above.
-        rt.gc.observeSlabArenas(&rt.memory.small_slab);
-        try rt.gc.serveObjectCells(&rt.memory);
-        rt.atoms = atom.AtomTable.init(&rt.memory);
+        // installed after the registry reaches its stable field address.
+        rt.gc.observeSlabArenas(&rt.gc.cell_storage.slab);
+        errdefer {
+            rt.gc.cell_storage.slab.arena_observer = null;
+            rt.gc.rollbackConstruction();
+        }
+        try rt.gc.serveObjectCells();
+        try takeRuntimeConstructionFailure(.after_object_cells);
+        rt.atoms = atom.AtomTable.init(rt);
         // TGC S3: the atom table needs the collector to answer "is a major
         // marking?" and "what epoch is it?". `rt` is already at its final
         // address here (the caller allocated it before calling in).
         rt.atoms.owner_runtime = rt;
         rt.atoms.runtime = rt;
-        try rt.classes.initInPlace(&rt.memory, &rt.atoms);
-        errdefer {
-            rt.classes.deinit();
-        }
-        rt.shapes = shape.Registry.init(rt, &rt.memory, &rt.atoms, &rt.gc);
+        errdefer rt.atoms.deinit();
+        // `class.Table.init` deinits its own records before returning the error.
+        // Register the class-table errdefer only after that success.
+        rt.classes.init(rt) catch |err| return err;
+        errdefer rt.classes.deinit();
+        try takeRuntimeConstructionFailure(.after_class_table);
+        rt.shapes = shape.Registry.init(rt, &rt.atoms, &rt.gc);
+        errdefer rt.shapes.deinit();
+        try takeRuntimeConstructionFailure(.after_shapes);
         rt.dynamic_import_loader = .{};
         rt.auto_init_descriptors = .empty;
-        rt.materialize_builtin_namespace_cb = null;
-        rt.materialize_context_global_cb = null;
+        rt.materialize_builtin_namespace_cb = rt.hooks.materialize_builtin_namespace;
+        rt.materialize_context_global_cb = rt.hooks.materialize_context_global;
         rt.small_inline_published_bytes = 0;
         rt.small_inline_specialized_bytes = 0;
         rt.small_inline_destroy = null;
         rt.small_inline_trace_atoms = null;
-        rt.install_standard_globals_cb = default_standard_globals_installer;
-        rt.standard_global_own_property_capacity = default_standard_global_own_property_capacity;
         rt.context_head = null;
         rt.context_tail = null;
         rt.constructing_context_head = null;
@@ -1606,14 +1429,10 @@ pub const JSRuntime = struct {
         rt.borrowed_reference_holders = .empty;
         rt.weak_reference_holder_head = null;
         rt.weak_reference_holder_tail = null;
-        rt.root_providers_inline = undefined;
-        rt.root_providers = rt.root_providers_inline[0..0];
-        rt.root_providers_capacity = rt.root_providers_inline.len;
-        rt.local_root_slots = .empty;
-        rt.persistent_root_slots = .empty;
-        rt.weak_root_slots = .empty;
+        rt.roots.bindInline();
         rt.active_value_roots = null;
-        rt.job_queue = job_mod.Queue.init(&rt.memory);
+        rt.job_queue = job_mod.Queue.init(rt);
+        rt.microtasks = .{ .policy = options.microtask_policy };
         rt.weakref_kept_alive = .empty;
         if (comptime builtin.is_test) rt.test_root_scan_override = null;
         rt.deferred_native_cleanups = .empty;
@@ -1629,14 +1448,10 @@ pub const JSRuntime = struct {
         rt.borrowed_weak_cleanup_identity_set = .empty;
         rt.weak_object_ids = .empty;
         rt.weak_id_objects = .empty;
-        rt.slots2_payload_attach_count = 0;
         rt.next_weak_id = 1;
         rt.borrowed_weak_cleanup_active = false;
-        rt.malloc_gc_threshold = options.gc_threshold;
         rt.gc_running = false;
-        rt.current_exception = JSValue.uninitialized();
-        rt.current_exception_uncatchable = false;
-        rt.current_exception_out_of_memory = false;
+        exception_state.clear(rt);
         rt.hot.call_depth = 0;
         rt.hot.native_call_depth = 0;
         rt.hot.active_bytecode_stack_bytes = 0;
@@ -1648,7 +1463,7 @@ pub const JSRuntime = struct {
         rt.active_invocation = null;
         rt.hot.stack_size = options.stack_size;
         rt.vm_stack_arena_policy = VmStackWindowPolicy.arenaForLimit(options.stack_size);
-        rt.hot.native_stack_size = initial_native_stack_size;
+        rt.hot.native_stack_size = options.native_stack_size;
         // Arm the native recursion guard at construction, mirroring QuickJS
         // JS_NewRuntime2 -> JS_UpdateStackTop. This covers every
         // entry path (eval / evalScript / ES module graph) even those that do not
@@ -1658,38 +1473,37 @@ pub const JSRuntime = struct {
         // per-thread base — required when execution runs on a different thread
         // than construction (conformance worker runtimes).
         rt.hot.native_stack_top = @frameAddress();
-        rt.hot.native_stack_limit = if (initial_native_stack_size == 0) 0 else rt.hot.native_stack_top -| initial_native_stack_size;
+        rt.hot.native_stack_limit = if (options.native_stack_size == 0) 0 else rt.hot.native_stack_top -| options.native_stack_size;
         rt.vm_stack.initDefault();
+        rt.termination_requested = .init(false);
         rt.interrupt_handler = options.interrupt_handler;
         rt.interrupt_context = options.interrupt_context;
         rt.can_block = options.can_block;
-        rt.single_byte_strings = @splat(null);
-        rt.empty_string = null;
-        rt.recent_two_unit_string = null;
-        rt.recent_atom_strings = @splat(null);
-        rt.percent_hex_strings = @splat(null);
-        rt.small_int_strings = @splat(null);
+        string_cache.bind(rt);
         rt.performance_time_origin_ms = 0;
         rt.opcode_profile = null;
         rt.native_entries = .empty;
         rt.native_entry_finalizers = .empty;
-        rt.native_entry_epoch = 0;
         rt.cached_iterator_next_entries = .empty;
-        rt.internal_builtins = &.{};
+        rt.internal_builtins = rt.hooks.internal_builtins;
         rt.host_invocation = null;
         rt.host_invocation_retire = null;
-        rt.memory.profile_alloc_count = null;
-        rt.memory.useIndependentSmallObjectSlabArenaBacking();
-        rt.memory.enableSmallObjectSlab();
-        rt.memory.trigger_gc_fn = JSRuntime.triggerGCOnAllocation;
-        rt.memory.trigger_gc_ctx = rt;
-        rt.memory.limit_gc_fn = JSRuntime.collectBeforeLimitRejection;
-        rt.memory.limit_gc_ctx = rt;
+        mem_ops.useIndependentSmallObjectSlabArenaBacking(rt);
+        mem_ops.enableSmallObjectSlab(rt);
+        // Heap-limit retry is one callee on the budget. It stays null until
+        // the registry, atoms, and shapes can survive a collection. Per-alloc
+        // notify is test/force only; production does not install it.
+        rt.gc.heap_budget.retry = JSRuntime.retryHeapLimitOnce;
+        rt.gc.heap_budget.retry_ctx = rt;
+        if (comptime memory.allocation_gc_trigger_enabled) {
+            rt.gc.heap_budget.owner_notify = JSRuntime.triggerGCOnAllocation;
+            rt.gc.heap_budget.owner_ctx = rt;
+        }
     }
 
     pub fn setOpcodeProfile(self: *JSRuntime, opcode_profile: ?*profile.OpcodeProfile) void {
         self.opcode_profile = opcode_profile;
-        self.memory.profile_alloc_count = if (opcode_profile) |prof| &prof.alloc_count else null;
+        self.diagnostics.trace.profile_alloc_count = if (opcode_profile) |prof| &prof.alloc_count else null;
     }
 
     pub fn isOwnerThread(self: *const JSRuntime) bool {
@@ -1704,58 +1518,31 @@ pub const JSRuntime = struct {
         if (!self.isOwnerThread()) @panic("JSRuntime mutation from non-owner thread");
     }
 
-    pub fn deinit(self: *JSRuntime) void {
+    fn deinit(self: *JSRuntime) void {
         self.assertOwnerThread();
         self.assertIdleForTeardown();
         // The resident host invocation (exec/call_site.zig) is only ever
         // published for the duration of a call, so an idle runtime retires it
         // here; a runtime destroyed mid-call fails the assertion above first.
-        if (self.host_invocation) |host_invocation| {
-            const retire = self.host_invocation_retire.?;
-            self.host_invocation = null;
-            self.host_invocation_retire = null;
-            retire(self, host_invocation);
-        }
-        self.vm_stack.deinit(&self.memory);
-        const backtrace_frames = self.backtrace_frames;
-        const backtrace_capacity = self.backtrace_capacity;
-        self.backtrace_frames = &.{};
-        self.backtrace_capacity = 0;
-        if (backtrace_capacity != 0) {
-            self.memory.free(context_mod.BacktraceFrame, backtrace_frames.ptr[0..backtrace_capacity]);
-        }
-        self.current_exception = JSValue.uninitialized();
-        self.current_exception_uncatchable = false;
-        self.current_exception_out_of_memory = false;
+        execution.retireHostInvocation(self);
+        self.vm_stack.deinit(self.nativeAllocator());
+        execution.releaseStoredBacktrace(self);
+        exception_state.clear(self);
         self.clearWeakRefKeptAlive();
         self.job_queue.deinit();
         self.clearPendingFinalizationJobs();
-        self.recent_two_unit_string = null;
-        for (&self.recent_atom_strings) |*slot| {
-            slot.* = null;
-        }
-        self.compact_state.recent_atom_string_next = 0;
-        self.empty_string = null;
-        for (&self.single_byte_strings) |*slot| {
-            slot.* = null;
-        }
-        for (&self.percent_hex_strings) |*slot| {
-            slot.* = null;
-        }
-        for (&self.small_int_strings) |*slot| {
-            slot.* = null;
-        }
+        string_cache.clear(self);
         self.clearExternalHostFunctions();
         self.drainDeferredNativeCleanups();
         self.assertNoOutstandingValueHandles();
         self.drainDeferredNativeCleanups();
         self.drainDeferredClassPayloadFinalizers();
         self.gc.scheduler.host_quiescent = true;
-        _ = self.runObjectCycleRemoval();
+        _ = self.collectForTeardown();
         self.drainDeferredNativeCleanups();
         self.drainDeferredClassPayloadFinalizers();
         self.clearPendingFinalizationJobs();
-        _ = self.runObjectCycleRemoval();
+        _ = self.collectForTeardown();
         self.gc.scheduler.host_quiescent = false;
         self.drainDeferredNativeCleanups();
         self.drainDeferredClassPayloadFinalizers();
@@ -1789,46 +1576,35 @@ pub const JSRuntime = struct {
         // residual dynamic symbol bodies (notably Symbol.for's registry ref)
         // before AtomTable.deinit asserts that no materialized bodies remain.
         self.atoms.releaseValueSymbolBodiesAfterGc();
-        // These containers live for the whole runtime. `memory.allocator` may
-        // temporarily point at a parser arena, so both allocation and teardown
-        // must use the stable backing allocator that owns runtime state.
-        self.borrowed_weak_cleanup_identity_set.deinit(self.memory.persistent_allocator);
-        self.weak_object_ids.deinit(self.memory.persistent_allocator);
-        self.weak_id_objects.deinit(self.memory.persistent_allocator);
-        for (self.auto_init_descriptors.items) |stored| self.destroyRuntime(property.AutoInit, stored);
-        self.auto_init_descriptors.deinit(self.memory.persistent_allocator);
+        // These native containers share the Runtime allocator for their entire
+        // lifetime; parser scratch is owned separately by each compilation.
+        property_state.deinitBorrowedCleanup(self);
+        gc_weak.deinitIds(self, self.nativeAllocator());
+        property_state.deinitAutoInit(self);
         self.shapes.deinit();
         self.classes.deinit();
         self.atoms.deinit();
-        const root_providers: []RootProvider = if (self.root_providers_capacity != 0 and !self.rootProvidersUsingInline()) self.root_providers.ptr[0..self.root_providers_capacity] else self.root_providers[0..0];
-        self.borrowed_reference_holders.deinit(self.memory.persistent_allocator);
-        self.root_providers = &.{};
-        self.root_providers_capacity = 0;
-        self.local_root_slots.deinit(self.memory.persistent_allocator);
-        self.persistent_root_slots.deinit(self.memory.persistent_allocator);
-        self.weak_root_slots.deinit(self.memory.persistent_allocator);
-        self.cached_iterator_next_entries.deinit(self.memory.persistent_allocator);
-        self.deferred_native_cleanups.deinit(self.memory.persistent_allocator);
-        self.deferred_class_payload_finalizers.deinit(self.memory.persistent_allocator);
-        self.deferred_class_payload_roots.deinit(self.memory.persistent_allocator);
+        const root_providers = self.roots.takeHeapProviderStorage();
+        property_state.deinitBorrowedHolders(self);
+        self.roots.deinitSlotLists(self.nativeAllocator());
+        property_state.deinitIteratorNext(self);
+        self.deferred_native_cleanups.deinit(self.nativeAllocator());
+        self.deferred_class_payload_finalizers.deinit(self.nativeAllocator());
+        self.deferred_class_payload_roots.deinit(self.nativeAllocator());
         self.reserved_deferred_class_payload_finalizer_slots = 0;
         self.active_deferred_class_payload_finalizer = null;
-        if (root_providers.len != 0) self.memory.free(RootProvider, root_providers);
-        self.memory.deinitSmallObjectSlab();
-        if (self.compact_state.owns_self_allocation) {
-            std.debug.assert(self.memory.allocation_count == 1);
-            std.debug.assert(self.memory.allocated_bytes == memory.MemoryAccount.accountedMallocSize(@sizeOf(JSRuntime), null));
-        } else {
-            std.debug.assert(!self.memory.hasOutstandingAllocations());
-        }
+        if (root_providers.len != 0) mem_ops.free(self, RootProvider, root_providers);
+        mem_ops.deinitSmallObjectSlab(self);
+        // The Runtime body is owned by `allocator`, outside native allocation instrumentation.
+        std.debug.assert(!mem_ops.hasOutstandingAllocations(self));
     }
 
     pub fn destroy(self: *JSRuntime) void {
         self.assertOwnerThread();
+        const allocator = self.allocator;
         self.deinit();
-        var account = self.memory;
-        account.destroy(JSRuntime, self);
-        std.debug.assert(!account.hasOutstandingAllocations());
+        if (comptime alloc_trace.enabled) self.diagnostics.trace.writeFree(@intFromPtr(self));
+        allocator.destroy(self);
     }
 
     /// Checked teardown entry for hosts that cannot prove their call thread.
@@ -1838,13 +1614,18 @@ pub const JSRuntime = struct {
         self.destroy();
     }
 
-    /// These runtime allocators reach `MemoryAccount.*NoTrigger` and therefore
+    /// Ordinary native allocator. Request bytes, one trace line, and the
+    /// optional diagnostic instrumentation. GC cells use explicit typed helpers.
+    pub inline fn nativeAllocator(self: *JSRuntime) std.mem.Allocator {
+        return memory.nativeAllocator(self);
+    }
+
+    /// These runtime allocators reach `mem_ops.*NoTrigger` and therefore
     /// carry the threshold check themselves. QuickJS puts no such check in
     /// `js_malloc_rt` / `js_realloc_rt`: its single
-    /// allocation-threshold site is `js_trigger_gc` from `JS_NewObjectFromShape`
-    ///. Gate them on the same comptime rule as the trigger
-    /// callback so both halves of the mechanism stay in one place — see
-    /// `memory.allocation_gc_trigger_enabled` for the full argument.
+    /// allocation-threshold site is `js_trigger_gc` from `JS_NewObjectFromShape`.
+    /// Gate them on the same comptime rule as the test/force notify so both
+    /// halves stay in one place — see `memory.allocation_gc_trigger_enabled`.
     const runtime_allocation_requests_gc = memory.allocation_gc_trigger_enabled;
 
     pub inline fn allocRuntime(self: *JSRuntime, comptime T: type, count: usize) ![]T {
@@ -1854,11 +1635,11 @@ pub const JSRuntime = struct {
                 self.requestGCForAllocation(bytes);
             }
         }
-        return self.memory.allocNoTrigger(T, count);
+        return mem_ops.allocNoTrigger(self, T, count);
     }
 
     pub inline fn freeRuntime(self: *JSRuntime, comptime T: type, slice: []T) void {
-        self.memory.free(T, slice);
+        mem_ops.free(self, T, slice);
     }
 
     pub inline fn remapRuntime(self: *JSRuntime, comptime T: type, slice: []T, new_count: usize) !?[]T {
@@ -1869,27 +1650,27 @@ pub const JSRuntime = struct {
                 self.requestGCForAllocation(new_bytes -| old_bytes);
             }
         }
-        return self.memory.remap(T, slice, new_count);
+        return mem_ops.remap(self, T, slice, new_count);
     }
 
     pub inline fn createRuntime(self: *JSRuntime, comptime T: type) !*T {
         if (comptime runtime_allocation_requests_gc) self.requestGCForAllocation(@sizeOf(T));
-        return self.memory.createNoTrigger(T);
+        return mem_ops.createNoTrigger(self, T);
     }
 
     pub inline fn destroyRuntime(self: *JSRuntime, comptime T: type, ptr: *T) void {
-        self.memory.destroy(T, ptr);
+        mem_ops.destroy(self, T, ptr);
     }
 
     pub inline fn allocRuntimeAlignedBytes(self: *JSRuntime, byte_count: usize, alignment: std.mem.Alignment) ![]u8 {
         if (comptime runtime_allocation_requests_gc) {
             if (byte_count != 0) self.requestGCForAllocation(byte_count);
         }
-        return self.memory.allocAlignedBytesNoTrigger(byte_count, alignment);
+        return mem_ops.allocAlignedBytesNoTrigger(self, byte_count, alignment);
     }
 
     pub inline fn freeRuntimeAlignedBytes(self: *JSRuntime, bytes: []u8, alignment: std.mem.Alignment) void {
-        self.memory.freeAlignedBytes(bytes, alignment);
+        mem_ops.freeAlignedBytes(self, bytes, alignment);
     }
 
     pub fn registerObject(self: *JSRuntime, object: *Object) !void {
@@ -1974,333 +1755,84 @@ pub const JSRuntime = struct {
     /// emptiness changes do not mutate the list while a GC weak pass traverses
     /// it.
     pub fn registerWeakReferenceHolder(self: *JSRuntime, object: *Object) void {
-        std.debug.assert(object.isWeakReferenceHolderClass());
-        const link = object.weakReferenceHolderLink().?;
-        std.debug.assert(!link.registered);
-        std.debug.assert(link.previous == null);
-        std.debug.assert(link.next == null);
-
-        link.previous = self.weak_reference_holder_tail;
-        if (self.weak_reference_holder_tail) |tail| {
-            const tail_link = tail.weakReferenceHolderLink().?;
-            std.debug.assert(tail_link.registered);
-            tail_link.next = object;
-        } else {
-            self.weak_reference_holder_head = object;
-        }
-        self.weak_reference_holder_tail = object;
-        link.registered = true;
-        // TGC S4-d spec 2.4: an intrusive list the object must unlink itself
-        // from at death (`unregisterWeakReferenceHolder`) -- c class.
-        object.markNeedsFinalizer(self);
+        gc_weak.registerHolder(self, object);
     }
 
     pub fn unregisterWeakReferenceHolder(self: *JSRuntime, object: *Object) void {
-        if (!object.isWeakReferenceHolderClass()) return;
-        const link = object.weakReferenceHolderLink() orelse return;
-        if (!link.registered) return;
-
-        if (link.previous) |previous| {
-            const previous_link = previous.weakReferenceHolderLink().?;
-            std.debug.assert(previous_link.registered);
-            previous_link.next = link.next;
-        } else {
-            std.debug.assert(self.weak_reference_holder_head == object);
-            self.weak_reference_holder_head = link.next;
-        }
-        if (link.next) |next| {
-            const next_link = next.weakReferenceHolderLink().?;
-            std.debug.assert(next_link.registered);
-            next_link.previous = link.previous;
-        } else {
-            std.debug.assert(self.weak_reference_holder_tail == object);
-            self.weak_reference_holder_tail = link.previous;
-        }
-        link.previous = null;
-        link.next = null;
-        link.registered = false;
+        gc_weak.unregisterHolder(self, object);
     }
 
     pub fn registerBorrowedReferenceHolder(self: *JSRuntime, object: *Object) !void {
-        if (object.flags.is_borrowed_reference_holder) return;
-        const index = self.borrowed_reference_holders.items.len;
-        try self.borrowed_reference_holders.append(self.memory.persistent_allocator, object);
-        object.setBorrowedReferenceHolderIndex(index);
-        object.flags.is_borrowed_reference_holder = true;
-        // TGC S4-d spec 2.4: this side table names the object by pointer and
-        // `unregisterBorrowedReferenceHolder` is what removes the entry.
-        object.markNeedsFinalizer(self);
-        // This table is lifetime bookkeeping only. A borrowed realm/weak
-        // pointer does not add exotic [[Get]]/[[Set]] semantics, so it must not
-        // poison the object's ordinary shape fast paths. Semantic slow-path
-        // eligibility is established by the class/exotic flags at creation.
+        return property_state.registerBorrowedHolder(self, object);
     }
 
     pub fn borrowedReferenceHolderRegistered(self: *const JSRuntime, object: *Object) bool {
         _ = self;
-        return object.flags.is_borrowed_reference_holder;
+        return object.isBorrowedReferenceHolder();
     }
 
     pub fn unregisterBorrowedReferenceHolder(self: *JSRuntime, object: *Object) void {
-        if (!object.flags.is_borrowed_reference_holder) return;
-        if (object.borrowedReferenceHolderIndex()) |cached_index| {
-            if (cached_index < self.borrowed_reference_holders.items.len and self.borrowed_reference_holders.items[cached_index] == object) {
-                self.removeBorrowedReferenceHolderAt(cached_index);
-                return;
-            }
-        }
-        var found: ?usize = null;
-        for (self.borrowed_reference_holders.items, 0..) |candidate, index| {
-            if (candidate == object) {
-                found = index;
-                break;
-            }
-        }
-        const index = found orelse return;
-        self.removeBorrowedReferenceHolderAt(index);
-    }
-
-    fn removeBorrowedReferenceHolderAt(self: *JSRuntime, index: usize) void {
-        const removed = self.borrowed_reference_holders.swapRemove(index);
-        if (index < self.borrowed_reference_holders.items.len) {
-            self.borrowed_reference_holders.items[index].setBorrowedReferenceHolderIndex(index);
-        }
-        removed.setBorrowedReferenceHolderIndex(null);
-        removed.flags.is_borrowed_reference_holder = false;
+        property_state.unregisterBorrowedHolder(self, object);
     }
 
     pub fn linkContext(self: *JSRuntime, ctx: *context_mod.JSContext) void {
-        self.assertOwnerThread();
-        std.debug.assert(ctx.runtime == self);
-        std.debug.assert(ctx.runtime_prev == null and ctx.runtime_next == null);
-        ctx.runtime_prev = self.context_tail;
-        if (self.context_tail) |tail| {
-            tail.runtime_next = ctx;
-        } else {
-            self.context_head = ctx;
-        }
-        self.context_tail = ctx;
+        context_registry.linkLive(self, ctx);
     }
 
     pub fn linkConstructingContext(self: *JSRuntime, ctx: *context_mod.JSContext) void {
-        self.assertOwnerThread();
-        std.debug.assert(ctx.runtime == self);
-        std.debug.assert(ctx.construction_prev == null and ctx.construction_next == null);
-        ctx.construction_prev = self.constructing_context_tail;
-        if (self.constructing_context_tail) |tail| {
-            tail.construction_next = ctx;
-        } else {
-            self.constructing_context_head = ctx;
-        }
-        self.constructing_context_tail = ctx;
+        context_registry.linkConstructing(self, ctx);
     }
 
     pub fn unlinkConstructingContext(self: *JSRuntime, ctx: *context_mod.JSContext) void {
-        self.assertOwnerThread();
-        if (ctx.construction_prev == null and ctx.construction_next == null and self.constructing_context_head != ctx) return;
-        if (ctx.construction_prev) |prev| {
-            prev.construction_next = ctx.construction_next;
-        } else {
-            std.debug.assert(self.constructing_context_head == ctx);
-            self.constructing_context_head = ctx.construction_next;
-        }
-        if (ctx.construction_next) |next| {
-            next.construction_prev = ctx.construction_prev;
-        } else {
-            std.debug.assert(self.constructing_context_tail == ctx);
-            self.constructing_context_tail = ctx.construction_prev;
-        }
-        ctx.construction_prev = null;
-        ctx.construction_next = null;
+        context_registry.unlinkConstructing(self, ctx);
     }
 
     pub fn unlinkContext(self: *JSRuntime, ctx: *context_mod.JSContext) void {
-        self.assertOwnerThread();
-        if (ctx.runtime_prev == null and ctx.runtime_next == null and self.context_head != ctx) return;
-        if (ctx.runtime_prev) |prev| {
-            prev.runtime_next = ctx.runtime_next;
-        } else {
-            std.debug.assert(self.context_head == ctx);
-            self.context_head = ctx.runtime_next;
-        }
-        if (ctx.runtime_next) |next| {
-            next.runtime_prev = ctx.runtime_prev;
-        } else {
-            std.debug.assert(self.context_tail == ctx);
-            self.context_tail = ctx.runtime_prev;
-        }
-        ctx.runtime_prev = null;
-        ctx.runtime_next = null;
+        context_registry.unlinkLive(self, ctx);
     }
 
     pub fn firstContext(self: *const JSRuntime) ?*context_mod.JSContext {
-        return self.context_head;
+        return context_registry.firstLive(self);
     }
 
     fn assertNoHostRealmRefsForTeardown(self: *JSRuntime) void {
-        if (comptime !std.debug.runtime_safety) return;
-        var current = self.context_head;
-        while (current) |ctx| : (current = ctx.runtime_next) {
-            std.debug.assert(ctx.host_api_release_consumed);
-        }
-        var constructing = self.constructing_context_head;
-        while (constructing) |ctx| : (constructing = ctx.construction_next) {
-            std.debug.assert(ctx.host_api_release_consumed);
-        }
+        context_registry.assertNoHostRealmRefs(self);
     }
 
     pub fn contextForGlobal(self: *const JSRuntime, global: *const Object) ?*context_mod.JSContext {
-        var current = self.context_head;
-        while (current) |ctx| : (current = ctx.runtime_next) {
-            if (ctx.global == global) return ctx;
-        }
-        return null;
+        return context_registry.liveForGlobal(self, global);
     }
 
-    /// Bootstrap-only resolver. Public/runtime enumeration intentionally uses
-    /// `contextForGlobal`, whose list contains published realms exclusively.
+    /// Bootstrap-only resolver. Public enumeration uses `contextForGlobal`,
+    /// whose list contains published realms exclusively.
     pub fn contextForGlobalIncludingConstructing(self: *const JSRuntime, global: *const Object) ?*context_mod.JSContext {
-        if (self.contextForGlobal(global)) |ctx| return ctx;
-        var current = self.constructing_context_head;
-        while (current) |ctx| : (current = ctx.construction_next) {
-            if (ctx.global == global) return ctx;
-        }
-        return null;
+        return context_registry.anyForGlobal(self, global);
     }
 
-    /// QuickJS `add_property` invalidation for a tagged-integer mutation of
-    /// the immutable intrinsic %Object.prototype%. Find only the owning
-    /// realm(s) and clear their exact %Array.prototype% marker; unrelated
-    /// realms in the same Runtime remain eligible for dense extension.
+    /// Clear the owning realm's %Array.prototype% marker after a mutation of
+    /// %Object.prototype%. Other realms in this runtime stay eligible.
     pub fn invalidateStandardArrayPrototypeForObjectPrototype(self: *JSRuntime, object_prototype: *Object) void {
-        self.assertOwnerThread();
-        var live = self.context_head;
-        while (live) |ctx| : (live = ctx.runtime_next) {
-            invalidateContextStandardArrayPrototype(ctx, object_prototype);
-        }
-        var constructing = self.constructing_context_head;
-        while (constructing) |ctx| : (constructing = ctx.construction_next) {
-            invalidateContextStandardArrayPrototype(ctx, object_prototype);
-        }
-    }
-
-    fn invalidateContextStandardArrayPrototype(ctx: *context_mod.JSContext, object_prototype: *Object) void {
-        const object_value = ctx.cached_values[@intFromEnum(object_mod.RealmValueSlot.object_prototype)] orelse return;
-        // Standard-realm bootstrap fills these two cache slots only from the
-        // corresponding constructor prototype objects, so a present value has
-        // already discharged Object.expect's type check.
-        const realm_object_prototype = Object.expect(object_value) catch unreachable;
-        if (realm_object_prototype != object_prototype) return;
-        const array_value = ctx.cached_values[@intFromEnum(object_mod.RealmValueSlot.array_prototype)] orelse return;
-        const array_prototype = Object.expect(array_value) catch unreachable;
-        array_prototype.flags.is_std_array_prototype = false;
+        context_registry.invalidateStandardArrayPrototype(self, object_prototype);
     }
 
     pub fn initialArrayShapeForPrototype(self: *const JSRuntime, prototype: ?*const Object) ?*shape.Shape {
-        var current = self.context_head;
-        while (current) |ctx| : (current = ctx.runtime_next) {
-            const initial = ctx.array_shape orelse continue;
-            if (initial.proto == prototype) return initial;
-        }
-        var constructing = self.constructing_context_head;
-        while (constructing) |ctx| : (constructing = ctx.construction_next) {
-            const initial = ctx.array_shape orelse continue;
-            if (initial.proto == prototype) return initial;
-        }
-        return null;
+        return context_registry.initialArrayShape(self, prototype);
     }
 
-    /// Reserve a prototype slot in every live realm before a class id is
-    /// published to callers.  This closes the old "registered after context
-    /// creation" hole without making the runtime list an ownership edge.
+    /// Reserve a prototype slot in every realm before a class id is published.
+    /// The lists are indexes; `RealmRef` keeps each realm alive across growth.
     pub fn ensureContextClassPrototypeCapacity(self: *JSRuntime, class_id: class.ClassId) !void {
-        try self.requireOwnerThread();
-        var current_owner = if (self.context_head) |head| context_mod.RealmRef.retain(head) else context_mod.RealmRef{};
-        defer current_owner.deinit();
-        while (current_owner.borrow()) |ctx| {
-            var next_owner = if (ctx.runtime_next) |next| context_mod.RealmRef.retain(next) else context_mod.RealmRef{};
-            errdefer next_owner.deinit();
-            _ = try ctx.ensureClassPrototypeSlot(class_id);
-            current_owner.deinit();
-            current_owner = next_owner;
-            next_owner = .{};
-        }
-
-        var constructing_owner = if (self.constructing_context_head) |head| context_mod.RealmRef.retain(head) else context_mod.RealmRef{};
-        defer constructing_owner.deinit();
-        while (constructing_owner.borrow()) |ctx| {
-            var next_owner = if (ctx.construction_next) |next| context_mod.RealmRef.retain(next) else context_mod.RealmRef{};
-            errdefer next_owner.deinit();
-            _ = try ctx.ensureClassPrototypeSlot(class_id);
-            constructing_owner.deinit();
-            constructing_owner = next_owner;
-            next_owner = .{};
-        }
+        return context_registry.ensureClassPrototypeCapacity(self, class_id);
     }
 
-    const ClassPrototypeContextList = enum {
-        live,
-        constructing,
-    };
-
-    fn nextRetainableClassPrototypeContext(
-        self: *JSRuntime,
-        start: ?*context_mod.JSContext,
-        comptime list: ClassPrototypeContextList,
-    ) context_mod.RealmRef {
-        var cursor = start;
-        while (cursor) |ctx| {
-            // Condemned Realm structs and their links stay allocated until the
-            // cycle collector's resource pass. Snapshot the borrowed link
-            // before deciding whether this node can still be retained. A
-            // condemned Realm already has trial rc zero; its own resource pass
-            // clears its class slots, so traversal must neither retain nor
-            // recursively clear it here.
-            const next = switch (list) {
-                .live => ctx.runtime_next,
-                .constructing => ctx.construction_next,
-            };
-            if (self.gc.hot.phase != .tracer_destroy or
-                !gc.headerCondemned(&ctx.header))
-            {
-                return context_mod.RealmRef.retain(ctx);
-            }
-            cursor = next;
-        }
-        return .{};
-    }
-
-    /// Drop a dynamically unregistered class prototype from every live realm
-    /// before its runtime definition (and possibly its plugin DSO) disappears.
+    /// Drop a dynamically unregistered class prototype from every realm.
     pub fn clearContextClassPrototype(self: *JSRuntime, class_id: class.ClassId) void {
-        self.assertOwnerThread();
-        var current_owner = self.nextRetainableClassPrototypeContext(self.context_head, .live);
-        defer current_owner.deinit();
-        while (current_owner.borrow()) |ctx| {
-            var next_owner = self.nextRetainableClassPrototypeContext(ctx.runtime_next, .live);
-            ctx.clearClassPrototype(class_id);
-            current_owner.deinit();
-            current_owner = next_owner;
-            next_owner = .{};
-        }
-
-        var constructing_owner = self.nextRetainableClassPrototypeContext(self.constructing_context_head, .constructing);
-        defer constructing_owner.deinit();
-        while (constructing_owner.borrow()) |ctx| {
-            var next_owner = self.nextRetainableClassPrototypeContext(ctx.construction_next, .constructing);
-            ctx.clearClassPrototype(class_id);
-            constructing_owner.deinit();
-            constructing_owner = next_owner;
-            next_owner = .{};
-        }
+        context_registry.clearClassPrototype(self, class_id);
     }
 
     pub fn registerRootProvider(self: *JSRuntime, provider: RootProvider) !void {
         self.assertOwnerThread();
-        for (self.root_providers) |registered| {
-            if (registered.context == provider.context and registered.trace == provider.trace) return;
-        }
-        try self.appendRootProvider(provider);
+        try self.roots.register(self, provider);
     }
 
     pub fn registerRootProviderChecked(self: *JSRuntime, provider: RootProvider) !void {
@@ -2308,53 +1840,9 @@ pub const JSRuntime = struct {
         return self.registerRootProvider(provider);
     }
 
-    fn rootProvidersUsingInline(self: *const JSRuntime) bool {
-        return self.root_providers.ptr == self.root_providers_inline[0..].ptr;
-    }
-
-    fn appendRootProvider(self: *JSRuntime, provider: RootProvider) !void {
-        if (self.root_providers.len == self.root_providers_capacity) {
-            const next_capacity = if (self.root_providers_capacity == 0) root_provider_inline_capacity else self.root_providers_capacity * 2;
-            const next = try self.memory.alloc(RootProvider, next_capacity);
-            errdefer self.memory.free(RootProvider, next);
-            @memcpy(next[0..self.root_providers.len], self.root_providers);
-            const old_capacity = self.root_providers_capacity;
-            const old_using_inline = self.rootProvidersUsingInline();
-            const old = if (!old_using_inline and old_capacity != 0) self.root_providers.ptr[0..old_capacity] else self.root_providers[0..0];
-            self.root_providers = next[0..self.root_providers.len];
-            self.root_providers_capacity = next_capacity;
-            if (old.len != 0) self.memory.free(RootProvider, old);
-        }
-        const len = self.root_providers.len;
-        self.root_providers = self.root_providers.ptr[0 .. len + 1];
-        self.root_providers[len] = provider;
-    }
-
     pub fn unregisterRootProvider(self: *JSRuntime, provider: RootProvider) void {
         self.assertOwnerThread();
-        var found: ?usize = null;
-        for (self.root_providers, 0..) |registered, index| {
-            if (registered.context == provider.context and registered.trace == provider.trace) {
-                found = index;
-                break;
-            }
-        }
-        const index = found orelse return;
-        if (index + 1 < self.root_providers.len) {
-            std.mem.copyForwards(RootProvider, self.root_providers[index .. self.root_providers.len - 1], self.root_providers[index + 1 ..]);
-        }
-        self.root_providers = self.root_providers[0 .. self.root_providers.len - 1];
-        if (self.root_providers.len == 0 and self.root_providers_capacity != 0) {
-            if (self.rootProvidersUsingInline()) {
-                self.root_providers = self.root_providers_inline[0..0];
-                self.root_providers_capacity = self.root_providers_inline.len;
-                return;
-            }
-            const old_providers = self.root_providers.ptr[0..self.root_providers_capacity];
-            self.root_providers = self.root_providers_inline[0..0];
-            self.root_providers_capacity = self.root_providers_inline.len;
-            self.memory.free(RootProvider, old_providers);
-        }
+        self.roots.unregister(self, provider);
     }
 
     /// Collections since this runtime started. `core.Local` compares against
@@ -2366,12 +1854,7 @@ pub const JSRuntime = struct {
     pub fn traceRoots(self: *JSRuntime, roots: ?*const ValueRootFrame, visitor: *RootVisitor) RootTraceError!void {
         try self.traceValueRootFrames(roots, visitor);
         try visitor.value(&self.current_exception);
-        for (self.local_root_slots.items) |slot| {
-            try visitor.value(&slot.value);
-        }
-        for (self.persistent_root_slots.items) |slot| {
-            try visitor.value(&slot.value);
-        }
+        try self.roots.traceHandleSlots(visitor);
         for (self.deferred_class_payload_roots.items) |object| {
             try object.traceClassPayloadRootEdges(self, visitor);
         }
@@ -2383,9 +1866,7 @@ pub const JSRuntime = struct {
         }
         try self.job_queue.traceRoots(visitor);
         for (self.weakref_kept_alive.items) |*kept| try visitor.value(kept);
-        for (self.root_providers) |provider| {
-            try provider.trace(provider.context, visitor);
-        }
+        try self.roots.traceProviders(visitor);
         try self.traceStringCacheRoots(visitor);
         try self.traceAtomRoots(visitor);
     }
@@ -2408,14 +1889,7 @@ pub const JSRuntime = struct {
     /// TGC S2: the runtime's interned/cached flat strings are roots while the
     /// string family is tracer-owned (they used to hold a +1 count each).
     fn traceStringCacheRoots(self: *JSRuntime, visitor: *RootVisitor) RootTraceError!void {
-        for (&self.single_byte_strings) |*slot| try visitor.stringSlot(slot);
-        for (&self.percent_hex_strings) |*slot| try visitor.stringSlot(slot);
-        for (&self.small_int_strings) |*slot| try visitor.stringSlot(slot);
-        try visitor.stringSlot(&self.empty_string);
-        if (self.recent_two_unit_string) |*cached| try visitor.stringField(&cached.string);
-        for (&self.recent_atom_strings) |*cached| {
-            if (cached.*) |*stored| try visitor.stringField(&stored.string);
-        }
+        try string_cache.trace(self, visitor);
         try self.atoms.traceRoots(visitor);
     }
 
@@ -2565,109 +2039,11 @@ pub const JSRuntime = struct {
         }
     }
 
-    fn createPersistentRootSlot(self: *JSRuntime, value: JSValue) !*RootSlot {
-        return self.createRootSlot(value, &self.persistent_root_slots);
-    }
-
-    fn createLocalRootSlot(self: *JSRuntime, value: JSValue) !*RootSlot {
-        return self.createRootSlot(value, &self.local_root_slots);
-    }
-
-    fn createWeakRootSlot(
-        self: *JSRuntime,
-        identity: usize,
-        callback: ?WeakPersistentCallback,
-        callback_context: ?*anyopaque,
-    ) !*WeakRootSlot {
-        const saved_trigger_fn = self.memory.trigger_gc_fn;
-        const saved_trigger_ctx = self.memory.trigger_gc_ctx;
-        self.memory.trigger_gc_fn = null;
-        self.memory.trigger_gc_ctx = null;
-        defer {
-            self.memory.trigger_gc_fn = saved_trigger_fn;
-            self.memory.trigger_gc_ctx = saved_trigger_ctx;
-        }
-
-        const slot = try self.memory.create(WeakRootSlot);
-        errdefer self.memory.destroy(WeakRootSlot, slot);
-        slot.* = .{
-            .identity = identity,
-            .callback = callback,
-            .callback_context = callback_context,
-        };
-        try self.weak_root_slots.append(self.memory.persistent_allocator, slot);
-        return slot;
-    }
-
-    fn createRootSlot(self: *JSRuntime, value: JSValue, slots: *std.ArrayListUnmanaged(*RootSlot)) !*RootSlot {
-        const saved_trigger_fn = self.memory.trigger_gc_fn;
-        const saved_trigger_ctx = self.memory.trigger_gc_ctx;
-        self.memory.trigger_gc_fn = null;
-        self.memory.trigger_gc_ctx = null;
-        defer {
-            self.memory.trigger_gc_fn = saved_trigger_fn;
-            self.memory.trigger_gc_ctx = saved_trigger_ctx;
-        }
-
-        const slot = try self.memory.create(RootSlot);
-        errdefer self.memory.destroy(RootSlot, slot);
-        slot.* = .{ .value = JSValue.undefinedValue() };
-        try slots.append(self.memory.persistent_allocator, slot);
-        slot.value = value;
-        return slot;
-    }
-
-    fn destroyWeakRootSlot(self: *JSRuntime, slot: *WeakRootSlot) void {
-        self.removeWeakRootSlot(slot);
-        self.clearWeakRootSlot(slot, false);
-        slot.* = .{};
-        self.memory.destroy(WeakRootSlot, slot);
-    }
-
-    fn removeWeakRootSlot(self: *JSRuntime, slot: *WeakRootSlot) void {
-        var found: ?usize = null;
-        for (self.weak_root_slots.items, 0..) |registered, index| {
-            if (registered == slot) {
-                found = index;
-                break;
-            }
-        }
-        const index = found.?;
-        _ = self.weak_root_slots.orderedRemove(index);
-        if (self.weak_root_slots.items.len == 0) self.weak_root_slots.clearAndFree(self.memory.persistent_allocator);
-    }
-
-    fn takePersistentRootSlot(self: *JSRuntime, slot: *RootSlot) JSValue {
-        self.removePersistentRootSlot(slot);
-        const value = slot.value;
-        slot.value = JSValue.undefinedValue();
-        self.memory.destroy(RootSlot, slot);
-        return value;
-    }
-
-    fn removePersistentRootSlot(self: *JSRuntime, slot: *RootSlot) void {
-        var found: ?usize = null;
-        for (self.persistent_root_slots.items, 0..) |registered, index| {
-            if (registered == slot) {
-                found = index;
-                break;
-            }
-        }
-        const index = found.?;
-        _ = self.persistent_root_slots.orderedRemove(index);
-        if (self.persistent_root_slots.items.len == 0) self.persistent_root_slots.clearAndFree(self.memory.persistent_allocator);
-    }
-
     /// Runtime teardown is not an owner for public handles. Clearing these
     /// arrays here would leave the caller's handle pointing into freed memory;
     /// every scope/persistent/weak owner must close its edge first.
     fn assertNoOutstandingValueHandles(self: *const JSRuntime) void {
-        if (self.local_root_slots.items.len != 0 or
-            self.persistent_root_slots.items.len != 0 or
-            self.weak_root_slots.items.len != 0)
-        {
-            @panic("JSRuntime destroyed with outstanding value handles");
-        }
+        self.roots.assertNoOutstanding();
     }
 
     /// Stack-local execution/root records are borrowed by Runtime. They must be
@@ -2689,6 +2065,7 @@ pub const JSRuntime = struct {
             self.active_invocation != null or
             self.active_value_roots != null or
             active_job_for_runtime or
+            self.microtasks.running or self.microtasks.scope_depth != 0 or
             self.formatting_error_stack)
         {
             @panic("JSRuntime destroyed while execution or root frames are active");
@@ -2704,7 +2081,7 @@ pub const JSRuntime = struct {
     }
 
     pub fn sweepDeadWeakPersistentSlots(self: *JSRuntime, live_context: anytype) void {
-        for (self.weak_root_slots.items) |slot| {
+        for (self.roots.weak_root_slots.items) |slot| {
             const identity = slot.identity orelse continue;
             if (!live_context.isWeakIdentityAlive(identity)) {
                 self.clearWeakRootSlot(slot, true);
@@ -2713,22 +2090,21 @@ pub const JSRuntime = struct {
     }
 
     pub fn clearWeakPersistentIdentity(self: *JSRuntime, identity: usize, notify: bool) void {
-        for (self.weak_root_slots.items) |slot| {
+        for (self.roots.weak_root_slots.items) |slot| {
             const slot_identity = slot.identity orelse continue;
             if (slot_identity == identity) self.clearWeakRootSlot(slot, notify);
         }
     }
 
-    /// §9.2: a successful WeakRef.deref promotes the target into the current
-    /// job's keep-alive set. No-op in default `rc`.
+    /// A successful WeakRef.deref keeps its target alive through the current
+    /// checkpoint, including all jobs enqueued while it drains.
     pub fn keepAliveWeakRefTarget(self: *JSRuntime, value: JSValue) void {
-        // An allocation failure drops the keep-alive silently, as before.
-        self.weakref_kept_alive.append(self.memory.persistent_allocator, value) catch return;
+        job_mod.keepAliveWeakRef(self, value);
     }
 
-    /// Clear [[KeptAlive]] at job end, not at an arbitrary safepoint.
+    /// Clear [[KeptAlive]] at a completed or terminated checkpoint.
     pub fn clearWeakRefKeptAlive(self: *JSRuntime) void {
-        self.weakref_kept_alive.clearAndFree(self.memory.persistent_allocator);
+        job_mod.clearKeptAlive(self);
     }
 
     /// TGC S4-e spec 2.5: object identities are not counted. A weak identity
@@ -2758,7 +2134,7 @@ pub const JSRuntime = struct {
         self.releaseWeakIdentity(identity);
     }
 
-    fn weakIdentityIsCurrentlyLive(self: *JSRuntime, identity: usize) bool {
+    pub fn weakIdentityIsCurrentlyLive(self: *JSRuntime, identity: usize) bool {
         if ((identity & 1) != 0) {
             const atom_id = identity >> 1;
             if (atom_id > std.math.maxInt(u32)) return false;
@@ -2767,7 +2143,7 @@ pub const JSRuntime = struct {
         return self.liveObjectFromWeakIdentity(identity) != null;
     }
 
-    fn valueFromWeakIdentity(self: *JSRuntime, identity: usize) JSValue {
+    pub fn valueFromWeakIdentity(self: *JSRuntime, identity: usize) JSValue {
         if ((identity & 1) != 0) {
             const atom_id = identity >> 1;
             if (atom_id > std.math.maxInt(u32)) return JSValue.undefinedValue();
@@ -2789,96 +2165,43 @@ pub const JSRuntime = struct {
     /// destruction that frees the struct, so an id that still resolves names a
     /// live object and the map lookup is the whole liveness test.
     pub fn liveObjectFromWeakIdentity(self: *const JSRuntime, identity: usize) ?*Object {
-        return self.objectFromWeakIdentity(identity);
-    }
-
-    fn objectFromWeakIdentity(self: *const JSRuntime, identity: usize) ?*Object {
-        if ((identity & 1) != 0) return null;
-        return self.weak_id_objects.get(identity >> 1);
+        return gc_weak.objectFromIdentity(self, identity);
     }
 
     /// Returns the encoded weak identity for `object`, allocating a fresh
     /// monotonically increasing weak id on first registration.
     pub fn registerWeakObjectIdentity(self: *JSRuntime, object: *Object) !usize {
-        const address = @intFromPtr(object.gcHeaderConst()) & ~@as(usize, 1);
-        if (object.flags.has_weak_id) {
-            const weak_id = self.weak_object_ids.get(address).?;
-            return weak_id << 1;
-        }
-        const weak_id = self.next_weak_id;
-        try self.weak_object_ids.put(self.memory.persistent_allocator, address, weak_id);
-        self.weak_id_objects.put(self.memory.persistent_allocator, weak_id, object) catch |err| {
-            _ = self.weak_object_ids.remove(address);
-            return err;
-        };
-        self.next_weak_id += 1;
-        object.flags.has_weak_id = true;
-        // TGC S4-e spec 2.5 (step 5): the finalizer bit STAYS.
-        //
-        // The spec offered to retract it if the identity were handed back by a
-        // mark-driven sweep of the two id maps instead. It is not: the return
-        // happens in `destroyFromHeaderSlow` (see `takeWeakObjectIdentity`
-        // there), which only runs for the fin set, so retracting the bit would
-        // strand a `weak_object_ids` / `weak_id_objects` pair naming freed
-        // memory -- and with the husk gone, "in the map" IS the liveness test
-        // (`liveObjectFromWeakIdentity`), so a stale pair is a resurrection,
-        // not a leak. Moving the return to `processWeak` would cost a full
-        // scan of the id maps per collection; the population that carries a
-        // weak id is small enough that one destructor call each is cheaper.
-        object.markNeedsFinalizer(self);
-        return weak_id << 1;
+        return gc_weak.registerObject(self, object);
     }
 
     /// Returns the encoded weak identity for `object` without registering one.
     pub fn peekWeakObjectIdentity(self: *const JSRuntime, object: *const Object) ?usize {
-        if (!object.flags.has_weak_id) return null;
-        const address = @intFromPtr(object.gcHeaderConst()) & ~@as(usize, 1);
-        const weak_id = self.weak_object_ids.get(address) orelse return null;
-        return weak_id << 1;
+        return gc_weak.peekObject(self, object);
     }
 
     /// Removes `object` from the weak identity registry, returning its encoded
     /// weak identity (if any) so destruction can propagate it to weak slots.
     pub fn takeWeakObjectIdentity(self: *JSRuntime, object: *Object) ?usize {
-        if (!object.flags.has_weak_id) return null;
-        object.flags.has_weak_id = false;
-        const address = @intFromPtr(object.gcHeader()) & ~@as(usize, 1);
-        const weak_id = self.weak_object_ids.get(address) orelse return null;
-        _ = self.weak_object_ids.remove(address);
-        _ = self.weak_id_objects.remove(weak_id);
-        return weak_id << 1;
-    }
-
-    fn clearLocalRootSlotsFrom(self: *JSRuntime, start: usize) void {
-        std.debug.assert(start <= self.local_root_slots.items.len);
-        var index = self.local_root_slots.items.len;
-        while (index > start) {
-            index -= 1;
-            const slot = self.local_root_slots.items[index];
-            slot.value = JSValue.undefinedValue();
-            self.memory.destroy(RootSlot, slot);
-        }
-        self.local_root_slots.shrinkRetainingCapacity(start);
-        if (self.local_root_slots.items.len == 0) self.local_root_slots.clearAndFree(self.memory.persistent_allocator);
+        return gc_weak.takeObject(self, object);
     }
 
     pub fn enterHandleScope(self: *JSRuntime) HandleScope {
         return HandleScope.enter(self);
     }
 
-    pub fn localRootCountForTest(self: JSRuntime) usize {
+    pub fn localRootCountForTest(self: *const JSRuntime) usize {
         if (!builtin.is_test) @compileError("test-only helper");
-        return self.local_root_slots.items.len;
+        return self.roots.local_root_slots.items.len;
     }
 
-    pub fn weakRootCountForTest(self: JSRuntime) usize {
+    pub fn weakRootCountForTest(self: *const JSRuntime) usize {
         if (!builtin.is_test) @compileError("test-only helper");
-        return self.weak_root_slots.items.len;
+        return self.roots.weak_root_slots.items.len;
     }
 
-    pub fn persistentRootCountForTest(self: JSRuntime) usize {
+    pub fn persistentRootCountForTest(self: *const JSRuntime) usize {
         if (!builtin.is_test) @compileError("test-only helper");
-        return self.persistent_root_slots.items.len;
+        return self.roots.persistent_root_slots.items.len;
     }
 
     pub fn symbolValue(self: *JSRuntime, atom_id: atom.Atom) !JSValue {
@@ -2903,16 +2226,18 @@ pub const JSRuntime = struct {
         return self.symbolValue(atom_id);
     }
 
-    pub fn createValueHandle(self: *JSRuntime, value: JSValue) !JSValueHandle {
-        return JSValueHandle.initDup(self, value);
-    }
-
-    pub fn takeValueHandle(self: *JSRuntime, value: JSValue) !JSValueHandle {
+    /// One strong persistent handle. `createValueHandle` and `takeValueHandle`
+    /// are the same store: a `JSValue` is copied by bits.
+    pub fn createPersistentValue(self: *JSRuntime, value: JSValue) !JSValueHandle {
         return JSValueHandle.init(self, value);
     }
 
-    pub fn createPersistentValue(self: *JSRuntime, value: JSValue) !JSValueHandle {
-        return self.createValueHandle(value);
+    pub fn createValueHandle(self: *JSRuntime, value: JSValue) !JSValueHandle {
+        return self.createPersistentValue(value);
+    }
+
+    pub fn takeValueHandle(self: *JSRuntime, value: JSValue) !JSValueHandle {
+        return self.createPersistentValue(value);
     }
 
     pub fn createWeakPersistentValue(
@@ -2927,23 +2252,18 @@ pub const JSRuntime = struct {
     /// NB2: allocate an immutable, address-stable host `NativeEntry` from a
     /// template. Never freed before `deinit` (design §5.5 lifetime rule).
     pub fn allocNativeEntry(self: *JSRuntime, template: native_entry.NativeEntry) !*const native_entry.NativeEntry {
-        const entry = try self.memory.create(native_entry.NativeEntry);
-        errdefer self.memory.destroy(native_entry.NativeEntry, entry);
-        entry.* = template;
-        try self.native_entries.append(self.memory.allocator, entry);
-        return entry;
+        return native_bindings.alloc(self, template);
     }
 
     pub fn registerNativeEntryFinalizer(self: *JSRuntime, ptr: *anyopaque, finalize: *const fn (*anyopaque) void) !void {
-        try self.native_entry_finalizers.append(self.memory.allocator, .{ .ptr = ptr, .finalize = finalize });
+        return native_bindings.registerFinalizer(self, ptr, finalize);
     }
 
     /// Retire a host entry in place (tombstone): callers that still hold
     /// the function object get a TypeError; nothing is freed.
     pub fn retireNativeEntry(self: *JSRuntime, entry: *const native_entry.NativeEntry) void {
-        const mutable: *native_entry.NativeEntry = @constCast(entry);
-        mutable.kind = .retired;
-        self.native_entry_epoch +%= 1;
+        _ = self;
+        native_bindings.retire(entry);
     }
 
     /// Internal-builtin record lookup: `domain_index` is the
@@ -2957,40 +2277,19 @@ pub const JSRuntime = struct {
     }
 
     pub fn clearExternalHostFunctions(self: *JSRuntime) void {
-        // NB2 entry state finalizers and the entries themselves.
-        const entry_finalizers = self.native_entry_finalizers;
-        self.native_entry_finalizers = .empty;
-        for (entry_finalizers.items) |item| {
-            self.enqueueDeferredNativeCleanup(item.finalize, item.ptr) catch {
-                item.finalize(item.ptr);
-            };
-        }
-        var finalizers_storage = entry_finalizers;
-        finalizers_storage.deinit(self.memory.allocator);
-        const entries = self.native_entries;
-        self.native_entries = .empty;
-        for (entries.items) |entry| self.memory.destroy(native_entry.NativeEntry, entry);
-        var entries_storage = entries;
-        entries_storage.deinit(self.memory.allocator);
+        native_bindings.destroyOwned(self);
     }
 
-    pub fn runObjectCycleRemoval(self: *JSRuntime) usize {
-        self.assertOwnerThread();
-        return self.runObjectCycleRemovalWithValueRoots(null);
+    /// Precise quiescent collection for lifecycle fixtures only.
+    pub fn collectForTest(self: *JSRuntime) usize {
+        if (!builtin.is_test) @compileError("test-only collection helper");
+        return self.collectForTeardown();
     }
 
-    pub fn runObjectCycleRemovalWithValueRoots(self: *JSRuntime, roots: ?*const ValueRootFrame) usize {
+    fn collectForTeardown(self: *JSRuntime) usize {
         self.assertOwnerThread();
-        // Host-explicit "collect everything" (including runtime teardown):
-        // the caller's contract is a quiescent engine, and teardown
-        // correctness requires ignoring stale test-stack slots so the final
-        // sweep can actually reclaim host-released realms.
-        const result = self.tryRunObjectCycleRemovalWithValueRoots(roots, .declared_only) catch return 0;
+        const result = self.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch return 0;
         return result.freed_objects;
-    }
-
-    pub fn tryRunObjectCycleRemoval(self: *JSRuntime) gc.CollectionError!gc.CollectionResult {
-        return self.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
     }
 
     pub fn tryRunObjectCycleRemovalWithValueRoots(
@@ -3036,7 +2335,7 @@ pub const JSRuntime = struct {
         defer self.gc_running = false;
 
         // The cycle's high-water is the account right now, at trigger time.
-        self.memory.samplePeakAtCollection();
+        mem_ops.samplePeakAtCollection(self);
         const start_ns = profile.nowNanos();
 
         self.gc.scheduler.beginMajorCycle(self.gc.scheduler.activeMajorReason() orelse .manual);
@@ -3082,228 +2381,17 @@ pub const JSRuntime = struct {
         self.assertOwnerThread();
         if (self.active_deferred_class_payload_finalizer != null) return .{};
         self.drainDeferredClassPayloadFinalizersAtSafeBoundary();
-        // A morgue can only be non-empty if a collection was interrupted
-        // mid-destruction by an allocation failure; finish it before starting
-        // anything new. Destruction is irreversible.
-        if (self.gc.morgue.pending and !self.gc_running and self.gc.hot.phase == .none) {
-            self.gc_running = true;
-            @import("gc_trace_stw.zig").finishPendingDestruction(self);
-            self.gc_running = false;
-            _ = self.finishDoomedCompletion(0);
-        }
-        // Is the whole-heap threshold already crossed? The crossing decides
-        // the ORDER of the two collections below, and it is asked TWICE: once
-        // here, and again on the account a minor leaves behind.
-        //
-        // A minor may not ANSWER a crossing. It does not reach the old
-        // generation, which is where a heap over its threshold has put its
-        // garbage. Letting it free a handful of young objects, report success
-        // and return meant the major check below was never reached, and
-        // nothing ever collected the old generation: earley-boyer performed
-        // 13,642 minors and zero majors, promoted 6.8M objects, and finished
-        // holding 435MB where refcounting held 3MB, with every one of those
-        // minors paying 1.12ms to trace a heap that large. See
-        // the minor/major threshold crossing.
-        //
-        // The first repair skipped the minor entirely on a crossing, which
-        // reads the crossing as PROOF that the garbage is old. Since S2 that
-        // inference is false: string bodies are collector carriers, so a dead
-        // young string stays in `allocated_bytes` until a collection frees it,
-        // and pure allocation churn drives the account past the threshold with
-        // nothing old behind it at all. pdfjs paid 908 whole-heap majors where
-        // the refcounting baseline paid 6.
-        //
-        // So the order is generational -- minor first -- and the verdict is
-        // the SECOND reading. Old-generation garbage survives the minor, the
-        // account is still over, and the major runs exactly as it did before:
-        // earley-boyer's repair is a consequence of the re-read, not of
-        // withholding the minor. Young churn is answered by the young
-        // collection, and the crossing is simply gone.
-        var over_threshold = self.memory.allocated_bytes > self.malloc_gc_threshold;
-        // The crossing is usually REPORTED, not observed here.
-        // `collectBeforeObjectAllocation` tests `allocated_bytes + size` and
-        // records `.allocation_threshold`/`.soon` BEFORE the allocation lands,
-        // then polls; the poll's own account is still one allocation short of
-        // the bar. Instrumented on pdfjs: this line saw 33 crossings against
-        // 874 majors -- the other 841 arrived as that pending request, so a
-        // minor-first rule written against `allocated_bytes` alone never fired.
-        const crossing = over_threshold or self.gc.scheduler.pendingAllocationThresholdRequest();
-        // §8.5: an automatic poll prefers a minor. A minor only reaches the
-        // young set, so allocation churn is reclaimed without a whole-heap
-        // trace -- but only here. An explicit `runObjectCycleRemoval` means
-        // "collect everything", and answering it with a minor would silently
-        // change what that call promises.
-        //
-        // A crossing widens the offer to `normal` as well. `acceptsMinor` asks
-        // whether a minor may BE the answer; a crossing asks the cheap
-        // collection first and then re-reads the account, so the minor is a
-        // precondition of the major rather than a substitute for it, and the
-        // caller of a threshold collection still receives everything it did.
-        // This matters because the crossing is almost always DISCOVERED at a
-        // `normal` poll: `collectBeforeObjectAllocation` is the boundary
-        // `String.createUninitialized` reaches on the very allocation that
-        // goes over (TGC S2-f), so an offer restricted to the scheduler modes
-        // never gets asked. Measured on pdfjs: unchanged at 909 majors when
-        // this read `acceptsMinor()` alone.
-        //
-        // `urgent` and `idle` keep out of the crossing arm, and one test
-        // covers both: they are the precise-scanning modes. `urgent`'s caller
-        // is out of headroom and wants the whole heap examined rather than one
-        // more pause before it; `idle`'s precise scan is host-quiescent by
-        // design, and a synchronous minor needs the conservative one -- see
-        // `pollScansConservatively`.
-        //
-        // The crossing also asks a different SIZE question of the young set --
-        // see `Registry.shouldTryMinorBeforeMajor`.
-        const offer_minor = if (crossing)
-            self.pollScansConservatively(mode) and self.gc.shouldTryMinorBeforeMajor()
-        else
-            mode.acceptsMinor() and self.gc.shouldTryMinor();
-        if (offer_minor and !self.gc_running) {
-            self.gc_running = true;
-            defer self.gc_running = false;
-            self.memory.samplePeakAtCollection();
-            const started = profile.nowNanos();
-            if (@import("gc_trace_stw.zig").collectMinor(self, roots, mode.rootScan()) catch null) |freed| {
-                self.gc.stats.collections += 1;
-                const ended = profile.nowNanos();
-                const elapsed = if (ended > started) ended - started else 0;
-                // Tracked separately from the major distribution: a minor
-                // is judged on being short, and averaging it with
-                // whole-heap pauses hides exactly that.
-                //
-                // Counted whether or not it reclaimed anything. A minor
-                // that frees nothing is the EXPENSIVE case, not a
-                // non-event: it walked its roots and every remembered
-                // owner and came back empty. Pricing those at zero made
-                // the panel report `minor pause mean 0 ns, max 0 ns` for a
-                // run that performed 320 of them, which is precisely the
-                // shape anyone optimising the minor needs to see.
-                self.gc.generation.recordMinorPause(
-                    gc.Registry.markQueueAllocator(),
-                    elapsed,
-                    @import("gc_trace_stw.zig").detailed_reports,
-                );
-                // TGC S2-h1 (2). The aged-decommit policy used to be
-                // driven from major boundaries alone. S2-g took pdfjs
-                // from 908 majors to 24, so the block decommit and the
-                // empty-medium-superblock release stopped being offered
-                // ~884 times per run and maxrss rose 31% (raytrace 33%)
-                // on a live set that had FALLEN -- a superblock high
-                // water mark, not retained garbage.
-                //
-                // A minor is now the same boundary: cells and medium
-                // extents are exactly what it frees. Nothing about the
-                // policy changes -- `releaseFreeBlockPages` keeps its own
-                // 100 ms period gate and both idle gates
-                // (`decommit_min_idle_ns`, `medium_release_min_idle_ns`)
-                // -- so this only stops the offers from being withheld.
-                // Placed after `elapsed` is taken, like the major call
-                // sites: the release is not part of the pause it reports.
-                // It also advances `Heap.clock_ns`, which is what makes
-                // the idle gates measure real idleness again instead of
-                // ageing against a clock that only ticked 24 times.
-                _ = self.gc.block_heap.releaseFreeBlockPages(ended);
-                const result: gc.CollectionResult = .{
-                    .freed_objects = freed,
-                    .duration_ns = elapsed,
-                };
-                // NOT `recordSuccess`: that would push a minor's duration
-                // into the major pause ring and count it as a whole-heap
-                // cycle. The minor's own pause accounting is the
-                // `generation.stats` update just above. This holds on the
-                // fall-through below too -- a minor that precedes a major
-                // in the same poll contributes its reclaim to the freed
-                // account but never its time to the major's pause ring.
-                if (freed > 0) self.gc.recordMinorSuccess(result);
-                // Deliberately NOT `resetGCThreshold()`. That sets the
-                // major threshold to 1.5x the CURRENT footprint and
-                // clears the allocation debt, and a minor has no claim
-                // to either: it did not look at the old generation, so
-                // the footprint it is measuring is mostly old garbage
-                // it cannot see. Resetting here raised the bar by half
-                // on every minor, so the more garbage accumulated the
-                // further the major receded -- the threshold outran the
-                // heap it was meant to bound. Both belong to the major.
-                if (crossing) {
-                    // The second verdict, on the account this minor left
-                    // behind. Still over means the garbage the threshold
-                    // is complaining about was not young, so fall through
-                    // to the major with the crossing intact.
-                    over_threshold = self.memory.allocated_bytes > self.malloc_gc_threshold;
-                    if (!over_threshold) {
-                        // The crossing WAS young churn and is now paid.
-                        // The threshold condition is level-triggered, so
-                        // the `.allocation_threshold`/`.soon` request an
-                        // allocation boundary recorded on the way up is
-                        // stale: discard exactly that request, the way
-                        // `collectBeforeObjectAllocation` does when a
-                        // prospective total falls back under the bar.
-                        _ = self.gc.scheduler.clearStaleAllocationThresholdRequest();
-                        // Only the threshold's own request is retired by a
-                        // minor. A host manual GC, memory pressure or a
-                        // failure retry that happened to be queued behind
-                        // it is a promise to someone: leave the poll on its
-                        // major path so this call still keeps it.
-                        if (!self.gc.hasPendingMajorRequest()) return result;
-                    }
-                } else if (freed > 0) {
-                    return result;
-                }
-            }
-        }
-        if (self.gc_running or self.gc.hot.phase != .none) return .{};
-        const scheduler_point: gc.SchedulerPoint = switch (mode) {
-            .normal => .allocation_slow_path,
-            .callback_boundary => .callback_boundary,
-            .idle => .idle,
-            .safepoint => .safepoint,
-            .urgent => .urgent,
-        };
-        switch (scheduler_point) {
-            .allocation_slow_path, .idle, .urgent => self.requestGCForProcessMemoryPressure(),
-            .callback_boundary, .safepoint => {},
-        }
-        const over_collection_threshold = over_threshold;
-        const run_major = self.gc.scheduler.shouldRunMajorAt(scheduler_point, over_collection_threshold);
-        if (!run_major) return .{};
-
-        const major_request = self.gc.scheduler.pendingMajorRequest();
-        if (major_request != null) _ = self.gc.scheduler.clearMajorRequest();
-        const reason = if (major_request) |request|
-            request.reason
-        else if (over_collection_threshold)
-            gc.RequestReason.allocation_threshold
-        else
-            gc.RequestReason.manual;
-        self.gc.scheduler.beginMajorCycle(reason);
-        return try self.tryRunObjectCycleRemovalWithValueRoots(null, mode.rootScan());
+        return gc_driver.continuePoll(self, roots, mode);
     }
 
     fn resetGCThresholdExcludingDoomed(self: *JSRuntime) void {
-        const settled = self.memory.allocated_bytes -| self.gc.morgue.bytes;
-        const saved = self.memory.allocated_bytes;
-        // Reuse the one rule rather than duplicating it: present the account
-        // net of corpses, compute, restore. Single-threaded, no observer.
-        self.memory.allocated_bytes = settled;
-        self.resetGCThreshold();
-        self.memory.allocated_bytes = saved;
+        gc_driver.resetThresholdExcludingDoomed(self);
     }
 
     /// The morgue is empty: deliver the cycle's CollectionResult and reset the
     /// growth threshold from the account the destruction actually shrank.
     fn finishDoomedCompletion(self: *JSRuntime, last_slice_ns: u64) gc.CollectionResult {
-        std.debug.assert(!self.gc.morgue.pending);
-        @import("gc_trace_stw.zig").auditDoomedExitInvariant(self);
-        const result: gc.CollectionResult = .{
-            .freed_objects = self.gc.morgue.destroyed,
-            .duration_ns = last_slice_ns,
-        };
-        self.gc.morgue.destroyed = 0;
-        self.gc.recordCycleSuccess(result);
-        self.resetGCThreshold();
-        _ = self.gc.block_heap.releaseFreeBlockPages(profile.nowNanos());
-        return result;
+        return gc_driver.finishDoomed(self, last_slice_ns);
     }
 
     /// Host-facing checked form of `pollGC`. Internal engine paths use the
@@ -3342,10 +2430,6 @@ pub const JSRuntime = struct {
         return self.pollGC(roots, .urgent);
     }
 
-    pub fn forceMajorGC(self: *JSRuntime, roots: ?*const ValueRootFrame) gc.CollectionError!gc.CollectionResult {
-        return self.forceGC(roots);
-    }
-
     pub fn requestGCForTest(self: *JSRuntime) void {
         if (!builtin.is_test) @compileError("test-only helper");
         self.assertOwnerThread();
@@ -3365,7 +2449,7 @@ pub const JSRuntime = struct {
     /// tests declare their frame quiescent so reclamation is deterministic,
     /// which an allocation boundary in the middle of a constructor is not.
     /// Those polls keep the pre-S2-g order (major without a preceding minor).
-    fn pollScansConservatively(self: *const JSRuntime, mode: GCPollMode) bool {
+    pub fn pollScansConservatively(self: *const JSRuntime, mode: GCPollMode) bool {
         const scan = if (comptime builtin.is_test)
             self.test_root_scan_override orelse mode.rootScan()
         else
@@ -3391,27 +2475,38 @@ pub const JSRuntime = struct {
         self.test_root_scan_override = null;
     }
 
-    pub fn gcPendingForTest(self: JSRuntime) bool {
+    pub fn gcPendingForTest(self: *const JSRuntime) bool {
         if (!builtin.is_test) @compileError("test-only helper");
         return self.gc.hasPendingMajorRequest();
     }
 
-    pub fn gcLastRequestReasonForTest(self: JSRuntime) ?gc.RequestReason {
+    pub fn gcLastRequestReasonForTest(self: *const JSRuntime) ?gc.RequestReason {
         if (!builtin.is_test) @compileError("test-only helper");
         return self.gc.stats.last_request_reason;
     }
 
     pub fn setGCThreshold(self: *JSRuntime, threshold: usize) void {
+        self.assertOwnerThread();
         self.gc.invalidateCycleEnvelopeBaseline();
-        self.malloc_gc_threshold = threshold;
+        self.gc.heap_budget.gc_threshold = threshold;
     }
 
-    pub fn gcThreshold(self: JSRuntime) usize {
-        return self.malloc_gc_threshold;
+    /// Current dynamic threshold, including changes during Context bootstrap.
+    pub fn gcThreshold(self: *const JSRuntime) usize {
+        return self.gc.heap_budget.gc_threshold;
     }
 
+    /// JS heap budget cap. Ordinary native allocations do not consult it.
     pub fn setMemoryLimit(self: *JSRuntime, limit: ?usize) void {
-        self.memory.setLimit(limit);
+        self.gc.heap_budget.limit = limit;
+    }
+
+    /// Test-only cap on the account's native byte counter. This is the
+    /// injector for ordinary allocation failure. `setMemoryLimit` does not
+    /// fail those allocations.
+    pub fn setNativeBytesLimitForTest(self: *JSRuntime, limit: ?usize) void {
+        if (!builtin.is_test) @compileError("test-only helper");
+        mem_ops.setLimit(self, limit);
     }
 
     /// Test-only: stop an over-limit allocation from collecting before it is
@@ -3427,11 +2522,37 @@ pub const JSRuntime = struct {
     /// unwind rather than the collector suppress it around the injection.
     pub fn suppressLimitCollectionForTest(self: *JSRuntime, suppressed: bool) void {
         if (!builtin.is_test) @compileError("test-only helper");
-        self.memory.limit_gc_fn = if (suppressed) null else JSRuntime.collectBeforeLimitRejection;
+        self.gc.heap_budget.suppress_retry = suppressed;
     }
 
-    pub fn memoryLimit(self: JSRuntime) ?usize {
-        return self.memory.getLimit();
+    pub fn memoryLimit(self: *const JSRuntime) ?usize {
+        return self.gc.heap_budget.limit;
+    }
+
+    /// Drain ECMAScript jobs only. The host owns timer, I/O and signal dispatch.
+    pub fn runMicrotasks(self: *JSRuntime) errors.HostError!void {
+        try self.requireOwnerThread();
+        try job_mod.runCheckpoint(self);
+    }
+
+    pub fn enterMicrotaskScope(self: *JSRuntime) errors.HostError!MicrotaskScope {
+        try self.requireOwnerThread();
+        if (self.microtasks.reporting) return error.MicrotaskReentry;
+        self.microtasks.scope_depth += 1;
+        return .{ .runtime = self, .depth = self.microtasks.scope_depth };
+    }
+
+    /// Called by engine execution boundaries after their VM frames unwind.
+    pub fn runAutomaticMicrotasks(self: *JSRuntime) errors.HostError!void {
+        if (self.microtasks.policy != .auto or self.microtasks.running or self.microtasks.scope_depth != 0 or
+            self.hot.call_depth != 0 or self.hot.native_call_depth != 0 or self.active_invocation != null) return;
+        try self.runMicrotasks();
+    }
+
+    pub fn setMicrotaskExceptionHandler(self: *JSRuntime, handler: ?job_mod.ExceptionHandler, userdata: ?*anyopaque) void {
+        self.assertOwnerThread();
+        self.microtasks.handler = handler;
+        self.microtasks.userdata = userdata;
     }
 
     pub fn memoryUsage(self: *const JSRuntime) MemoryUsage {
@@ -3448,33 +2569,22 @@ pub const JSRuntime = struct {
             if (record.isRegistered()) registered_classes += 1;
         }
 
-        const object_count = self.gc.liveCountKind(.object);
-        const shape_count = self.gc.liveCountKind(.shape);
-        // Count heap nodes, not Realm registry membership: an externally
-        // retained record remains live and reportable after its Realm unlinks.
-        const module_count = self.gc.liveCountKind(.module);
         const class_record_count = self.classes.records.len;
         return .{
             .memory_limit = self.memoryLimit(),
-            .allocated_bytes = self.memory.allocated_bytes,
-            .allocation_count = self.memory.allocation_count,
-            .peak_allocated_bytes = self.memory.peak_allocated_bytes,
-            .peak_allocation_count = self.memory.peak_allocation_count,
-            .alloc_calls = self.memory.alloc_calls,
-            .free_calls = self.memory.free_calls,
-            .create_calls = self.memory.create_calls,
-            .destroy_calls = self.memory.destroy_calls,
+            .heap_bytes = self.gc.heap_budget.bytes,
+            .allocated_bytes = if (alloc_trace.enabled) self.diagnostics.allocations.allocated_bytes + @sizeOf(JSRuntime) else 0,
+            .allocation_count = if (alloc_trace.enabled) self.diagnostics.allocations.allocation_count + 1 else 0,
+            .peak_allocated_bytes = if (alloc_trace.enabled) self.diagnostics.allocations.peak_allocated_bytes + @sizeOf(JSRuntime) else 0,
+            .peak_allocation_count = if (alloc_trace.enabled) self.diagnostics.allocations.peak_allocation_count + 1 else 0,
+            .alloc_calls = if (alloc_trace.enabled) self.diagnostics.allocations.alloc_calls else 0,
+            .free_calls = if (alloc_trace.enabled) self.diagnostics.allocations.free_calls else 0,
+            .create_calls = if (alloc_trace.enabled) self.diagnostics.allocations.create_calls + 1 else 0,
+            .destroy_calls = if (alloc_trace.enabled) self.diagnostics.allocations.destroy_calls else 0,
             .atom_count = atom.predefined_count + live_dynamic_atoms,
             .atom_bytes = dynamic_atom_bytes,
-            .object_count = object_count,
-            .object_bytes = object_count * Object.objectBodyBytes(class.ids.object, false),
-            .shape_count = shape_count,
-            .shape_bytes = shape_count * @sizeOf(shape.Shape),
-            .module_count = module_count,
-            .module_bytes = module_count * @sizeOf(module.ModuleRecord),
             .registered_class_count = registered_classes,
             .class_record_count = class_record_count,
-            .class_bytes = class_record_count * @sizeOf(class.Record),
         };
     }
 
@@ -3488,21 +2598,13 @@ pub const JSRuntime = struct {
     }
 
     /// Internal classification for inline buffer bytes that already live in
-    /// MemoryAccount. Off-account embedders must use `reportExternalAlloc` and
+    /// mem_ops. Off-account embedders must use `reportExternalAlloc` and
     /// retain its token; this raw hook does not perform the pressure check.
-    pub fn reportExternalAllocUntracked(self: *JSRuntime, bytes: usize) void {
-        self.gc.reportExternalAllocUntracked(bytes);
-    }
-
-    pub fn reportExternalFreeUntracked(self: *JSRuntime, bytes: usize) void {
-        self.gc.reportExternalFreeUntracked(bytes);
-    }
-
-    pub fn externalMemoryBytes(self: JSRuntime) usize {
+    pub fn externalMemoryBytes(self: *const JSRuntime) usize {
         return self.gc.stats.external_bytes;
     }
 
-    pub fn allocationDebtBytes(self: JSRuntime) usize {
+    pub fn allocationDebtBytes(self: *const JSRuntime) usize {
         // Historical API name: this is weighted byte-debt, not a live-memory
         // byte count. `external_weight` may make it larger than the external
         // bytes allocated since the last completed major.
@@ -3517,9 +2619,8 @@ pub const JSRuntime = struct {
         return self.gc.pauseDistribution();
     }
 
-    pub fn gcStats(self: *const JSRuntime) gc.Stats {
-        var stats = self.gc.statsSnapshot(self);
-        stats.weak_ref_count = self.weakReferenceCount();
+    fn fillGcCounters(self: *const JSRuntime, stats: *gc.Stats) void {
+        stats.weak_ref_count = self.weakRootSlotCount();
         const finalization_jobs = self.job_queue.countKind(.finalization);
         stats.finalizer_queue_length = finalization_jobs;
         stats.pending_finalization_job_count = finalization_jobs;
@@ -3527,9 +2628,24 @@ pub const JSRuntime = struct {
         stats.deferred_native_cleanup_run_count = self.deferred_native_cleanup_run_count;
         stats.deferred_class_payload_finalizer_count = self.deferred_class_payload_finalizers.items.len;
         stats.deferred_class_payload_finalizer_run_count = self.deferred_class_payload_finalizer_run_count;
-        stats.rss_bytes = currentRssBytes();
-        stats.cgroup_limit_bytes = cgroupLimitBytes();
+    }
+
+    /// Maintained counters only. Does not walk the heap or read RSS/cgroup.
+    pub fn gcStats(self: *const JSRuntime) gc.Stats {
+        var stats = self.gc.counterSnapshot(self);
+        self.fillGcCounters(&stats);
         return stats;
+    }
+
+    /// One heap census plus a process sample. Heap bytes stay separate from
+    /// external debt and from RSS.
+    pub fn gcDetailedStats(self: *const JSRuntime) gc.DetailedStats {
+        var detailed = self.gc.statsSnapshot(self);
+        self.fillGcCounters(&detailed.counters);
+        detailed.counters.weak_ref_count += self.weakObjectEntryCount();
+        detailed.rss_bytes = (platform_memory.currentRssBytes() orelse 0);
+        detailed.cgroup_limit_bytes = (platform_memory.cgroupLimitBytes() orelse 0);
+        return detailed;
     }
 
     pub fn ownsObject(self: *const JSRuntime, object: *const Object) bool {
@@ -3550,24 +2666,30 @@ pub const JSRuntime = struct {
     /// threshold triggers in `reportExternalAlloc` all run first and unchanged,
     /// and any policy that does consume the snapshot reaches the identical
     /// slow path.
-    inline fn requestGCForProcessMemoryPressure(self: *JSRuntime) void {
+    pub inline fn requestGCForProcessMemoryPressure(self: *JSRuntime) void {
         if (!self.gc.scheduler.policy.needsProcessMemorySnapshot()) return;
         self.requestGCForProcessMemoryPressureSlow();
     }
 
     noinline fn requestGCForProcessMemoryPressureSlow(self: *JSRuntime) void {
-        const rss_bytes = currentRssBytes();
-        const cgroup_limit_bytes = cgroupLimitBytes();
+        const rss_bytes = (platform_memory.currentRssBytes() orelse 0);
+        const cgroup_limit_bytes = (platform_memory.cgroupLimitBytes() orelse 0);
         if (self.gc.processMemoryRequest(rss_bytes, cgroup_limit_bytes)) |request| {
             self.gc.requestGC(request.reason, request.urgency);
         }
     }
 
-    fn weakReferenceCount(self: *const JSRuntime) usize {
+    fn weakRootSlotCount(self: *const JSRuntime) usize {
         var count: usize = 0;
-        for (self.weak_root_slots.items) |slot| {
+        for (self.roots.weak_root_slots.items) |slot| {
             if (slot.identity != null) count += 1;
         }
+        return count;
+    }
+
+    fn weakObjectEntryCount(self: *const JSRuntime) usize {
+        gc.noteHeapWalk();
+        var count: usize = 0;
         var gc_iter = self.gc.objectIterator(.all);
         while (gc_iter.next()) |header| {
             if (header.meta().flags.kind == .object) {
@@ -3579,50 +2701,8 @@ pub const JSRuntime = struct {
         return count;
     }
 
-    fn currentRssBytes() usize {
-        if (builtin.os.tag != .linux) return 0;
-        var buf: [128]u8 = undefined;
-        const contents = readLinuxFile("/proc/self/statm", &buf) orelse return 0;
-        var tokens = std.mem.tokenizeAny(u8, contents, " \t\r\n");
-        _ = tokens.next() orelse return 0;
-        const resident_pages = parseUnsignedToken(tokens.next() orelse return 0) orelse return 0;
-        return std.math.mul(usize, resident_pages, std.heap.pageSize()) catch std.math.maxInt(usize);
-    }
-
-    fn cgroupLimitBytes() usize {
-        if (builtin.os.tag != .linux) return 0;
-        var buf: [128]u8 = undefined;
-        if (readLinuxFile("/sys/fs/cgroup/memory.max", &buf)) |contents| {
-            if (parseUnsignedToken(firstToken(contents))) |limit| return limit;
-        }
-        if (readLinuxFile("/sys/fs/cgroup/memory/memory.limit_in_bytes", &buf)) |contents| {
-            if (parseUnsignedToken(firstToken(contents))) |limit| return limit;
-        }
-        return 0;
-    }
-
-    fn readLinuxFile(path: []const u8, buf: []u8) ?[]const u8 {
-        if (comptime builtin.os.tag == .linux) {
-            const fd = std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY }, 0) catch return null;
-            defer _ = std.os.linux.close(fd);
-            const len = std.posix.read(fd, buf) catch return null;
-            return buf[0..len];
-        }
-        return null;
-    }
-
-    fn firstToken(contents: []const u8) []const u8 {
-        var tokens = std.mem.tokenizeAny(u8, contents, " \t\r\n");
-        return tokens.next() orelse "";
-    }
-
-    fn parseUnsignedToken(token: []const u8) ?usize {
-        if (token.len == 0 or std.mem.eql(u8, token, "max")) return null;
-        return value_format.parseAsciiInt(usize, token, 10) catch null;
-    }
-
     inline fn prospectiveAllocationTotal(self: *const JSRuntime, size: usize) usize {
-        return self.memory.allocated_bytes +| size;
+        return self.gc.heap_budget.bytes +| size;
     }
 
     /// Queue an allocation-threshold request and return the exact prospective
@@ -3632,11 +2712,13 @@ pub const JSRuntime = struct {
     /// overflow-checked add on every object construction.
     inline fn requestGCForAllocationTotal(self: *JSRuntime, size: usize) usize {
         if (comptime builtin.is_test) {
-            if (self.memory.trigger_gc_fn) |trigger| {
-                if (trigger != JSRuntime.triggerGCOnAllocation) {
-                    trigger(self.memory.trigger_gc_ctx, size);
-                    return self.prospectiveAllocationTotal(size);
-                }
+            if (self.gc.heap_budget.probe) |probe| {
+                const budget = &self.gc.heap_budget;
+                const saved = budget.suspend_alloc_notify;
+                budget.suspend_alloc_notify = true;
+                defer budget.suspend_alloc_notify = saved;
+                probe(budget.probe_ctx, size);
+                return self.prospectiveAllocationTotal(size);
             }
         }
         // Allocation is legal from class/native finalizers while the refcount
@@ -3645,20 +2727,18 @@ pub const JSRuntime = struct {
         // also covers outer zero-ref drains that run without that flag.
         if (self.gc_running or self.gc.hot.phase != .none) return self.prospectiveAllocationTotal(size);
         if (comptime memory.force_gc_on_allocation_enabled) {
-            if (self.memory.trigger_gc_fn == null) return self.prospectiveAllocationTotal(size);
+            if (self.gc.heap_budget.suspend_alloc_notify) return self.prospectiveAllocationTotal(size);
             // The force-GC build option is diagnostic instrumentation, not a
             // scheduling-policy change. Preserve an explicitly configured
             // threshold across the synthetic pre-allocation collection.
-            const saved_threshold = self.malloc_gc_threshold;
-            defer self.malloc_gc_threshold = saved_threshold;
+            const saved_threshold = self.gc.heap_budget.gc_threshold;
+            defer self.gc.heap_budget.gc_threshold = saved_threshold;
             _ = self.forceGC(null) catch {};
             return self.prospectiveAllocationTotal(size);
         }
-        // qjs js_trigger_gc:
-        //   force_gc = (malloc_size + size) > malloc_gc_threshold
-        // malloc_size is allocated_bytes (usable+MALLOC_OVERHEAD, quickjs.c).
+        // The growth bar is the heap budget, not the mixed native account.
         const total = self.prospectiveAllocationTotal(size);
-        if (total > self.malloc_gc_threshold) {
+        if (total > self.gc.heap_budget.gc_threshold) {
             self.gc.requestGC(.allocation_threshold, .soon);
         }
         return total;
@@ -3712,7 +2792,7 @@ pub const JSRuntime = struct {
         // threshold condition is level-triggered: discard only that ordinary
         // stale request. Registry request coalescing preserves manual/external/
         // pressure reasons so they cannot be cancelled here.
-        if (prospective <= self.malloc_gc_threshold) {
+        if (prospective <= self.gc.heap_budget.gc_threshold) {
             _ = self.gc.scheduler.clearStaleAllocationThresholdRequest();
         }
         // §8.6: allocation debt buys bounded slices of the collector's work.
@@ -3736,69 +2816,35 @@ pub const JSRuntime = struct {
         self.requestGCForAllocation(size);
     }
 
-    /// Last chance before an allocation is rejected for crossing the memory
-    /// limit. The mutator's native frames are live here -- this runs from the
-    /// middle of an arbitrary allocation -- so the scan must be the
-    /// conservative one; `declared_only` would sweep objects the caller is
-    /// still holding in Zig locals. Reentrancy is already handled:
-    /// `tryRunObjectCycleRemovalWithValueRoots` returns immediately if a
-    /// collection is in flight, so a collection that allocates cannot recurse.
-    fn collectBeforeLimitRejection(ctx: *anyopaque) void {
+    /// One heap-limit retry. The mutator's native frames are live here, so the
+    /// scan stays `.engine_active`; `declared_only` would sweep objects the
+    /// caller still holds in Zig locals. `Budget.retrying` stops a nested
+    /// admit from collecting again, and this guard is the same exit when a
+    /// collection is already running.
+    fn retryHeapLimitOnce(ctx: *anyopaque) void {
         const self: *JSRuntime = @ptrCast(@alignCast(ctx));
+        if (self.gc_running or self.gc.hot.phase != .none) return;
         _ = self.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch return;
     }
 
+    /// Admit `bytes` against the JS heap limit, collecting at most once.
+    /// Callers that already hold an unpublished cell must not use this: the
+    /// retry can run, and a precise scan cannot name that cell. A rejected
+    /// admit is left for the following `checkOnly` to report.
+    pub inline fn prepareHeapCharge(self: *JSRuntime, bytes: usize) void {
+        if (self.gc.heap_budget.limit == null) {
+            @branchHint(.likely);
+            return;
+        }
+        self.prepareHeapChargeSlow(bytes);
+    }
+
+    noinline fn prepareHeapChargeSlow(self: *JSRuntime, bytes: usize) void {
+        self.gc.heap_budget.admit(bytes) catch {};
+    }
+
     fn resetGCThreshold(self: *JSRuntime) void {
-        // Refcounting keeps qjs's rule verbatim (js_trigger_gc after JS_RunGC,
-        // quickjs.c): threshold = malloc_size + (malloc_size >> 1).
-        //
-        // The tracer gets 2x, and the divergence is deliberate: qjs's 1.5x
-        // governs a CYCLE collector running over a heap where refcounting has
-        // already freed every acyclic object, so each round handles residue.
-        // A tracer must trace the whole live set to free anything at all --
-        // the cost of a collection is proportional to what survives, not to
-        // what dies -- so the same constant buys far less allocation per
-        // whole-heap trace. Copying it across that semantic change was
-        // faithfulness to the wrong collector: splay completed in 16 rounds
-        // under rc and paid ~41 whole-heap majors under the tracer at 1.5x.
-        // JSC's precedent for a full-tracing heap is a growth factor of 2 on
-        // small heaps (smallHeapGrowthFactor, OptionsList.h:219; "small" is
-        // heap < 25% of RAM). The factor here was 1.75 while §1.3 capped
-        // cycle peak/live at 1.8; the owner renegotiated that cap to 2.0 on
-        // 2026-08-29 (ABBA n=16 pricing: splay cycles -7.25%, six-benchmark
-        // geomean 0.9867, peak RSS +10-13%).
-        // Steady-state cycle peak/live equals this factor by construction,
-        // so the constant and the §1.3 cap must move together.
-        const live_now = self.memory.allocated_bytes;
-        const grown = std.math.add(usize, live_now, live_now) catch std.math.maxInt(usize);
-        // ...plus room for one nursery. Half of a small live set is less than
-        // a nursery, and since the threshold is tested before a minor is
-        // offered, such a threshold would be crossed first every time and
-        // every collection would be a major. raytrace lives in 288KB, so the
-        // qjs rule alone gives it 144KB of headroom to fill a nursery that
-        // wants an order of magnitude more.
-        const headroom = gc.small_heap_major_headroom_bytes;
-        const floored = std.math.add(usize, self.memory.allocated_bytes, headroom) catch std.math.maxInt(usize);
-        self.malloc_gc_threshold = @max(grown, floored);
-        // Both rules add to the live set, so the threshold can never sit below
-        // it: a threshold under `allocated_bytes` would make the very next
-        // allocation trigger a collection.
-        std.debug.assert(self.malloc_gc_threshold >= self.memory.allocated_bytes);
-        // Which rule set the cadence. Without this the claim "raytrace's
-        // majors are paced by the floor, not by growth" stays an inference
-        // from arithmetic; with it, it is a reading.
-        if (floored > grown) {
-            self.gc.stats.threshold_floor_hits +|= 1;
-        } else {
-            self.gc.stats.threshold_growth_hits +|= 1;
-        }
-        // A pending morgue uses a provisional threshold net of doomed bytes;
-        // no new cycle may begin before destruction completes, and the final
-        // reset below will publish the actual settled pair.
-        if (!self.gc.morgue.pending) {
-            self.gc.noteCycleEnvelopeBaseline(self.memory.allocated_bytes, self.malloc_gc_threshold);
-        }
-        self.gc.resetAllocationDebt();
+        gc_driver.resetThreshold(self);
     }
 
     /// Return the shared single-code-unit (latin1) string for `byte`,
@@ -3809,105 +2855,59 @@ pub const JSRuntime = struct {
     /// Inline load + branch; the one-shot creation is outlined so a hit costs
     /// nothing more than the table read.
     pub inline fn singleByteString(self: *JSRuntime, byte: u8) !*string.String {
-        if (self.single_byte_strings[byte]) |cached| return cached;
-        return self.createSingleByteString(byte);
-    }
-
-    /// Cold half of `singleByteString`: at most 256 executions per runtime.
-    noinline fn createSingleByteString(self: *JSRuntime, byte: u8) !*string.String {
-        const created = try string.String.createLatin1(self, &.{byte});
-        self.single_byte_strings[byte] = created;
-        return created;
+        return string_cache.singleByte(self, byte);
     }
 
     /// Non-allocating probe: null when the slot has not been filled yet.
     pub inline fn cachedSingleByteString(self: *JSRuntime, byte: u8) ?*string.String {
-        return self.single_byte_strings[byte];
+        return string_cache.cachedSingleByte(self, byte);
     }
 
     pub fn emptyString(self: *JSRuntime) !*string.String {
-        if (self.empty_string) |cached| return cached;
-        const created = try string.String.createAscii(self, "");
-        self.empty_string = created;
-        return created;
+        return string_cache.empty(self);
     }
 
-    /// Return a borrowed cached string for a two-code-unit sequence. The cache
-    /// slot is a root, so -- as with `singleByteString` -- returning the value
-    /// takes no per-caller retain.
+    /// Return a borrowed cached string for a two-code-unit sequence.
     pub fn recentTwoUnitString(self: *JSRuntime, first: u16, second: u16) !*string.String {
-        if (self.recent_two_unit_string) |cached| {
-            if (cached.first == first and cached.second == second) return cached.string;
-        }
-
-        const created = try string.String.createUtf16Pair(self, first, second);
-        self.recent_two_unit_string = .{
-            .first = first,
-            .second = second,
-            .string = created,
-        };
-        return created;
+        return string_cache.recentTwoUnit(self, first, second);
     }
 
-    /// Return a borrowed cached string for a recently materialized atom. The
-    /// cache slot is a root; there is no per-caller retain to take.
+    /// Return a borrowed cached string for a recently materialized atom.
     pub fn recentAtomString(self: *JSRuntime, atom_id: atom.Atom, bytes: []const u8) !*string.String {
-        for (self.recent_atom_strings) |slot| {
-            if (slot) |cached| {
-                if (cached.atom_id == atom_id) return cached.string;
-            }
-        }
-
-        const created = try string.String.createUtf8(self, bytes);
-        // Seeds the weak back-pointer (and, for non-tagged string atoms,
-        // the table-side cache); no-op for symbol atoms.
-        self.atoms.cacheString(self, atom_id, created);
-        const slot_index: usize = self.compact_state.recent_atom_string_next;
-        self.recent_atom_strings[slot_index] = .{
-            .atom_id = atom_id,
-            .string = created,
-        };
-        self.compact_state.recent_atom_string_next = @intCast((slot_index + 1) % self.recent_atom_strings.len);
-        return created;
+        return string_cache.recentAtom(self, atom_id, bytes);
     }
 
-    /// Return a borrowed cached decimal string ("0".."255") for a byte. The
-    /// cache slot is a root; there is no per-caller retain to take.
+    /// Return a borrowed cached decimal string ("0".."255") for a byte.
     pub fn smallIntString(self: *JSRuntime, value: u8) !*string.String {
-        if (self.small_int_strings[value]) |s| return s;
-        var buf: [4]u8 = undefined;
-        const text = std.fmt.bufPrint(&buf, "{d}", .{value}) catch unreachable;
-        const s = try string.String.createLatin1(self, text);
-        // The slot roots the string for the runtime's lifetime and is simply
-        // nulled at teardown; callers receive a borrowed pointer.
-        self.small_int_strings[value] = s;
-        return s;
+        return string_cache.smallInt(self, value);
     }
 
     pub fn percentHexString(self: *JSRuntime, value: u8) !*string.String {
-        if (self.percent_hex_strings[value]) |cached| return cached;
-        const bytes: [3]u8 = .{
-            '%',
-            unicode.asciiUpperHexDigitChar(value >> 4),
-            unicode.asciiUpperHexDigitChar(value & 0x0f),
-        };
-        const created = try string.String.createAscii(self, &bytes);
-        self.percent_hex_strings[value] = created;
-        return created;
+        return string_cache.percentHex(self, value);
     }
 
     pub fn setStackSize(self: *JSRuntime, size: usize) void {
+        self.assertOwnerThread();
         self.hot.stack_size = size;
         self.vm_stack_arena_policy = VmStackWindowPolicy.arenaForLimit(size);
     }
 
-    pub fn stackSize(self: JSRuntime) usize {
+    pub fn stackSize(self: *const JSRuntime) usize {
         return self.hot.stack_size;
     }
 
+    pub fn nativeStackSize(self: *const JSRuntime) usize {
+        return self.hot.native_stack_size;
+    }
+
     pub fn setNativeStackSize(self: *JSRuntime, size: usize) void {
+        self.assertOwnerThread();
         self.hot.native_stack_size = size;
-        self.updateNativeStackTop();
+        if (self.hot.call_depth == 0 and self.hot.native_call_depth == 0) {
+            self.updateNativeStackTop();
+        } else {
+            self.hot.native_stack_limit = if (size == 0) 0 else self.hot.native_stack_top -| size;
+        }
     }
 
     /// Capture the current native frame pointer as the recursion base and derive
@@ -3947,10 +2947,8 @@ pub const JSRuntime = struct {
         return self.atoms.internString(bytes);
     }
 
-    pub fn newClassId(self: *JSRuntime, requested: class.ClassId) (error{ClassIdExhausted} || RuntimeMutationError)!class.ClassId {
-        try self.requireOwnerThread();
-        if (requested != class.invalid_class_id) return requested;
-        return class.allocateDynamicClassId();
+    pub fn registerClass(self: *JSRuntime, definition: class.Definition) !class.Binding {
+        return self.classes.registerDefinition(definition);
     }
 
     pub fn setInterruptHandler(self: *JSRuntime, handler: ?*const fn (*JSRuntime, ?*anyopaque) bool, context: ?*anyopaque) void {
@@ -3972,56 +2970,33 @@ pub const JSRuntime = struct {
         };
     }
 
-    /// Reserve count for a global object's own-property table prior to running
-    /// the standard-globals installer. Returns the count registered with the
-    /// installer (0 if none is wired, in which case `installStandardGlobals`
-    /// will fail).
     pub fn standardGlobalOwnPropertyCapacity(self: *const JSRuntime) usize {
-        return self.standard_global_own_property_capacity;
+        return self.hooks.standard_global_own_property_capacity;
     }
 
-    /// Bootstrap the standard ECMAScript global object onto `global` via the
-    /// registered installer. Fails with `error.InvalidBuiltinRegistry` if the
-    /// exec bootstrap never registered one (the installer also wires
-    /// `internal_builtins` and `materialize_builtin_namespace_cb`).
-    ///
-    /// The installer callback is typed `anyerror` so core need not name the
-    /// exec's error set, but the install only ever produces engine errors;
-    /// narrow the result back to the engine runtime-error set so bounded-error
-    /// bootstrap callers keep a concrete operation-specific surface.
-    pub fn installStandardGlobals(self: *JSRuntime, global: *Object) errors.RuntimeError!void {
-        const installer = self.install_standard_globals_cb orelse return error.InvalidBuiltinRegistry;
-        var adopted_context: ?*context_mod.JSContext = null;
-        if (self.contextForGlobalIncludingConstructing(global) == null) {
-            var candidate = self.context_head;
-            while (candidate) |ctx| : (candidate = ctx.runtime_next) {
-                if (ctx.global != null) continue;
-                global.promoteToGlobalObjectClass(self);
-                ctx.global = global;
-                _ = global.ensureGlobalPayload(self) catch |err| {
-                    ctx.rollbackIntrinsicBootstrap();
-                    ctx.global = null;
-                    return @errorCast(err);
-                };
-                adopted_context = ctx;
-                break;
-            }
-            if (adopted_context == null) return error.InvalidBuiltinRegistry;
-        }
-        installer(self, global) catch |err| {
-            if (adopted_context) |ctx| {
-                ctx.rollbackIntrinsicBootstrap();
-                ctx.global = null;
-            }
-            return @errorCast(err);
-        };
+    /// Thread-safe request. The caller must keep this Runtime alive.
+    pub fn terminateExecution(self: *JSRuntime) void {
+        self.termination_requested.store(true, .release);
     }
 
-    pub fn hasInterruptHandler(self: JSRuntime) bool {
-        return self.interrupt_handler != null;
+    pub fn isExecutionTerminating(self: *const JSRuntime) bool {
+        return self.termination_requested.load(.acquire);
+    }
+
+    /// Owner-only idle recovery. Requests ordered after this exchange survive.
+    pub fn cancelTerminateExecution(self: *JSRuntime) !void {
+        try self.requireOwnerThread();
+        if (self.hot.call_depth != 0 or self.hot.native_call_depth != 0 or self.active_invocation != null or self.microtasks.running)
+            return error.RuntimeBusy;
+        _ = self.termination_requested.swap(false, .acq_rel);
+    }
+
+    pub fn hasInterruptHandler(self: *const JSRuntime) bool {
+        return self.interrupt_handler != null or self.isExecutionTerminating();
     }
 
     pub fn runInterruptHandler(self: *JSRuntime) bool {
+        if (self.isExecutionTerminating()) return true;
         const handler = self.interrupt_handler orelse return false;
         return handler(self, self.interrupt_context);
     }
@@ -4030,7 +3005,7 @@ pub const JSRuntime = struct {
         self.can_block = can_block;
     }
 
-    pub fn canBlock(self: JSRuntime) bool {
+    pub fn canBlock(self: *const JSRuntime) bool {
         return self.can_block;
     }
 
@@ -4077,222 +3052,95 @@ pub const JSRuntime = struct {
         }
     }
 
-    pub fn pendingFinalizationJobCountForTest(self: JSRuntime) usize {
+    pub fn pendingFinalizationJobCountForTest(self: *const JSRuntime) usize {
         if (!builtin.is_test) @compileError("test-only helper");
         return self.job_queue.countKind(.finalization);
     }
 
     pub fn enqueueDeferredNativeCleanup(self: *JSRuntime, finalizer: host_function.ExternalFinalizer, ptr: *anyopaque) !void {
-        try self.deferred_native_cleanups.append(self.memory.persistent_allocator, .{
-            .finalizer = finalizer,
-            .ptr = ptr,
-        });
+        return deferred_cleanup.enqueueNative(self, finalizer, ptr);
     }
 
     pub fn enqueueDeferredClassPayloadFinalizer(self: *JSRuntime, class_id: class.ClassId, payload: class.Payload, payload_kind: class.PayloadKind, object_identity: usize) !bool {
-        const definition = self.classes.destructionPlan(class_id) orelse return false;
-        try self.ensureDeferredClassPayloadFinalizerCapacity(self.deferred_class_payload_finalizers.items.len + self.reserved_deferred_class_payload_finalizer_slots + 1);
-        const callbacks = self.classes.pinDeferredPayloadCallbacks(class_id, definition.generation) orelse return false;
-        self.deferred_class_payload_finalizers.appendAssumeCapacity(.{
-            .class_id = class_id,
-            .generation = callbacks.generation,
-            .finalizer = callbacks.finalizer,
-            .mark = callbacks.mark,
-            .payload = payload,
-            .payload_kind = payload_kind,
-            .object_identity = object_identity,
-        });
-        return true;
+        return deferred_cleanup.enqueueClassPayload(self, class_id, payload, payload_kind, object_identity);
     }
 
     pub fn reserveDeferredClassPayloadFinalizerSlot(self: *JSRuntime) !void {
-        try self.ensureDeferredClassPayloadFinalizerCapacity(self.deferred_class_payload_finalizers.items.len + self.reserved_deferred_class_payload_finalizer_slots + 1);
-        errdefer self.releaseEmptyDeferredClassPayloadFinalizerBuffer();
-        // The same reservation owns one entry in the pre-enqueue payload-root
-        // registry. Reserve both allocations before publishing the wrapper's
-        // payload so destruction can transfer ownership without failure.
-        // `reserved_...` already counts every registered root plus any
-        // construction whose payload has not been published yet.
-        try self.ensureDeferredClassPayloadRootCapacity(self.reserved_deferred_class_payload_finalizer_slots + 1);
-        self.reserved_deferred_class_payload_finalizer_slots +|= 1;
+        return deferred_cleanup.reserveClassPayloadSlot(self);
     }
 
     pub fn releaseDeferredClassPayloadFinalizerSlot(self: *JSRuntime) void {
-        std.debug.assert(self.reserved_deferred_class_payload_finalizer_slots != 0);
-        self.reserved_deferred_class_payload_finalizer_slots -= 1;
-        self.releaseEmptyDeferredClassPayloadFinalizerBuffer();
-        self.releaseEmptyDeferredClassPayloadRootBuffer();
+        deferred_cleanup.releaseClassPayloadSlot(self);
     }
 
     /// Publish a wrapper's declared payload edges as roots after its payload
     /// is fully initialized. The reservation remains outstanding until the
     /// wrapper finalizer atomically transfers the payload to a queued job.
     pub fn registerReservedDeferredClassPayloadRoot(self: *JSRuntime, object: *Object) void {
-        std.debug.assert(self.reserved_deferred_class_payload_finalizer_slots != 0);
-        std.debug.assert(self.deferred_class_payload_roots.items.len < self.reserved_deferred_class_payload_finalizer_slots);
-        self.deferred_class_payload_roots.appendAssumeCapacity(object);
+        deferred_cleanup.registerReservedRoot(self, object);
     }
 
     /// End the pre-enqueue root lifetime after the queued node has copied the
     /// payload and mark callback. Queue roots take over before this removal.
     pub fn unregisterDeferredClassPayloadRoot(self: *JSRuntime, object: *Object) void {
-        var found: ?usize = null;
-        for (self.deferred_class_payload_roots.items, 0..) |registered, index| {
-            if (registered == object) {
-                found = index;
-                break;
-            }
-        }
-        const index = found.?;
-        _ = self.deferred_class_payload_roots.swapRemove(index);
-        self.releaseEmptyDeferredClassPayloadRootBuffer();
+        deferred_cleanup.unregisterRoot(self, object);
     }
 
     pub fn enqueueReservedDeferredClassPayloadFinalizer(self: *JSRuntime, class_id: class.ClassId, generation: u64, payload: class.Payload, payload_kind: class.PayloadKind, object_identity: usize) bool {
-        std.debug.assert(self.reserved_deferred_class_payload_finalizer_slots != 0);
-        self.reserved_deferred_class_payload_finalizer_slots -= 1;
-
-        const callbacks = self.classes.pinDeferredPayloadCallbacks(class_id, generation) orelse {
-            self.releaseEmptyDeferredClassPayloadFinalizerBuffer();
-            return false;
-        };
-        self.deferred_class_payload_finalizers.appendAssumeCapacity(.{
-            .class_id = class_id,
-            .generation = callbacks.generation,
-            .finalizer = callbacks.finalizer,
-            .mark = callbacks.mark,
-            .payload = payload,
-            .payload_kind = payload_kind,
-            .object_identity = object_identity,
-        });
-        return true;
+        return deferred_cleanup.enqueueReservedClassPayload(self, class_id, generation, payload, payload_kind, object_identity);
     }
 
     pub fn hasDeferredNativeCleanups(self: *const JSRuntime) bool {
-        return self.deferred_native_cleanups.items.len != 0 or self.deferred_class_payload_finalizers.items.len != 0;
+        return deferred_cleanup.hasNative(self);
     }
 
-    pub fn hasPendingDeferredClassPayloadFinalizers(self: JSRuntime) bool {
-        return self.deferred_class_payload_finalizers.items.len != 0 or
-            self.active_deferred_class_payload_finalizer != null;
+    pub fn hasPendingDeferredClassPayloadFinalizers(self: *const JSRuntime) bool {
+        return deferred_cleanup.hasPendingClassPayload(self);
     }
 
     pub fn isActiveDeferredClassPayloadFinalizerCallback(self: *const JSRuntime, object_identity: *anyopaque) bool {
-        const active = self.active_deferred_class_payload_finalizer orelse return false;
-        return object_identity == @as(*anyopaque, @ptrCast(&active.object_identity));
+        return deferred_cleanup.isActiveClassPayloadCallback(self, object_identity);
     }
 
     pub fn runDeferredNativeCleanupBudgeted(self: *JSRuntime, max_jobs: usize) usize {
-        if (max_jobs == 0) return 0;
-        if (self.draining_deferred_native_cleanups) return 0;
-        self.draining_deferred_native_cleanups = true;
-        defer self.draining_deferred_native_cleanups = false;
-
-        var ran: usize = 0;
-        while (ran < max_jobs and self.deferred_native_cleanups.items.len != 0) : (ran += 1) {
-            const job = self.deferred_native_cleanups.orderedRemove(0);
-            job.run();
-            self.deferred_native_cleanup_run_count +|= 1;
-        }
-
-        self.releaseEmptyDeferredNativeCleanupBuffer();
-        return ran;
+        return deferred_cleanup.runNativeBudgeted(self, max_jobs);
     }
 
     pub fn runDeferredClassPayloadFinalizerBudgeted(self: *JSRuntime, max_jobs: usize) usize {
-        if (max_jobs == 0) return 0;
-        if (self.draining_deferred_class_payload_finalizers) return 0;
-        self.draining_deferred_class_payload_finalizers = true;
-        defer self.draining_deferred_class_payload_finalizers = false;
-
-        var ran: usize = 0;
-        while (ran < max_jobs and self.deferred_class_payload_finalizers.items.len != 0) : (ran += 1) {
-            var job = self.deferred_class_payload_finalizers.orderedRemove(0);
-            self.runDeferredClassPayloadFinalizerJob(&job);
-            self.deferred_class_payload_finalizer_run_count +|= 1;
-        }
-
-        self.releaseEmptyDeferredClassPayloadFinalizerBuffer();
-        return ran;
+        return deferred_cleanup.runClassPayloadBudgeted(self, max_jobs);
     }
 
     pub fn drainDeferredNativeCleanups(self: *JSRuntime) void {
-        while (self.runDeferredNativeCleanupBudgeted(std.math.maxInt(usize)) != 0) {}
-        self.releaseEmptyDeferredNativeCleanupBuffer();
+        deferred_cleanup.drainNative(self);
     }
 
     pub fn drainDeferredClassPayloadFinalizers(self: *JSRuntime) void {
-        while (self.runDeferredClassPayloadFinalizerBudgeted(std.math.maxInt(usize)) != 0) {}
-        self.releaseEmptyDeferredClassPayloadFinalizerBuffer();
+        deferred_cleanup.drainClassPayload(self);
     }
 
     /// Deliver user callbacks only after the collector phase has returned to
-    /// idle. Every entry capable of starting another collection calls this
-    /// first, so a queued payload and its parked destruction morgue cannot be
-    /// carried into a fresh mark cycle. Reentry from the callback is rejected
-    /// by the active-job guard above while its GC request remains pending.
+    /// idle. Reentry from the callback is rejected while its GC request remains
+    /// pending.
     inline fn drainDeferredClassPayloadFinalizersAtSafeBoundary(self: *JSRuntime) void {
-        if (self.deferred_class_payload_finalizers.items.len == 0) return;
-        if (self.gc_running or self.gc.hot.phase != .none) return;
-        if (self.draining_deferred_class_payload_finalizers) return;
-        self.drainDeferredClassPayloadFinalizers();
+        deferred_cleanup.drainClassPayloadAtSafeBoundary(self);
     }
 
-    fn runDeferredClassPayloadFinalizerJob(self: *JSRuntime, job: *DeferredClassPayloadFinalizer) void {
-        std.debug.assert(self.active_deferred_class_payload_finalizer == null);
-        self.active_deferred_class_payload_finalizer = job;
-        defer self.active_deferred_class_payload_finalizer = null;
-        job.run(self);
-    }
-
-    pub fn pendingDeferredNativeCleanupCountForTest(self: JSRuntime) usize {
+    pub fn pendingDeferredNativeCleanupCountForTest(self: *const JSRuntime) usize {
         if (!builtin.is_test) @compileError("test-only helper");
-        return self.deferred_native_cleanups.items.len;
+        return deferred_cleanup.pendingNativeCount(self);
     }
 
-    pub fn pendingDeferredClassPayloadFinalizerCountForTest(self: JSRuntime) usize {
+    pub fn pendingDeferredClassPayloadFinalizerCountForTest(self: *const JSRuntime) usize {
         if (!builtin.is_test) @compileError("test-only helper");
-        return self.deferred_class_payload_finalizers.items.len;
-    }
-
-    fn releaseEmptyDeferredNativeCleanupBuffer(self: *JSRuntime) void {
-        if (self.deferred_native_cleanups.items.len != 0) return;
-        self.deferred_native_cleanups.clearAndFree(self.memory.persistent_allocator);
-    }
-
-    fn ensureDeferredClassPayloadFinalizerCapacity(self: *JSRuntime, min_capacity: usize) !void {
-        try self.deferred_class_payload_finalizers.ensureTotalCapacity(self.memory.persistent_allocator, min_capacity);
-    }
-
-    fn ensureDeferredClassPayloadRootCapacity(self: *JSRuntime, min_capacity: usize) !void {
-        try self.deferred_class_payload_roots.ensureTotalCapacity(self.memory.persistent_allocator, min_capacity);
-    }
-
-    /// Both deferred-finalizer tables give their buffers back once nothing
-    /// is queued and no reservation is outstanding.
-    fn releaseEmptyDeferredClassPayloadFinalizerBuffer(self: *JSRuntime) void {
-        if (self.deferred_class_payload_finalizers.items.len != 0) return;
-        if (self.reserved_deferred_class_payload_finalizer_slots != 0) return;
-        self.deferred_class_payload_finalizers.clearAndFree(self.memory.persistent_allocator);
-    }
-
-    fn releaseEmptyDeferredClassPayloadRootBuffer(self: *JSRuntime) void {
-        if (self.deferred_class_payload_roots.items.len != 0) return;
-        if (self.reserved_deferred_class_payload_finalizer_slots != 0) return;
-        self.deferred_class_payload_roots.clearAndFree(self.memory.persistent_allocator);
+        return deferred_cleanup.pendingClassPayloadCount(self);
     }
 
     pub fn beginBorrowedWeakCleanup(self: *JSRuntime) void {
-        std.debug.assert(!self.borrowed_weak_cleanup_active);
-        self.borrowed_weak_cleanup_active = true;
-        self.borrowed_weak_cleanup_identity_set.clearRetainingCapacity();
-        self.borrowed_weak_cleanup_identities.clearRetainingCapacity();
+        property_state.beginBorrowedCleanup(self);
     }
 
     pub fn endBorrowedWeakCleanup(self: *JSRuntime) void {
-        self.borrowed_weak_cleanup_active = false;
-        self.borrowed_weak_cleanup_identity_set.clearRetainingCapacity();
-        self.borrowed_weak_cleanup_identities.clearRetainingCapacity();
+        property_state.endBorrowedCleanup(self);
     }
 
     pub fn borrowedWeakCleanupActive(self: *const JSRuntime) bool {
@@ -4304,43 +3152,19 @@ pub const JSRuntime = struct {
     }
 
     pub fn enqueueBorrowedWeakCleanupIdentity(self: *JSRuntime, identity: usize) !void {
-        try self.borrowed_weak_cleanup_identities.ensureUnusedCapacity(self.memory.persistent_allocator, 1);
-        if ((identity & 1) == 0) {
-            try self.borrowed_weak_cleanup_identity_set.put(self.memory.persistent_allocator, identity, {});
-        }
-        self.borrowed_weak_cleanup_identities.appendAssumeCapacity(identity);
+        return property_state.enqueueBorrowedCleanupIdentity(self, identity);
     }
 
     pub fn borrowedWeakCleanupIdentityMatches(self: *const JSRuntime, identity: usize) bool {
-        if (identity == 0) return false;
-        if ((identity & 1) == 0) {
-            return self.borrowed_weak_cleanup_identity_set.contains(identity);
-        }
-        var index = self.borrowed_weak_cleanup_identities.items.len;
-        while (index != 0) {
-            index -= 1;
-            if (self.borrowed_weak_cleanup_identities.items[index] == identity) return true;
-        }
-        return false;
+        return property_state.borrowedCleanupIdentityMatches(self, identity);
     }
 
     pub inline fn borrowedWeakCleanupIdentityMatchesSlice(self: *const JSRuntime, start_index: usize, identity: usize) bool {
-        if (identity == 0) return false;
-        if ((identity & 1) == 0) {
-            return self.borrowed_weak_cleanup_identity_set.contains(identity);
-        }
-        var index = self.borrowed_weak_cleanup_identities.items.len;
-        while (index > start_index) {
-            index -= 1;
-            if (self.borrowed_weak_cleanup_identities.items[index] == identity) return true;
-        }
-        return false;
+        return property_state.borrowedCleanupIdentityMatchesSlice(self, start_index, identity);
     }
 
     pub fn clearBorrowedWeakCleanupIdentities(self: *JSRuntime) void {
-        self.borrowed_weak_cleanup_identity_set.clearRetainingCapacity();
-        self.borrowed_weak_cleanup_identities.clearAndFree(self.memory.persistent_allocator);
-        self.borrowed_weak_cleanup_active = false;
+        property_state.clearBorrowedCleanup(self);
     }
 };
 
@@ -4368,21 +3192,20 @@ pub fn settlePendingDestructionForGateStats(rt: *JSRuntime) void {
 }
 
 test "value root frame activation restores nested scopes" {
-    var rt: JSRuntime = undefined;
-    try rt.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
+    defer rt.destroy();
 
     try std.testing.expect(rt.active_value_roots == null);
     {
         var outer = ValueRootFrame{};
-        outer.activate(&rt);
-        defer outer.deactivate(&rt);
+        outer.activate(rt);
+        defer outer.deactivate(rt);
         try std.testing.expect(rt.active_value_roots == &outer);
 
         {
             var inner = ValueRootFrame{};
-            inner.activate(&rt);
-            defer inner.deactivate(&rt);
+            inner.activate(rt);
+            defer inner.deactivate(rt);
             try std.testing.expect(rt.active_value_roots == &inner);
         }
 
@@ -4392,11 +3215,10 @@ test "value root frame activation restores nested scopes" {
 }
 
 test "value handle uses runtime persistent root slot" {
-    var rt: JSRuntime = undefined;
-    try rt.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
+    defer rt.destroy();
 
-    const object = try Object.create(&rt, class.ids.object, null);
+    const object = try Object.create(rt, class.ids.object, null);
     var handle = try rt.takeValueHandle(object.value());
     try std.testing.expectEqual(@as(usize, 1), rt.persistentRootCountForTest());
     try std.testing.expect(handle.get().is(.object));
@@ -4410,14 +3232,14 @@ test "value handle uses runtime persistent root slot" {
 }
 
 test "external memory accounting records debt and requests GC" {
-    var rt: JSRuntime = undefined;
-    try rt.init(std.testing.allocator, .{
+    const rt = try JSRuntime.create(.{
+        .allocator = std.testing.allocator,
         .gc_policy = .{
             .external_weight = 2,
             .major_debt_threshold = 16,
         },
     });
-    defer rt.deinit();
+    defer rt.destroy();
 
     try std.testing.expectEqual(@as(usize, 0), rt.externalMemoryBytes());
     try std.testing.expectEqual(@as(usize, 0), rt.allocationDebtBytes());
@@ -4449,14 +3271,14 @@ test "external memory accounting records debt and requests GC" {
 }
 
 test "external hard memory pressure requests urgent major gc" {
-    var rt: JSRuntime = undefined;
-    try rt.init(std.testing.allocator, .{
+    const rt = try JSRuntime.create(.{
+        .allocator = std.testing.allocator,
         .gc_policy = .{
             .external_hard_limit = 8,
             .major_debt_threshold = std.math.maxInt(usize),
         },
     });
-    defer rt.deinit();
+    defer rt.destroy();
 
     var token = try rt.reportExternalAlloc(8);
     defer token.release();
@@ -4484,10 +3306,11 @@ test "VM stack arena default fill matches VmStackArena{}" {
     try std.testing.expectEqual(empty.ptr, arena.chunks[0].ptr);
     try std.testing.expectEqual(@as(usize, 0), arena.chunks[0].len);
 
-    var account = memory.MemoryAccount.init(std.testing.allocator);
-    arena.deinit(&account);
+    const account = try mem_ops.createTestRuntime(std.testing.allocator);
+    defer account.destroy();
+    arena.deinit(account.nativeAllocator());
     try std.testing.expectEqualDeep(VmStackArena{}, arena);
-    try std.testing.expect(!account.hasOutstandingAllocations());
+    try std.testing.expect(!mem_ops.hasOutstandingAllocations(account));
 }
 
 test "VM stack arena allocates and reuses a compact first chunk" {
@@ -4496,45 +3319,47 @@ test "VM stack arena allocates and reuses a compact first chunk" {
         VmStackArena.first_chunk_slots,
     );
 
-    var account = memory.MemoryAccount.init(std.testing.allocator);
+    const account = try mem_ops.createTestRuntime(std.testing.allocator);
+    defer account.destroy();
     var arena: VmStackArena = .{};
-    defer arena.deinit(&account);
+    defer arena.deinit(account.nativeAllocator());
 
     const initial_mark = arena.mark();
-    const first = arena.carve(&account, 3) orelse return error.TestUnexpectedResult;
+    const first = arena.carve(account, 3) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 3), first.len);
     try std.testing.expectEqual(@as(usize, 1), arena.chunk_count);
     try std.testing.expectEqual(@as(usize, 0), arena.active);
     try std.testing.expectEqual(VmStackArena.first_chunk_slots, arena.chunks[0].len);
-    try std.testing.expectEqual(VmStackArena.first_chunk_bytes, account.allocated_bytes);
-    try std.testing.expectEqual(@as(usize, 1), account.allocation_count);
+    try std.testing.expectEqual(VmStackArena.first_chunk_bytes, account.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 1), account.diagnostics.allocations.allocation_count);
 
     arena.restore(initial_mark);
-    const allocations_before_reuse = account.allocation_count;
-    const reused = arena.carve(&account, 3) orelse return error.TestUnexpectedResult;
+    const allocations_before_reuse = account.diagnostics.allocations.allocation_count;
+    const reused = arena.carve(account, 3) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@intFromPtr(first.ptr), @intFromPtr(reused.ptr));
-    try std.testing.expectEqual(allocations_before_reuse, account.allocation_count);
-    try std.testing.expectEqual(VmStackArena.first_chunk_bytes, account.allocated_bytes);
+    try std.testing.expectEqual(allocations_before_reuse, account.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(VmStackArena.first_chunk_bytes, account.diagnostics.allocations.allocated_bytes);
 }
 
 test "VM stack arena active miss is pure before authoritative second chunk carve" {
-    var account = memory.MemoryAccount.init(std.testing.allocator);
+    const account = try mem_ops.createTestRuntime(std.testing.allocator);
+    defer account.destroy();
     var arena: VmStackArena = .{};
-    defer arena.deinit(&account);
+    defer arena.deinit(account.nativeAllocator());
 
-    _ = arena.carve(&account, VmStackArena.first_chunk_slots) orelse
+    _ = arena.carve(account, VmStackArena.first_chunk_slots) orelse
         return error.TestUnexpectedResult;
     const full_mark = arena.mark();
-    const bytes_before_miss = account.allocated_bytes;
-    const allocations_before_miss = account.allocation_count;
+    const bytes_before_miss = account.diagnostics.allocations.allocated_bytes;
+    const allocations_before_miss = account.diagnostics.allocations.allocation_count;
 
     try std.testing.expect(arena.carveActiveMarked(1) == null);
     try std.testing.expectEqual(full_mark, arena.mark());
-    try std.testing.expectEqual(bytes_before_miss, account.allocated_bytes);
-    try std.testing.expectEqual(allocations_before_miss, account.allocation_count);
+    try std.testing.expectEqual(bytes_before_miss, account.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(allocations_before_miss, account.diagnostics.allocations.allocation_count);
     try std.testing.expectEqual(@as(usize, 1), arena.chunk_count);
 
-    const second = arena.carve(&account, 1) orelse return error.TestUnexpectedResult;
+    const second = arena.carve(account, 1) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), second.len);
     try std.testing.expectEqual(@as(usize, 2), arena.chunk_count);
     try std.testing.expectEqual(@as(usize, 1), arena.active);
@@ -4543,77 +3368,80 @@ test "VM stack arena active miss is pure before authoritative second chunk carve
     try std.testing.expectEqual(
         VmStackArena.first_chunk_bytes +
             VmStackArena.chunk_slots * @sizeOf(JSValue),
-        account.allocated_bytes,
+        account.diagnostics.allocations.allocated_bytes,
     );
-    try std.testing.expectEqual(allocations_before_miss + 1, account.allocation_count);
+    try std.testing.expectEqual(allocations_before_miss + 1, account.diagnostics.allocations.allocation_count);
 }
 
 test "VM stack arena large first carve retains the maximum chunk size" {
-    var account = memory.MemoryAccount.init(std.testing.allocator);
+    const account = try mem_ops.createTestRuntime(std.testing.allocator);
+    defer account.destroy();
     var arena: VmStackArena = .{};
-    defer arena.deinit(&account);
+    defer arena.deinit(account.nativeAllocator());
 
     const requested = VmStackArena.first_chunk_slots + 1;
-    const window = arena.carve(&account, requested) orelse return error.TestUnexpectedResult;
+    const window = arena.carve(account, requested) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(requested, window.len);
     try std.testing.expectEqual(@as(usize, 1), arena.chunk_count);
     try std.testing.expectEqual(VmStackArena.chunk_slots, arena.chunks[0].len);
     try std.testing.expectEqual(
         VmStackArena.chunk_slots * @sizeOf(JSValue),
-        account.allocated_bytes,
+        account.diagnostics.allocations.allocated_bytes,
     );
-    try std.testing.expectEqual(@as(usize, 1), account.allocation_count);
+    try std.testing.expectEqual(@as(usize, 1), account.diagnostics.allocations.allocation_count);
 }
 
 test "VM stack arena oversized carve is rejected without state or accounting changes" {
-    var account = memory.MemoryAccount.init(std.testing.allocator);
+    const account = try mem_ops.createTestRuntime(std.testing.allocator);
+    defer account.destroy();
     var arena: VmStackArena = .{};
-    defer arena.deinit(&account);
+    defer arena.deinit(account.nativeAllocator());
 
     const before = arena.mark();
-    try std.testing.expect(arena.carve(&account, VmStackArena.chunk_slots + 1) == null);
+    try std.testing.expect(arena.carve(account, VmStackArena.chunk_slots + 1) == null);
     try std.testing.expectEqual(before, arena.mark());
     try std.testing.expectEqual(@as(usize, 0), arena.chunk_count);
-    try std.testing.expectEqual(@as(usize, 0), account.allocated_bytes);
-    try std.testing.expectEqual(@as(usize, 0), account.allocation_count);
+    try std.testing.expectEqual(@as(usize, 0), account.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), account.diagnostics.allocations.allocation_count);
 }
 
 test "VM stack arena allocation failure is retryable and keeps accounting balanced" {
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    var account = memory.MemoryAccount.init(failing_allocator.allocator());
+    const account = try mem_ops.createTestRuntime(failing_allocator.allocator());
+    defer account.destroy();
     var arena: VmStackArena = .{};
-    defer arena.deinit(&account);
+    defer arena.deinit(account.nativeAllocator());
 
     failing_allocator.fail_index = failing_allocator.alloc_index;
     const before = arena.mark();
-    try std.testing.expect(arena.carve(&account, 1) == null);
+    try std.testing.expect(arena.carve(account, 1) == null);
     try std.testing.expectEqual(before, arena.mark());
     try std.testing.expectEqual(@as(usize, 0), arena.chunk_count);
-    try std.testing.expectEqual(@as(usize, 0), account.allocated_bytes);
-    try std.testing.expectEqual(@as(usize, 0), account.allocation_count);
+    try std.testing.expectEqual(@as(usize, 0), account.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), account.diagnostics.allocations.allocation_count);
 
     failing_allocator.fail_index = std.math.maxInt(usize);
-    const retry = arena.carve(&account, 1) orelse return error.TestUnexpectedResult;
+    const retry = arena.carve(account, 1) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), retry.len);
     try std.testing.expectEqual(@as(usize, 1), arena.chunk_count);
-    try std.testing.expectEqual(VmStackArena.first_chunk_bytes, account.allocated_bytes);
-    try std.testing.expectEqual(@as(usize, 1), account.allocation_count);
+    try std.testing.expectEqual(VmStackArena.first_chunk_bytes, account.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 1), account.diagnostics.allocations.allocation_count);
 
-    _ = arena.carve(&account, VmStackArena.first_chunk_slots - 1) orelse
+    _ = arena.carve(account, VmStackArena.first_chunk_slots - 1) orelse
         return error.TestUnexpectedResult;
     const full_first_mark = arena.mark();
     failing_allocator.fail_index = failing_allocator.alloc_index;
-    try std.testing.expect(arena.carve(&account, 1) == null);
+    try std.testing.expect(arena.carve(account, 1) == null);
     try std.testing.expectEqual(full_first_mark, arena.mark());
     try std.testing.expectEqual(@as(usize, 1), arena.chunk_count);
     try std.testing.expectEqual(@as(usize, 0), arena.active);
     try std.testing.expectEqual(@as(usize, 0), arena.chunks[1].len);
     try std.testing.expectEqual(@as(usize, 0), arena.used[1]);
-    try std.testing.expectEqual(VmStackArena.first_chunk_bytes, account.allocated_bytes);
-    try std.testing.expectEqual(@as(usize, 1), account.allocation_count);
+    try std.testing.expectEqual(VmStackArena.first_chunk_bytes, account.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 1), account.diagnostics.allocations.allocation_count);
 
     failing_allocator.fail_index = std.math.maxInt(usize);
-    const second_retry = arena.carve(&account, 1) orelse return error.TestUnexpectedResult;
+    const second_retry = arena.carve(account, 1) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), second_retry.len);
     try std.testing.expectEqual(@as(usize, 2), arena.chunk_count);
     try std.testing.expectEqual(@as(usize, 1), arena.active);
@@ -4622,41 +3450,41 @@ test "VM stack arena allocation failure is retryable and keeps accounting balanc
     try std.testing.expectEqual(
         VmStackArena.first_chunk_bytes +
             VmStackArena.chunk_slots * @sizeOf(JSValue),
-        account.allocated_bytes,
+        account.diagnostics.allocations.allocated_bytes,
     );
-    try std.testing.expectEqual(@as(usize, 2), account.allocation_count);
+    try std.testing.expectEqual(@as(usize, 2), account.diagnostics.allocations.allocation_count);
 
-    arena.deinit(&account);
-    try std.testing.expectEqual(@as(usize, 0), account.allocated_bytes);
-    try std.testing.expectEqual(@as(usize, 0), account.allocation_count);
+    arena.deinit(account.nativeAllocator());
+    try std.testing.expectEqual(@as(usize, 0), account.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(@as(usize, 0), account.diagnostics.allocations.allocation_count);
 }
 
 test "runtime allocator facades share memory accounting" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
-    const baseline = rt.memory.allocated_bytes;
-    const current = try rt.memory.allocator.alloc(u8, 2048);
+    const baseline = rt.diagnostics.allocations.allocated_bytes;
+    const current = try rt.nativeAllocator().alloc(u8, 2048);
     var current_live = true;
-    defer if (current_live) rt.memory.allocator.free(current);
-    try std.testing.expectEqual(baseline + current.len, rt.memory.allocated_bytes);
+    defer if (current_live) rt.nativeAllocator().free(current);
+    try std.testing.expectEqual(baseline + current.len, rt.diagnostics.allocations.allocated_bytes);
 
-    const persistent = try rt.memory.persistent_allocator.alloc(u8, 4096);
+    const persistent = try rt.nativeAllocator().alloc(u8, 4096);
     var persistent_live = true;
-    defer if (persistent_live) rt.memory.persistent_allocator.free(persistent);
-    try std.testing.expectEqual(baseline + current.len + persistent.len, rt.memory.allocated_bytes);
+    defer if (persistent_live) rt.nativeAllocator().free(persistent);
+    try std.testing.expectEqual(baseline + current.len + persistent.len, rt.diagnostics.allocations.allocated_bytes);
 
-    rt.memory.persistent_allocator.free(persistent);
+    rt.nativeAllocator().free(persistent);
     persistent_live = false;
-    try std.testing.expectEqual(baseline + current.len, rt.memory.allocated_bytes);
-    rt.memory.allocator.free(current);
+    try std.testing.expectEqual(baseline + current.len, rt.diagnostics.allocations.allocated_bytes);
+    rt.nativeAllocator().free(current);
     current_live = false;
-    try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(baseline, rt.diagnostics.allocations.allocated_bytes);
 }
 
 test "runtime and context init-deinit are leak free" {
     for (0..3) |_| {
-        const rt = try JSRuntime.create(std.testing.allocator, .{});
+        const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
         const ctx1 = try context_mod.JSContext.create(rt, .{});
         const ctx2 = try context_mod.JSContext.create(rt, .{});
         ctx2.destroy();

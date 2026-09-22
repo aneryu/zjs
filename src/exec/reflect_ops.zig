@@ -230,7 +230,7 @@ pub fn reflectConstructCall(
     if (object_ops.objectFromValue(args[0])) |target| {
         if (target.proxyTarget() == null) {
             const target_name = try call_mod.nativeFunctionNameForVm(ctx.runtime, target);
-            defer ctx.runtime.memory.allocator.free(target_name);
+            defer ctx.runtime.nativeAllocator().free(target_name);
             if (construct_mod.typedArrayElement(target_name) != null) {
                 try array_ops.typedArrayValidateConstructArgsPreAllocate(ctx, output, global, construct_args);
             }

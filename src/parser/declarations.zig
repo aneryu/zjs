@@ -218,7 +218,7 @@ pub fn declarationConflictIndex(
     }
     if (fd.vars.len < declaration_conflict_index_threshold) return null;
 
-    const allocator = s.memory.allocator;
+    const allocator = s.scratch;
     var candidate: DeclarationConflictIndex = .{};
     var candidate_owned = true;
     defer if (candidate_owned) candidate.deinit(allocator);
@@ -256,13 +256,13 @@ pub fn discardDeclarationConflictIndex(
     fd: *function_def_mod.FunctionDef,
 ) void {
     if (s.declaration_conflict_indices.getPtr(fd)) |index| {
-        index.deinit(s.memory.allocator);
+        index.deinit(s.scratch);
         _ = s.declaration_conflict_indices.remove(fd);
     }
 }
 
 pub fn deinitDeclarationConflictIndices(s: *State) void {
-    const allocator = s.memory.allocator;
+    const allocator = s.scratch;
     var iterator = s.declaration_conflict_indices.iterator();
     while (iterator.next()) |entry| {
         entry.value_ptr.deinit(allocator);
@@ -294,7 +294,7 @@ pub fn prepareLinkedDeclarationIndexWrite(
             1,
         ) catch return error.OutOfMemory;
         try index.scope_names.ensureTotalCapacity(
-            s.memory.allocator,
+            s.scratch,
             @intCast(needed),
         );
     }
@@ -365,7 +365,7 @@ pub fn prepareFunctionVarOriginIndexWrite(
             missing,
         ) catch return error.OutOfMemory;
         try index.scope_names.ensureTotalCapacity(
-            s.memory.allocator,
+            s.scratch,
             @intCast(needed),
         );
     }

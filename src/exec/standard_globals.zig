@@ -17,7 +17,7 @@ const string_builtin = @import("string_ops.zig");
 const atomics_builtin = @import("atomics_ops.zig");
 const reflect_builtin = @import("reflect_ops.zig");
 const typed_array_names = core.typed_array_names;
-const internal_builtins = @import("internal_builtins.zig");
+pub const internal_builtins = @import("internal_builtins.zig");
 const function_ops = @import("function_ops.zig");
 const json_builtin = @import("json_ops.zig");
 const math_builtin = @import("math_ops.zig");
@@ -1427,24 +1427,8 @@ fn constructorPrototypeObject(ctor: *core.Object) ?*core.Object {
     return null;
 }
 
-fn materializeBuiltinNamespace(rt: *core.JSRuntime, global: *core.Object, kind: core.property.AutoInitKind) anyerror!?core.JSValue {
+pub fn materializeBuiltinNamespace(rt: *core.JSRuntime, global: *core.Object, kind: core.property.AutoInitKind) anyerror!?core.JSValue {
     return try materializeBuiltinNamespaceAutoInit(rt, global, kind);
-}
-
-/// Register exec's standard-globals installer as the process-wide default.
-/// New bare `core.JSRuntime` instances copy this callback and capacity during
-/// initialization without introducing a core -> exec dependency.
-pub fn registerStandardGlobalsDefault() void {
-    core.runtime.setDefaultStandardGlobalsInstaller(installStandardGlobals, standardGlobalOwnPropertyCapacity());
-}
-
-/// Configure an existing runtime for standard-global bootstrap. This is the
-/// single setup interface for binding and test callers that already own a
-/// runtime; it keeps the callback and its capacity invariant together.
-pub fn configureRuntime(rt: *core.JSRuntime) void {
-    registerStandardGlobalsDefault();
-    rt.install_standard_globals_cb = installStandardGlobals;
-    rt.standard_global_own_property_capacity = standardGlobalOwnPropertyCapacity();
 }
 
 /// Install one explicitly named standard constructor. The caller supplies the
@@ -1704,12 +1688,8 @@ fn installStandardConstructors(
     }
 }
 
-pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
-    // Keep the per-runtime + process-global installer hooks live for any later
-    // runtime/realm built off this one, even when bootstrap reached us directly.
-    configureRuntime(rt);
-    rt.materialize_builtin_namespace_cb = materializeBuiltinNamespace;
-    rt.internal_builtins = &internal_builtins.table;
+pub fn installStandardGlobals(ctx: *core.JSContext, global: *core.Object) !void {
+    const rt = ctx.runtime;
     // Constructing realms are not roots via `context_head`. Name the global
     // for the bootstrap window so properties published onto it stay live
     // under exact-mark (test-oom STW canary).
@@ -1740,7 +1720,6 @@ pub fn installStandardGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
     const regexp_ctor = installedConstructor(&installed_constructors, .regexp) orelse return error.InvalidBuiltinRegistry;
     const array_proto = constructorPrototypeObject(array_ctor) orelse return error.InvalidBuiltinRegistry;
     const regexp_proto = constructorPrototypeObject(regexp_ctor) orelse return error.InvalidBuiltinRegistry;
-    const ctx = rt.contextForGlobalIncludingConstructing(global) orelse return error.InvalidBuiltinRegistry;
     try ctx.initializeInitialShapes(object_proto, array_proto, regexp_proto);
     // Publish only after the intrinsic graph and realm-owned initial shapes are
     // complete. Indexed mutation of this Array prototype (or its matching
@@ -3240,7 +3219,6 @@ pub const Intrinsics = struct {
     global: *core.Object,
 
     pub fn init(rt: *core.JSRuntime) !Intrinsics {
-        configureRuntime(rt);
         const context = try core.JSContext.create(rt, .{});
         errdefer context.destroy();
         const global = try core.Object.createWithOwnPropertyCapacity(
@@ -3251,7 +3229,7 @@ pub const Intrinsics = struct {
         );
         _ = try global.ensureGlobalPayload(rt);
         context.global = global;
-        try rt.installStandardGlobals(global);
+        try context.installStandardGlobals(global);
         return .{ .context = context, .global = global };
     }
 
@@ -3473,7 +3451,7 @@ fn expectAutoInitOwnPropertyForTest(object: *core.Object, atom_id: core.Atom) !v
 }
 
 test "intrinsic bootstrap registers global builtin domains through object properties" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     var intrinsics = try Intrinsics.init(rt);
@@ -3514,7 +3492,7 @@ test "intrinsic bootstrap registers global builtin domains through object proper
 }
 
 test "lazy standard functions attach typed records for every formerly exceptional domain" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     var intrinsics = try Intrinsics.init(rt);
@@ -3559,7 +3537,7 @@ test "lazy standard functions attach typed records for every formerly exceptiona
 }
 
 test "bootstrap aliases retain exact native identity and records" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     var intrinsics = try Intrinsics.init(rt);
@@ -3644,7 +3622,7 @@ test "bootstrap aliases retain exact native identity and records" {
 }
 
 test "Realm bootstrap publishes eager and alias function metadata without repair scans" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     var intrinsics = try Intrinsics.init(rt);
@@ -3795,7 +3773,7 @@ test "Realm bootstrap publishes eager and alias function metadata without repair
 }
 
 test "lazy builtin namespaces remain AUTOINIT after Realm bootstrap" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     var intrinsics = try Intrinsics.init(rt);

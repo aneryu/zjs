@@ -299,7 +299,7 @@ const OpenUsingBlock = struct {
 fn openUsingBlock(s: *State) Error!OpenUsingBlock {
     const frame_len = s.using_block_frames.items.len;
     const catch_marker_depth = s.active_catch_marker_depth;
-    try array_list_erased.append(&s.using_block_frames, s.memory.allocator, .{});
+    try array_list_erased.append(&s.using_block_frames, s.scratch, .{});
     return .{ .frame_len = frame_len, .catch_marker_depth = catch_marker_depth };
 }
 

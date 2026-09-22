@@ -83,7 +83,16 @@ These names are on the public module today and are recorded rather than
 hidden:
 
 - `zjs.RuntimeMemoryUsage` is a root export. Embedders read it from
-  `Runtime.memoryUsage()`.
+  `Runtime.memoryUsage()`. It reports heap-budget bytes, optional allocation diagnostics, the byte length of
+  live dynamic atom names, and class registration counts. It does not
+  estimate object, shape, or module sizes from a count times a fixed width.
+- `zjs.GCStats` and `zjs.GCDetailedStats` are root exports.
+  `Runtime.gcStats()` reads maintained counters only: it does not walk the
+  heap and it does not read process memory. `Runtime.gcDetailedStats()`
+  adds one heap census and a process sample. Heap live bytes, external
+  token bytes, and RSS stay separate. Ordinary `weak_ref_count` counts
+  host weak-root slots; the detailed snapshot also counts
+  weak-collection and FinalizationRegistry cells.
 - `zjs.JSRuntime` / `JSContext` / `JSValue` are aliases of `Runtime` /
   `Context` / `Value`. `zjs.core`, `zjs.exec`, `zjs.parser`, `zjs.native`,
   and `zjs.runtime` are in-tree layer re-exports.
@@ -107,12 +116,82 @@ public-contract update.
 
 ## Runtime And Context
 
+`Runtime.create(.{})` creates an owned, stable-address Runtime using
+`std.heap.c_allocator`. Supply `.allocator = your_allocator` in the same options
+object to override it; release with `destroy()`. Runtime has no public in-place
+initialization or copied ownership state. The libc default follows the local
+allocator comparison, not a claim of universal throughput superiority.
+
+Ordinary native storage uses the selected allocator directly in production.
+GC cells use the GC-owned slab, nursery, block and extent routes; prefixed
+cells must be released through their matching engine helpers. Parser scratch
+belongs to its compile arena. No allocator context is reverse-cast to discover
+an owner: operand stacks and reserved BigInts name their Runtime explicitly.
+Debug/test instrumentation records allocation events and supports failure
+injection; it is not a production native-memory limit or a second heap budget.
+
+`memoryUsage().heap_bytes` reports the maintained published-heap budget.
+`allocation_tracking_enabled` distinguishes available native/mixed allocation
+diagnostics from unavailable counters (zero in builds without instrumentation).
+Heap bytes, external pressure and process RSS are separate quantities. Cycle
+peak diagnostics now use the same heap-budget domain as the GC threshold.
+
 `Runtime` owns allocator-backed engine state, atom tables, GC state, public
 handle scopes, memory limits, interrupt hooks, opcode-profiling state, the
-native-entry arena (see Native Functions), and runtime cleanup. The profiling
+native-entry arena (see Native Functions), and runtime cleanup.
+`Runtime.diagnostics` owns the allocation-trace sink and the mark-footprint
+census used by `--gc-mark-footprint`. That census stays off the GC registry
+so the registry's hot words keep their front-line placement.
+`Runtime.setMemoryLimit` / `memoryUsage().memory_limit` cap the JS heap
+budget (published non-nursery cells). They do not cap ordinary native
+allocations, external token bytes, or RSS. A charge that does not fit
+collects at most once, then rechecks the current limit (including changes made by reentrant cleanup) and fails if it still does not fit. Ordinary
+native allocation does not collect. `Runtime.gcThreshold` is the
+collector's growth bar for that same budget. The profiling
 types are public, but per-opcode counts are populated only in profiling
 builds (`zig build zjs-profile` / `-Dzjs_enable_opcode_profile=true`);
 default builds fail closed on `--profile-opcodes`.
+
+The creation option `gc_threshold` is the initial threshold. `gcThreshold()`
+returns the current dynamic threshold, including adjustments made while
+creating a Context. `forceGC` propagates collection errors; silent collection
+is restricted to internal teardown and test fixtures.
+
+`stack_size` / `setStackSize` bound active VM frame bytes. The separate
+`native_stack_size` / `setNativeStackSize` bound the native stack; zero disables
+only that native bound. Existing depth safeguards remain in place. Setting a
+native bound while idle refreshes the stack base; setting it during execution
+preserves the active entry's base.
+
+`terminateExecution` can be called from another thread while the caller keeps
+the Runtime alive. Execution observes the atomic request at interrupt polls;
+it does not interrupt blocking host code. `cancelTerminateExecution` requires
+the owner thread and an idle Runtime. Requests ordered after its atomic reset
+remain pending. A checkpoint observing termination discards its remaining jobs;
+recovery does not revive them. Live finalization reservations remain valid.
+
+`Runtime.runMicrotasks()` drains only ECMAScript jobs. Without an exception
+handler, an ordinary job exception returns `JSException`, leaves its value in
+the Runtime and preserves the tail. A handler receives a borrowed, precisely
+rooted value; success continues draining. Handler failure returns to the host
+and preserves the tail. Handler reentry returns `MicrotaskReentry`; ordinary
+nested checkpoints are no-ops. OOM and termination retain their error classes.
+`Context.runJobs` and `EventLoop.drain` propagate these failures. EventLoop
+alone dispatches timer, I/O, signal and Atomics host completions.
+
+`microtask_policy` defaults to `auto`: successful outermost execution returns
+run a checkpoint. `explicit` requires the host to call it. With `scoped`,
+`enterMicrotaskScope()` returns a token whose fallible `finish()` drains at
+the outermost scope exit. Tokens must finish in LIFO order, including when
+the scope body fails. An open scope prevents premature checkpoints. WeakRef
+kept-alive values clear when the checkpoint completes, not between jobs.
+
+Internal engine hooks are fixed when the Runtime is created. Context bootstrap
+names its Realm explicitly; it never adopts the first empty Context. Dynamic
+class registration returns a Runtime-owned binding; numeric ids are local,
+failed reservations are not reused, and definitions remain until teardown.
+Native object creation and unwrap reject bindings and objects from other
+Runtimes. Bindings cannot outlive their owning Runtime.
 
 `Context` owns a realm and exposes public helpers for:
 
@@ -368,3 +447,10 @@ The current public API contract is covered by:
   finalizer timing);
 - public API contract and production failure-path tests in
   `tests/core.zig` and `tests/public_api.zig`.
+
+
+The dynamic-import host drain obeys Runtime checkpoint reentry and scope
+boundaries. Internal TLA scheduling retains its continuation/job interleaving,
+but each engine job uses the shared termination and exception-reporting
+boundary. An exception handler that leaves a pending OOM or uncatchable
+exception preserves that failure classification for the host.

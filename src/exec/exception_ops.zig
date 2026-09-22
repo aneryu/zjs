@@ -12,7 +12,6 @@ const std = @import("std");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 
-
 const frame_mod = @import("frame.zig");
 const property_ops = @import("property_ops.zig");
 const value_ops = @import("value_ops.zig");
@@ -172,7 +171,7 @@ fn buildNamedErrorObject(rt: *core.JSRuntime, ctor_value: core.JSValue, name: []
 }
 
 test "buildNamedErrorObject roots direct symbol constructor while creating error object" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-error-constructor-symbol");
@@ -207,7 +206,7 @@ test "buildNamedErrorObject roots direct symbol constructor while creating error
         try std.testing.expect(stored.isString());
     }
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -422,7 +421,7 @@ pub fn throwReferenceErrorMessage(ctx: *core.JSContext, global: *core.Object, me
 /// "not defined") is what a JS `catch` would otherwise see. Cold: called only
 /// after the lookup has already failed.
 pub fn throwReferenceErrorNotDefined(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom) !core.JSValue {
-    const allocator = ctx.runtime.memory.allocator;
+    const allocator = ctx.runtime.nativeAllocator();
     var index_buf: [16]u8 = undefined;
     const name: []const u8 = if (atom_id.isTaggedInt())
         std.fmt.bufPrint(&index_buf, "{d}", .{atom_id.toUInt32()}) catch unreachable
@@ -464,7 +463,7 @@ fn backtraceFunctionNameAtom(ctx: *core.JSContext, fallback: core.Atom, current_
     if (name_desc.kind != .data or !name_desc.value.isString()) return core.atom.ids.empty_string;
 
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(ctx.runtime.memory.allocator);
+    defer bytes.deinit(ctx.runtime.nativeAllocator());
     try value_ops.appendRawString(ctx.runtime, &bytes, name_desc.value);
     return ctx.runtime.atoms.internString(bytes.items);
 }
@@ -519,13 +518,13 @@ pub fn isErrorConstructorName(name: []const u8) bool {
 }
 
 pub fn functionNameBytes(rt: *core.JSRuntime, value: core.JSValue) ![]u8 {
-    const object = core.value_semantics.objectFromValue(value) orelse return rt.memory.allocator.dupe(u8, "");
+    const object = core.value_semantics.objectFromValue(value) orelse return rt.nativeAllocator().dupe(u8, "");
     const name_value = try object.getProperty(core.atom.ids.name);
-    if (!name_value.isString()) return rt.memory.allocator.dupe(u8, "");
+    if (!name_value.isString()) return rt.nativeAllocator().dupe(u8, "");
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try value_ops.appendRawString(rt, &bytes, name_value);
-    return rt.memory.allocator.dupe(u8, bytes.items);
+    return rt.nativeAllocator().dupe(u8, bytes.items);
 }
 
 pub fn pendingExceptionMatchesError(ctx: *core.JSContext, err: anyerror) bool {
@@ -776,13 +775,11 @@ fn throwReferenceErrorSentinel(ctx: *core.JSContext) void {
     _ = ctx.throwValue(core.JSValue.int32(@intCast(reference_error_atom.raw())));
 }
 
-
 // ----- merged from exceptions.zig -----
 // Compatibility names for the core engine-error authority.
 const core_errors = @import("../core/errors.zig");
 pub const RuntimeError = core_errors.RuntimeError;
 pub const HostError = core_errors.HostError;
-
 
 // ----- merged from error_ops.zig -----
 // Error-object native records and their realm-aware dispatch seam.
@@ -854,7 +851,6 @@ fn errorCall(
         else => error.TypeError,
     };
 }
-
 
 // ----- merged from error_stack_ops.zig -----
 // Error.stack capture/formatting, backtrace naming and CallSite helpers.
@@ -974,8 +970,8 @@ fn defineParseErrorSurface(
     try instance.defineOwnProperty(rt, core.atom.ids.columnNumber, core.Descriptor.data(core.JSValue.int32(col_num), .method));
 
     var bytes: std.ArrayList(u8) = .empty;
-    defer bytes.deinit(rt.memory.allocator);
-    try bytes.print(rt.memory.allocator, "    at {s}:{d}:{d}\n", .{ filename, line_num, col_num });
+    defer bytes.deinit(rt.nativeAllocator());
+    try bytes.print(rt.nativeAllocator(), "    at {s}:{d}:{d}\n", .{ filename, line_num, col_num });
     const frames_value = try buildErrorStackStringValue(ctx, global, null);
     try value_ops.appendRawString(rt, &bytes, frames_value);
     const stack_value = try value_ops.createStringValue(rt, bytes.items);
@@ -1044,22 +1040,22 @@ pub fn appendBacktraceFunctionName(
     const name = ctx.runtime.atoms.name(function_name) orelse "";
     const file = ctx.runtime.atoms.name(filename) orelse "";
     if (name.len == 0) {
-        try bytes.appendSlice(ctx.runtime.memory.allocator, "<anonymous>");
+        try bytes.appendSlice(ctx.runtime.nativeAllocator(), "<anonymous>");
     } else if (std.mem.eql(u8, name, file)) {
         // Top-level script/eval frame (see callSiteFunctionName).
-        try bytes.appendSlice(ctx.runtime.memory.allocator, "<eval>");
+        try bytes.appendSlice(ctx.runtime.nativeAllocator(), "<eval>");
     } else {
-        try bytes.appendSlice(ctx.runtime.memory.allocator, name);
+        try bytes.appendSlice(ctx.runtime.nativeAllocator(), name);
     }
 }
 
 pub fn appendCallSiteFunctionName(rt: *core.JSRuntime, bytes: *std.ArrayList(u8), site: *core.Object) !void {
     const name_value = site.callSiteFunctionName() orelse {
-        try bytes.appendSlice(rt.memory.allocator, "<anonymous>");
+        try bytes.appendSlice(rt.nativeAllocator(), "<anonymous>");
         return;
     };
     if (!name_value.isString()) {
-        try bytes.appendSlice(rt.memory.allocator, "<anonymous>");
+        try bytes.appendSlice(rt.nativeAllocator(), "<anonymous>");
         return;
     }
     try value_ops.appendRawString(rt, bytes, name_value);
@@ -1067,11 +1063,11 @@ pub fn appendCallSiteFunctionName(rt: *core.JSRuntime, bytes: *std.ArrayList(u8)
 
 pub fn appendCallSiteFileName(rt: *core.JSRuntime, bytes: *std.ArrayList(u8), site: *core.Object) !void {
     const file_value = site.callSiteFile() orelse {
-        try bytes.appendSlice(rt.memory.allocator, "<anonymous>");
+        try bytes.appendSlice(rt.nativeAllocator(), "<anonymous>");
         return;
     };
     if (!file_value.isString()) {
-        try bytes.appendSlice(rt.memory.allocator, "<anonymous>");
+        try bytes.appendSlice(rt.nativeAllocator(), "<anonymous>");
         return;
     }
     try value_ops.appendRawString(rt, bytes, file_value);
@@ -1178,7 +1174,7 @@ pub fn errorCaptureStackTrace(
         try functionNameBytes(ctx.runtime, args[1])
     else
         null;
-    defer if (skip_name) |bytes| ctx.runtime.memory.allocator.free(bytes);
+    defer if (skip_name) |bytes| ctx.runtime.nativeAllocator().free(bytes);
     const stack_value = try buildErrorStackValue(ctx, output, global, args[0], skip_name);
     try target.defineOwnProperty(ctx.runtime, core.atom.ids.stack, core.Descriptor.data(stack_value, .method));
     return core.JSValue.undefinedValue();

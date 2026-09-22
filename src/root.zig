@@ -33,8 +33,12 @@ pub const Call = native.Call;
 pub const EventLoop = event_loop.EventLoop;
 
 pub const GCStats = core.GCStats;
+pub const GCDetailedStats = core.GCDetailedStats;
 pub const GCPauseDistribution = core.GCPauseDistribution;
 pub const RuntimeOptions = core.RuntimeOptions;
+pub const MicrotaskPolicy = core.runtime.MicrotaskPolicy;
+pub const MicrotaskScope = core.runtime.MicrotaskScope;
+pub const MicrotaskExceptionHandler = core.runtime.MicrotaskExceptionHandler;
 pub const RuntimeMemoryUsage = core.RuntimeMemoryUsage;
 pub const OpcodeProfile = core.OpcodeProfile;
 pub const default_stack_size = core.runtime.default_stack_size;

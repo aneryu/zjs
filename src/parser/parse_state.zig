@@ -439,7 +439,17 @@ pub const State = struct {
     pub const DefineVarType = declarations.DefineVarType;
     pub const DefinedVar = declarations.DefinedVar;
     lex: *lexer_mod.Lexer,
-    memory: *core.memory.MemoryAccount,
+    /// Native allocator for function defs and parser-owned slices. Its
+    /// context is the account, recovered only when a reserved BigInt cell
+    /// must be created before a runtime exists.
+    allocator: std.mem.Allocator,
+    /// Facade for FunctionDef var-index maps.
+    artifacts: std.mem.Allocator,
+    /// Limb allocator captured from `Runtime native allocator` at init.
+    persistent: std.mem.Allocator,
+    /// Lists and temporary strings freed with this parse. Captured at init
+    /// and overwritten by `compile` with its arena.
+    scratch: std.mem.Allocator,
     atoms: *atom_module.AtomTable,
     /// Name of the parse root; the default name for a nameless declaration.
     root_name: Atom,
@@ -607,17 +617,23 @@ pub const State = struct {
     /// declaration; `script_or_module` defaults to it.
     pub fn init(
         lex: *lexer_mod.Lexer,
-        account: *core.memory.MemoryAccount,
+        native: std.mem.Allocator,
+        artifacts: std.mem.Allocator,
+        persistent: std.mem.Allocator,
+        scratch: std.mem.Allocator,
         atoms: *atom_module.AtomTable,
         name: Atom,
     ) Error!State {
         var state = State{
             .lex = lex,
-            .memory = account,
+            .allocator = native,
+            .artifacts = artifacts,
+            .persistent = persistent,
+            .scratch = scratch,
             .atoms = atoms,
             .root_name = name,
             .token = undefined,
-            .function_def = function_def_mod.FunctionDef.init(account, atoms, name),
+            .function_def = function_def_mod.FunctionDef.init(native, artifacts, atoms, name),
             .atom_scope = atom_module.CompileAtomScope.init(atoms),
         };
         errdefer state.function_def.deinitInitFailure();
@@ -653,15 +669,20 @@ pub const State = struct {
     /// the runtime-less initializer for low-level parser-only tests, while
     /// production compilation and executable-bytecode helpers use this
     /// entry point.
+    pub fn initFromRuntime(lex: *lexer_mod.Lexer, rt: *core.JSRuntime, atoms: *atom_module.AtomTable, name: Atom) Error!State {
+        const facade = rt.nativeAllocator();
+        return init(lex, rt.nativeAllocator(), facade, facade, facade, atoms, name);
+    }
+
     pub fn initWithRuntime(rt: *core.JSRuntime, lex: *lexer_mod.Lexer, name: Atom) Error!State {
-        var state = try init(lex, &rt.memory, &rt.atoms, name);
+        var state = try initFromRuntime(lex, rt, &rt.atoms, name);
         state.runtime = rt;
         return state;
     }
 
     /// The module record of a module root, created on first use.
     pub fn ensureModule(self: *State) *bytecode.module.Record {
-        if (self.module_record == null) self.module_record = bytecode.module.Record.init(self.memory, self.atoms);
+        if (self.module_record == null) self.module_record = bytecode.module.Record.init(self.allocator, self.atoms);
         return &self.module_record.?;
     }
 
@@ -686,7 +707,7 @@ pub const State = struct {
             self.last_declared_atom = null;
         }
         if (self.source_line_starts.len != 0) {
-            self.memory.allocator.free(self.source_line_starts);
+            self.scratch.free(self.source_line_starts);
             self.source_line_starts = &.{};
             self.source_line_starts_src = &.{};
         }
@@ -698,10 +719,10 @@ pub const State = struct {
         self.cur_func_stack_capacity = 0;
         for (cur_func_stack) |fd| {
             fd.deinit(rt);
-            self.memory.destroy(function_def_mod.FunctionDef, fd);
+            self.allocator.destroy(fd);
         }
         if (cur_func_stack_capacity != 0) {
-            self.memory.free(*function_def_mod.FunctionDef, cur_func_stack.ptr[0..cur_func_stack_capacity]);
+            self.allocator.free(cur_func_stack.ptr[0..cur_func_stack_capacity]);
         }
         var discarded_func = self.discarded_func_head;
         self.discarded_func_head = null;
@@ -709,32 +730,32 @@ pub const State = struct {
             const next = fd.discard_next;
             fd.discard_next = null;
             fd.deinit(rt);
-            self.memory.destroy(function_def_mod.FunctionDef, fd);
+            self.allocator.destroy(fd);
             discarded_func = next;
         }
-        self.break_fixups.deinit(self.memory.allocator);
-        self.break_frame_lens.deinit(self.memory.allocator);
-        self.break_frame_labels.deinit(self.memory.allocator);
-        self.continue_fixups.deinit(self.memory.allocator);
-        self.continue_frame_lens.deinit(self.memory.allocator);
-        self.continue_frame_labels.deinit(self.memory.allocator);
-        self.continue_frame_break_frame_indices.deinit(self.memory.allocator);
-        self.break_frame_catch_marker_depths.deinit(self.memory.allocator);
-        self.break_frame_cleanup_drops.deinit(self.memory.allocator);
-        self.break_frame_cross_cleanup_drops.deinit(self.memory.allocator);
-        self.continue_frame_catch_marker_depths.deinit(self.memory.allocator);
-        self.continue_frame_cleanup_drops.deinit(self.memory.allocator);
+        self.break_fixups.deinit(self.scratch);
+        self.break_frame_lens.deinit(self.scratch);
+        self.break_frame_labels.deinit(self.scratch);
+        self.continue_fixups.deinit(self.scratch);
+        self.continue_frame_lens.deinit(self.scratch);
+        self.continue_frame_labels.deinit(self.scratch);
+        self.continue_frame_break_frame_indices.deinit(self.scratch);
+        self.break_frame_catch_marker_depths.deinit(self.scratch);
+        self.break_frame_cleanup_drops.deinit(self.scratch);
+        self.break_frame_cross_cleanup_drops.deinit(self.scratch);
+        self.continue_frame_catch_marker_depths.deinit(self.scratch);
+        self.continue_frame_cleanup_drops.deinit(self.scratch);
         for (self.label_frames.items) |*frame| {
-            frame.deinit(self.memory.allocator);
+            frame.deinit(self.scratch);
         }
-        self.label_frames.deinit(self.memory.allocator);
-        self.return_finally_frames.deinit(self.memory.allocator);
-        self.finally_body_control_frames.deinit(self.memory.allocator);
-        self.using_block_frames.deinit(self.memory.allocator);
+        self.label_frames.deinit(self.scratch);
+        self.return_finally_frames.deinit(self.scratch);
+        self.finally_body_control_frames.deinit(self.scratch);
+        self.using_block_frames.deinit(self.scratch);
         self.truncateClassPrivateElements(0);
-        self.class_private_elements.deinit(self.memory.allocator);
+        self.class_private_elements.deinit(self.scratch);
         self.truncateClassPrivateBoundNames(0);
-        self.class_private_bound_names.deinit(self.memory.allocator);
+        self.class_private_bound_names.deinit(self.scratch);
         self.function_def.deinit(rt);
         if (self.module_record) |*record| record.deinit();
         self.module_record = null;
@@ -838,14 +859,14 @@ pub const State = struct {
                 std.math.mul(usize, old_capacity, 2) catch return error.OutOfMemory;
             if (new_capacity < new_len) new_capacity = new_len;
 
-            const next = try self.memory.alloc(*function_def_mod.FunctionDef, new_capacity);
-            errdefer self.memory.free(*function_def_mod.FunctionDef, next);
+            const next = try self.allocator.alloc(*function_def_mod.FunctionDef, new_capacity);
+            errdefer self.allocator.free(next);
             @memcpy(next[0..old_len], self.cur_func_stack);
             const old_stack: []*function_def_mod.FunctionDef = if (old_capacity != 0) self.cur_func_stack.ptr[0..old_capacity] else self.cur_func_stack[0..0];
             self.cur_func_stack = next[0..old_len];
             self.cur_func_stack_capacity = new_capacity;
             if (old_capacity != 0) {
-                self.memory.free(*function_def_mod.FunctionDef, old_stack);
+                self.allocator.free(old_stack);
             }
         }
 
@@ -873,7 +894,7 @@ pub const State = struct {
         declarations.discardDeclarationConflictIndex(self, fd);
         if (self.runtime) |rt| {
             fd.deinit(rt);
-            self.memory.destroy(function_def_mod.FunctionDef, fd);
+            self.allocator.destroy(fd);
             return;
         }
         fd.discard_next = self.discarded_func_head;
@@ -1337,7 +1358,7 @@ pub const State = struct {
         var continue_label: ?compiler.LabelId = null;
         if (allow_continue) continue_label = try Emitter.newLabel(s);
         break_label = try Emitter.newLabel(s);
-        try s.label_frames.append(s.memory.allocator, LabelFrame{
+        try s.label_frames.append(s.scratch, LabelFrame{
             .atom = atom_id,
             .allow_continue = allow_continue,
             .catch_marker_depth = s.active_catch_marker_depth,
@@ -1367,7 +1388,7 @@ pub const State = struct {
 
     pub fn popLabelFrame(s: *State, frame_index: usize) void {
         std.debug.assert(frame_index + 1 == s.label_frames.items.len);
-        s.label_frames.items[frame_index].deinit(s.memory.allocator);
+        s.label_frames.items[frame_index].deinit(s.scratch);
         _ = s.label_frames.pop().?;
     }
 
@@ -1406,7 +1427,7 @@ pub const State = struct {
     }
 
     fn deinitCurrentControlFrames(s: *State) void {
-        const allocator = s.memory.allocator;
+        const allocator = s.scratch;
         s.break_fixups.deinit(allocator);
         s.break_frame_lens.deinit(allocator);
         s.break_frame_labels.deinit(allocator);
@@ -1987,15 +2008,15 @@ pub const State = struct {
 
         const parse_text = if (std.mem.indexOfScalar(u8, text, '_')) |_| blk: {
             var normalized = std.ArrayList(u8).empty;
-            errdefer normalized.deinit(self.memory.allocator);
+            errdefer normalized.deinit(self.scratch);
             for (text) |ch| {
-                if (ch != '_') try normalized.append(self.memory.allocator, ch);
+                if (ch != '_') try normalized.append(self.scratch, ch);
             }
-            break :blk try normalized.toOwnedSlice(self.memory.allocator);
+            break :blk try normalized.toOwnedSlice(self.scratch);
         } else text;
-        defer if (parse_text.ptr != text.ptr) self.memory.allocator.free(parse_text);
+        defer if (parse_text.ptr != text.ptr) self.scratch.free(parse_text);
 
-        var parsed = libs_bignum.parseAutoAlloc(self.memory.persistent_allocator, parse_text) catch return Error.InvalidNumberLiteral;
+        var parsed = libs_bignum.parseAutoAlloc(self.persistent, parse_text) catch return Error.InvalidNumberLiteral;
         errdefer parsed.deinit();
         if (negate and !parsed.isZero()) parsed.negative = !parsed.negative;
 
@@ -2003,12 +2024,12 @@ pub const State = struct {
         // the owning FunctionBytecode is published
         // (`BigInt.registerReservedValue`), so a collection during the rest
         // of the parse can neither sweep nor need to trace it. The parser
-        // may run without a runtime, so allocation and the failure-path
-        // free both go through the function's own account.
-        const big = try self.memory.create(core_bigint.BigInt);
+        // obtains the allocation owner explicitly from its atom table; no
+        // allocator context is interpreted as a Runtime.
+        const big = try core_bigint.BigInt.createExternalReserved(self.atoms.owner);
         big.initExternalFromOwned(parsed);
-        parsed = .{ .allocator = self.memory.persistent_allocator };
-        errdefer big.destroyWithAccount(self.memory);
+        parsed = .{ .allocator = self.persistent };
+        errdefer big.destroyExternalReserved(self.atoms.owner);
         try Emitter.pushConst(self, big.valueRef());
     }
 
@@ -2029,8 +2050,8 @@ pub const State = struct {
     pub fn ensureBuilderForFd(self: *State, fd: *function_def_mod.FunctionDef) compiler.builder.Error!void {
         _ = self;
         if (fd.builder == null) {
-            const v2b = try fd.memory.create(compiler.Builder);
-            v2b.* = compiler.Builder.init(fd.memory, fd.atoms);
+            const v2b = try fd.allocator.create(compiler.Builder);
+            v2b.* = compiler.Builder.init(fd.allocator, fd.atoms);
             fd.builder = v2b;
         }
     }

@@ -2150,7 +2150,7 @@ fn parseRegExpLiteral(s: *State) Error!void {
     };
     try Emitter.pushConst(s, pattern_string.value());
 
-    var compiled = regexp_lib.compilePatternAndFlagsWithOptions(s.memory.allocator, pattern, flags, .{
+    var compiled = regexp_lib.compilePatternAndFlagsWithOptions(s.scratch, pattern, flags, .{
         .host = core.regexp.libraryHost(s.runtime.?),
     }) catch |err| switch (err) {
         error.OutOfMemory => return Error.OutOfMemory,
@@ -2158,7 +2158,7 @@ fn parseRegExpLiteral(s: *State) Error!void {
         error.StackOverflow => return Error.StackOverflow,
         else => return Error.InvalidRegExp,
     };
-    defer compiled.deinit(s.memory.allocator);
+    defer compiled.deinit(s.scratch);
     // qjs compiles a literal once while parsing, stores the lre bytecode as
     // an 8-bit JSString constant, and lets OP_regexp share that immutable
     // string with each fresh RegExp instance (quickjs.c,
@@ -2506,7 +2506,7 @@ const TaggedTemplateObjectBuilder = struct {
 
         if (comptime @import("builtin").is_test) {
             if (force_gc_in_window_for_test) {
-                _ = self.rt.forceMajorGC(null) catch {};
+                _ = self.rt.forceGC(null) catch {};
             }
         }
         const raw = core.string.String.createUtf8(self.rt, raw_bytes) catch return Error.InvalidUtf8;
@@ -2871,7 +2871,7 @@ pub fn parseObjectPropertyName(s: *State) Error!?ObjectPropertyName {
             try identifiers.formatBigIntPropertyName(s, s.token.payload.num.bigint_text)
         else
             core.value_format.formatFiniteNumberAssumeCapacity(&number_buf, s.token.payload.num.value);
-        defer if (is_bigint) s.memory.allocator.free(text);
+        defer if (is_bigint) s.scratch.free(text);
         atom_id = try s.atoms.internString(text);
         try s.advance();
     } else {

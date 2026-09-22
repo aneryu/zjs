@@ -36,6 +36,7 @@ fn addEngine(
         .omit_frame_pointer = omit_frame_pointer,
     });
     mod.addOptions("build_options", options);
+    config.attachEngineHooks(ctx.b, mod, ctx.target, ctx.optimize);
     return mod;
 }
 
@@ -87,6 +88,7 @@ pub fn addEngineArtifacts(ctx: config.Ctx) Artifacts {
         .link_libc = true,
     });
     engine_mod.addOptions("build_options", ctx.engine_options);
+    config.attachEngineHooks(b, engine_mod, ctx.target, ctx.optimize);
 
     const engine = addEngine(ctx, ctx.engine_options, omit_frames);
     const zjs = addCli(ctx, "zjs", "src/cli/zjs.zig", engine, true);
@@ -106,6 +108,9 @@ pub fn addEngineArtifacts(ctx: config.Ctx) Artifacts {
     const profile_engine = addEngine(ctx, profile_engine_options, omit_frames);
     const zjs_profile = addCli(ctx, "zjs-profile", "src/cli/zjs.zig", profile_engine, true);
     addInstallStep(b, "zjs-profile", "Build and install zjs with per-opcode dispatch scopes (follows -Doptimize)", zjs_profile.install);
+
+    const allocator_bench = addCli(ctx, "runtime-allocator-bench", "tools/runtime/allocator_bench.zig", engine, false);
+    addInstallStep(b, "runtime-allocator-bench", "Build the Runtime allocator comparison probe", allocator_bench.install);
 
     const run_test262 = addCli(ctx, "run-test262", "src/cli/run_test262.zig", engine, false);
     addInstallStep(b, "run-test262", "Build and install run-test262 (follows -Doptimize)", run_test262.install);

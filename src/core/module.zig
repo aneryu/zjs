@@ -8,6 +8,7 @@
 //! realm-core state used by parser/compiler/exec orchestration; it must not
 //! import exec or binding.
 
+const mem_ops = @import("memory.zig");
 const std = @import("std");
 
 const atom = @import("atom.zig");
@@ -165,7 +166,7 @@ pub const ResolvedExport = union(enum) {
 /// `module_ns` is intentionally absent: a namespace is published only after a
 /// fresh record has been completely installed and linked.
 pub const PendingDefinition = struct {
-    memory: *memory.MemoryAccount,
+    runtime: *@import("runtime.zig").JSRuntime,
     atoms: *atom.AtomTable,
     requests: []RequestEntry = &.{},
     imports: []ImportEntry = &.{},
@@ -177,8 +178,8 @@ pub const PendingDefinition = struct {
     synthetic_kind: SyntheticKind = .none,
     has_top_level_await: bool = false,
 
-    pub fn init(account: *memory.MemoryAccount, atoms: *atom.AtomTable) PendingDefinition {
-        return .{ .memory = account, .atoms = atoms };
+    pub fn init(account: *@import("runtime.zig").JSRuntime, atoms: *atom.AtomTable) PendingDefinition {
+        return .{ .runtime = account, .atoms = atoms };
     }
 
     /// Release an unconsumed definition. Every owner is detached first so value
@@ -207,18 +208,18 @@ pub const PendingDefinition = struct {
             }
         }
 
-        if (requests.len != 0) self.memory.free(RequestEntry, requests);
-        if (imports.len != 0) self.memory.free(ImportEntry, imports);
-        if (exports.len != 0) self.memory.free(ExportEntry, exports);
-        if (indirect_exports.len != 0) self.memory.free(IndirectExportEntry, indirect_exports);
-        if (star_exports.len != 0) self.memory.free(StarExportEntry, star_exports);
-        if (import_attributes.len != 0) self.memory.free(ImportAttributeEntry, import_attributes);
+        if (requests.len != 0) mem_ops.free(self.runtime, RequestEntry, requests);
+        if (imports.len != 0) mem_ops.free(self.runtime, ImportEntry, imports);
+        if (exports.len != 0) mem_ops.free(self.runtime, ExportEntry, exports);
+        if (indirect_exports.len != 0) mem_ops.free(self.runtime, IndirectExportEntry, indirect_exports);
+        if (star_exports.len != 0) mem_ops.free(self.runtime, StarExportEntry, star_exports);
+        if (import_attributes.len != 0) mem_ops.free(self.runtime, ImportAttributeEntry, import_attributes);
     }
 
     pub fn addRequest(self: *PendingDefinition, module_name: atom.Atom) !u32 {
         const index = std.math.cast(u32, self.requests.len) orelse return error.ModuleMetadataOverflow;
         const owned_name = self.atoms.noteHolderStore(module_name);
-        try append(self.memory, RequestEntry, &self.requests, .{ .module_name = owned_name });
+        try append(self.runtime, RequestEntry, &self.requests, .{ .module_name = owned_name });
         return index;
     }
 
@@ -233,7 +234,7 @@ pub const PendingDefinition = struct {
         try self.validateRequestIndex(request_index);
         const owned_import_name = self.atoms.noteHolderStore(import_name);
         const owned_local_name = self.atoms.noteHolderStore(local_name);
-        try append(self.memory, ImportEntry, &self.imports, .{
+        try append(self.runtime, ImportEntry, &self.imports, .{
             .request_index = request_index,
             .import_name = owned_import_name,
             .local_name = owned_local_name,
@@ -251,7 +252,7 @@ pub const PendingDefinition = struct {
         if (self.exports.len > std.math.maxInt(u32)) return error.ModuleMetadataOverflow;
         const owned_export_name = self.atoms.noteHolderStore(export_name);
         const owned_local_name = self.atoms.noteHolderStore(local_name);
-        try append(self.memory, ExportEntry, &self.exports, .{
+        try append(self.runtime, ExportEntry, &self.exports, .{
             .export_name = owned_export_name,
             .local_name = owned_local_name,
             .var_idx = var_idx,
@@ -269,7 +270,7 @@ pub const PendingDefinition = struct {
         if (self.indirect_exports.len > std.math.maxInt(u32)) return error.ModuleMetadataOverflow;
         const owned_export_name = self.atoms.noteHolderStore(export_name);
         const owned_import_name = self.atoms.noteHolderStore(import_name);
-        try append(self.memory, IndirectExportEntry, &self.indirect_exports, .{
+        try append(self.runtime, IndirectExportEntry, &self.indirect_exports, .{
             .request_index = request_index,
             .export_name = owned_export_name,
             .import_name = owned_import_name,
@@ -279,7 +280,7 @@ pub const PendingDefinition = struct {
 
     pub fn addStarExport(self: *PendingDefinition, request_index: u32) !void {
         try self.validateRequestIndex(request_index);
-        try append(self.memory, StarExportEntry, &self.star_exports, .{ .request_index = request_index });
+        try append(self.runtime, StarExportEntry, &self.star_exports, .{ .request_index = request_index });
     }
 
     pub fn addImportAttribute(
@@ -291,7 +292,7 @@ pub const PendingDefinition = struct {
         try self.validateRequestIndex(request_index);
         const owned_key = self.atoms.noteHolderStore(key);
         const owned_value = self.atoms.noteHolderStore(value);
-        try append(self.memory, ImportAttributeEntry, &self.import_attributes, .{
+        try append(self.runtime, ImportAttributeEntry, &self.import_attributes, .{
             .request_index = request_index,
             .key = owned_key,
             .value = owned_value,
@@ -328,14 +329,14 @@ pub const ModuleRecord = struct {
     pub const gc_kind_tag: u8 = @intFromEnum(gc.GcKind.module);
 
     comptime {
-        // MemoryAccount places the common GC metadata immediately before the
+        // Runtime allocation helpers places the common GC metadata immediately before the
         // record, so the embedded header must remain at payload offset zero.
         std.debug.assert(@offsetOf(@This(), "header") == 0);
         std.debug.assert(@sizeOf(@This()) == 240);
         std.debug.assert(@alignOf(@This()) == 16);
         std.debug.assert(@offsetOf(@This(), "registry_prev") == 128);
         std.debug.assert(@offsetOf(@This(), "registry") == 32);
-        std.debug.assert(@offsetOf(@This(), "memory") == 40);
+        std.debug.assert(@offsetOf(@This(), "runtime") == 40);
         std.debug.assert(@offsetOf(@This(), "module_name") == 212);
         std.debug.assert(@offsetOf(@This(), "requests") == 96);
         std.debug.assert(@offsetOf(@This(), "func_obj") == 176);
@@ -349,7 +350,7 @@ pub const ModuleRecord = struct {
     registry_prev: ?*ModuleRecord = null,
     registry_next: ?*ModuleRecord = null,
     registry: ?*Registry = null,
-    memory: *memory.MemoryAccount,
+    runtime: *@import("runtime.zig").JSRuntime,
     atoms: *atom.AtomTable,
     module_name: atom.Atom,
     definition_installed: bool = false,
@@ -391,9 +392,9 @@ pub const ModuleRecord = struct {
     /// quickjs.c).
     eval_exception: ?value_mod.JSValue = null,
 
-    fn prepare(self: *ModuleRecord, account: *memory.MemoryAccount, atoms: *atom.AtomTable, name: atom.Atom) void {
+    fn prepare(self: *ModuleRecord, account: *@import("runtime.zig").JSRuntime, atoms: *atom.AtomTable, name: atom.Atom) void {
         self.* = .{
-            .memory = account,
+            .runtime = account,
             .atoms = atoms,
             .module_name = atoms.noteHolderStore(name),
         };
@@ -407,7 +408,7 @@ pub const ModuleRecord = struct {
         std.debug.assert(self.registry == null);
         std.debug.assert(!self.definition_installed);
         std.debug.assert(!self.requests_resolved);
-        std.debug.assert(self.memory == pending.memory);
+        std.debug.assert(self.runtime == pending.runtime);
         std.debug.assert(self.atoms == pending.atoms);
         std.debug.assert(self.requests.len == 0);
         std.debug.assert(self.imports.len == 0);
@@ -476,18 +477,18 @@ pub const ModuleRecord = struct {
                 std.debug.assert(VarRef.fromValue(cell) != null);
             }
         }
-        if (requests.len != 0) self.memory.free(RequestEntry, requests);
-        if (imports.len != 0) self.memory.free(ImportEntry, imports);
-        if (exports.len != 0) self.memory.free(ExportEntry, exports);
-        if (indirect_exports.len != 0) self.memory.free(IndirectExportEntry, indirect_exports);
-        if (star_exports.len != 0) self.memory.free(StarExportEntry, star_exports);
-        if (import_attributes.len != 0) self.memory.free(ImportAttributeEntry, import_attributes);
+        if (requests.len != 0) mem_ops.free(self.runtime, RequestEntry, requests);
+        if (imports.len != 0) mem_ops.free(self.runtime, ImportEntry, imports);
+        if (exports.len != 0) mem_ops.free(self.runtime, ExportEntry, exports);
+        if (indirect_exports.len != 0) mem_ops.free(self.runtime, IndirectExportEntry, indirect_exports);
+        if (star_exports.len != 0) mem_ops.free(self.runtime, StarExportEntry, star_exports);
+        if (import_attributes.len != 0) mem_ops.free(self.runtime, ImportAttributeEntry, import_attributes);
     }
 
     /// `rt` is unused: the destroy-by-kind dispatch (`gc.zig`,
     /// `gc_trace_stw.zig`) calls every kind's destructor with the same
     /// (runtime, header) shape, and a module frees only through its own
-    /// `MemoryAccount`.
+    /// `Runtime allocation helpers`.
     pub fn destroyFromHeader(rt: anytype, header: *gc.Header) void {
         _ = rt;
         const self: *ModuleRecord = @alignCast(@fieldParentPtr("header", header));
@@ -497,7 +498,7 @@ pub const ModuleRecord = struct {
         self.clearForDestroy();
 
         // TGC S4-e spec 2.5: no Pass-B deferral.
-        self.memory.destroy(ModuleRecord, self);
+        mem_ops.destroy(self.runtime, ModuleRecord, self);
     }
 
     pub inline fn traceChildEdgesFallible(self: *ModuleRecord, rt: anytype, visitor: anytype) !void {
@@ -664,7 +665,7 @@ pub const ModuleRecord = struct {
 };
 
 pub const Registry = struct {
-    memory: *memory.MemoryAccount,
+    runtime: *@import("runtime.zig").JSRuntime,
     atoms: *atom.AtomTable,
     gc_registry: *gc.Registry,
     head: ?*ModuleRecord = null,
@@ -701,9 +702,9 @@ pub const Registry = struct {
         }
     };
 
-    pub fn init(account: *memory.MemoryAccount, atoms: *atom.AtomTable, gc_registry: *gc.Registry) Registry {
+    pub fn init(account: *@import("runtime.zig").JSRuntime, atoms: *atom.AtomTable, gc_registry: *gc.Registry) Registry {
         return .{
-            .memory = account,
+            .runtime = account,
             .atoms = atoms,
             .gc_registry = gc_registry,
         };
@@ -786,7 +787,7 @@ pub const Registry = struct {
         name: atom.Atom,
         pending: *PendingDefinition,
     ) !PreparedTarget {
-        std.debug.assert(pending.memory == self.memory);
+        std.debug.assert(pending.runtime == self.runtime);
         std.debug.assert(pending.atoms == self.atoms);
 
         if (self.find(name)) |record| {
@@ -794,8 +795,8 @@ pub const Registry = struct {
             return .{ .existing = record };
         }
 
-        const record = try self.memory.create(ModuleRecord);
-        record.prepare(self.memory, self.atoms, name);
+        const record = try mem_ops.create(self.runtime, ModuleRecord);
+        record.prepare(self.runtime, self.atoms, name);
         record.replaceDefinitionNoFail(pending);
         // Bulk install of a whole pending definition -- exports, the function
         // object, import attributes. Remember the record once instead of
@@ -824,7 +825,7 @@ pub const Registry = struct {
     ) !ResolvedExport {
         if (record.registry != self) return error.ForeignModuleRecord;
         var visiting = std.ArrayList(ResolutionVisit).empty;
-        defer visiting.deinit(self.memory.allocator);
+        defer visiting.deinit(self.runtime.nativeAllocator());
         return self.resolveExportFromRecord(record, export_name, &visiting);
     }
 
@@ -839,7 +840,7 @@ pub const Registry = struct {
         for (visiting.items) |entry| {
             if (entry.module == record and entry.export_name == export_name) return .not_found;
         }
-        try visiting.append(self.memory.allocator, .{ .module = record, .export_name = export_name });
+        try visiting.append(self.runtime.nativeAllocator(), .{ .module = record, .export_name = export_name });
         defer _ = visiting.pop().?;
 
         for (record.exports, 0..) |entry, index| {
@@ -923,11 +924,12 @@ fn unresolvedModuleAutoInit(
     return error.InvalidBuiltinRegistry;
 }
 
-inline fn append(account: *memory.MemoryAccount, comptime T: type, slice: *[]T, item: T) !void {
+inline fn append(account: *@import("runtime.zig").JSRuntime, comptime T: type, slice: *[]T, item: T) !void {
     const old = slice.*;
     const new_count = std.math.add(usize, old.len, 1) catch return error.OutOfMemory;
     const old_ptr: [*]u8 = if (old.len == 0) undefined else @ptrCast(old.ptr);
-    const new_buf = try account.reallocElements(
+    const new_buf = try mem_ops.reallocElements(
+        account,
         old_ptr,
         old.len,
         new_count,

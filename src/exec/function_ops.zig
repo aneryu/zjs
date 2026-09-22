@@ -406,13 +406,13 @@ pub fn constructDynamicFunctionFromSource(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     var params = std.ArrayList(u8).empty;
-    defer params.deinit(ctx.runtime.memory.allocator);
+    defer params.deinit(ctx.runtime.nativeAllocator());
     var body = std.ArrayList(u8).empty;
-    defer body.deinit(ctx.runtime.memory.allocator);
+    defer body.deinit(ctx.runtime.nativeAllocator());
 
     if (args.len > 0) {
         for (args[0 .. args.len - 1], 0..) |arg, idx| {
-            if (idx != 0) try params.append(ctx.runtime.memory.allocator, ',');
+            if (idx != 0) try params.append(ctx.runtime.nativeAllocator(), ',');
             const string_value = try string_ops.toStringForAnnexB(ctx, output, global, arg, caller_function, caller_frame);
             try string_ops.appendSourceStringUtf8(ctx.runtime, &params, string_value);
         }
@@ -422,18 +422,18 @@ pub fn constructDynamicFunctionFromSource(
     const compile_realm = try call_runtime.functionRealmContext(ctx, constructor);
     const function_global = compile_realm.global orelse return error.InvalidBuiltinRegistry;
     var source = std.ArrayList(u8).empty;
-    defer source.deinit(ctx.runtime.memory.allocator);
+    defer source.deinit(ctx.runtime.nativeAllocator());
     const prefix = switch (kind) {
         .normal => "(function anonymous(",
         .async_function => "(async function anonymous(",
         .generator => "(function* anonymous(",
         .async_generator => "(async function* anonymous(",
     };
-    try source.appendSlice(ctx.runtime.memory.allocator, prefix);
-    try source.appendSlice(ctx.runtime.memory.allocator, params.items);
-    try source.appendSlice(ctx.runtime.memory.allocator, "\n) {\n");
-    try source.appendSlice(ctx.runtime.memory.allocator, body.items);
-    try source.appendSlice(ctx.runtime.memory.allocator, "\n})");
+    try source.appendSlice(ctx.runtime.nativeAllocator(), prefix);
+    try source.appendSlice(ctx.runtime.nativeAllocator(), params.items);
+    try source.appendSlice(ctx.runtime.nativeAllocator(), "\n) {\n");
+    try source.appendSlice(ctx.runtime.nativeAllocator(), body.items);
+    try source.appendSlice(ctx.runtime.nativeAllocator(), "\n})");
 
     const filename = switch (kind) {
         .normal => "Function",
@@ -464,7 +464,7 @@ pub fn constructDynamicFunctionFromSource(
     const root_function_object = object_ops.functionObjectFromValue(root_function_value) orelse return error.InvalidBytecode;
     const root_bytecode_value = root_function_object.functionBytecode() orelse return error.InvalidBytecode;
     const function = call_runtime.functionBytecodeFromValue(root_bytecode_value) orelse return error.InvalidBytecode;
-    var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stackSize());
+    var nested_stack = stack_mod.Stack.init(ctx.runtime, ctx.runtime.stackSize());
     defer nested_stack.deinit(ctx.runtime);
     // A dynamic-function compilation is a *nested* eval inside a live VM call: the
     // outer frames hold roots this nested cycle pass cannot see, so running the
@@ -505,7 +505,6 @@ pub fn constructDynamicFunctionFromSource(
     }
     return result;
 }
-
 
 // ----- merged from class_init_ops.zig -----
 // Class construction and super helpers.

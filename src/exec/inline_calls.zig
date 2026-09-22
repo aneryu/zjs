@@ -806,7 +806,7 @@ pub const Entry = struct {
             if (frame.function.openVarRefCount() != 0) frame.closeOpenVarRefs(rt);
         } else {
             self.stack.deinit(rt);
-            self.frame.deinitInlineCall(&rt.memory, rt);
+            self.frame.deinitInlineCall(rt.nativeAllocator(), rt);
         }
         rt.vm_stack.restore(self.arena_mark);
     }
@@ -821,7 +821,7 @@ pub const Entry = struct {
     fn deinitGeneralResources(self: *Entry, ctx: *core.JSContext) void {
         const rt = ctx.runtime;
         self.stack.deinit(rt);
-        self.frame.deinitInlineCall(&rt.memory, rt);
+        self.frame.deinitInlineCall(rt.nativeAllocator(), rt);
     }
 
     /// Successful tail replacement has already built and linked the target
@@ -1289,7 +1289,7 @@ pub const LeanFrame = struct {
         // Geometry that never changes per call: the argument window length
         // and the operand-stack capacity (the pointers are carved per call).
         entry.frame.args = @as([*]core.JSValue, undefined)[0..frame_arg_count];
-        entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.vm_stack_arena_policy, @as([*]core.JSValue, undefined)[0..stack_count]);
+        entry.stack = stack_mod.Stack.initArenaWindow(rt, rt.vm_stack_arena_policy, @as([*]core.JSValue, undefined)[0..stack_count]);
         entry.teardown = .{
             .simple = true,
             .special_return = true,
@@ -1371,18 +1371,18 @@ pub const Machine = struct {
         self.vm.retarget(ctx, output, global);
     }
 
-    /// Free the chunk storage of an idle machine through the runtime
-    /// account directly (the resident host invocation may outlive the
+    /// Free the chunk storage of an idle machine through that runtime's
+    /// native allocator (the resident host invocation may outlive the
     /// JSContext its `ctx` field last pointed at).
     pub fn deinitStorage(self: *Machine, rt: *core.JSRuntime) void {
         std.debug.assert(self.depth == 0);
         self.async_completions.deinit(rt);
         for (self.chunks[0..self.chunk_count]) |chunk| {
-            rt.memory.destroy(@TypeOf(chunk.*), chunk);
+            rt.nativeAllocator().destroy(chunk);
         }
         self.chunk_count = 0;
         if (self.chunks.len != 0) {
-            rt.memory.free(*[entries_per_chunk]Entry, self.chunks);
+            rt.nativeAllocator().free(self.chunks);
             self.chunks = &.{};
         }
     }
@@ -1459,10 +1459,10 @@ pub const Machine = struct {
             return error.StackOverflow;
         }
         if (self.chunks.len == 0) {
-            self.chunks = try self.ctx.runtime.memory.alloc(*[entries_per_chunk]Entry, max_chunks);
+            self.chunks = try self.ctx.runtime.nativeAllocator().alloc(*[entries_per_chunk]Entry, max_chunks);
         }
         std.debug.assert(chunk_index == self.chunk_count);
-        const chunk = try self.ctx.runtime.memory.create([entries_per_chunk]Entry);
+        const chunk = try self.ctx.runtime.nativeAllocator().create([entries_per_chunk]Entry);
         if (comptime builtin.is_test) TestMetricStorage.metrics.entry_chunk_allocations += 1;
         // Pre-define each slot's `frame.var_refs` so the warm borrowed-
         // iterator constructor's store-elision compare
@@ -1892,7 +1892,7 @@ pub const Machine = struct {
             },
             .cold = null,
         };
-        entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.vm_stack_arena_policy, stack_window);
+        entry.stack = stack_mod.Stack.initArenaWindow(rt, rt.vm_stack_arena_policy, stack_window);
     }
 
     /// Warm-first dispatch. Inlined so a `carveActiveMarked` hit is a `void`
@@ -2057,14 +2057,14 @@ pub const Machine = struct {
             break :blk active_carve.window;
         } else blk: {
             entry.arena_mark = rt.vm_stack.mark();
-            break :blk rt.vm_stack.carve(&rt.memory, total) orelse heap: {
-                const heap = try rt.memory.alloc(core.JSValue, total);
+            break :blk rt.vm_stack.carve(rt, total) orelse heap: {
+                const heap = try rt.nativeAllocator().alloc(core.JSValue, total);
                 storage_on_heap = true;
                 break :heap heap;
             };
         };
         errdefer rt.vm_stack.restore(entry.arena_mark);
-        errdefer if (storage_on_heap) rt.memory.free(core.JSValue, slab_values);
+        errdefer if (storage_on_heap) rt.nativeAllocator().free(slab_values);
 
         // Pointer-arithmetic partition (17855-17866). Padded args occupy the
         // prefix exactly as qjs's `arg_buf = local_buf`; the zero-sized exact
@@ -2100,7 +2100,7 @@ pub const Machine = struct {
         // Allocate the cold box before takeSourceSlot: this is the final
         // failable point, preserving the source-restoration errdefer above.
         const cold: ?*frame_mod.Frame.FrameCold = if (snapshot_count == 0) null else blk: {
-            const box = try rt.memory.create(frame_mod.Frame.FrameCold);
+            const box = try rt.nativeAllocator().create(frame_mod.Frame.FrameCold);
             for (args, 0..) |arg, index| original_args[index] = arg;
             box.* = .{ .original_args = original_args };
             break :blk box;
@@ -2152,7 +2152,7 @@ pub const Machine = struct {
             },
             .cold = cold,
         };
-        entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.vm_stack_arena_policy, stack_window);
+        entry.stack = stack_mod.Stack.initArenaWindow(rt, rt.vm_stack_arena_policy, stack_window);
     }
 
     /// Deep constructor for an exact simple frame. The common call path used to
@@ -2294,7 +2294,7 @@ pub const Machine = struct {
         };
         entry.frame.cold = null;
         entry.stack = .{
-            .memory = &rt.memory,
+            .runtime = rt,
             .values = stack_window.ptr,
             .top_ptr = stack_window.ptr,
             .capacity = stack_window.len,
@@ -2435,12 +2435,12 @@ pub const Machine = struct {
         errdefer rt.vm_stack.restore(entry.arena_mark);
         const stack_count = @as(usize, function.stack_size) + 1;
         var storage_on_heap = false;
-        const stack_window = rt.vm_stack.carve(&rt.memory, stack_count) orelse blk: {
-            const heap = try rt.memory.alloc(core.JSValue, stack_count);
+        const stack_window = rt.vm_stack.carve(rt, stack_count) orelse blk: {
+            const heap = try rt.nativeAllocator().alloc(core.JSValue, stack_count);
             storage_on_heap = true;
             break :blk heap;
         };
-        errdefer if (storage_on_heap) rt.memory.free(core.JSValue, stack_window);
+        errdefer if (storage_on_heap) rt.nativeAllocator().free(stack_window);
 
         return self.finishEmptyLeafFrame(leaf_this, rt, entry, global, function, region_start, stack_window, storage_on_heap, planned_stack_bytes, self.callerResumePc());
     }
@@ -2495,12 +2495,12 @@ pub const Machine = struct {
         errdefer rt.vm_stack.restore(entry.arena_mark);
         const stack_count = @as(usize, function.stack_size) + 1;
         var storage_on_heap = false;
-        const stack_window = rt.vm_stack.carve(&rt.memory, stack_count) orelse blk: {
-            const heap = try rt.memory.alloc(core.JSValue, stack_count);
+        const stack_window = rt.vm_stack.carve(rt, stack_count) orelse blk: {
+            const heap = try rt.nativeAllocator().alloc(core.JSValue, stack_count);
             storage_on_heap = true;
             break :blk heap;
         };
-        errdefer if (storage_on_heap) rt.memory.free(core.JSValue, stack_window);
+        errdefer if (storage_on_heap) rt.nativeAllocator().free(stack_window);
 
         return self.finishExactArgsLeafFrame(leaf_this, false, rt, entry, global, function, captures, region_start, argc, stack_window, storage_on_heap, planned_stack_bytes, self.callerResumePc(), core.JSValue.undefinedValue());
     }
@@ -2550,12 +2550,12 @@ pub const Machine = struct {
         errdefer rt.vm_stack.restore(entry.arena_mark);
         const stack_count = @as(usize, function.stack_size) + 1;
         var storage_on_heap = false;
-        const stack_window = rt.vm_stack.carve(&rt.memory, stack_count) orelse blk: {
-            const heap = try rt.memory.alloc(core.JSValue, stack_count);
+        const stack_window = rt.vm_stack.carve(rt, stack_count) orelse blk: {
+            const heap = try rt.nativeAllocator().alloc(core.JSValue, stack_count);
             storage_on_heap = true;
             break :blk heap;
         };
-        errdefer if (storage_on_heap) rt.memory.free(core.JSValue, stack_window);
+        errdefer if (storage_on_heap) rt.nativeAllocator().free(stack_window);
 
         return self.finishCaptureLeafFrame(leaf_this, rt, entry, global, function, captures, region_start, stack_window, storage_on_heap, planned_stack_bytes, self.callerResumePc());
     }
@@ -2660,7 +2660,7 @@ pub const Machine = struct {
                 .storage = if (storage_on_heap) .owned else .borrowed,
             },
         };
-        entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.vm_stack_arena_policy, stack_window);
+        entry.stack = stack_mod.Stack.initArenaWindow(rt, rt.vm_stack_arena_policy, stack_window);
         entry.teardown = .{
             .simple = true,
             .empty_leaf = !storage_on_heap,
@@ -2747,7 +2747,7 @@ pub const Machine = struct {
                 .storage = if (storage_on_heap) .owned else .borrowed,
             },
         };
-        entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.vm_stack_arena_policy, stack_window);
+        entry.stack = stack_mod.Stack.initArenaWindow(rt, rt.vm_stack_arena_policy, stack_window);
         if (comptime forwarded) {
             std.debug.assert(!storage_on_heap);
             // NOT `exact_args_leaf`: that bit routes `popAndResume`'s hot arm
@@ -2828,7 +2828,7 @@ pub const Machine = struct {
                 .storage = if (storage_on_heap) .owned else .borrowed,
             },
         };
-        entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.vm_stack_arena_policy, stack_window);
+        entry.stack = stack_mod.Stack.initArenaWindow(rt, rt.vm_stack_arena_policy, stack_window);
         entry.teardown = .{
             .simple = true,
             .exact_args_leaf = !storage_on_heap,
@@ -3091,7 +3091,7 @@ pub const Machine = struct {
         errdefer rt.vm_stack.restore(entry.arena_mark);
 
         entry.frame = frame_mod.Frame.init(function);
-        errdefer entry.frame.deinit(&rt.memory, rt);
+        errdefer entry.frame.deinit(rt.nativeAllocator(), rt);
         // No per-call backtrace node: the invocation's Machine-owned node
         // walks this Entry directly through the execution chain.
 
@@ -3162,8 +3162,8 @@ pub const Machine = struct {
             .var_refs = var_ref_storage_count,
             .open_var_refs = open_var_ref_count,
         };
-        const slab = frame_mod.FrameSlab.carve(&rt.memory, &rt.vm_stack, slab_layout) orelse blk: {
-            const heap_windows = try frame_mod.FrameSlab.allocHeap(&rt.memory, slab_layout);
+        const slab = frame_mod.FrameSlab.carve(rt, &rt.vm_stack, slab_layout) orelse blk: {
+            const heap_windows = try frame_mod.FrameSlab.allocHeap(rt.nativeAllocator(), slab_layout);
             entry.frame.installOwnedStorage(heap_windows.storage);
             break :blk heap_windows;
         };
@@ -3174,13 +3174,13 @@ pub const Machine = struct {
             .var_refs = if (slab.var_refs.len != 0) slab.var_refs else null,
             .open_var_refs = if (slab.open_var_refs.len != 0) slab.open_var_refs else null,
         };
-        entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.vm_stack_arena_policy, slab.stack);
+        entry.stack = stack_mod.Stack.initArenaWindow(rt, rt.vm_stack_arena_policy, slab.stack);
         errdefer entry.stack.deinit(rt);
 
         try vm_call.initFrameLocals(ctx, function, &entry.frame, true, frame_windows);
         if (borrow_source_args) {
             try entry.frame.initArgumentsBorrowedSlots(
-                &rt.memory,
+                rt.nativeAllocator(),
                 sourceArgs(source),
                 need_original_snapshot,
                 frame_windows,
@@ -3188,7 +3188,7 @@ pub const Machine = struct {
             cleanup_source = .non_args;
         } else {
             try entry.frame.initArgumentsMoved(
-                &rt.memory,
+                rt,
                 &rt.vm_stack,
                 sourceArgs(source),
                 need_original_snapshot,
@@ -3201,7 +3201,7 @@ pub const Machine = struct {
         if (frame_windows.open_var_refs) |open_refs| {
             try entry.frame.installOpenVarRefSlots(open_refs);
         } else if (open_var_ref_count != 0) {
-            try entry.frame.ensureOpenVarRefSlots(&rt.memory, &rt.vm_stack);
+            try entry.frame.ensureOpenVarRefSlots(rt, &rt.vm_stack);
         }
         if (borrow_var_refs) {
             // Alias the closure's captures (mutable slice; no merge replaced it).
@@ -3254,12 +3254,12 @@ pub const Machine = struct {
         errdefer rt.vm_stack.restore(entry.arena_mark);
 
         var storage_on_heap = false;
-        const slab_values = rt.vm_stack.carve(&rt.memory, total) orelse blk: {
-            const heap = try rt.memory.alloc(core.JSValue, total);
+        const slab_values = rt.vm_stack.carve(rt, total) orelse blk: {
+            const heap = try rt.nativeAllocator().alloc(core.JSValue, total);
             storage_on_heap = true;
             break :blk heap;
         };
-        errdefer if (storage_on_heap) rt.memory.free(core.JSValue, slab_values);
+        errdefer if (storage_on_heap) rt.nativeAllocator().free(slab_values);
 
         const args = slab_values[0..frame_arg_count];
         const locals_start = frame_arg_count;
@@ -3294,7 +3294,7 @@ pub const Machine = struct {
                 .storage = if (storage_on_heap) .owned else .borrowed,
             },
         };
-        entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.vm_stack_arena_policy, stack_window);
+        entry.stack = stack_mod.Stack.initArenaWindow(rt, rt.vm_stack_arena_policy, stack_window);
     }
 
     fn sourceCallableSlot(source: ArgsSource) *core.JSValue {
@@ -3600,7 +3600,7 @@ pub const Machine = struct {
         // heap-allocating a cold box on every `new`.
         entry.frame.ownership.new_target = .aliases_function;
         if (owned_new_target) |value| {
-            try entry.frame.takeConstructorNewTarget(&self.ctx.runtime.memory, value);
+            try entry.frame.takeConstructorNewTarget(self.ctx.runtime.nativeAllocator(), value);
         }
         entry.frame.planned_stack_bytes = @intCast(planned_stack_bytes);
 
@@ -3649,7 +3649,7 @@ pub const Machine = struct {
 
         entry.frame.ownership.new_target = .aliases_function;
         if (owned_new_target) |value| {
-            try entry.frame.takeConstructorNewTarget(&self.ctx.runtime.memory, value);
+            try entry.frame.takeConstructorNewTarget(self.ctx.runtime.nativeAllocator(), value);
         }
         std.debug.assert(entry.frame.this_value.is(.uninitialized));
         entry.native_caller = core.JSValue.undefinedValue();
@@ -3885,7 +3885,7 @@ pub const Machine = struct {
         copyValueSlotPinned(&entry.frame.this_value, &target.this_value);
         copyValueSlotPinned(&entry.frame.current_function, &target.callable);
         entry.stack = stack_mod.Stack.initArenaWindow(
-            &rt.memory,
+            rt,
             rt.vm_stack_arena_policy,
             carve.window,
         );
@@ -3981,7 +3981,7 @@ pub const Machine = struct {
         copyValueSlotPinned(&entry.frame.this_value, &target.this_value);
         copyValueSlotPinned(&entry.frame.current_function, &target.callable);
         entry.stack = stack_mod.Stack.initArenaWindow(
-            &rt.memory,
+            rt,
             rt.vm_stack_arena_policy,
             stack_window,
         );
@@ -4097,7 +4097,7 @@ pub const Machine = struct {
         copyValueSlotPinned(&entry.frame.this_value, &target.this_value);
         copyValueSlotPinned(&entry.frame.current_function, &target.callable);
         entry.stack = stack_mod.Stack.initArenaWindow(
-            &rt.memory,
+            rt,
             rt.vm_stack_arena_policy,
             stack_window,
         );
@@ -4210,13 +4210,13 @@ pub const Machine = struct {
             break :blk active_carve.window;
         } else blk: {
             entry.arena_mark = rt.vm_stack.mark();
-            break :blk rt.vm_stack.carve(&rt.memory, total) orelse heap: {
+            break :blk rt.vm_stack.carve(rt, total) orelse heap: {
                 storage_on_heap = true;
-                break :heap try rt.memory.alloc(core.JSValue, total);
+                break :heap try rt.nativeAllocator().alloc(core.JSValue, total);
             };
         };
         errdefer rt.vm_stack.restore(entry.arena_mark);
-        errdefer if (storage_on_heap) rt.memory.free(core.JSValue, slab_values);
+        errdefer if (storage_on_heap) rt.nativeAllocator().free(slab_values);
 
         const frame_args = slab_values[0..frame_arg_count];
         const stack_window = slab_values[frame_arg_count..];
@@ -4244,7 +4244,7 @@ pub const Machine = struct {
             },
         };
         entry.stack = stack_mod.Stack.initArenaWindow(
-            &rt.memory,
+            rt,
             rt.vm_stack_arena_policy,
             stack_window,
         );
@@ -4300,13 +4300,13 @@ pub const Machine = struct {
             break :blk active_carve.window;
         } else blk: {
             entry.arena_mark = rt.vm_stack.mark();
-            break :blk rt.vm_stack.carve(&rt.memory, stack_count) orelse heap: {
+            break :blk rt.vm_stack.carve(rt, stack_count) orelse heap: {
                 storage_on_heap = true;
-                break :heap try rt.memory.alloc(core.JSValue, stack_count);
+                break :heap try rt.nativeAllocator().alloc(core.JSValue, stack_count);
             };
         };
         errdefer rt.vm_stack.restore(entry.arena_mark);
-        errdefer if (storage_on_heap) rt.memory.free(core.JSValue, stack_window);
+        errdefer if (storage_on_heap) rt.nativeAllocator().free(stack_window);
 
         entry.frame = .{
             .function = function,
@@ -4321,7 +4321,7 @@ pub const Machine = struct {
             },
         };
         entry.stack = stack_mod.Stack.initArenaWindow(
-            &rt.memory,
+            rt,
             rt.vm_stack_arena_policy,
             stack_window,
         );
@@ -4383,14 +4383,14 @@ pub const Machine = struct {
             break :blk active_carve.window;
         } else blk: {
             entry.arena_mark = rt.vm_stack.mark();
-            break :blk rt.vm_stack.carve(&rt.memory, total) orelse heap: {
-                const heap_values = try rt.memory.alloc(core.JSValue, total);
+            break :blk rt.vm_stack.carve(rt, total) orelse heap: {
+                const heap_values = try rt.nativeAllocator().alloc(core.JSValue, total);
                 storage_on_heap = true;
                 break :heap heap_values;
             };
         };
         errdefer rt.vm_stack.restore(entry.arena_mark);
-        errdefer if (storage_on_heap) rt.memory.free(core.JSValue, slab_values);
+        errdefer if (storage_on_heap) rt.nativeAllocator().free(slab_values);
 
         const frame_args = slab_values[0..frame_arg_count];
         const locals_start = frame_arg_count;
@@ -4414,7 +4414,7 @@ pub const Machine = struct {
         // FrameCold allocation is the final failable operation. Source owners
         // therefore remain untouched on every setup failure.
         const cold: ?*frame_mod.Frame.FrameCold = if (snapshot_count == 0) null else blk: {
-            const box = try rt.memory.create(frame_mod.Frame.FrameCold);
+            const box = try rt.nativeAllocator().create(frame_mod.Frame.FrameCold);
             for (args, 0..) |arg, index| original_args[index] = arg;
             box.* = .{ .original_args = original_args };
             break :blk box;
@@ -4446,7 +4446,7 @@ pub const Machine = struct {
             .cold = cold,
         };
         entry.stack = stack_mod.Stack.initArenaWindow(
-            &rt.memory,
+            rt,
             rt.vm_stack_arena_policy,
             stack_window,
         );
@@ -4688,7 +4688,7 @@ pub const Machine = struct {
             .storage = .borrowed,
         };
         frame.cold = null;
-        entry.stack = stack_mod.Stack.initArenaWindow(&rt.memory, rt.vm_stack_arena_policy, stack_window);
+        entry.stack = stack_mod.Stack.initArenaWindow(rt, rt.vm_stack_arena_policy, stack_window);
         entry.teardown = .{ .simple = true };
         entry.prev = self.top;
         self.top = entry;
@@ -4742,8 +4742,8 @@ pub const Machine = struct {
         const moved: []core.JSValue = if (total <= inline_buf.len)
             inline_buf[0..total]
         else
-            try rt.memory.alloc(core.JSValue, total);
-        defer if (total > inline_buf.len) rt.memory.free(core.JSValue, moved);
+            try rt.nativeAllocator().alloc(core.JSValue, total);
+        defer if (total > inline_buf.len) rt.nativeAllocator().free(moved);
         @memcpy(moved, caller_stack.values[region_base..][0..total]);
         caller_stack.setLen(region_base);
         // `moved` now owns the call region (the receiver and callable plus any
@@ -5235,7 +5235,6 @@ pub const Machine = struct {
     }
 };
 
-
 // ----- merged from async_completion.zig -----
 // Rooted async completion records owned by a Machine, independent of callee arenas.
 const Value = core.JSValue;
@@ -5265,7 +5264,7 @@ pub const Store = struct {
             var remaining = (id - 1) / per_chunk;
             while (true) {
                 if (link.* == null) {
-                    const chunk = try rt.memory.create(Chunk);
+                    const chunk = try rt.nativeAllocator().create(Chunk);
                     chunk.* = .{};
                     link.* = chunk;
                 }
@@ -5304,21 +5303,21 @@ pub const Store = struct {
         var node = self.chunks;
         while (node) |chunk| {
             node = chunk.next;
-            rt.memory.destroy(Chunk, chunk);
+            rt.nativeAllocator().destroy(chunk);
         }
         self.chunks = null;
     }
 };
 test "no-suspend async overflow allocation failure leaves published roots intact" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     var store = Store{};
     defer store.deinit(rt);
     const first = try store.begin(rt, Value.int32(7));
     store.at(first).promise = Value.int32(11);
-    rt.setMemoryLimit(0);
+    rt.setNativeBytesLimitForTest(0);
     try std.testing.expectError(error.OutOfMemory, store.begin(rt, Value.int32(8)));
-    rt.setMemoryLimit(null);
+    rt.setNativeBytesLimitForTest(null);
     try std.testing.expectEqual(@as(u32, 1), store.count);
     try std.testing.expect(store.chunks == null);
     try std.testing.expectEqual(@as(?i32, 7), store.at(first).callee.as(.int));
@@ -5327,7 +5326,6 @@ test "no-suspend async overflow allocation failure leaves published roots intact
     try std.testing.expectEqual(@as(u32, 0), store.count);
     try std.testing.expect(store.first.promise.is(.undefined_value) and store.first.callee.is(.undefined_value));
 }
-
 
 // ----- merged from active_invocation_trace.zig -----
 // Exec-owned no-fail root walk for `JSRuntime.active_invocation`.

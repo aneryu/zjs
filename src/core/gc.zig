@@ -2,6 +2,7 @@
 //! Governing Layer: third_party/zjs/src/core/gc.zig
 //! Following Z-GE Architecture Contract v1.0
 
+const mem_ops = @import("memory.zig");
 const std = @import("std");
 pub const representation = @import("gc_representation_constants.zig");
 const builtin = @import("builtin");
@@ -25,6 +26,9 @@ const value_format = @import("value_format.zig");
 const KB: usize = 1024;
 const MB: usize = 1024 * KB;
 
+const gc_storage = @import("gc_storage.zig");
+const heap_budget = @import("heap_budget.zig");
+pub const gc_weak = @import("gc_weak.zig");
 const BlockHeapMod = @import("gc_block_heap.zig");
 const gc_space = @import("gc_space.zig");
 
@@ -690,7 +694,6 @@ pub const AllocInfo = packed struct(u8) {
     standalone: bool = false,
 };
 
-
 /// Tracer-owned lifetime state in the tail of Metadata. Epoch 0 is reserved
 /// for newborn/unmarked; the Registry epoch starts at 1.
 /// TGC S4-e: the lifetime tail's flag byte is empty. `husk` retired with the
@@ -1305,18 +1308,8 @@ pub const GeStats = struct {
 };
 
 pub const Stats = struct {
-    total_allocated_bytes: usize = 0,
+    /// Account high-water, not a heap census and not RSS.
     peak_allocated_bytes: usize = 0,
-    heap_live_bytes: usize = 0,
-    old_live_bytes: usize = 0,
-    large_object_bytes: usize = 0,
-    rss_bytes: usize = 0,
-    cgroup_limit_bytes: usize = 0,
-
-    old_allocated_bytes: usize = 0,
-    old_alloc_count: usize = 0,
-    large_allocated_bytes: usize = 0,
-    large_alloc_count: usize = 0,
 
     external_bytes: usize = 0,
     external_untracked_bytes: usize = 0,
@@ -1354,6 +1347,28 @@ pub const Stats = struct {
     pending_request_urgency: ?RequestUrgency = null,
     last_request_reason: ?RequestReason = null,
 };
+
+/// Explicit heap census plus process sample. Ordinary `gcStats` does not
+/// fill these; a missing census is not reported as zero.
+pub const DetailedStats = struct {
+    counters: Stats = .{},
+    /// Live traced bytes from one census. Not `allocated_bytes`, not RSS.
+    heap_live_bytes: usize = 0,
+    old_live_bytes: usize = 0,
+    large_object_bytes: usize = 0,
+    old_count: usize = 0,
+    large_count: usize = 0,
+    rss_bytes: usize = 0,
+    cgroup_limit_bytes: usize = 0,
+};
+
+pub var heap_walks_for_test: if (builtin.is_test) usize else void =
+    if (builtin.is_test) 0 else {};
+
+pub fn noteHeapWalk() void {
+    if (comptime !builtin.is_test) return;
+    heap_walks_for_test += 1;
+}
 
 /// Z-GE Registry
 /// The two words every write barrier and every JSValue release reads.
@@ -1412,7 +1427,7 @@ pub const Registry = struct {
     // .text grew 5,260 bytes on address materialization alone.
     hot: HotWords align(64) = .{},
 
-    memory: *memory.MemoryAccount,
+    runtime: *JSRuntime,
 
     /// The published non-Object carrier list and its cursors.
     /// See `gc_registry_lists.zig`.
@@ -1446,6 +1461,8 @@ pub const Registry = struct {
     nonblock_objects: ?*NonBlockObjectAuthority = null,
     /// Bump-allocated young generation. Empty unless `nursery_enabled`.
     nursery: nursery_mod.Nursery = .{},
+    /// Cell heap, nursery, and audit carrier tables. The account forwards here.
+    cell_storage: gc_storage.Owner = .{},
     /// Bumped by every collection that can move or free an object.
     ///
     /// This is the `Effect.may_alloc` discipline made checkable at runtime:
@@ -1480,6 +1497,9 @@ pub const Registry = struct {
     stats: GeStats = .{},
     /// Publication-size histogram for Stage 4 class freeze.
     space_histogram: SpaceHistogram = .{},
+    /// Live JS heap charge and its limit. Declared last so it does not shift
+    /// the hot prefix. Nursery cells are not charged.
+    heap_budget: heap_budget.Budget = .{},
 
     // The R3 conservative-only root census is deliberately NOT a field here.
     // It lives in `gc_conservative`'s `.bss`: as a Registry field it was part
@@ -1497,7 +1517,7 @@ pub const Registry = struct {
     /// with the JS heap limit.
     ///
     /// The OOM-injection tier must nevertheless route it through
-    /// `MemoryAccount.backing_allocator` -- the *unaccounted* raw allocator
+    /// `mem_ops.backing_allocator` -- the *unaccounted* raw allocator
     /// the account itself sits on. Everything the tracing collector moved
     /// into the block heap (S2: the string family; S4-b: property storage
     /// and array element buffers) is otherwise invisible to
@@ -1533,13 +1553,13 @@ pub const Registry = struct {
     /// no errdefer to write. The rollback obligation is one level up --
     /// `JSRuntime` construction can fail after this returns -- which is why
     /// each sub-structure's `deinit` is idempotent instead.
-    pub fn init(account: *memory.MemoryAccount, policy: Policy) Registry {
+    pub fn init(account: *@import("runtime.zig").JSRuntime, policy: Policy) Registry {
         forensics.readFromEnv();
         return .{
-            .memory = account,
+            .runtime = account,
             .scheduler = .{ .policy = policy },
             .block_heap = BlockHeap.init(if (comptime block_heap_uses_account_backing)
-                account.backing_allocator
+                account.allocator
             else
                 std.heap.page_allocator),
         };
@@ -1712,19 +1732,17 @@ pub const Registry = struct {
 
         self.lists.init();
 
-        self.external.deinit(self.memory);
-        self.pins.deinit(self.memory);
+        self.external.deinit(self.runtime);
+        self.pins.deinit(self.runtime);
 
         // TGC S2: string carriers that survived the host-quiescent teardown
         // collections (atom-table roots) leave through the same unpublish +
         // return path the sweep uses, so the accounting oracle balances.
         string.destroyAllStringCarriersForDeinit(rt);
 
-        if (self.nonblock_objects) |authority| {
-            authority.deinit(addressRegistryAllocator());
-            addressRegistryAllocator().destroy(authority);
-            self.nonblock_objects = null;
-        }
+        self.destroyNonblockAuthority();
+        self.cell_storage.slab.arena_observer = null;
+        self.arena_slab = null;
         self.address_registry.deinit(addressRegistryAllocator());
         self.generation.deinit(addressRegistryAllocator());
         self.nursery.deinit(self.nursery.page_allocator);
@@ -1734,7 +1752,7 @@ pub const Registry = struct {
             self.heap_accounting_oracle.deinit(std.heap.page_allocator);
         }
         if (comptime carrier.audit_enabled or carrier.audit_enabled) {
-            self.memory.deinitGcCarrier();
+            mem_ops.deinitGcCarrier(self.runtime);
         }
 
         self.hot.phase = .none;
@@ -1742,7 +1760,7 @@ pub const Registry = struct {
 
     pub fn reportExternalAlloc(self: *Registry, bytes: usize) !ExternalMemoryToken {
         if (bytes == 0) return .{};
-        const id = try self.external.add(self.memory, bytes);
+        const id = try self.external.add(self.runtime, bytes);
         self.stats.external_bytes = std.math.add(usize, self.stats.external_bytes, bytes) catch std.math.maxInt(usize);
         self.stats.peak_external_bytes = @max(self.stats.peak_external_bytes, self.stats.external_bytes);
         self.stats.external_alloc_count +|= 1;
@@ -1936,13 +1954,13 @@ pub const Registry = struct {
         }
         if (comptime carrier.audit_enabled) {
             if (!h.metaConst().alloc_info.nursery) {
-                self.memory.carrierPublish(@intFromPtr(h), bytes) catch
+                mem_ops.carrierPublish(self.runtime, @intFromPtr(h), bytes) catch
                     @panic("gc: CARRIER IDENTITY: publication missing carrier record");
             }
         }
         // qjs add_gc_object writes header bookkeeping once and then
         // list_add_tail's. No membership flag. GC pacing
-        // is owned by MemoryAccount.allocated_bytes; logical space bytes and
+        // is owned by mem_ops.allocated_bytes; logical space bytes and
         // counts are derived by statsSnapshot.
         if (comptime arm == .fast) {
             std.debug.assert(!is_large);
@@ -2009,7 +2027,7 @@ pub const Registry = struct {
             self.heap_accounting_oracle.recordPublish(@intFromPtr(h), bytes, false);
         }
         if (comptime carrier.audit_enabled) {
-            self.memory.carrierPublish(@intFromPtr(h), bytes) catch
+            mem_ops.carrierPublish(self.runtime, @intFromPtr(h), bytes) catch
                 @panic("gc: CARRIER IDENTITY: publication missing carrier record");
         }
         self.lists.linkTail(h);
@@ -2098,6 +2116,7 @@ pub const Registry = struct {
 
     fn recordHeapFreeWithBytes(self: *Registry, header: *Header, bytes: usize) void {
         if (!header.meta().alloc_info.heap_accounted or bytes == 0) return;
+        if (!header.metaConst().alloc_info.nursery) self.heap_budget.discharge(bytes);
         // Production restores the publication bit; test/audit builds also
         // debit the independent lifecycle oracle compiled above.
         const is_large = self.isLargeAllocation(bytes);
@@ -2113,7 +2132,7 @@ pub const Registry = struct {
         header.meta().alloc_info.heap_accounted = false;
         if (comptime carrier.audit_enabled) {
             if (in_carrier_ledgers) {
-                self.memory.carrierTransition(@intFromPtr(header), .doomed) catch
+                mem_ops.carrierTransition(self.runtime, @intFromPtr(header), .doomed) catch
                     @panic("gc: CARRIER IDENTITY: retirement missing carrier record");
             }
         }
@@ -2131,17 +2150,16 @@ pub const Registry = struct {
     }
 
     pub fn pinHeader(self: *Registry, header: *Header) !void {
-        return self.pins.pin(self.memory, header);
+        return self.pins.pin(self.runtime, header);
     }
 
     pub fn unpinHeader(self: *Registry, header: *Header) void {
         self.pins.unpin(header);
     }
 
-    // Production heap_live_bytes / old_live_bytes / large_object_bytes are
-    // never stored: statsSnapshot derives them from the accounting census.
-    // Test/audit builds separately retain a shadow lifecycle oracle so the
-    // verifier can detect a census ownership omission.
+    // Heap live bytes are not stored. `gcDetailedStats` derives them from one
+    // census. Ordinary `gcStats` does not. Test/audit builds retain a shadow
+    // lifecycle oracle so the verifier can detect a census ownership omission.
 
     pub fn unlinkObjectWithBytes(self: *Registry, h: *Header, bytes: usize) void {
         self.recordHeapFreeWithBytes(h, bytes);
@@ -2192,7 +2210,7 @@ pub const Registry = struct {
         kind_tag: u8,
         total_bytes: usize,
     ) ![*]u8 {
-        const cell = try self.memory.createStorageCell(kind_tag, total_bytes);
+        const cell = try mem_ops.createStorageCell(self.runtime, kind_tag, total_bytes);
         const body = cell.base + metadata_prefix_size;
         self.addInitializedWithSizeNoFail(@ptrCast(@alignCast(body)), cell.accounted_bytes);
         return body;
@@ -2259,7 +2277,7 @@ pub const Registry = struct {
                     if (index >= block.cell_count) break;
                     const header: *Header = @ptrFromInt(cells_base + index * cell_size);
                     self.unpublishStringCell(header, accounted);
-                    if (comptime audit_walk) self.memory.noteBlockCellBitmapReclaim(header);
+                    if (comptime audit_walk) mem_ops.noteBlockCellBitmapReclaim(self.runtime, header);
                 }
             }
         }
@@ -2280,7 +2298,7 @@ pub const Registry = struct {
         std.debug.assert(kindIsPrefixCarrier(h.metaConst().flags.kind));
         const total = storageCellBlockTotalBytes(h);
         self.unpublishStringCell(h, BlockHeapMod.accountedBodyBytesForRequest(total, metadata_prefix_size).?);
-        self.memory.destroyStringCell(h, total);
+        mem_ops.destroyStringCell(self.runtime, h, total);
     }
 
     /// Allocation size (prefix included) of a storage cell served by a block
@@ -2904,13 +2922,13 @@ pub const Registry = struct {
     pub fn noteCycleEnvelopeBaseline(self: *Registry, start_bytes: usize, threshold_bytes: usize) void {
         if (!gc_trace_stw_reports.detailed_reports) return;
         std.debug.assert(!self.incremental.envelope_active);
-        if (self.incremental.envelope_baseline_valid) self.memory.endCyclePeakTracking();
+        if (self.incremental.envelope_baseline_valid) self.heap_budget.endCyclePeakTracking();
         self.incremental.envelope_next_start_bytes = start_bytes;
         self.incremental.envelope_next_threshold_bytes = threshold_bytes;
         self.incremental.envelope_cycle_peak_bytes = start_bytes;
         self.incremental.envelope_baseline_valid = threshold_bytes != 0;
         if (self.incremental.envelope_baseline_valid) {
-            self.memory.beginCyclePeakTracking(&self.incremental.envelope_cycle_peak_bytes);
+            self.heap_budget.beginCyclePeakTracking(&self.incremental.envelope_cycle_peak_bytes);
         }
     }
 
@@ -2918,11 +2936,11 @@ pub const Registry = struct {
     /// policy, so the next cycle must not be presented as §1.3 evidence.
     pub fn invalidateCycleEnvelopeBaseline(self: *Registry) void {
         if (self.incremental.envelope_active) {
-            self.memory.endCyclePeakTracking();
+            self.heap_budget.endCyclePeakTracking();
             self.incremental.envelope_active = false;
             self.incremental.stats.envelope_skipped_cycles +|= 1;
         } else if (self.incremental.envelope_baseline_valid) {
-            self.memory.endCyclePeakTracking();
+            self.heap_budget.endCyclePeakTracking();
         }
         self.incremental.envelope_baseline_valid = false;
     }
@@ -2942,19 +2960,19 @@ pub const Registry = struct {
         self.incremental.envelope_baseline_valid = false;
         self.incremental.envelope_cycle_start_bytes = self.incremental.envelope_next_start_bytes;
         self.incremental.envelope_cycle_threshold_bytes = threshold_bytes;
-        self.incremental.envelope_cycle_begin_bytes = self.memory.allocated_bytes;
+        self.incremental.envelope_cycle_begin_bytes = self.heap_budget.bytes;
         self.incremental.envelope_active = true;
     }
 
     fn abortCycleEnvelope(self: *Registry) void {
         if (!self.incremental.envelope_active) return;
-        self.memory.endCyclePeakTracking();
+        self.heap_budget.endCyclePeakTracking();
         self.incremental.envelope_active = false;
     }
 
     pub fn finishCycleEnvelope(self: *Registry) void {
         if (!self.incremental.envelope_active) return;
-        self.memory.endCyclePeakTracking();
+        self.heap_budget.endCyclePeakTracking();
         self.incremental.envelope_active = false;
 
         const start = self.incremental.envelope_cycle_start_bytes;
@@ -3390,7 +3408,7 @@ pub const Registry = struct {
             self.heap_accounting_oracle.recordPublish(@intFromPtr(h), bytes, is_large);
         }
         if (comptime carrier.audit_enabled) {
-            self.memory.carrierPublish(@intFromPtr(h), bytes) catch
+            mem_ops.carrierPublish(self.runtime, @intFromPtr(h), bytes) catch
                 @panic("gc: CARRIER IDENTITY: promotion missing carrier record");
         }
         self.observeNewPublication(h, bytes);
@@ -3415,7 +3433,7 @@ pub const Registry = struct {
         const body_bytes = heapByteSizeFromHeader(rt, old);
         const request = body_bytes + metadata_prefix_size;
         if (!BlockHeapMod.canAllocCellSize(request)) return null;
-        const cell_raw = self.memory.allocPromotedObjectCell(request) orelse return null;
+        const cell_raw = mem_ops.allocPromotedObjectCell(self.runtime, request) orelse return null;
         const cell = @intFromPtr(cell_raw);
         const moved: *Header = @ptrFromInt(cell + metadata_prefix_size);
 
@@ -3474,24 +3492,70 @@ pub const Registry = struct {
     /// overwhelming majority of the heap (space histogram: 18.4M of 18.4M
     /// small allocations) and fixed-size, so the routing predicate is one
     /// comptime tag compare.
-    pub fn serveObjectCells(self: *Registry, account: *memory.MemoryAccount) !void {
+    /// How many `NonBlockObjectAuthority` objects are currently allocated.
+    /// Construction rollback and `Registry.deinit` both go through
+    /// `destroyNonblockAuthority`, so a failed `JSRuntime` init must leave
+    /// this where it started.
+    pub var nonblock_authorities_live_for_test: if (builtin.is_test) usize else void =
+        if (builtin.is_test) 0 else {};
+
+    /// When set, the next `serveObjectCells` installs heap pointers and then
+    /// returns `error.OutOfMemory` before the authority allocation.
+    pub var fail_nonblock_authority_for_test: if (builtin.is_test) bool else void =
+        if (builtin.is_test) false else {};
+
+    fn destroyNonblockAuthority(self: *Registry) void {
+        const authority = self.nonblock_objects orelse return;
+        authority.deinit(addressRegistryAllocator());
+        addressRegistryAllocator().destroy(authority);
+        self.nonblock_objects = null;
+        if (comptime builtin.is_test) nonblock_authorities_live_for_test -= 1;
+    }
+
+    /// Drop what `init` / `initLists` / `serveObjectCells` acquired.
+    /// No heap walk: shapes, atoms, and classes are not owned here, and a
+    /// half-built runtime must not enter `deinit`.
+    pub fn rollbackConstruction(self: *Registry) void {
+        const account = self.runtime;
+        self.destroyNonblockAuthority();
+        mem_ops.deinitGcCarrier(account);
+        self.cell_storage.slab.arena_observer = null;
+        self.arena_slab = null;
+        self.address_registry.deinit(addressRegistryAllocator());
+        self.generation.deinit(addressRegistryAllocator());
+        self.nursery.deinit(self.nursery.page_allocator);
+        self.block_heap.deinit();
+        self.external.deinit(account);
+        self.pins.deinit(account);
+        if (comptime carrier_audit_enabled) {
+            std.debug.assert(self.heap_accounting_oracle.raw.count() == 0);
+            self.heap_accounting_oracle.deinit(std.heap.page_allocator);
+        }
+    }
+
+    pub fn serveObjectCells(self: *Registry) !void {
         // The conservative resolver needs the block geometry before the first
         // cell can appear in a stack slot.
         self.address_registry.block_heap = &self.block_heap;
-        // `MemoryAccount` owns the allocation funnel, so give it the concrete
-        // heap rather than two runtime function pointers. The trace build can
-        // now direct-call and specialize `allocCell`; RC comptime-erases both
-        // the field and the branch.
-        account.gc_object_cell_heap = &self.block_heap;
+        // One cell store, owned here. The account only forwards.
+        self.cell_storage.block_heap = &self.block_heap;
         self.nursery.page_allocator = nurseryAllocator();
         self.nursery.enabled = nursery_enabled;
-        account.gc_nursery = &self.nursery;
+        self.cell_storage.nursery = &self.nursery;
         if (comptime carrier_audit_enabled) {
-            account.gc_heap_oracle = &self.heap_accounting_oracle;
+            self.cell_storage.heap_oracle = &self.heap_accounting_oracle;
+        }
+
+        if (comptime builtin.is_test) {
+            if (fail_nonblock_authority_for_test) {
+                fail_nonblock_authority_for_test = false;
+                return error.OutOfMemory;
+            }
         }
         const authority = try addressRegistryAllocator().create(NonBlockObjectAuthority);
         authority.* = .{};
         self.nonblock_objects = authority;
+        if (comptime builtin.is_test) nonblock_authorities_live_for_test += 1;
     }
 
     fn noteSlabArenaCreated(ctx: *anyopaque, base: usize) void {
@@ -3508,7 +3572,7 @@ pub const Registry = struct {
         // Kept so a failed arena registration can be recovered by re-walking
         // the slab, instead of leaving that arena invisible for its whole life.
         self.arena_slab = slab;
-        // Arenas that already exist. In the current `initWithAccount` order
+        // Arenas that already exist. In the current `initInPlace` order
         // there are none -- `enableSmallObjectSlab` runs afterwards, so this
         // walk visits nothing -- but the observer's correctness must not depend
         // on that ordering, because an arena created before it is installed is
@@ -3680,6 +3744,7 @@ pub const Registry = struct {
     /// Histogram and sweep-window observation for a first-time publication.
     /// Restores do not call this (the object was already counted / windowed).
     inline fn observeNewPublication(self: *Registry, header: *Header, bytes: usize) void {
+        if (!isNurseryHeader(header)) self.heap_budget.charge(bytes);
         if (comptime builtin.is_test) {
             if (header.metaConst().flags.kind == .object) {
                 self.space_histogram.recordObject(
@@ -3748,6 +3813,7 @@ pub const Registry = struct {
     pub const pauseDistribution = registry_diagnostics.pauseDistribution;
     pub const HeapSpaceSnapshot = registry_diagnostics.HeapSpaceSnapshot;
     pub const statsSnapshot = registry_diagnostics.statsSnapshot;
+    pub const counterSnapshot = registry_diagnostics.counterSnapshot;
     pub const verifyObjectPropertyStorageLayouts = registry_diagnostics.verifyObjectPropertyStorageLayouts;
     pub const recordFailure = registry_diagnostics.recordFailure;
     pub const recordSuccess = registry_diagnostics.recordSuccess;
@@ -3825,7 +3891,7 @@ pub const Registry = struct {
     /// authorities behind it exist nowhere else).
     pub fn allocationHandle(self: *const Registry, header: *const Header) ?AllocationHandle {
         comptime std.debug.assert(carrier.audit_enabled);
-        return self.memory.carrierGenerationHandle(@intFromPtr(header));
+        return mem_ops.carrierGenerationHandle(self.runtime, @intFromPtr(header));
     }
 
     /// Generation/state exact resolution (audit builds only).
@@ -3858,11 +3924,11 @@ pub const Registry = struct {
             return .{ .tracing = header };
         }
 
-        const record = try self.memory.gc_extent_identity.resolve(
+        const record = try self.runtime.gc.cell_storage.extent_identity.resolve(
             handle,
             if (expected_kind) |kind| @intFromEnum(kind) else null,
         );
-        const lifecycle = try self.memory.gc_extent_lifecycle.resolve(handle.base, allowed_states);
+        const lifecycle = try self.runtime.gc.cell_storage.extent_lifecycle.resolve(handle.base, allowed_states);
         const header: *Header = @ptrFromInt(handle.base);
         const kind = header.metaConst().flags.kind;
         if (@intFromEnum(kind) != record.kind) return error.HeaderMismatch;

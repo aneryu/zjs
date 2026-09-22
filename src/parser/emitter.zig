@@ -262,7 +262,7 @@ pub const Emitter = struct {
     pub fn discardDetachedSources(s: *State, seg: *compiler.builder.DetachedSegment) void {
         const sources = seg.sources;
         seg.sources = &.{};
-        if (sources.len != 0) s.memory.free(compiler.builder.SourceSlot, sources);
+        if (sources.len != 0) s.allocator.free(sources);
     }
     pub fn spliceSegment(s: *State, seg: *compiler.builder.DetachedSegment) Error!void {
         try s.activeBuilder().spliceSegment(seg);
@@ -276,25 +276,25 @@ pub fn emitGrammarSource(s: *State, source: SourcePosition) Error!void {
 }
 
 pub fn pushBreakFrame(s: *State) Error!void {
-    try s.break_frame_lens.append(s.memory.allocator, s.break_fixups.items.len);
-    try s.continue_frame_lens.append(s.memory.allocator, s.continue_fixups.items.len);
-    try s.continue_frame_break_frame_indices.append(s.memory.allocator, s.break_frame_lens.items.len - 1);
-    try s.break_frame_catch_marker_depths.append(s.memory.allocator, s.active_catch_marker_depth);
-    try s.break_frame_cleanup_drops.append(s.memory.allocator, 0);
-    try s.break_frame_cross_cleanup_drops.append(s.memory.allocator, 0);
-    try s.continue_frame_catch_marker_depths.append(s.memory.allocator, s.active_catch_marker_depth);
-    try s.continue_frame_cleanup_drops.append(s.memory.allocator, 0);
+    try s.break_frame_lens.append(s.scratch, s.break_fixups.items.len);
+    try s.continue_frame_lens.append(s.scratch, s.continue_fixups.items.len);
+    try s.continue_frame_break_frame_indices.append(s.scratch, s.break_frame_lens.items.len - 1);
+    try s.break_frame_catch_marker_depths.append(s.scratch, s.active_catch_marker_depth);
+    try s.break_frame_cleanup_drops.append(s.scratch, 0);
+    try s.break_frame_cross_cleanup_drops.append(s.scratch, 0);
+    try s.continue_frame_catch_marker_depths.append(s.scratch, s.active_catch_marker_depth);
+    try s.continue_frame_cleanup_drops.append(s.scratch, 0);
     // qjs push_break_entry order: label_cont first, then label_break.
-    try array_list_erased.append(&s.continue_frame_labels, s.memory.allocator, try Emitter.newLabel(s));
-    try array_list_erased.append(&s.break_frame_labels, s.memory.allocator, try Emitter.newLabel(s));
+    try array_list_erased.append(&s.continue_frame_labels, s.scratch, try Emitter.newLabel(s));
+    try array_list_erased.append(&s.break_frame_labels, s.scratch, try Emitter.newLabel(s));
 }
 
 pub fn pushBreakOnlyFrame(s: *State) Error!void {
-    try s.break_frame_lens.append(s.memory.allocator, s.break_fixups.items.len);
-    try s.break_frame_catch_marker_depths.append(s.memory.allocator, s.active_catch_marker_depth);
-    try s.break_frame_cleanup_drops.append(s.memory.allocator, 0);
-    try s.break_frame_cross_cleanup_drops.append(s.memory.allocator, 0);
-    try array_list_erased.append(&s.break_frame_labels, s.memory.allocator, try Emitter.newLabel(s));
+    try s.break_frame_lens.append(s.scratch, s.break_fixups.items.len);
+    try s.break_frame_catch_marker_depths.append(s.scratch, s.active_catch_marker_depth);
+    try s.break_frame_cleanup_drops.append(s.scratch, 0);
+    try s.break_frame_cross_cleanup_drops.append(s.scratch, 0);
+    try array_list_erased.append(&s.break_frame_labels, s.scratch, try Emitter.newLabel(s));
 }
 
 /// Put a real break/continue target in the same ordered environment chain
@@ -512,7 +512,7 @@ pub fn pushReturnFinallyFrame(
     catch_marker_depth: u32,
 ) Error!usize {
     if (catch_marker_depth > s.active_catch_marker_depth) return error.ParserInvariant;
-    try s.return_finally_frames.append(s.memory.allocator, .{
+    try s.return_finally_frames.append(s.scratch, .{
         .finally_label = finally_label,
         .scope_level = s.scope_level,
         .catch_marker_depth = catch_marker_depth,
@@ -572,9 +572,9 @@ pub fn enterReturnFinallyFunctionBoundary(s: *State) ReturnFinallyBoundary {
 }
 
 pub fn leaveReturnFinallyFunctionBoundary(s: *State, saved: *const ReturnFinallyBoundary) void {
-    s.return_finally_frames.deinit(s.memory.allocator);
+    s.return_finally_frames.deinit(s.scratch);
     s.return_finally_frames = saved.frames;
-    s.finally_body_control_frames.deinit(s.memory.allocator);
+    s.finally_body_control_frames.deinit(s.scratch);
     s.finally_body_control_frames = saved.finally_body_control_frames;
 }
 
@@ -614,7 +614,7 @@ pub fn parseSharedFinallyBlock(s: *State) Error!void {
         s.top_break = block.prev;
     }
 
-    try s.finally_body_control_frames.append(s.memory.allocator, .{
+    try s.finally_body_control_frames.append(s.scratch, .{
         .block = &block,
         .catch_marker_depth = s.active_catch_marker_depth,
         .break_depth = s.break_frame_lens.items.len,

@@ -263,8 +263,8 @@ pub fn toStringMethod(rt: *core.JSRuntime, receiver: core.JSValue, args: []const
     const options: dtoa.FormatOptions = .{ .exp = .disabled };
     const needed = try dtoa.radixMaxLen(number, @intCast(radix), 0, options);
     var out = std.ArrayList(u8).empty;
-    defer out.deinit(rt.memory.allocator);
-    try out.resize(rt.memory.allocator, needed);
+    defer out.deinit(rt.nativeAllocator());
+    try out.resize(rt.nativeAllocator(), needed);
     const text = dtoa.formatRadix(out.items, number, @intCast(radix), 0, options) catch unreachable;
     const string = try core.string.String.createAscii(rt, text);
     return string.value();

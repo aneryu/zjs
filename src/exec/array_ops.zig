@@ -1194,7 +1194,7 @@ pub fn typedArraySetCall(
             }
 
             // Mismatched element class: convert per element through the value path.
-            const values = try ctx.runtime.memory.alloc(core.JSValue, source_length);
+            const values = try ctx.runtime.nativeAllocator().alloc(core.JSValue, source_length);
             var rooted_values: []core.JSValue = values[0..0];
             var values_root = ValueSliceRoot{};
             values_root.init(ctx.runtime, &rooted_values);
@@ -1206,7 +1206,7 @@ pub fn typedArraySetCall(
                     values[free_index] = core.JSValue.undefinedValue();
                 }
                 rooted_values = &.{};
-                if (values.len != 0) ctx.runtime.memory.free(core.JSValue, values);
+                if (values.len != 0) ctx.runtime.nativeAllocator().free(values);
             }
 
             var snapshot_index: usize = 0;
@@ -1241,7 +1241,7 @@ pub fn typedArraySetCall(
 }
 
 test "typedArraySetCall roots typed array snapshot while reading source" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -1264,16 +1264,16 @@ test "typedArraySetCall roots typed array snapshot while reading source" {
     const function_object = try core.Object.create(rt, core.class.ids.object, null);
     const args = [_]core.JSValue{source_value};
 
-    const saved_trigger_fn = rt.memory.trigger_gc_fn;
-    const saved_trigger_ctx = rt.memory.trigger_gc_ctx;
+    const saved_trigger_fn = rt.gc.heap_budget.probe;
+    const saved_trigger_ctx = rt.gc.heap_budget.probe_ctx;
     var probe = ActiveRootValueProbe{
         .rt = rt,
     };
-    rt.memory.trigger_gc_fn = ActiveRootValueProbe.trigger;
-    rt.memory.trigger_gc_ctx = &probe;
+    rt.gc.heap_budget.probe = ActiveRootValueProbe.trigger;
+    rt.gc.heap_budget.probe_ctx = &probe;
     defer {
-        rt.memory.trigger_gc_fn = saved_trigger_fn;
-        rt.memory.trigger_gc_ctx = saved_trigger_ctx;
+        rt.gc.heap_budget.probe = saved_trigger_fn;
+        rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
     }
 
     _ = (try typedArraySetCall(ctx, null, global, target_value, function_object, &args, null, null)) orelse return error.TypeError;
@@ -1632,8 +1632,8 @@ pub fn typedArrayMapFilter(
         return out_window[0];
     }
 
-    const kept = try ctx.runtime.memory.alloc(core.JSValue, length);
-    errdefer ctx.runtime.memory.free(core.JSValue, kept);
+    const kept = try ctx.runtime.nativeAllocator().alloc(core.JSValue, length);
+    errdefer ctx.runtime.nativeAllocator().free(kept);
     var rooted_kept: []core.JSValue = kept[0..0];
     var root_slices = [_]core.runtime.ValueRootSlice{
         .{ .mutable = &rooted_kept },
@@ -1673,7 +1673,7 @@ pub fn typedArrayMapFilter(
         kept[index] = core.JSValue.undefinedValue();
     }
     rooted_kept = &.{};
-    ctx.runtime.memory.free(core.JSValue, kept);
+    ctx.runtime.nativeAllocator().free(kept);
     return out_value;
 }
 
@@ -1805,11 +1805,11 @@ pub fn arrayReduceRightSparseLarge(
     const keys = try object.ownKeys(ctx.runtime);
     defer core.Object.freeKeys(ctx.runtime, keys);
     var indexed = std.ArrayList(SparseIndexKey).empty;
-    defer indexed.deinit(ctx.runtime.memory.allocator);
+    defer indexed.deinit(ctx.runtime.nativeAllocator());
     for (keys) |key| {
         const index = propertyIndexFromLengthKey(ctx.runtime, key) orelse continue;
         if (index >= length) continue;
-        try array_list_erased.append(&indexed, ctx.runtime.memory.allocator, .{ .atom_id = key, .index = index });
+        try array_list_erased.append(&indexed, ctx.runtime.nativeAllocator(), .{ .atom_id = key, .index = index });
     }
     sort_erased.heap(SparseIndexKey, indexed.items, {}, struct {
         fn lessThan(_: void, a: SparseIndexKey, b: SparseIndexKey) bool {
@@ -2129,11 +2129,11 @@ pub fn arrayLastIndexSparseLarge(
     const keys = try object.ownKeys(ctx.runtime);
     defer core.Object.freeKeys(ctx.runtime, keys);
     var indexed = std.ArrayList(SparseIndexKey).empty;
-    defer indexed.deinit(ctx.runtime.memory.allocator);
+    defer indexed.deinit(ctx.runtime.nativeAllocator());
     for (keys) |key| {
         const index = propertyIndexFromLengthKey(ctx.runtime, key) orelse continue;
         if (index >= start_exclusive or index >= length) continue;
-        try array_list_erased.append(&indexed, ctx.runtime.memory.allocator, .{ .atom_id = key, .index = index });
+        try array_list_erased.append(&indexed, ctx.runtime.nativeAllocator(), .{ .atom_id = key, .index = index });
     }
     sort_erased.heap(SparseIndexKey, indexed.items, {}, struct {
         fn lessThan(_: void, a: SparseIndexKey, b: SparseIndexKey) bool {
@@ -3394,12 +3394,12 @@ pub fn arrayUnshiftSparseLarge(
     const keys = try object.ownKeys(ctx.runtime);
     defer core.Object.freeKeys(ctx.runtime, keys);
     var candidates = std.ArrayList(usize).empty;
-    defer candidates.deinit(ctx.runtime.memory.allocator);
+    defer candidates.deinit(ctx.runtime.nativeAllocator());
     for (keys) |key| {
         const index = propertyIndexFromLengthKey(ctx.runtime, key) orelse continue;
-        if (index < length) try candidates.append(ctx.runtime.memory.allocator, index);
+        if (index < length) try candidates.append(ctx.runtime.nativeAllocator(), index);
         if (index >= insert_count and index - insert_count < length) {
-            try candidates.append(ctx.runtime.memory.allocator, index - insert_count);
+            try candidates.append(ctx.runtime.nativeAllocator(), index - insert_count);
         }
     }
     sort_erased.heap(usize, candidates.items, {}, struct {
@@ -4741,7 +4741,7 @@ pub const ArraySortEntry = struct {
     key: ?[]u8 = null,
 
     pub fn freeEntry(self: ArraySortEntry, ctx: *core.JSContext) void {
-        if (self.key) |bytes| ctx.runtime.memory.allocator.free(bytes);
+        if (self.key) |bytes| ctx.runtime.nativeAllocator().free(bytes);
     }
 };
 
@@ -4759,12 +4759,12 @@ fn SortScratch(comptime T: type) type {
         heap: bool = false,
 
         fn acquire(rt: *core.JSRuntime, n: usize) !@This() {
-            if (rt.vm_stack.carveTyped(&rt.memory, T, n)) |window| return .{ .items = window };
-            return .{ .items = try rt.memory.alloc(T, n), .heap = true };
+            if (rt.vm_stack.carveTyped(rt, T, n)) |window| return .{ .items = window };
+            return .{ .items = try rt.nativeAllocator().alloc(T, n), .heap = true };
         }
 
         fn release(self: @This(), rt: *core.JSRuntime) void {
-            if (self.heap) rt.memory.free(T, self.items);
+            if (self.heap) rt.nativeAllocator().free(self.items);
         }
     };
 }
@@ -4848,7 +4848,7 @@ pub fn arraySortCall(
     // window; anything else grows a list through the observable [[HasProperty]]
     // / [[Get]] walk exactly as before.
     var entries_list = std.ArrayList(ArraySortEntry).empty;
-    defer entries_list.deinit(rt.memory.allocator);
+    defer entries_list.deinit(rt.nativeAllocator());
     var entries_scratch: SortScratch(ArraySortEntry) = .{};
     defer entries_scratch.release(rt);
     var entries: []ArraySortEntry = &.{};
@@ -4888,7 +4888,7 @@ pub fn arraySortCall(
                 undefined_count += 1;
                 continue;
             }
-            try array_list_erased.append(&entries_list, rt.memory.allocator, .{ .value = value, .order = index });
+            try array_list_erased.append(&entries_list, rt.nativeAllocator(), .{ .value = value, .order = index });
         }
         entries = entries_list.items;
     }
@@ -5174,7 +5174,7 @@ pub fn arrayByCopyCall(
         var entries = std.ArrayList(ArraySortEntry).empty;
         defer {
             for (entries.items) |entry| entry.freeEntry(ctx);
-            entries.deinit(ctx.runtime.memory.allocator);
+            entries.deinit(ctx.runtime.nativeAllocator());
         }
         var undefined_count: usize = 0;
         for (0..length) |index| {
@@ -5184,7 +5184,7 @@ pub fn arrayByCopyCall(
             if (item.is(.undefined_value)) {
                 undefined_count += 1;
             } else {
-                try array_list_erased.append(&entries, ctx.runtime.memory.allocator, .{ .value = item, .order = @intCast(index) });
+                try array_list_erased.append(&entries, ctx.runtime.nativeAllocator(), .{ .value = item, .order = @intCast(index) });
             }
         }
         var sort_window: SortEntryRootWindow = .{};
@@ -5287,12 +5287,12 @@ pub fn typedArrayByCopyCall(
         var entries = std.ArrayList(ArraySortEntry).empty;
         defer {
             for (entries.items) |entry| entry.freeEntry(ctx);
-            entries.deinit(ctx.runtime.memory.allocator);
+            entries.deinit(ctx.runtime.nativeAllocator());
         }
 
         for (0..length) |index| {
             const item = try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(index));
-            try array_list_erased.append(&entries, ctx.runtime.memory.allocator, .{ .value = item, .order = @intCast(index) });
+            try array_list_erased.append(&entries, ctx.runtime.nativeAllocator(), .{ .value = item, .order = @intCast(index) });
         }
         try stableArraySortEntries(ctx, output, global, true, comparator, entries.items, caller_function, caller_frame);
 
@@ -5569,9 +5569,9 @@ fn arraySortStringKey(
     if (entry.key) |bytes| return bytes;
     const string_value = try toStringForAnnexB(ctx, output, global, entry.value, caller_function, caller_frame);
     var bytes = std.ArrayList(u8).empty;
-    errdefer bytes.deinit(ctx.runtime.memory.allocator);
+    errdefer bytes.deinit(ctx.runtime.nativeAllocator());
     try value_ops.appendRawString(ctx.runtime, &bytes, string_value);
-    const owned = try bytes.toOwnedSlice(ctx.runtime.memory.allocator);
+    const owned = try bytes.toOwnedSlice(ctx.runtime.nativeAllocator());
     entry.key = owned;
     return owned;
 }
@@ -5677,14 +5677,14 @@ pub fn uint8ArrayCodecCall(
 ) !?core.JSValue {
     if (std.mem.eql(u8, name, "fromHex")) {
         var bytes = try uint8ArrayStringBytes(ctx.runtime, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
-        defer bytes.deinit(ctx.runtime.memory.allocator);
+        defer bytes.deinit(ctx.runtime.nativeAllocator());
         var decoded = try decodeHexBytes(ctx.runtime, bytes.items, true);
-        defer decoded.deinit(ctx.runtime.memory.allocator);
+        defer decoded.deinit(ctx.runtime.nativeAllocator());
         return try createUint8ArrayFromBytes(ctx.runtime, global, decoded.items);
     }
     if (std.mem.eql(u8, name, "fromBase64")) {
         var bytes = try uint8ArrayStringBytes(ctx.runtime, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
-        defer bytes.deinit(ctx.runtime.memory.allocator);
+        defer bytes.deinit(ctx.runtime.nativeAllocator());
         const options = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
         // Mirrors js_uint8array_from_base64: GetOptionsObject
         // runs after the string check, before any option Get.
@@ -5692,14 +5692,14 @@ pub fn uint8ArrayCodecCall(
         const alphabet = try uint8ArrayBase64Alphabet(ctx, output, global, options, caller_function, caller_frame);
         const last_chunk_handling = try uint8ArrayBase64LastChunkHandling(ctx, output, global, options, caller_function, caller_frame);
         var decoded = try decodeBase64Bytes(ctx.runtime, bytes.items, alphabet, last_chunk_handling);
-        defer decoded.deinit(ctx.runtime.memory.allocator);
+        defer decoded.deinit(ctx.runtime.nativeAllocator());
         return try createUint8ArrayFromBytes(ctx.runtime, global, decoded.items);
     }
     if (std.mem.eql(u8, name, "toHex")) {
         const object = try expectUint8ArrayObject(this_value);
         const bytes = try uint8ArrayViewBytes(ctx.runtime, object);
         var encoded = try encodeHexBytes(ctx.runtime, bytes);
-        defer encoded.deinit(ctx.runtime.memory.allocator);
+        defer encoded.deinit(ctx.runtime.nativeAllocator());
         return try value_ops.createStringValue(ctx.runtime, encoded.items);
     }
     if (std.mem.eql(u8, name, "toBase64")) {
@@ -5712,14 +5712,14 @@ pub fn uint8ArrayCodecCall(
         const omit_padding = try uint8ArrayOmitPadding(ctx, output, global, options, caller_function, caller_frame);
         const bytes = try uint8ArrayViewBytes(ctx.runtime, object);
         var encoded = try encodeBase64Bytes(ctx.runtime, bytes, alphabet, omit_padding);
-        defer encoded.deinit(ctx.runtime.memory.allocator);
+        defer encoded.deinit(ctx.runtime.nativeAllocator());
         return try value_ops.createStringValue(ctx.runtime, encoded.items);
     }
     if (std.mem.eql(u8, name, "setFromHex")) {
         const object = try expectUint8ArrayObject(this_value);
         try core.object.typedArrayRejectImmutableBuffer(ctx.runtime, object);
         var source = try uint8ArrayStringBytes(ctx.runtime, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
-        defer source.deinit(ctx.runtime.memory.allocator);
+        defer source.deinit(ctx.runtime.nativeAllocator());
         const target = try uint8ArrayViewBytes(ctx.runtime, object);
         const result = try decodeHexInto(source.items, target);
         return try uint8ArrayCodecResult(ctx.runtime, result.read, result.written);
@@ -5728,7 +5728,7 @@ pub fn uint8ArrayCodecCall(
         const object = try expectUint8ArrayObject(this_value);
         try core.object.typedArrayRejectImmutableBuffer(ctx.runtime, object);
         var source = try uint8ArrayStringBytes(ctx.runtime, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
-        defer source.deinit(ctx.runtime.memory.allocator);
+        defer source.deinit(ctx.runtime.nativeAllocator());
         const options = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
         // Mirrors js_uint8array_set_from_base64:
         // GetOptionsObject runs after the receiver and string checks, before
@@ -5835,7 +5835,7 @@ noinline fn uint8ArrayBase64NamedOption(
     const value = try getValueProperty(ctx, output, global, options, key, caller_function, caller_frame);
     if (value.is(.undefined_value)) return default_id;
     var text = try uint8ArrayStringBytes(ctx.runtime, value);
-    defer text.deinit(ctx.runtime.memory.allocator);
+    defer text.deinit(ctx.runtime.nativeAllocator());
     return core.host_function.name_id.lookup(text.items, table) orelse error.TypeError;
 }
 
@@ -5988,8 +5988,8 @@ pub fn argsFromArray(rt: *core.JSRuntime, array_value: core.JSValue) ![]core.JSV
     // path as well (the qjs length check precedes its fast_array branch).
     if (array.arrayLength() > max_apply_arguments) return error.RangeError;
     if (array.arrayLength() == 0) return &.{};
-    const args = try rt.memory.alloc(core.JSValue, array.arrayLength());
-    errdefer rt.memory.free(core.JSValue, args);
+    const args = try rt.nativeAllocator().alloc(core.JSValue, array.arrayLength());
+    errdefer rt.nativeAllocator().free(args);
     var rooted_args: []core.JSValue = args[0..0];
     var args_root = ValueSliceRoot{};
     args_root.init(rt, &rooted_args);
@@ -6051,7 +6051,7 @@ pub const OwnedArrayLikeArgs = struct {
         switch (self.storage) {
             .empty => {},
             .arena => rt.vm_stack.restore(self.arena_mark),
-            .heap => rt.memory.free(core.JSValue, self.values),
+            .heap => rt.nativeAllocator().free(self.values),
         }
         self.* = .{};
     }
@@ -6222,15 +6222,15 @@ fn materializeArgsFromArrayLike(
     const rt = ctx.runtime;
     const arena_mark = rt.vm_stack.mark();
     const arena_values = if (prefer_arena)
-        rt.vm_stack.carve(&rt.memory, length)
+        rt.vm_stack.carve(rt, length)
     else
         null;
     const storage: OwnedArrayLikeArgs.Storage = if (arena_values != null) .arena else .heap;
-    const values = arena_values orelse try rt.memory.alloc(core.JSValue, length);
+    const values = arena_values orelse try rt.nativeAllocator().alloc(core.JSValue, length);
     errdefer switch (storage) {
         .empty => {},
         .arena => rt.vm_stack.restore(arena_mark),
-        .heap => rt.memory.free(core.JSValue, values),
+        .heap => rt.nativeAllocator().free(values),
     };
     var rooted_args: []core.JSValue = values[0..0];
     var args_root = ValueSliceRoot{};
@@ -6359,7 +6359,7 @@ pub fn createArrayFromArgs(rt: *core.JSRuntime, global: *core.Object, args: []co
 }
 
 test "createArrayFromArgs roots direct function bytecode args while creating array" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
@@ -6383,7 +6383,7 @@ test "createArrayFromArgs roots direct function bytecode args while creating arr
         try std.testing.expect(stored.same(arg_value));
     }
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -6542,13 +6542,13 @@ pub fn arrayJoinCall(
     const separator_value = if (args.len >= 1 and !args[0].is(.undefined_value)) args[0] else try value_ops.createStringValue(ctx.runtime, ",");
     const separator_string = try toStringForAnnexB(ctx, output, global, separator_value, caller_function, caller_frame);
     var separator = std.ArrayList(u8).empty;
-    defer separator.deinit(ctx.runtime.memory.allocator);
+    defer separator.deinit(ctx.runtime.nativeAllocator());
     try value_ops.appendRawString(ctx.runtime, &separator, separator_string);
 
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(ctx.runtime.memory.allocator);
+    defer bytes.deinit(ctx.runtime.nativeAllocator());
     for (0..length) |index| {
-        if (index != 0) try bytes.appendSlice(ctx.runtime.memory.allocator, separator.items);
+        if (index != 0) try bytes.appendSlice(ctx.runtime.nativeAllocator(), separator.items);
         const item = if (is_typed_array) blk: {
             if (!is_typed_method and index >= try arrayMethodTypedArrayLength(ctx.runtime, object, false)) break :blk core.JSValue.undefinedValue();
             break :blk try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(index));
@@ -6578,9 +6578,9 @@ pub fn fastDensePrimitiveArrayJoin(
     if (length > elements.len) return null;
 
     var separator = std.ArrayList(u8).empty;
-    defer separator.deinit(rt.memory.allocator);
+    defer separator.deinit(rt.nativeAllocator());
     if (args.len == 0 or args[0].is(.undefined_value)) {
-        try separator.append(rt.memory.allocator, ',');
+        try separator.append(rt.nativeAllocator(), ',');
     } else if (args[0].isString()) {
         try value_ops.appendRawString(rt, &separator, args[0]);
     } else {
@@ -6588,11 +6588,11 @@ pub fn fastDensePrimitiveArrayJoin(
     }
 
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     for (0..length) |index| {
         const item = elements[index];
         if (!canFastJoinPrimitive(item)) return null;
-        if (index != 0) try bytes.appendSlice(rt.memory.allocator, separator.items);
+        if (index != 0) try bytes.appendSlice(rt.nativeAllocator(), separator.items);
         if (!item.is(.undefined_value) and !item.is(.null_value)) try value_ops.appendValueString(rt, &bytes, item);
     }
     return try value_ops.createStringValue(rt, bytes.items);
@@ -6652,7 +6652,7 @@ pub fn objectEntryArrayValue(
 }
 
 test "objectEntryArrayValue roots direct symbol value while creating entry array" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -6677,12 +6677,12 @@ test "objectEntryArrayValue roots direct symbol value while creating entry array
         try std.testing.expectEqual(@as(?core.Atom, symbol_atom), stored.asSymbolAtom());
     }
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
 test "objectEnumerableOwnPropertiesCall roots direct symbol values while creating output array" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -6708,7 +6708,7 @@ test "objectEnumerableOwnPropertiesCall roots direct symbol values while creatin
         try std.testing.expectEqual(@as(?core.Atom, symbol_atom), stored.asSymbolAtom());
     }
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -6903,12 +6903,12 @@ pub fn typedArrayCanonicalDelete(rt: *core.JSRuntime, object: *core.Object, atom
 pub fn decodeHexBytes(rt: *core.JSRuntime, source: []const u8, reject_odd: bool) !std.ArrayList(u8) {
     if (reject_odd and source.len % 2 != 0) return error.SyntaxError;
     var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(rt.memory.allocator);
+    errdefer out.deinit(rt.nativeAllocator());
     var index: usize = 0;
     while (index + 1 < source.len) : (index += 2) {
         const hi = hexNibble(source[index]) orelse return error.SyntaxError;
         const lo = hexNibble(source[index + 1]) orelse return error.SyntaxError;
-        try out.append(rt.memory.allocator, (hi << 4) | lo);
+        try out.append(rt.nativeAllocator(), (hi << 4) | lo);
     }
     return out;
 }
@@ -6929,10 +6929,10 @@ pub fn decodeHexInto(source: []const u8, target: []u8) !Uint8ArrayCodecProgress 
 
 pub fn encodeHexBytes(rt: *core.JSRuntime, bytes: []const u8) !std.ArrayList(u8) {
     var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(rt.memory.allocator);
+    errdefer out.deinit(rt.nativeAllocator());
     for (bytes) |byte| {
-        try out.append(rt.memory.allocator, unicode_lib.asciiLowerHexDigitChar(byte >> 4));
-        try out.append(rt.memory.allocator, unicode_lib.asciiLowerHexDigitChar(byte & 0x0f));
+        try out.append(rt.nativeAllocator(), unicode_lib.asciiLowerHexDigitChar(byte >> 4));
+        try out.append(rt.nativeAllocator(), unicode_lib.asciiLowerHexDigitChar(byte & 0x0f));
     }
     return out;
 }
@@ -6953,7 +6953,7 @@ pub fn decodeBase64Bytes(
     last_chunk_handling: Uint8ArrayBase64LastChunkHandling,
 ) !std.ArrayList(u8) {
     var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(rt.memory.allocator);
+    errdefer out.deinit(rt.nativeAllocator());
     _ = try decodeBase64Internal(rt, source, alphabet, last_chunk_handling, &out, null);
     return out;
 }
@@ -7006,7 +7006,7 @@ pub fn decodeBase64Internal(
                 if (decoded.len > bytes.len - written) return .{ .read = last_read, .written = written };
                 if (decoded.len != 0) @memcpy(bytes[written..][0..decoded.len], decoded.bytes[0..decoded.len]);
             } else if (out) |list| {
-                try list.appendSlice(rt.memory.allocator, decoded.bytes[0..decoded.len]);
+                try list.appendSlice(rt.nativeAllocator(), decoded.bytes[0..decoded.len]);
             }
             written += decoded.len;
             last_read = read_pos;
@@ -7022,7 +7022,7 @@ pub fn decodeBase64Internal(
             if (decoded.len > bytes.len - written) return .{ .read = last_read, .written = written };
             if (decoded.len != 0) @memcpy(bytes[written..][0..decoded.len], decoded.bytes[0..decoded.len]);
         } else if (out) |list| {
-            try list.appendSlice(rt.memory.allocator, decoded.bytes[0..decoded.len]);
+            try list.appendSlice(rt.nativeAllocator(), decoded.bytes[0..decoded.len]);
         }
         written += decoded.len;
         return .{ .read = pending_padded_read, .written = written };
@@ -7034,7 +7034,7 @@ pub fn decodeBase64Internal(
         if (decoded.len > bytes.len - written) return .{ .read = last_read, .written = written };
         if (decoded.len != 0) @memcpy(bytes[written..][0..decoded.len], decoded.bytes[0..decoded.len]);
     } else if (out) |list| {
-        try list.appendSlice(rt.memory.allocator, decoded.bytes[0..decoded.len]);
+        try list.appendSlice(rt.nativeAllocator(), decoded.bytes[0..decoded.len]);
     }
     written += decoded.len;
     return .{ .read = read_pos, .written = written };
@@ -7099,24 +7099,24 @@ pub fn decodeBase64Chunk(
 pub fn encodeBase64Bytes(rt: *core.JSRuntime, bytes: []const u8, alphabet: Uint8ArrayBase64Alphabet, omit_padding: bool) !std.ArrayList(u8) {
     const table = if (alphabet == .base64) "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/" else "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(rt.memory.allocator);
+    errdefer out.deinit(rt.nativeAllocator());
     var index: usize = 0;
     while (index < bytes.len) : (index += 3) {
         const rem = bytes.len - index;
         const b0 = bytes[index];
         const b1 = if (rem > 1) bytes[index + 1] else 0;
         const b2 = if (rem > 2) bytes[index + 2] else 0;
-        try out.append(rt.memory.allocator, table[b0 >> 2]);
-        try out.append(rt.memory.allocator, table[((b0 & 0x03) << 4) | (b1 >> 4)]);
+        try out.append(rt.nativeAllocator(), table[b0 >> 2]);
+        try out.append(rt.nativeAllocator(), table[((b0 & 0x03) << 4) | (b1 >> 4)]);
         if (rem > 1) {
-            try out.append(rt.memory.allocator, table[((b1 & 0x0f) << 2) | (b2 >> 6)]);
+            try out.append(rt.nativeAllocator(), table[((b1 & 0x0f) << 2) | (b2 >> 6)]);
         } else if (!omit_padding) {
-            try out.append(rt.memory.allocator, '=');
+            try out.append(rt.nativeAllocator(), '=');
         }
         if (rem > 2) {
-            try out.append(rt.memory.allocator, table[b2 & 0x3f]);
+            try out.append(rt.nativeAllocator(), table[b2 & 0x3f]);
         } else if (!omit_padding) {
-            try out.append(rt.memory.allocator, '=');
+            try out.append(rt.nativeAllocator(), '=');
         }
     }
     return out;
@@ -7166,7 +7166,6 @@ pub const LengthIndexAtom = struct {
     }
 };
 
-
 // ----- merged from array_builtin_ops.zig -----
 // Array constructor/prototype records and direct array builtin bodies.
 //
@@ -7187,12 +7186,12 @@ const RootedValueCopies = struct {
     roots: []core.runtime.ValueRootValue,
 
     fn init(rt: *core.JSRuntime, source: []const core.JSValue) !RootedValueCopies {
-        const values = try rt.memory.alloc(core.JSValue, source.len);
-        errdefer rt.memory.free(core.JSValue, values);
+        const values = try rt.nativeAllocator().alloc(core.JSValue, source.len);
+        errdefer rt.nativeAllocator().free(values);
         @memcpy(values, source);
 
-        const roots = try rt.memory.alloc(core.runtime.ValueRootValue, source.len);
-        errdefer rt.memory.free(core.runtime.ValueRootValue, roots);
+        const roots = try rt.nativeAllocator().alloc(core.runtime.ValueRootValue, source.len);
+        errdefer rt.nativeAllocator().free(roots);
         for (values, 0..) |*value, index| {
             roots[index] = .{ .value = value };
         }
@@ -7201,8 +7200,8 @@ const RootedValueCopies = struct {
     }
 
     fn deinit(self: RootedValueCopies, rt: *core.JSRuntime) void {
-        rt.memory.free(core.runtime.ValueRootValue, self.roots);
-        rt.memory.free(core.JSValue, self.values);
+        rt.nativeAllocator().free(self.roots);
+        rt.nativeAllocator().free(self.values);
     }
 };
 pub const StaticMethod = core.host_function.builtin_method_ids.array.StaticMethod;
@@ -7825,7 +7824,7 @@ fn arrayIterator(realm: *core.RealmContext, receiver: core.JSValue, kind: ArrayI
 }
 
 test "realm-aware primitive array iterator reuses the final realm prototype" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const realm = try core.RealmContext.create(rt, .{});
     defer realm.destroy();
@@ -7884,7 +7883,7 @@ fn iteratorResult(rt: *core.JSRuntime, value: core.JSValue, done: bool) !core.JS
 }
 
 test "array iteratorResult roots direct function bytecode value while creating result" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-iterator-result-bytecode-symbol");
@@ -7905,12 +7904,12 @@ test "array iteratorResult roots direct function bytecode value while creating r
         try std.testing.expect(stored.same(result_value));
     }
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
 test "array splice roots direct function bytecode insert values while creating removed array" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const array = try core.Object.createArray(rt, null);
@@ -7948,13 +7947,13 @@ test "array splice roots direct function bytecode insert values while creating r
         try std.testing.expect(stored_second.same(second_value));
     }
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(first_symbol) == null);
     try std.testing.expect(rt.atoms.name(second_symbol) == null);
 }
 
 test "array constructWithPrototype roots direct function bytecode elements while creating array" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-construct-bytecode-symbol");
@@ -7976,12 +7975,12 @@ test "array constructWithPrototype roots direct function bytecode elements while
         try std.testing.expect(stored.same(element_value));
     }
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
 test "array concat roots direct function bytecode argument while creating output array" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const receiver = try core.Object.createArray(rt, null);
@@ -8006,7 +8005,7 @@ test "array concat roots direct function bytecode argument while creating output
         try std.testing.expect(stored.same(arg_value));
     }
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -8110,10 +8109,10 @@ fn indexSearch(rt: *core.JSRuntime, value: core.JSValue, needle: core.JSValue, m
 
 fn stringSearchValue(rt: *core.JSRuntime, value: core.JSValue, needle: core.JSValue, mode: SearchMode) !core.JSValue {
     var haystack = std.ArrayList(u8).empty;
-    defer haystack.deinit(rt.memory.allocator);
+    defer haystack.deinit(rt.nativeAllocator());
     try core.string.appendValueUtf8(rt, &haystack, value);
     var query = std.ArrayList(u8).empty;
-    defer query.deinit(rt.memory.allocator);
+    defer query.deinit(rt.nativeAllocator());
     try appendValueString(rt, &query, needle);
     const index = std.mem.indexOf(u8, haystack.items, query.items);
     return switch (mode) {
@@ -8252,9 +8251,9 @@ fn sort(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSVal
     var entries = std.ArrayList(SortEntry).empty;
     defer {
         for (entries.items) |entry| {
-            rt.memory.allocator.free(entry.key);
+            rt.nativeAllocator().free(entry.key);
         }
-        entries.deinit(rt.memory.allocator);
+        entries.deinit(rt.nativeAllocator());
     }
 
     var index: u32 = 0;
@@ -8265,13 +8264,13 @@ fn sort(rt: *core.JSRuntime, array_value: core.JSValue, args: []const core.JSVal
         }
 
         var key_buffer = std.ArrayList(u8).empty;
-        defer key_buffer.deinit(rt.memory.allocator);
+        defer key_buffer.deinit(rt.nativeAllocator());
         try appendValueString(rt, &key_buffer, value);
-        const key = try rt.memory.allocator.dupe(u8, key_buffer.items);
+        const key = try rt.nativeAllocator().dupe(u8, key_buffer.items);
         var key_owned = true;
-        errdefer if (key_owned) rt.memory.allocator.free(key);
+        errdefer if (key_owned) rt.nativeAllocator().free(key);
 
-        try entries.append(rt.memory.allocator, .{ .value = value, .key = key });
+        try entries.append(rt.nativeAllocator(), .{ .value = value, .key = key });
         key_owned = false;
     }
 
@@ -8309,11 +8308,11 @@ fn rewriteSortedArray(rt: *core.JSRuntime, array: *core.Object, entries: []const
 
 fn rewriteSortedArrayRooted(rt: *core.JSRuntime, array: *core.Object, entries: []const SortEntry) !void {
     var rooted_values: []core.JSValue = &.{};
-    defer if (rooted_values.len != 0) rt.memory.free(core.JSValue, rooted_values);
+    defer if (rooted_values.len != 0) rt.nativeAllocator().free(rooted_values);
     var slices: [1]core.runtime.ValueRootSlice = undefined;
     var entries_frame = core.runtime.ValueRootFrame{};
     if (entries.len != 0) {
-        rooted_values = try rt.memory.alloc(core.JSValue, entries.len);
+        rooted_values = try rt.nativeAllocator().alloc(core.JSValue, entries.len);
         for (entries, 0..) |entry, i| rooted_values[i] = entry.value;
         slices[0] = .{ .borrowed = rooted_values };
         entries_frame.slices = &slices;

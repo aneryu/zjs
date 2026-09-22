@@ -4,6 +4,7 @@
 //! resident windows retain it, and generator suspension uses the explicit
 //! install/clear seam to transfer backing ownership without duplicating values.
 
+const mem_ops = @import("../core/memory.zig");
 const std = @import("std");
 
 const memory = @import("../core/memory.zig");
@@ -56,7 +57,9 @@ pub const PendingCallRegion = struct {
 pub const Stack = struct {
     const Policy = runtime.VmStackWindowPolicy;
 
-    memory: *memory.MemoryAccount,
+    /// Explicit owner, kept pointer-sized so inline_calls.Entry stays compact.
+    /// No allocator-vtable introspection is needed for growth or release.
+    runtime: *@import("../core/runtime.zig").JSRuntime,
     /// Base of the operand-stack backing allocation. `top_ptr` is the
     /// authoritative end of the live prefix; keeping both as raw pointers
     /// avoids rebuilding a slice at every VM/cold-helper seam.
@@ -68,20 +71,20 @@ pub const Stack = struct {
     /// buffer while avoiding the six bytes of tail padding the booleans created.
     policy: Policy,
 
-    pub fn init(account: *memory.MemoryAccount, limit: usize) Stack {
+    pub fn init(rt: *runtime.JSRuntime, limit: usize) Stack {
         const empty = emptyPtr();
         return .{
-            .memory = account,
+            .runtime = rt,
             .values = empty,
             .top_ptr = empty,
             .policy = Policy.forLimit(limit),
         };
     }
 
-    pub fn initArenaWindow(account: *memory.MemoryAccount, policy: Policy, window: []JSValue) Stack {
+    pub fn initArenaWindow(rt: *runtime.JSRuntime, policy: Policy, window: []JSValue) Stack {
         std.debug.assert(policy.arena_window and !policy.resident_window);
         return .{
-            .memory = account,
+            .runtime = rt,
             .values = window.ptr,
             .top_ptr = window.ptr,
             .capacity = window.len,
@@ -203,7 +206,7 @@ pub const Stack = struct {
         if (self.policy.arena_window or self.policy.resident_window) return;
         const backing = self.backingValues();
         self.clearBacking();
-        self.memory.free(JSValue, backing);
+        mem_ops.free(self.runtime, JSValue, backing);
     }
 
     pub inline fn deinit(self: *Stack, _: anytype) void {
@@ -218,7 +221,7 @@ pub const Stack = struct {
         for (values) |*slot| {
             slot.* = JSValue.undefinedValue();
         }
-        if (stack_capacity != 0 and !arena_window and !resident_window) self.memory.free(JSValue, backing);
+        if (stack_capacity != 0 and !arena_window and !resident_window) mem_ops.free(self.runtime, JSValue, backing);
     }
 
     pub fn push(self: *Stack, value: JSValue) !void {
@@ -282,8 +285,8 @@ pub const Stack = struct {
         }
         if (next_capacity < needed) return error.StackOverflow;
 
-        const next = try self.memory.alloc(JSValue, next_capacity);
-        errdefer self.memory.free(JSValue, next);
+        const next = try mem_ops.alloc(self.runtime, JSValue, next_capacity);
+        errdefer mem_ops.free(self.runtime, JSValue, next);
         const old_values = self.liveValues();
         const old_backing = self.backingValues();
         const old_capacity = current_capacity;
@@ -295,6 +298,6 @@ pub const Stack = struct {
         self.capacity = next_capacity;
         self.policy.arena_window = false;
         self.policy.resident_window = false;
-        if (old_capacity != 0 and !old_arena_window and !old_resident_window) self.memory.free(JSValue, old_backing);
+        if (old_capacity != 0 and !old_arena_window and !old_resident_window) mem_ops.free(self.runtime, JSValue, old_backing);
     }
 };

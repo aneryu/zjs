@@ -8,6 +8,9 @@
 
 pub const RuntimeError = error{
     AccessorWithoutSetter,
+    MicrotaskReentry,
+    InvalidMicrotaskScope,
+    WrongRuntimeThread,
     AmbiguousExport,
     AwaitOutsideAsyncFunction,
     BigIntTooLarge,

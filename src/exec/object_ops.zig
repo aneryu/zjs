@@ -662,7 +662,7 @@ pub fn constructPrimitiveWrapperWithPrototype(
 }
 
 test "constructPrimitiveWrapperWithPrototype roots direct symbol while creating wrapper" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-construct-primitive-wrapper-symbol");
@@ -678,7 +678,7 @@ test "constructPrimitiveWrapperWithPrototype roots direct symbol while creating 
     const stored = wrapper.objectDataSlot().* orelse return error.TypeError;
     try std.testing.expect(stored.same(symbol_value));
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -741,7 +741,7 @@ pub fn aggregateErrorConstructWithPrototype(
 }
 
 test "aggregateErrorConstructWithPrototype preserves direct symbol errors and cause" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -787,7 +787,7 @@ test "aggregateErrorConstructWithPrototype preserves direct symbol errors and ca
         try std.testing.expect(stored_cause.same(cause_value));
     }
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(error_atom) == null);
     try std.testing.expect(rt.atoms.name(cause_atom) == null);
 }
@@ -834,7 +834,7 @@ pub fn suppressedErrorConstructWithPrototype(
 }
 
 test "suppressedErrorConstructWithPrototype roots direct symbol args while creating error" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -867,7 +867,7 @@ test "suppressedErrorConstructWithPrototype roots direct symbol args while creat
         try std.testing.expect(stored_suppressed.same(suppressed_arg));
     }
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(error_atom) == null);
     try std.testing.expect(rt.atoms.name(suppressed_atom) == null);
 }
@@ -943,7 +943,7 @@ pub fn errorConstructWithPrototype(
 }
 
 test "errorConstructWithPrototype preserves direct symbol cause" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -974,7 +974,7 @@ test "errorConstructWithPrototype preserves direct symbol cause" {
         try std.testing.expect(stored_cause.same(cause_value));
     }
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(cause_atom) == null);
 }
 
@@ -1193,7 +1193,7 @@ pub fn defineRegExpIndicesGroupsProperty(rt: *core.JSRuntime, global: *core.Obje
         const name = found.captureNameAt(capture_index) orelse continue;
         const capture = found.captureAt(capture_index);
         var decoded_name = std.ArrayList(u8).empty;
-        defer decoded_name.deinit(rt.memory.allocator);
+        defer decoded_name.deinit(rt.nativeAllocator());
         try appendDecodedRegExpGroupName(rt, &decoded_name, name);
         const atom = try rt.internAtom(decoded_name.items);
         // TGC S3 §4 class B: bare group-name id held across the property
@@ -1234,7 +1234,7 @@ pub noinline fn populateRegExpGroupsFromCaptureValues(
         const name = found.captureNameAt(capture_index) orelse continue;
         const capture = found.captureAt(capture_index);
         var decoded_name = std.ArrayList(u8).empty;
-        defer decoded_name.deinit(rt.memory.allocator);
+        defer decoded_name.deinit(rt.nativeAllocator());
         try appendDecodedRegExpGroupName(rt, &decoded_name, name);
         const atom = try rt.internAtom(decoded_name.items);
         // TGC S3 §4 class B: bare group-name id held across the property
@@ -1324,13 +1324,13 @@ fn symbolConstructorCall(
             if (args[0].is(.symbol)) return throwTypeErrorMessage(ctx, global, "cannot convert symbol to string");
             const string_value = try string_ops.toStringForAnnexB(ctx, output, global, args[0], null, null);
             var buffer = std.ArrayList(u8).empty;
-            errdefer buffer.deinit(rt.memory.allocator);
+            errdefer buffer.deinit(rt.nativeAllocator());
             try value_ops.appendRawString(rt, &buffer, string_value);
-            break :blk @as(?[]u8, try buffer.toOwnedSlice(rt.memory.allocator));
+            break :blk @as(?[]u8, try buffer.toOwnedSlice(rt.nativeAllocator()));
         }
         break :blk null;
     };
-    defer if (description) |bytes| rt.memory.allocator.free(bytes);
+    defer if (description) |bytes| rt.nativeAllocator().free(bytes);
     return rt.newSymbolValue(if (description) |bytes| bytes else null);
 }
 
@@ -1705,8 +1705,8 @@ pub fn propertyIndexFromLengthKey(rt: *core.JSRuntime, atom_id: core.Atom) ?usiz
 
 pub fn propertyAtomFromLengthIndex(rt: *core.JSRuntime, index: usize) !LengthIndexAtom {
     if (index <= core.atom.max_int_atom) return .{ .atom = core.Atom.taggedInt(@intCast(index)), .owned = false };
-    const name = try std.fmt.allocPrint(rt.memory.allocator, "{d}", .{index});
-    defer rt.memory.allocator.free(name);
+    const name = try std.fmt.allocPrint(rt.nativeAllocator(), "{d}", .{index});
+    defer rt.nativeAllocator().free(name);
     const id = try rt.internAtom(name);
     // TGC S3 §2.2 root G; see `LengthIndexAtom`. Paired with `deinit`.
     rt.atoms.pinForHost(id);
@@ -1826,7 +1826,7 @@ pub fn destructuringObjectRest(
 }
 
 test "destructuringObjectRest roots direct symbol values while creating rest object" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -1852,7 +1852,7 @@ test "destructuringObjectRest roots direct symbol values while creating rest obj
         try std.testing.expectEqual(@as(?core.Atom, symbol_atom), stored.asSymbolAtom());
     }
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -2814,7 +2814,7 @@ pub fn primitiveObjectForAccess(rt: *core.JSRuntime, global: *core.Object, primi
 }
 
 test "primitiveObjectForAccess roots direct symbol while creating wrapper" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     const global = try core.Object.create(rt, core.class.ids.object, null);
     const symbol_constructor = try core.Object.create(rt, core.class.ids.object, null);
     const symbol_prototype = try core.Object.create(rt, core.class.ids.object, null);
@@ -2847,7 +2847,7 @@ test "primitiveObjectForAccess roots direct symbol while creating wrapper" {
     const stored = wrapper.objectData() orelse return error.TypeError;
     try std.testing.expect(stored.same(symbol_value));
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -3384,7 +3384,7 @@ pub fn descriptorObjectFromDescriptor(rt: *core.JSRuntime, global: *core.Object,
 }
 
 test "descriptorObjectFromDescriptor roots direct function bytecode value while creating descriptor object" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
@@ -3412,7 +3412,7 @@ test "descriptorObjectFromDescriptor roots direct function bytecode value while 
         try std.testing.expect(stored.same(desc_value));
     }
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -3846,44 +3846,44 @@ pub fn objectHasNonEmptyName(rt: *core.JSRuntime, object: *core.Object) !bool {
     const existing = (try object.getOwnProperty(rt, core.atom.ids.name)) orelse return false;
     if (existing.kind != .data or !existing.value.isString()) return false;
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     value_ops.appendRawString(rt, &bytes, existing.value) catch return false;
     return bytes.items.len != 0;
 }
 
 pub fn throwNullishPropertyTypeError(ctx: *core.JSContext, global: *core.Object, value: core.JSValue, atom_id: core.Atom) !core.JSValue {
     const property_name = try atomPropertyName(ctx.runtime, atom_id);
-    defer ctx.runtime.memory.allocator.free(property_name);
+    defer ctx.runtime.nativeAllocator().free(property_name);
     const base = if (value.is(.null_value)) "null" else "undefined";
     const message = try std.fmt.allocPrint(
-        ctx.runtime.memory.allocator,
+        ctx.runtime.nativeAllocator(),
         "cannot read property '{s}' of {s}",
         .{ property_name, base },
     );
-    defer ctx.runtime.memory.allocator.free(message);
+    defer ctx.runtime.nativeAllocator().free(message);
     return throwTypeErrorMessage(ctx, global, message);
 }
 
 pub fn throwNullishComputedPropertyTypeError(ctx: *core.JSContext, global: *core.Object, value: core.JSValue, key: core.JSValue) !core.JSValue {
     var property_name = std.ArrayList(u8).empty;
-    defer property_name.deinit(ctx.runtime.memory.allocator);
+    defer property_name.deinit(ctx.runtime.nativeAllocator());
     try value_ops.appendValueString(ctx.runtime, &property_name, key);
     const base = if (value.is(.null_value)) "null" else "undefined";
     const message = try std.fmt.allocPrint(
-        ctx.runtime.memory.allocator,
+        ctx.runtime.nativeAllocator(),
         "cannot read property '{s}' of {s}",
         .{ property_name.items, base },
     );
-    defer ctx.runtime.memory.allocator.free(message);
+    defer ctx.runtime.nativeAllocator().free(message);
     return throwTypeErrorMessage(ctx, global, message);
 }
 
 pub fn atomPropertyName(rt: *core.JSRuntime, atom_id: core.Atom) ![]const u8 {
     if (atom_id.isTaggedInt()) {
-        return try std.fmt.allocPrint(rt.memory.allocator, "{d}", .{atom_id.toUInt32()});
+        return try std.fmt.allocPrint(rt.nativeAllocator(), "{d}", .{atom_id.toUInt32()});
     }
     const name = rt.atoms.name(atom_id) orelse "";
-    return try rt.memory.allocator.dupe(u8, name);
+    return try rt.nativeAllocator().dupe(u8, name);
 }
 
 // --- Combined from class.zig ---
@@ -4327,7 +4327,7 @@ fn readInt(comptime T: type, bytes: []const u8) T {
 }
 
 test "private brand atom is released with home object" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const home = try core.Object.create(rt, core.class.ids.object, null);
@@ -4338,12 +4338,12 @@ test "private brand atom is released with home object" {
     // object is torn down; under the tracer that is a collection rather than
     // the last release. Nothing here needs rooting -- `home` is the thing that
     // must die.
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(brand_atom) == null);
 }
 
 test "private brand creation does not allocate atom for non-extensible home object" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const home = try core.Object.create(rt, core.class.ids.object, null);
@@ -4480,8 +4480,8 @@ pub fn validateProxyOwnKeysResult(
     // Mirrors qjs's tab[idx].is_enumerable found-marking: a trap-result key on
     // a non-extensible target must correspond to a target key whose gopd walk
     // actually found a descriptor.
-    const found = try rt.memory.allocator.alloc(bool, result_keys.len);
-    defer rt.memory.allocator.free(found);
+    const found = try rt.nativeAllocator().alloc(bool, result_keys.len);
+    defer rt.nativeAllocator().free(found);
     @memset(found, false);
 
     for (target_keys) |target_key| {
@@ -4786,7 +4786,7 @@ pub fn constructProxyInstance(
 }
 
 test "constructProxyInstance allocates a proxy whose [[Prototype]] is null" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -5103,7 +5103,6 @@ pub fn proxyTrapKeyValue(rt: *core.JSRuntime, atom_id: core.Atom) !core.JSValue 
     return rt.atoms.toStringValue(rt, atom_id);
 }
 
-
 // ----- merged from object_builtin_ops.zig -----
 // Object constructor, static/prototype records, and direct builtin bodies.
 //
@@ -5126,12 +5125,12 @@ const RootedValueCopies = struct {
     roots: []core.runtime.ValueRootValue,
 
     fn init(rt: *core.JSRuntime, source: []const core.JSValue) !RootedValueCopies {
-        const values = try rt.memory.alloc(core.JSValue, source.len);
-        errdefer rt.memory.free(core.JSValue, values);
+        const values = try rt.nativeAllocator().alloc(core.JSValue, source.len);
+        errdefer rt.nativeAllocator().free(values);
         @memcpy(values, source);
 
-        const roots = try rt.memory.alloc(core.runtime.ValueRootValue, source.len);
-        errdefer rt.memory.free(core.runtime.ValueRootValue, roots);
+        const roots = try rt.nativeAllocator().alloc(core.runtime.ValueRootValue, source.len);
+        errdefer rt.nativeAllocator().free(roots);
         for (values, 0..) |*value, index| {
             roots[index] = .{ .value = value };
         }
@@ -5140,8 +5139,8 @@ const RootedValueCopies = struct {
     }
 
     fn deinit(self: RootedValueCopies, rt: *core.JSRuntime) void {
-        rt.memory.free(core.runtime.ValueRootValue, self.roots);
-        rt.memory.free(core.JSValue, self.values);
+        rt.nativeAllocator().free(self.roots);
+        rt.nativeAllocator().free(self.values);
     }
 };
 pub const StaticMethod = core.host_function.builtin_method_ids.object.StaticMethod;
@@ -5428,7 +5427,7 @@ pub fn literal(rt: *core.JSRuntime, names: []const core.Atom, values: []const co
 }
 
 test "object literal roots direct function bytecode values while creating object" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const key = try rt.internAtom("value");
@@ -5453,7 +5452,7 @@ test "object literal roots direct function bytecode values while creating object
         try std.testing.expect(stored.same(literal_value));
     }
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -5593,8 +5592,8 @@ fn objectAssignEnumOnly(
     // Snapshot the enumerable bit of every key off the shape now, before
     // any getter/setter runs — mirroring qjs filling tab_atom[] with only
     // the enumerable keys during the ENUM_ONLY GPN walk.
-    const enumerable_snapshot = try ctx.runtime.memory.alloc(bool, own_keys.len);
-    defer ctx.runtime.memory.free(bool, enumerable_snapshot);
+    const enumerable_snapshot = try ctx.runtime.nativeAllocator().alloc(bool, own_keys.len);
+    defer ctx.runtime.nativeAllocator().free(enumerable_snapshot);
     for (own_keys, enumerable_snapshot) |key, *slot| {
         slot.* = source.ownPropertyEnumerable(key) orelse false;
     }
@@ -6078,7 +6077,7 @@ pub fn appendObjectGroupByValue(
 }
 
 test "Object.groupBy new group define failure releases group once" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -6103,7 +6102,7 @@ test "Object.groupBy new group define failure releases group once" {
     var roots = core.runtime.rootObjects(.{ &kept_global, &kept_out });
     roots.activate(rt);
     defer roots.deactivate(rt);
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     // RealmContext and Shapes are GC objects: global and out share one live
     // empty root shape, alongside their owning context.
     try std.testing.expectEqual(@as(usize, 4), rt.gc.liveCount());

@@ -23,8 +23,12 @@ pub const Call = src.Call;
 pub const EventLoop = src.EventLoop;
 
 pub const GCStats = src.GCStats;
+pub const GCDetailedStats = src.GCDetailedStats;
 pub const GCPauseDistribution = src.GCPauseDistribution;
 pub const RuntimeOptions = src.RuntimeOptions;
+pub const MicrotaskPolicy = src.MicrotaskPolicy;
+pub const MicrotaskScope = src.MicrotaskScope;
+pub const MicrotaskExceptionHandler = src.MicrotaskExceptionHandler;
 pub const RuntimeMemoryUsage = src.RuntimeMemoryUsage;
 pub const OpcodeProfile = src.OpcodeProfile;
 pub const default_stack_size = src.default_stack_size;

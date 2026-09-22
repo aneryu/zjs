@@ -7,6 +7,7 @@
 //! `JSString`/`JSStringRope` at quickjs.c. Core and higher layers may
 //! import this module; it has no exec/binding dependency.
 
+const mem_ops = @import("memory.zig");
 const atom_mod = @import("atom.zig");
 const gc = @import("gc.zig");
 const gc_visit = @import("gc_visit.zig");
@@ -311,7 +312,12 @@ pub fn createStringBuffer(rt: *JSRuntime, is_wide: bool, capacity: usize) !*Stri
     // Same allocation-threshold boundary flat bodies and rope nodes take
     // (TGC S2-f (3)); before the raw carrier pointer is taken.
     rt.collectBeforeObjectAllocation(total);
-    const cell = try rt.memory.createStorageCell(gc.representation.string_buffer_kind_tag, total);
+    const charge = if (gc_block_heap.canAllocCellSize(total))
+        gc_block_heap.accountedBodyBytesForRequest(total, gc.string_prefix_size) orelse (total -| gc.string_prefix_size)
+    else
+        total -| gc.string_prefix_size;
+    rt.prepareHeapCharge(charge);
+    const cell = try mem_ops.createStorageCell(rt, gc.representation.string_buffer_kind_tag, total);
     const buf: *StringBuffer = @ptrCast(@alignCast(cell.base + gc.string_prefix_size));
     buf.* = .{ .capacity = @intCast(capacity), .is_wide = is_wide };
     rt.gc.addInitializedWithSizeNoFail(@ptrCast(@alignCast(buf)), cell.accounted_bytes);
@@ -325,7 +331,7 @@ pub fn destroyStringBufferCell(rt: *JSRuntime, header: *gc.Header) void {
     const buf: *StringBuffer = @ptrCast(@alignCast(header));
     const total = stringBufferAllocSize(buf.is_wide, buf.capacity).?;
     rt.gc.unpublishStringCell(header, gc_block_heap.accountedBodyBytesForRequest(total, gc.string_prefix_size).?);
-    rt.memory.destroyStringCell(buf, total);
+    mem_ops.destroyStringCell(rt, buf, total);
 }
 
 /// Registry-side size query for a `.string_buffer` carrier, the twin of
@@ -517,15 +523,15 @@ pub const String = struct {
         if (self.atom_id != no_atom_id) return self.atom_id;
         _ = self.contentHash();
         var utf8 = std.ArrayList(u8).empty;
-        defer utf8.deinit(rt.memory.allocator);
+        defer utf8.deinit(rt.nativeAllocator());
         const atom_id = switch (self.resolveData()) {
             .latin1 => |bytes| blk: {
                 if (isAsciiBytes(bytes)) break :blk try rt.atoms.internString(bytes);
-                for (bytes) |byte| try unicode.appendUtf8CodePoint(rt.memory.allocator, &utf8, byte);
+                for (bytes) |byte| try unicode.appendUtf8CodePoint(rt.nativeAllocator(), &utf8, byte);
                 break :blk try rt.atoms.internString(utf8.items);
             },
             .utf16 => |units| blk: {
-                try unicode.appendUtf16UnitsAsUtf8(rt.memory.allocator, &utf8, units);
+                try unicode.appendUtf16UnitsAsUtf8(rt.nativeAllocator(), &utf8, units);
                 break :blk try rt.atoms.internString(utf8.items);
             },
         };
@@ -895,7 +901,7 @@ pub const String = struct {
         // is 8-aligned (Metadata), so the struct at `base + 8` keeps `String`'s
         // 4-byte alignment and the inline char FAM stays u16-aligned. The
         // prefix carries collector metadata.
-        if (try rt.memory.createStringCell(gc.representation.string_kind_tag, inline_layout.total_size)) |base| {
+        if (try mem_ops.createStringCell(rt, gc.representation.string_kind_tag, inline_layout.total_size)) |base| {
             const self: *String = @ptrCast(@alignCast(base + gc.string_prefix_size));
             self.* = .{
                 .len_meta = .{ .len = @intCast(unit_count), .is_wide = (tag == .utf16) },
@@ -907,7 +913,7 @@ pub const String = struct {
         }
         // Extent route (spec §5.7): over the cell ceiling the body lives in a
         // medium page run / large mapping of the same heap.
-        const bytes = try rt.memory.createStringExtent(inline_layout.total_size);
+        const bytes = try mem_ops.createStringExtent(rt, inline_layout.total_size);
         const self: *String = @ptrCast(@alignCast(bytes.ptr + gc.string_prefix_size));
         self.* = .{
             .len_meta = .{ .len = @intCast(unit_count), .is_wide = (tag == .utf16) },
@@ -925,11 +931,11 @@ pub const String = struct {
             .utf16 => inlineAllocationLayout(.utf16, self.len_meta.len).?,
         };
         if (gc.Registry.isBlockCellHeader(@ptrCast(@alignCast(self)))) {
-            rt.memory.destroyStringCell(self, inline_layout.total_size);
+            mem_ops.destroyStringCell(rt, self, inline_layout.total_size);
             return;
         }
         std.debug.assert(self.metadata().alloc_info.standalone);
-        rt.memory.destroyStringExtent(self, inline_layout.total_size);
+        mem_ops.destroyStringExtent(rt, self, inline_layout.total_size);
     }
 };
 
@@ -1224,10 +1230,10 @@ pub fn appendValueUtf8(rt: *JSRuntime, buffer: *std.ArrayList(u8), value: JSValu
     const string_value = value.asStringBody() orelse return;
     switch (string_value.resolveData()) {
         .latin1 => |bytes| {
-            if (isAsciiBytes(bytes)) return buffer.appendSlice(rt.memory.allocator, bytes);
-            for (bytes) |byte| try unicode.appendUtf8CodePoint(rt.memory.allocator, buffer, byte);
+            if (isAsciiBytes(bytes)) return buffer.appendSlice(rt.nativeAllocator(), bytes);
+            for (bytes) |byte| try unicode.appendUtf8CodePoint(rt.nativeAllocator(), buffer, byte);
         },
-        .utf16 => |units| try unicode.appendUtf16UnitsAsUtf8(rt.memory.allocator, buffer, units),
+        .utf16 => |units| try unicode.appendUtf16UnitsAsUtf8(rt.nativeAllocator(), buffer, units),
     }
 }
 
@@ -1557,7 +1563,7 @@ fn allocRopeNode(rt: *JSRuntime) !*StringRope {
     // TGC S2-f (3): same allocation-threshold boundary as flat bodies (see
     // `String.createUninitialized`). Before the cell pointer is taken.
     rt.collectBeforeObjectAllocation(rope_node_alloc_size);
-    const base = (try rt.memory.createStringCell(gc.representation.rope_kind_tag, rope_node_alloc_size)).?;
+    const base = (try mem_ops.createStringCell(rt, gc.representation.rope_kind_tag, rope_node_alloc_size)).?;
     const node: *StringRope = @ptrCast(@alignCast(base + StringRope.metadata_prefix_size));
     rt.gc.addInitializedWithSizeNoFail(@ptrCast(node), gc_block_heap.accountedBodyBytesForRequest(rope_node_alloc_size, StringRope.metadata_prefix_size).?);
     return node;
@@ -1680,7 +1686,7 @@ pub fn destroyCellFromHeader(rt: *JSRuntime, header: *gc.Header) void {
     if (metaIsRope(meta)) {
         const node: *StringRope = @ptrCast(@alignCast(header));
         rt.gc.unpublishStringCell(header, gc_block_heap.accountedBodyBytesForRequest(rope_node_alloc_size, StringRope.metadata_prefix_size).?);
-        rt.memory.destroyStringCell(node, rope_node_alloc_size);
+        mem_ops.destroyStringCell(rt, node, rope_node_alloc_size);
         return;
     }
     const body: *String = @ptrCast(@alignCast(header));
@@ -1698,7 +1704,7 @@ pub fn destroyCellFromHeader(rt: *JSRuntime, header: *gc.Header) void {
     else
         inlineAllocationLayout(.latin1, body.len_meta.len).?;
     rt.gc.unpublishStringCell(header, gc_block_heap.accountedBodyBytesForRequest(layout.total_size, gc.string_prefix_size).?);
-    rt.memory.destroyStringCell(body, layout.total_size);
+    mem_ops.destroyStringCell(rt, body, layout.total_size);
 }
 
 /// Runtime teardown twin of the sweep: every remaining string cell and
@@ -1772,7 +1778,7 @@ fn destroyDeadStringExtent(ctx: *anyopaque, base: usize, user_bytes: usize, need
     if (!needs_finalizer) {
         const plain: *gc.Header = @ptrFromInt(base + gc.string_prefix_size);
         rt.gc.unpublishStringExtent(plain, user_bytes - gc.string_prefix_size);
-        rt.memory.destroyStringExtent(plain, user_bytes);
+        mem_ops.destroyStringExtent(rt, plain, user_bytes);
         return;
     }
     // TGC S4 spec 2.2 "destroy_by_kind": the extent tables hold every prefix
@@ -1795,7 +1801,7 @@ fn destroyDeadStringExtent(ctx: *anyopaque, base: usize, user_bytes: usize, need
         // a bound-argument array or reaction list past the 3760B ceiling.)
         const body: *gc.Header = @ptrFromInt(base + gc.string_prefix_size);
         rt.gc.unpublishStringExtent(body, user_bytes - gc.string_prefix_size);
-        rt.memory.destroyStringExtent(body, user_bytes);
+        mem_ops.destroyStringExtent(rt, body, user_bytes);
         return;
     }
     std.debug.assert(meta.flags.kind == .string);
@@ -1810,7 +1816,7 @@ fn destroyDeadStringExtent(ctx: *anyopaque, base: usize, user_bytes: usize, need
         rt.atoms.onSymbolBodyDead(atom_id, body);
     }
     rt.gc.unpublishStringExtent(header, user_bytes - gc.string_prefix_size);
-    rt.memory.destroyStringExtent(body, user_bytes);
+    mem_ops.destroyStringExtent(rt, body, user_bytes);
 }
 
 /// Child edges of a rope node: `left`/`right`. Flat bodies are leaves and
@@ -2003,7 +2009,7 @@ test "string ascii byte helper covers byte boundary" {
 }
 
 test "string compare uses code-unit ordering for same and mixed width strings" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const latin_a = try String.createUtf8(rt, "abc");
@@ -2026,7 +2032,7 @@ test "string compare uses code-unit ordering for same and mixed width strings" {
 }
 
 test "flatStringsEqNear matches js_string_eq on same-width flats" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const a = try String.createUtf8(rt, "k0");
@@ -2049,7 +2055,7 @@ test "flatStringsEqNear matches js_string_eq on same-width flats" {
 }
 
 test "string compare short-circuits equal interned atom ids" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const first = try String.createUtf8(rt, "length");
@@ -2082,7 +2088,7 @@ fn tailBufferText(rt: *JSRuntime, allocator: std.mem.Allocator, value: JSValue) 
 }
 
 test "strings choose QuickJS-style 8-bit or 16-bit storage" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const ascii = try String.createUtf8(rt, "abc");
@@ -2120,48 +2126,48 @@ test "strings choose QuickJS-style 8-bit or 16-bit storage" {
 }
 
 test "ASCII suffix concatenation preserves source width with one result allocation" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const narrow_source = try String.createLatin1(rt, "ab");
-    const narrow_allocations = rt.memory.allocation_count;
+    const narrow_allocations = rt.diagnostics.allocations.allocation_count;
     const narrow = try String.createAsciiSuffix(rt, narrow_source.resolveData(), "y");
     try std.testing.expect(!narrow.isWide());
     try std.testing.expect(narrow.eqlBytes("aby"));
-    try std.testing.expectEqual(narrow_allocations + 1, rt.memory.allocation_count);
+    try std.testing.expectEqual(narrow_allocations + 1, rt.diagnostics.allocations.allocation_count);
 
     const wide_source = try String.createUtf16(rt, &.{ 0x0100, 'a' });
-    const wide_allocations = rt.memory.allocation_count;
+    const wide_allocations = rt.diagnostics.allocations.allocation_count;
     const wide = try String.createAsciiSuffix(rt, wide_source.resolveData(), "y");
     try std.testing.expect(wide.isWide());
     try std.testing.expectEqual(@as(usize, 3), wide.len());
     try std.testing.expectEqual(@as(u16, 0x0100), wide.codeUnitAt(0));
     try std.testing.expectEqual(@as(u16, 'a'), wide.codeUnitAt(1));
     try std.testing.expectEqual(@as(u16, 'y'), wide.codeUnitAt(2));
-    try std.testing.expectEqual(wide_allocations + 1, rt.memory.allocation_count);
+    try std.testing.expectEqual(wide_allocations + 1, rt.diagnostics.allocations.allocation_count);
 }
 
 test "flat strings store characters inline in a single fixed-size allocation" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     // QuickJS `JSString` keeps characters inline (a flexible array member),
     // so creating a flat string is exactly one allocation and holds no spare
     // capacity to append into.
-    const fixed_allocations = rt.memory.allocation_count;
+    const fixed_allocations = rt.diagnostics.allocations.allocation_count;
     var fixed = try String.createLatin1(rt, "abc");
     try std.testing.expectEqual(@as(usize, 3), fixed.len());
     try std.testing.expect(!fixed.isWide());
     try std.testing.expect(fixed.eqlBytes("abc"));
-    try std.testing.expectEqual(fixed_allocations + 1, rt.memory.allocation_count);
+    try std.testing.expectEqual(fixed_allocations + 1, rt.diagnostics.allocations.allocation_count);
     dropGcPtr(&fixed);
-    _ = rt.runObjectCycleRemoval();
-    try std.testing.expectEqual(fixed_allocations, rt.memory.allocation_count);
+    _ = rt.collectForTest();
+    try std.testing.expectEqual(fixed_allocations, rt.diagnostics.allocations.allocation_count);
 
-    const growable_allocations = rt.memory.allocation_count;
+    const growable_allocations = rt.diagnostics.allocations.allocation_count;
     const growable = try String.createLatin1Concat(rt, "ab", "c");
     try std.testing.expect(growable.eqlBytes("abc"));
-    try std.testing.expectEqual(growable_allocations + 1, rt.memory.allocation_count);
+    try std.testing.expectEqual(growable_allocations + 1, rt.diagnostics.allocations.allocation_count);
 }
 
 test "rope nodes keep the compact tree-only layout" {
@@ -2178,7 +2184,7 @@ test "rope nodes keep the compact tree-only layout" {
 }
 
 test "S2-i tail buffer views read, compare and hash exactly like the flat string" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const left = try String.createLatin1(rt, "abcdefgh");
@@ -2211,7 +2217,7 @@ test "S2-i tail buffer views read, compare and hash exactly like the flat string
 }
 
 test "S2-i in-place append moves the extensible right and leaves the shorter view intact" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const seed_left = try String.createLatin1(rt, "0123456789");
@@ -2246,7 +2252,7 @@ test "S2-i in-place append moves the extensible right and leaves the shorter vie
 }
 
 test "S2-i tail buffer doubles on overflow and widens on a utf16 append" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const seed_left = try String.createLatin1(rt, "ab");
@@ -2282,7 +2288,7 @@ test "S2-i tail buffer doubles on overflow and widens on a utf16 append" {
 }
 
 test "rope index compare and hash traverse nested leaves without flattening" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const left = try String.createLatin1(rt, "ab");
@@ -2311,7 +2317,7 @@ test "rope index compare and hash traverse nested leaves without flattening" {
 }
 
 test "nested ropes preserve immutable child content" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const left = try String.createLatin1(rt, "abc");

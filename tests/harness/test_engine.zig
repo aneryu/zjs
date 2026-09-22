@@ -20,17 +20,8 @@ pub fn evalTypeScriptChecked(engine_instance: *TestEngine, source: []const u8, o
     return engine_instance.evalWithOptions(source, options);
 }
 
-/// Install the standard + host globals on a bare `core.JSRuntime` global for
-/// tests that build a runtime directly (bypassing the binding-layer context
-/// create that wires the installer). The deep setup interface keeps the
-/// installer callback and its capacity invariant together. Idempotent.
-pub fn registerStandardGlobalsBare(rt: *core.JSRuntime) void {
-    exec.standard_globals.configureRuntime(rt);
-}
-
-pub fn installHostGlobalsBare(rt: *core.JSRuntime, global: *core.Object) !void {
-    registerStandardGlobalsBare(rt);
-    try exec.call.installHostGlobals(rt, global);
+pub fn installHostGlobalsBare(ctx: *core.JSContext, global: *core.Object) !void {
+    try exec.call.installHostGlobals(ctx, global);
 }
 
 pub var job_counter: usize = 0;
@@ -84,7 +75,7 @@ const ExceptionInfo = struct {
         }
 
         var temp_list = std.ArrayList(u8).empty;
-        defer temp_list.deinit(rt.memory.allocator);
+        defer temp_list.deinit(rt.nativeAllocator());
         try exec.value_ops.appendValueString(rt, &temp_list, value);
         return try allocator.dupe(u8, temp_list.items);
     }
@@ -96,7 +87,7 @@ fn getPropertyString(rt: *core.JSRuntime, obj: *core.Object, name: []const u8, a
     if (!val.isString()) return null;
 
     var temp_list = std.ArrayList(u8).empty;
-    defer temp_list.deinit(rt.memory.allocator);
+    defer temp_list.deinit(rt.nativeAllocator());
     try exec.value_ops.appendRawString(rt, &temp_list, val);
     return try allocator.dupe(u8, temp_list.items);
 }
@@ -120,14 +111,14 @@ pub const TestEngine = struct {
     }
 
     pub fn initWithOptions(options: EngineOptions) !TestEngine {
-        const rt = try core.JSRuntime.create(options.allocator, .{
+        const rt = try core.JSRuntime.create(.{
+            .allocator = options.allocator,
             .trace_writer = options.trace_writer,
             .memory_limit = options.limits.memory_bytes,
             .gc_threshold = options.limits.gc_threshold_bytes orelse core.runtime.default_gc_threshold,
             .stack_size = options.limits.stack_bytes orelse core.runtime.default_stack_size,
         });
         errdefer rt.destroy();
-        registerStandardGlobalsBare(rt);
         rt.setNativeStackSize(core.runtime.default_native_stack_size * 4);
         const ctx = try core.JSContext.create(rt, .{});
         errdefer ctx.destroy();
@@ -242,8 +233,8 @@ pub const TestEngine = struct {
     }
 
     pub fn installLegacyProbeEntry(rt: *core.JSRuntime, function_object: *core.Object, ptr: *anyopaque, call: core.host_function.ExternalCallFn) !void {
-        const state = try rt.memory.create(LegacyProbeState);
-        errdefer rt.memory.destroy(LegacyProbeState, state);
+        const state = try rt.nativeAllocator().create(LegacyProbeState);
+        errdefer rt.nativeAllocator().destroy(state);
         state.* = .{ .runtime = rt, .ptr = ptr, .call = call, .finalizer = null };
         try rt.registerNativeEntryFinalizer(@ptrCast(state), LegacyProbeState.finalize);
         const entry = try rt.allocNativeEntry(.{
@@ -265,8 +256,8 @@ pub const TestEngine = struct {
         call: core.host_function.ExternalCallFn,
         finalizer: ?core.host_function.ExternalFinalizer,
     ) !core.JSValue {
-        const state = try self.runtime.memory.create(LegacyProbeState);
-        errdefer self.runtime.memory.destroy(LegacyProbeState, state);
+        const state = try self.runtime.nativeAllocator().create(LegacyProbeState);
+        errdefer self.runtime.nativeAllocator().destroy(state);
         state.* = .{ .runtime = self.runtime, .ptr = ptr, .call = call, .finalizer = finalizer };
         try self.runtime.registerNativeEntryFinalizer(@ptrCast(state), LegacyProbeState.finalize);
         const entry = try self.runtime.allocNativeEntry(.{
@@ -325,7 +316,7 @@ pub const LegacyProbeState = struct {
     pub fn finalize(raw: *anyopaque) void {
         const self: *LegacyProbeState = @ptrCast(@alignCast(raw));
         if (self.finalizer) |f| f(self.ptr);
-        self.runtime.memory.destroy(LegacyProbeState, self);
+        self.runtime.nativeAllocator().destroy(self);
     }
 
     pub fn thunk(

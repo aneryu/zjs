@@ -8,10 +8,10 @@
 //!
 //! Lifetime: a `NativeType` is allocated on registration and released by the
 //! class table at runtime teardown (after the final sweep, so every instance
-//! finalizer has already run). Class ids come from the process-global dynamic
-//! allocator through a caller-owned `ClassIdSlot`, so one comptime class keeps
-//! one id across runtimes and reloads (hot-reload design §0.2).
+//! finalizer has already run). Class ids are Runtime-local; callers retain
+//! the binding and must not use it after its owner is destroyed.
 
+const mem_ops = @import("memory.zig");
 const std = @import("std");
 const class = @import("class.zig");
 const object_mod = @import("object.zig");
@@ -41,22 +41,20 @@ pub const NativeType = struct {
     }
 };
 
-/// Register `class_id` as a NativeObject class in `rt` (idempotent per
-/// runtime: a second registration of the same id returns the existing type).
+/// Register a NativeObject class using a fresh Runtime-local class ID.
+/// The returned binding belongs to `rt`; names do not deduplicate types.
 /// `name` must outlive the runtime (comptime string in practice).
-pub fn registerType(rt: *JSRuntime, class_id: class.ClassId, name: []const u8, finalize: ?FinalizeFn) !*const NativeType {
-    if (NativeType.fromRecord(rt, class_id)) |existing| return existing;
-    if (rt.classes.isRegistered(class_id)) return error.DuplicateClass;
-    const native_type = try rt.memory.create(NativeType);
-    errdefer rt.memory.destroy(NativeType, native_type);
+pub fn registerType(rt: *JSRuntime, name: []const u8, finalize: ?FinalizeFn) !*const NativeType {
+    try rt.requireOwnerThread();
+    const native_type = try mem_ops.create(rt, NativeType);
+    errdefer mem_ops.destroy(rt, NativeType, native_type);
     native_type.* = .{
-        .class_id = class_id,
+        .class_id = class.invalid_class_id,
         .name = name,
         .finalize = finalize,
         .owner = rt,
     };
-    try rt.ensureContextClassPrototypeCapacity(class_id);
-    try rt.classes.register(class_id, .{
+    const binding = try rt.registerClass(.{
         .class_name = name,
         .binding_data = @ptrCast(native_type),
         .binding_data_finalizer = destroyType,
@@ -64,12 +62,13 @@ pub fn registerType(rt: *JSRuntime, class_id: class.ClassId, name: []const u8, f
         .payload_finalizer = payloadFinalizer,
         .native_type = @ptrCast(native_type),
     });
+    native_type.class_id = binding.id;
     return native_type;
 }
 
 fn destroyType(data: *anyopaque) void {
     const native_type: *NativeType = @ptrCast(@alignCast(data));
-    native_type.owner.memory.destroy(NativeType, native_type);
+    mem_ops.destroy(native_type.owner, NativeType, native_type);
 }
 
 /// Class payload finalizer (sweep / teardown, runtime thread): hand a live
@@ -88,6 +87,11 @@ fn payloadFinalizer(runtime: *anyopaque, object: *anyopaque, payload: *class.Pay
 /// `self` installed. The object owns `self` from here: the finalizer runs
 /// unless `Object.takeNativeSelf` detaches it first.
 pub fn create(rt: *JSRuntime, native_type: *const NativeType, prototype: ?*Object, self_ptr: *anyopaque) !*Object {
+    try rt.requireOwnerThread();
+    if (native_type.owner != rt) return error.WrongRuntime;
+    if (prototype) |proto| {
+        if (!rt.ownsObject(proto)) return error.WrongRuntime;
+    }
     const obj = try Object.create(rt, native_type.class_id, prototype);
     obj.installNativeSelf(rt, self_ptr);
     return obj;
@@ -95,8 +99,10 @@ pub fn create(rt: *JSRuntime, native_type: *const NativeType, prototype: ?*Objec
 
 /// Typed unwrap: `value` must be an object of exactly `class_id` with a live
 /// `self`.
-pub inline fn unwrap(val: JSValue, class_id: class.ClassId) ?*anyopaque {
+pub inline fn unwrap(rt: *JSRuntime, val: JSValue, native_type: *const NativeType) ?*anyopaque {
+    rt.assertOwnerThread();
+    if (native_type.owner != rt) return null;
     const obj = value_semantics.objectFromValue(val) orelse return null;
-    if (obj.class_id != class_id) return null;
+    if (!rt.ownsObject(obj) or obj.class_id != native_type.class_id) return null;
     return obj.nativeSelfAssumeClass();
 }

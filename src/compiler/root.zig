@@ -56,7 +56,7 @@ fn releaseConsumedBuilder(fd: *bytecode.function_def.FunctionDef) void {
     std.debug.assert(consumed.code_capacity == 0 and consumed.atom_capacity == 0 and
         consumed.label_capacity == 0 and consumed.reloc_capacity == 0 and
         consumed.source_capacity == 0);
-    fd.memory.destroy(Builder, consumed);
+    fd.allocator.destroy(consumed);
 }
 
 test {

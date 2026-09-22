@@ -60,7 +60,7 @@ pub fn parseAndCompileV2TestProgram(
     var lexer = parser.Lexer.init(testing_allocator, &rt.atoms, source);
     errdefer lexer.deinit();
 
-    var state = try Parser.ParseState.init(&lexer, &rt.memory, &rt.atoms, name_atom);
+    var state = try Parser.ParseState.initFromRuntime(&lexer, rt, &rt.atoms, name_atom);
     errdefer state.deinit(rt);
     state.runtime = rt;
     switch (options.root) {

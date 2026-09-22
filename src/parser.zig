@@ -1,8 +1,8 @@
 //! Owns parser diagnostics, token-to-bytecode lowering, and module syntax.
 pub const subsystem_name = "parser";
 pub const diagnostics = struct {
+    const std = @import("std");
     const atom = @import("core/atom.zig");
-    const memory = @import("core/memory.zig");
 
     pub const Position = struct {
         offset: usize = 0,
@@ -11,18 +11,18 @@ pub const diagnostics = struct {
     };
 
     pub const SyntaxError = struct {
-        memory: *memory.MemoryAccount,
+        memory: std.mem.Allocator,
         atoms: *atom.AtomTable,
         message: []u8,
         filename: atom.Atom = atom.null_atom,
         position: Position,
 
-        pub fn create(account: *memory.MemoryAccount, atoms: *atom.AtomTable, filename: atom.Atom, position: Position, message: []const u8) !SyntaxError {
-            const owned: []u8 = if (message.len == 0) &.{} else try account.alloc(u8, message.len);
-            errdefer if (owned.len != 0) account.free(u8, owned);
+        pub fn create(allocator: std.mem.Allocator, atoms: *atom.AtomTable, filename: atom.Atom, position: Position, message: []const u8) !SyntaxError {
+            const owned: []u8 = if (message.len == 0) &.{} else try allocator.alloc(u8, message.len);
+            errdefer if (owned.len != 0) allocator.free(owned);
             if (message.len != 0) @memcpy(owned, message);
             return .{
-                .memory = account,
+                .memory = allocator,
                 .atoms = atoms,
                 .message = owned,
                 .filename = filename,
@@ -34,7 +34,7 @@ pub const diagnostics = struct {
             const message = self.message;
             self.filename = atom.null_atom;
             self.message = &.{};
-            if (message.len != 0) self.memory.free(u8, message);
+            if (message.len != 0) self.memory.free(message);
         }
     };
 
@@ -53,6 +53,7 @@ pub const token = @import("token.zig");
 
 pub const lexer = @import("lexer.zig");
 
+const mem_ops = @import("core/memory.zig");
 const parse_state = @import("parser/parse_state.zig");
 const declarations = @import("parser/declarations.zig");
 const closure = @import("parser/closure.zig");
@@ -363,7 +364,7 @@ pub const compile_entry = struct {
             if (already_restored) continue;
 
             const retained = seed.var_name;
-            state.class_private_bound_names.append(rt.memory.allocator, retained) catch |err| {
+            state.class_private_bound_names.append(state.scratch, retained) catch |err| {
                 return err;
             };
             restored_any = true;
@@ -378,13 +379,9 @@ pub const compile_entry = struct {
 
     pub fn compile(compile_context: bytecode.CompileContext, source: []const u8, options: OptionsImpl) !ResultImpl {
         const rt = compile_context.realm.runtime;
-        var arena = std.heap.ArenaAllocator.init(rt.memory.persistent_allocator);
+        var arena = std.heap.ArenaAllocator.init(rt.nativeAllocator());
         var arena_owned = true;
         errdefer if (arena_owned) arena.deinit();
-
-        const original_allocator = rt.memory.allocator;
-        rt.memory.allocator = arena.allocator();
-        defer rt.memory.allocator = original_allocator;
 
         // TGC S3-b §2.2: interval root for every atom the front end obtains.
         // The whole chain -- filename atom, lexer tokens, FunctionDef tables,
@@ -409,7 +406,7 @@ pub const compile_entry = struct {
                 .direct_eval = options.mode == .eval_direct,
             };
             result.syntax_error = try diagnostics_mod.SyntaxError.create(
-                &rt.memory,
+                rt.nativeAllocator(),
                 &rt.atoms,
                 filename_atom,
                 .{ .line = 1, .column = 1, .offset = 0 },
@@ -426,7 +423,7 @@ pub const compile_entry = struct {
 
         var module_record: ?bytecode.module.Record = null;
         errdefer if (module_record) |*record| record.deinit();
-        const canonical_root = compileQjsProgram(rt, source, options, compile_context, filename_atom, &module_record, &features, &pending_diagnostic) catch |err| switch (err) {
+        const canonical_root = compileQjsProgram(rt, arena.allocator(), source, options, compile_context, filename_atom, &module_record, &features, &pending_diagnostic) catch |err| switch (err) {
             error.OutOfMemory => return err,
             // qjs:libregexp.c and quickjs.c js_parse_error "stack overflow"
             error.StackOverflow => {
@@ -437,7 +434,7 @@ pub const compile_entry = struct {
                 if (pending_diagnostic) |pending| {
                     try setPendingSyntaxError(&result, rt, filename_atom, &pending);
                 } else {
-                    try setFallbackSyntaxError(&result, rt, filename_atom, source, "stack overflow");
+                    try setFallbackSyntaxError(&result, rt, arena.allocator(), filename_atom, source, "stack overflow");
                 }
                 arena.deinit();
                 arena_owned = false;
@@ -453,7 +450,7 @@ pub const compile_entry = struct {
                 } else if (pending_diagnostic) |pending| {
                     try setPendingSyntaxError(&result, rt, filename_atom, &pending);
                 } else {
-                    try setFallbackSyntaxError(&result, rt, filename_atom, source, @errorName(err));
+                    try setFallbackSyntaxError(&result, rt, arena.allocator(), filename_atom, source, @errorName(err));
                 }
                 arena.deinit();
                 arena_owned = false;
@@ -483,6 +480,7 @@ pub const compile_entry = struct {
 
     fn compileQjsProgram(
         rt: *JSRuntime,
+        scratch: std.mem.Allocator,
         source: []const u8,
         options: OptionsImpl,
         compile_context: bytecode.CompileContext,
@@ -493,11 +491,12 @@ pub const compile_entry = struct {
     ) !*bytecode.FunctionBytecode {
         const frontend_start = if (compile_context.timing != null) platform_clock.monotonicNanos() else 0;
         const effective_strict = options.strict;
-        var lex = lexer_mod.Lexer.init(rt.memory.allocator, &rt.atoms, source);
+        var lex = lexer_mod.Lexer.init(scratch, &rt.atoms, source);
         defer lex.deinit();
         lex.is_strict_mode = options.mode == .module or effective_strict;
         lex.is_module = options.mode == .module;
         var state = try parser_core.ParseState.initWithRuntime(rt, &lex, filename_atom);
+        state.scratch = scratch;
         defer state.deinit(rt);
         if (options.script_or_module) |script_or_module| state.function_def.script_or_module = script_or_module;
         // TGC S3-b: the parse's own interval roots (atoms + cpool values),
@@ -604,18 +603,10 @@ pub const compile_entry = struct {
             timing.frontend_ns += elapsedNanosSince(frontend_start);
         }
 
-        // Parsing intentionally redirects the operation allocator to the
-        // short-lived arena. Finalization may use that facade for scratch
-        // lists, but the published FB must be built under the runtime's stable
-        // allocation policy. FunctionDef buffers, module metadata, and FB
-        // storage use MemoryAccount ownership directly; this scoped switch
-        // additionally prevents a future finalizer helper from accidentally
-        // retaining an arena-backed allocation. Restore it before State.deinit
-        // so parser scratch still unwinds under the allocator that created it.
+        // Parser lists and the lexer use `scratch` (the compile arena).
+        // FunctionDef buffers, module metadata, and published bytecode use
+        // the runtime account directly, so the facade is not redirected.
         const finalize_start = if (compile_context.timing != null) platform_clock.monotonicNanos() else 0;
-        const parse_allocator = rt.memory.allocator;
-        rt.memory.allocator = compile_context.artifactAllocator();
-        defer rt.memory.allocator = parse_allocator;
         const root_slice = try (if (options.mode == .module) blk: {
             const record = if (state.module_record) |*owned| owned else return error.InvalidBytecode;
             break :blk bytecode.pipeline.finalize.createModuleFunctionBytecode(
@@ -639,7 +630,7 @@ pub const compile_entry = struct {
         pending: *const parser_impl.PendingDiagnostic,
     ) !void {
         result.syntax_error = try diagnostics_mod.SyntaxError.create(
-            &rt.memory,
+            rt.nativeAllocator(),
             &rt.atoms,
             filename_atom,
             pending.position,
@@ -683,7 +674,7 @@ pub const compile_entry = struct {
             .{@errorName(err)},
         ) catch "internal compiler error";
         result.syntax_error = try diagnostics_mod.SyntaxError.create(
-            &rt.memory,
+            rt.nativeAllocator(),
             &rt.atoms,
             filename_atom,
             .{ .line = 0, .column = 0, .offset = 0 },
@@ -695,11 +686,12 @@ pub const compile_entry = struct {
     fn setFallbackSyntaxError(
         result: *ResultImpl,
         rt: *JSRuntime,
+        scratch: std.mem.Allocator,
         filename_atom: atom.Atom,
         source: []const u8,
         message: []const u8,
     ) !void {
-        var lex = lexer_mod.Lexer.init(rt.memory.allocator, &rt.atoms, source);
+        var lex = lexer_mod.Lexer.init(scratch, &rt.atoms, source);
         var pos = diagnostics_mod.Position{ .line = 1, .column = 1, .offset = 0 };
         var previous_token_kind: ?token_mod.TokenKind = null;
         while (true) {
@@ -708,7 +700,7 @@ pub const compile_entry = struct {
                 error.OutOfMemory => return err,
                 else => {
                     result.syntax_error = try diagnostics_mod.SyntaxError.create(
-                        &rt.memory,
+                        rt.nativeAllocator(),
                         &rt.atoms,
                         filename_atom,
                         .{ .line = lex.mark_line, .column = lex.mark_col, .offset = lex.mark_pos },
@@ -726,7 +718,7 @@ pub const compile_entry = struct {
             previous_token_kind = tok.val;
             lex.freeToken(&tok);
         }
-        result.syntax_error = try diagnostics_mod.SyntaxError.create(&rt.memory, &rt.atoms, filename_atom, pos, message);
+        result.syntax_error = try diagnostics_mod.SyntaxError.create(rt.nativeAllocator(), &rt.atoms, filename_atom, pos, message);
         result.parse_path = .syntax_error_guard;
     }
 
@@ -878,19 +870,21 @@ test "pending diagnostic preserves exact fields truncation replacement and OOM b
 test "pending diagnostic syntax error allocation propagates OOM" {
     const std = @import("std");
     const core = @import("core/root.zig");
-    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    var account = core.memory.MemoryAccount.init(failing.allocator());
-    var atoms = core.atom.AtomTable.init(&account);
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const account = try mem_ops.createTestRuntime(failing.allocator());
+    defer account.destroy();
+    var atoms = core.atom.AtomTable.init(account);
     defer atoms.deinit();
+    failing.fail_index = failing.alloc_index;
     try std.testing.expectError(error.OutOfMemory, diagnostics.SyntaxError.create(
-        &account,
+        account.nativeAllocator(),
         &atoms,
         core.atom.null_atom,
         .{ .offset = 137, .line = 11, .column = 23 },
         "expected ')', got '{'",
     ));
     try std.testing.expect(failing.has_induced_failure);
-    try std.testing.expect(!account.hasOutstandingAllocations());
+    try std.testing.expect(!mem_ops.hasOutstandingAllocations(account));
 }
 
 // Unified-suite tests only (`build_options.zjs_unified_test_suite`).

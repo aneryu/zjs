@@ -506,8 +506,8 @@ pub fn symbolFor(
     const key = if (args.len >= 1)
         try toStringBytesForSymbol(ctx, output, global, args[0], caller_function, caller_frame)
     else
-        try ctx.runtime.memory.allocator.dupe(u8, "undefined");
-    defer ctx.runtime.memory.allocator.free(key);
+        try ctx.runtime.nativeAllocator().dupe(u8, "undefined");
+    defer ctx.runtime.nativeAllocator().free(key);
 
     return ctx.runtime.globalSymbolValue(key);
 }
@@ -738,7 +738,6 @@ pub fn defineNativeDataMethodNamedWithNativeId(rt: *core.JSRuntime, global: *cor
 }
 
 // --- Primitive coercion moved to coercion_ops.zig ---
-
 
 // ----- merged from performance_ops.zig -----
 // Typed standard-native record for the `performance` namespace.

@@ -15,7 +15,7 @@ const core = zjs.core;
 /// deterministic, and it is what turns a missing root into a test failure
 /// rather than into a conservative-scan accident.
 pub fn reclaimNow(rt: *core.JSRuntime) void {
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
 }
 
 pub fn objectFromValue(value: core.JSValue) *core.Object {

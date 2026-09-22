@@ -306,7 +306,7 @@ fn test262AgentRun(agent: *Test262Agent) void {
     }
 
     const allocator = test262PageAllocator();
-    const rt = zjs.JSRuntime.create(allocator, .{}) catch return;
+    const rt = zjs.JSRuntime.create(.{ .allocator = allocator }) catch return;
     defer rt.destroy();
     rt.setCanBlock(true);
     rt.setInterruptHandler(test262AgentInterruptHandler, agent);
@@ -331,10 +331,12 @@ fn test262AgentRun(agent: *Test262Agent) void {
         .filename = "<test262-agent>",
         .discard_script_result = true,
     }) catch return;
-    ctx.runJobs(null) catch {};
-    while (!test262AgentIsDone(agent)) {
+    // Agent hosts must poll Atomics completions as well as engine jobs.
+    // Context.runJobs deliberately only performs a microtask checkpoint.
+    while (true) {
+        _ = event_loop.drain() catch return;
+        if (test262AgentIsDone(agent)) break;
         std.Io.sleep(test262AgentIo(), std.Io.Duration.fromMilliseconds(1), .awake) catch {};
-        ctx.runJobs(null) catch return;
     }
 }
 
@@ -635,7 +637,7 @@ fn hostCallTest262Error(
 ) !zjs.JSValue {
     _ = output;
     const message = if (args.len > 0) try stringBytes(ctx, args[0]) else "";
-    defer if (args.len > 0) ctx.runtimePtr().memory.allocator.free(message);
+    defer if (args.len > 0) ctx.runtimePtr().nativeAllocator().free(message);
     return createTest262ErrorValue(ctx, global, message);
 }
 
@@ -685,8 +687,8 @@ fn hostCallAssertThrows(
     args: []const zjs.JSValue,
 ) !zjs.JSValue {
     if (args.len < 2) return error.TypeError;
-    const expected_name = try ctx.functionName(args[0], ctx.runtimePtr().memory.allocator);
-    defer ctx.runtimePtr().memory.allocator.free(expected_name);
+    const expected_name = try ctx.functionName(args[0], ctx.runtimePtr().nativeAllocator());
+    defer ctx.runtimePtr().nativeAllocator().free(expected_name);
     _ = ctx.callFunction(args[1], &.{}, .{
         .output = output,
         .realm_global = global,
@@ -832,9 +834,9 @@ fn hostVerifyProperty(ctx: *zjs.JSContext, values: []const zjs.JSValue, callable
         const actual = try ctx.getPropertyKey(values[0], values[1], .{});
         if (!ctx.isCallable(actual)) return error.JSException;
         const expected_name = try stringBytes(ctx, values[2]);
-        defer rt.memory.allocator.free(expected_name);
-        const actual_name = try ctx.functionName(actual, rt.memory.allocator);
-        defer rt.memory.allocator.free(actual_name);
+        defer rt.nativeAllocator().free(expected_name);
+        const actual_name = try ctx.functionName(actual, rt.nativeAllocator());
+        defer rt.nativeAllocator().free(actual_name);
         if (!std.mem.eql(u8, expected_name, actual_name)) return error.JSException;
         const expected_length = values[3].as(.int) orelse return error.JSException;
         const length_value = try ctx.getProperty(actual, "length");
@@ -903,7 +905,7 @@ fn expectedValue(ctx: *zjs.JSContext, object: zjs.JSValue, name: []const u8) !zj
 
 fn stringBytes(ctx: *zjs.JSContext, value: zjs.JSValue) ![]u8 {
     const string = value.asString() orelse return error.TypeError;
-    return string.toOwnedUtf8(ctx.runtimePtr().memory.allocator);
+    return string.toOwnedUtf8(ctx.runtimePtr().nativeAllocator());
 }
 
 fn test262Int64Arg(ctx: *zjs.JSContext, args: []const zjs.JSValue, index: usize) !i64 {
@@ -973,7 +975,7 @@ fn test262Gc(
     _ = output;
     _ = global;
     _ = args;
-    _ = ctx.runtimePtr().runObjectCycleRemoval();
+    _ = try ctx.runtimePtr().tryRunObjectCycleRemovalWithValueRoots(null, .engine_active);
     return zjs.JSValue.undefinedValue();
 }
 
@@ -1052,7 +1054,7 @@ fn test262AgentStringValue(ctx: *zjs.JSContext, value: zjs.JSValue) ![]u8 {
 }
 
 test "test262 globals do not retain local namespace object reference" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try zjs.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -1067,12 +1069,12 @@ test "test262 globals do not retain local namespace object reference" {
 
     try std.testing.expect(weak.isAlive());
     try std.testing.expect(try ctx.deleteProperty(global.value(), "$262"));
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(!weak.isAlive());
 }
 
 test "test262 evalScript uses the installed function realm" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try zjs.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -1091,7 +1093,7 @@ test "test262 evalScript uses the installed function realm" {
 }
 
 test "test262 agent string conversion follows JavaScript ToString" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try zjs.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -1107,7 +1109,7 @@ test "test262 agent string conversion follows JavaScript ToString" {
 }
 
 test "test262 timer integer conversion follows JavaScript ToNumber" {
-    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try zjs.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();

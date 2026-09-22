@@ -143,7 +143,7 @@ pub fn parseImport(s: *State) Error!void {
             }
 
             if (!type_only) {
-                try imports.append(s.memory.allocator, .{
+                try imports.append(s.scratch, .{
                     .import_name = import_name,
                     .local_name = local_name,
                 });
@@ -314,11 +314,11 @@ fn isWellFormedModuleString(bytes: []const u8) bool {
 }
 
 fn freeModuleImportSpecs(s: *State, imports: *std.ArrayList(ModuleImportSpec)) void {
-    imports.deinit(s.memory.allocator);
+    imports.deinit(s.scratch);
 }
 
 fn freeModuleExportSpecs(s: *State, exports: *std.ArrayList(ModuleExportSpec)) void {
-    exports.deinit(s.memory.allocator);
+    exports.deinit(s.scratch);
 }
 
 /// Parse export statement
@@ -496,7 +496,7 @@ fn parseExportList(s: *State) Error!void {
         }
 
         if (!type_only) {
-            try export_specs.append(s.memory.allocator, .{
+            try export_specs.append(s.scratch, .{
                 .export_name = export_name,
                 .import_name = local_name,
                 .import_name_is_string = local_name_was_string,

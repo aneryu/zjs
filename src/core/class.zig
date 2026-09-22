@@ -1,13 +1,13 @@
 //! JavaScript class identities, runtime-local definitions, and builtin taxonomy.
 //!
-//! Class ids are process-global stable tokens allocated through caller-owned
-//! `ClassIdSlot`s; each Runtime independently owns the definition registered
-//! at that id. Finalizer/mark callbacks therefore receive runtime-owned
+//! Dynamic class ids and immutable definitions belong to one Runtime.
+//! Published ids are never reused; definitions live until Runtime teardown. Finalizer/mark callbacks therefore receive runtime-owned
 //! objects but do not own the id itself. The builtin id matrix and payload-kind
 //! mapping are load-bearing for ObjectStorage dispatch. This is core metadata:
 //! exec/binding register and consume classes through it, while it must not
 //! import either higher layer.
 
+const mem_ops = @import("memory.zig");
 const std = @import("std");
 const atom = @import("atom.zig");
 const memory = @import("memory.zig");
@@ -21,45 +21,10 @@ pub const ClassId = u16;
 pub const invalid_class_id: ClassId = 0;
 pub const MutationError = error{WrongRuntimeThread};
 
-/// QuickJS class identities are process-global: a runtime owns the class
-/// definition registered at an id, while the id itself belongs to the caller
-/// (normally a static `JSClassID` slot).  Keep the allocator widened so the
-/// final legal u16 id is usable and exhaustion can never wrap/reuse an id.
-var dynamic_class_id_lock: std.atomic.Value(bool) = .init(false);
-var next_dynamic_class_id: u32 = ids.init_count;
-
-fn lockDynamicClassIds() void {
-    while (dynamic_class_id_lock.swap(true, .acquire)) std.atomic.spinLoopHint();
-}
-
-fn unlockDynamicClassIds() void {
-    dynamic_class_id_lock.store(false, .release);
-}
-
-fn allocateDynamicClassIdLocked() error{ClassIdExhausted}!ClassId {
-    if (next_dynamic_class_id > std.math.maxInt(ClassId)) return error.ClassIdExhausted;
-    const id: ClassId = @intCast(next_dynamic_class_id);
-    next_dynamic_class_id += 1;
-    return id;
-}
-
-pub fn allocateDynamicClassId() error{ClassIdExhausted}!ClassId {
-    lockDynamicClassIds();
-    defer unlockDynamicClassIds();
-    return allocateDynamicClassIdLocked();
-}
-
-/// Caller-owned stable class identity, mirroring `JS_NewClassID(&slot)`.
-/// Definitions remain independently registered in each `JSRuntime`.
-pub const ClassIdSlot = struct {
-    value: ClassId = invalid_class_id,
-
-    pub fn getOrAllocate(self: *ClassIdSlot) error{ClassIdExhausted}!ClassId {
-        lockDynamicClassIds();
-        defer unlockDynamicClassIds();
-        if (self.value == invalid_class_id) self.value = try allocateDynamicClassIdLocked();
-        return self.value;
-    }
+/// A definition is meaningful only in its registering Runtime.
+pub const Binding = struct {
+    owner: *@import("runtime.zig").JSRuntime,
+    id: ClassId,
 };
 
 pub const ids = struct {
@@ -298,7 +263,6 @@ const RegistrationState = struct {
     construction_pins: usize = 0,
     live_object_pins: usize = 0,
     callback_pins: usize = 0,
-    unregister_pending: bool = false,
 
     fn isPinned(self: RegistrationState) bool {
         return self.construction_pins != 0 or self.live_object_pins != 0 or self.callback_pins != 0;
@@ -330,8 +294,7 @@ pub const Table = struct {
             self.table.assertOwnerThread();
             if (!self.dynamic_pin_active) return;
             const state = &self.table.registration_states[self.class_id];
-            // The construction pin makes unregister defer record removal. Other
-            // class registrations may still move the table, so reacquire by id
+            // Other class registrations may move the table, so reacquire by id
             // and validate the generation before publication.
             const record_view = self.table.recordPtr(self.class_id).?;
             std.debug.assert(state.generation == self.definition.generation);
@@ -343,8 +306,7 @@ pub const Table = struct {
         }
 
         /// Release an unpublished construction view. Callers declare this
-        /// before their prepared-resource errdefers so pending unregister only
-        /// completes after those resources have unwound.
+        /// before their prepared-resource errdefers to keep lifetime checks paired.
         pub fn abort(self: *Construction) void {
             self.table.assertOwnerThread();
             if (!self.dynamic_pin_active) return;
@@ -353,7 +315,6 @@ pub const Table = struct {
             std.debug.assert(state.construction_pins != 0);
             state.construction_pins -= 1;
             self.dynamic_pin_active = false;
-            self.table.completePendingUnregister(self.class_id);
         }
     };
 
@@ -365,16 +326,15 @@ pub const Table = struct {
         mark: ?PayloadMark,
     };
 
-    memory: *memory.MemoryAccount,
     atoms: *atom.AtomTable,
-    owner_thread_id: std.Thread.Id,
+    owner: *@import("runtime.zig").JSRuntime,
+    next_dynamic_id: u32 = ids.init_count,
     records: []Record = &.{},
     records_inline: [ids.init_count]Record = @splat(.{}),
     registration_states: []RegistrationState = &.{},
     registration_states_inline: [ids.init_count]RegistrationState = @splat(.{}),
     /// Registration-time cache of every standard id's immutable DefinitionPlan.
-    /// Standard classes are runtime-lifetime (`unregisterDynamicOwned` rejects
-    /// `id < ids.init_count`), so `registerAtom` writes each entry at most once
+    /// Standard classes are runtime-lifetime, so `registerAtom` writes each entry at most once
     /// and every allocation/destruction reads one indexed struct instead of the
     /// recordPtr + per-field load chain — mirroring how qjs reads its immutable
     /// `rt->class_array` scalars with no per-alloc bookkeeping. Standard ids
@@ -383,26 +343,10 @@ pub const Table = struct {
     /// record view.
     standard_plans: [ids.init_count]DefinitionPlan = undefined,
 
-    pub fn init(account: *memory.MemoryAccount, atoms: *atom.AtomTable) !Table {
-        var table = Table{
-            .memory = account,
-            .atoms = atoms,
-            .owner_thread_id = std.Thread.getCurrentId(),
-            .records_inline = undefined,
-            .standard_plans = undefined,
-        };
-        fillStandardPlanFallbacks(&table.standard_plans);
-        errdefer table.deinit();
-        try table.ensureCapacity(ids.init_count);
-        try table.registerStandardClasses();
-        return table;
-    }
-
-    pub fn initInPlace(self: *Table, account: *memory.MemoryAccount, atoms: *atom.AtomTable) !void {
+    pub fn init(self: *Table, owner: *@import("runtime.zig").JSRuntime) !void {
         self.* = .{
-            .memory = account,
-            .atoms = atoms,
-            .owner_thread_id = std.Thread.getCurrentId(),
+            .atoms = &owner.atoms,
+            .owner = owner,
             .records_inline = undefined,
             .standard_plans = undefined,
         };
@@ -413,6 +357,17 @@ pub const Table = struct {
         @memset(self.registration_states, .{});
         errdefer self.deinit();
         try self.registerStandardClasses();
+    }
+
+    /// Reserve before any allocation or callback. Failed ids remain consumed.
+    pub fn registerDefinition(self: *Table, definition: Definition) !Binding {
+        try self.requireOwnerThread();
+        if (self.next_dynamic_id > std.math.maxInt(ClassId)) return error.ClassIdExhausted;
+        const id: ClassId = @intCast(self.next_dynamic_id);
+        self.next_dynamic_id += 1;
+        try self.owner.ensureContextClassPrototypeCapacity(id);
+        try self.register(id, definition);
+        return .{ .owner = self.owner, .id = id };
     }
 
     fn registerStandardClasses(self: *Table) !void {
@@ -433,7 +388,7 @@ pub const Table = struct {
     }
 
     pub fn isOwnerThread(self: *const Table) bool {
-        return self.owner_thread_id == std.Thread.getCurrentId();
+        return self.owner.isOwnerThread();
     }
 
     pub fn requireOwnerThread(self: *const Table) MutationError!void {
@@ -457,6 +412,10 @@ pub const Table = struct {
     }
 
     pub fn deinit(self: *Table) void {
+        // `init` rolls its own records back before the caller observes
+        // the error. A second deinit from a later errdefer must not free them
+        // again. An untouched table is not empty; only a completed deinit is.
+        if (self.records.len == 0 and self.registration_states.len == 0) return;
         self.assertOwnerThread();
         const records = self.records;
         const using_inline = self.usingInlineRecords();
@@ -473,16 +432,16 @@ pub const Table = struct {
         if (using_inline) {
             fillDefaultRecords(records);
         } else if (records.len != 0) {
-            self.memory.free(Record, records);
+            mem_ops.free(self.owner, Record, records);
         }
         if (using_inline_states) {
             @memset(registration_states, .{});
         } else if (registration_states.len != 0) {
-            self.memory.free(RegistrationState, registration_states);
+            mem_ops.free(self.owner, RegistrationState, registration_states);
         }
     }
 
-    pub fn register(self: *Table, id: ClassId, def: Definition) !void {
+    fn register(self: *Table, id: ClassId, def: Definition) !void {
         try self.requireOwnerThread();
         // TGC S3 §4 class B: `name_atom` is a bare id and this file sits below
         // runtime.zig, so it cannot name an `AtomRootFrame`. Grow the record
@@ -495,25 +454,6 @@ pub const Table = struct {
         try self.registerAtom(id, name_atom, def);
     }
 
-    pub fn unregisterDynamic(self: *Table, id: ClassId) void {
-        self.assertOwnerThread();
-        self.unregisterDynamicOwned(id);
-    }
-
-    /// Checked unregistration for embedding boundaries. Rejection happens
-    /// before the pending bit or class record is touched.
-    pub fn tryUnregisterDynamic(self: *Table, id: ClassId) MutationError!void {
-        try self.requireOwnerThread();
-        self.unregisterDynamicOwned(id);
-    }
-
-    fn unregisterDynamicOwned(self: *Table, id: ClassId) void {
-        if (id < ids.init_count or id >= self.records.len) return;
-        if (!self.records[id].isRegistered()) return;
-        self.registration_states[id].unregister_pending = true;
-        self.completePendingUnregister(id);
-    }
-
     /// Snapshot the immutable scalars required during construction and pin a
     /// dynamic definition. Standard definitions are runtime-lifetime and avoid
     /// the counter traffic entirely.
@@ -523,13 +463,8 @@ pub const Table = struct {
         if (id >= self.records.len or !self.records[id].isRegistered()) return error.InvalidClassId;
         const definition_view = self.recordPtr(id).?;
         const state = &self.registration_states[id];
-        // Once removal is published, only constructions that already own this
-        // generation may finish. A later Object.create must not indefinitely
-        // extend a retired definition's lifetime.
-        if (state.unregister_pending) return error.InvalidClassId;
-        // An in-flight construction may finish from the exact pinned
-        // generation even after unregister was requested. Later unregister
-        // completion waits for the resulting live-object pin.
+        // Definitions are immutable until teardown; pins still verify that
+        // construction, object release and deferred callbacks are balanced.
         state.construction_pins += 1;
         return .{
             .table = self,
@@ -585,7 +520,6 @@ pub const Table = struct {
         std.debug.assert(state.generation == generation);
         std.debug.assert(state.live_object_pins != 0);
         state.live_object_pins -= 1;
-        self.completePendingUnregister(id);
     }
 
     /// Copy the callbacks for a deferred node and retain the definition from
@@ -614,12 +548,6 @@ pub const Table = struct {
         std.debug.assert(state.generation == generation);
         std.debug.assert(state.callback_pins != 0);
         state.callback_pins -= 1;
-        self.completePendingUnregister(id);
-    }
-
-    pub fn unregisterPending(self: *const Table, id: ClassId) bool {
-        if (id >= self.registration_states.len) return false;
-        return self.registration_states[id].unregister_pending;
     }
 
     pub fn isRegistered(self: Table, id: ClassId) bool {
@@ -665,7 +593,7 @@ pub const Table = struct {
     /// the stack. Mirror that: return `*const Record` so callers touch just the
     /// fields they need (payload_kind / payload_finalizer / exotic) via scalar
     /// loads instead of an 88B by-value SIMD block copy. Dynamic registration
-    /// may move the complete table and unregister may clear a record, so this
+    /// may move the complete table, so this
     /// pointer is not a stable handle. Spanning callers use the scalar plan plus
     /// generation/pin APIs above.
     pub fn recordPtr(self: *const Table, id: ClassId) ?*const Record {
@@ -748,7 +676,6 @@ pub const Table = struct {
         if (self.records[id].isRegistered()) return error.DuplicateClass;
         const state = &self.registration_states[id];
         std.debug.assert(!state.isPinned());
-        std.debug.assert(!state.unregister_pending);
         state.generation +%= 1;
         if (state.generation == 0) state.generation = 1;
         self.records[id] = .{
@@ -779,10 +706,17 @@ pub const Table = struct {
         var new_len = if (self.records.len == 0) @as(usize, ids.init_count) else self.records.len + self.records.len / 2;
         if (new_len < needed) new_len = needed;
 
-        const next = try self.memory.alloc(Record, new_len);
-        errdefer self.memory.free(Record, next);
-        const next_states = try self.memory.alloc(RegistrationState, new_len);
-        errdefer self.memory.free(RegistrationState, next_states);
+        const next = try mem_ops.alloc(self.owner, Record, new_len);
+        errdefer mem_ops.free(self.owner, Record, next);
+        const next_states = try mem_ops.alloc(self.owner, RegistrationState, new_len);
+        errdefer mem_ops.free(self.owner, RegistrationState, next_states);
+        // Allocation callbacks may have completed a nested registration.
+        // Its larger published table wins; never overwrite it with this stale capacity.
+        if (self.records.len >= needed) {
+            mem_ops.free(self.owner, RegistrationState, next_states);
+            mem_ops.free(self.owner, Record, next);
+            return;
+        }
         fillDefaultRecords(next);
         @memset(next_states, .{});
         const old_records = self.records;
@@ -796,12 +730,12 @@ pub const Table = struct {
         if (old_using_inline) {
             fillDefaultRecords(old_records);
         } else if (old_records.len != 0) {
-            self.memory.free(Record, old_records);
+            mem_ops.free(self.owner, Record, old_records);
         }
         if (old_states_using_inline) {
             @memset(old_states, .{});
         } else if (old_states.len != 0) {
-            self.memory.free(RegistrationState, old_states);
+            mem_ops.free(self.owner, RegistrationState, old_states);
         }
     }
 
@@ -842,20 +776,6 @@ pub const Table = struct {
         std.debug.assert(state.generation == generation);
         std.debug.assert(state.callback_pins != 0);
         state.callback_pins -= 1;
-        self.completePendingUnregister(id);
-    }
-
-    fn completePendingUnregister(self: *Table, id: ClassId) void {
-        if (id < ids.init_count or id >= self.records.len) return;
-        const state = &self.registration_states[id];
-        if (!state.unregister_pending or state.isPinned()) return;
-        const old_definition = self.records[id];
-        std.debug.assert(old_definition.isRegistered());
-        self.records[id] = .{};
-        state.unregister_pending = false;
-        // Publish the empty slot before invoking/freeing definition-owned data:
-        // reentrant registration never observes a half-cleared old definition.
-        old_definition.finalizeBindingData();
     }
 };
 

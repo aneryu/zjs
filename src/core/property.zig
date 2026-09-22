@@ -14,6 +14,7 @@ const JSRuntime = @import("runtime.zig").JSRuntime;
 const VarRef = @import("var_ref.zig").VarRef;
 const native_entry = @import("native_entry.zig");
 const module_auto_init = @import("module_auto_init.zig");
+const property_state = @import("property_state.zig");
 const std = @import("std");
 
 /// Property kind (qjs `JS_PROP_TMASK`, quickjs.h). The kind is NOT
@@ -310,7 +311,7 @@ pub const AutoInit = struct {
     /// mutate the owner whose AUTOINIT slot is being materialized.
     prepare_native_function: ?*const fn (*JSRuntime, *const AutoInit, JSValue) anyerror!void = null,
 
-    fn eql(self: AutoInit, other: AutoInit) bool {
+    pub fn eql(self: AutoInit, other: AutoInit) bool {
         return std.mem.eql(u8, self.name, other.name) and
             self.length == other.length and
             self.kind == other.kind and
@@ -369,17 +370,7 @@ comptime {
 }
 
 pub fn internAutoInit(rt: *JSRuntime, info: AutoInit) !*const AutoInit {
-    // Each descriptor has a stable address for the Runtime lifetime. Parsing
-    // may temporarily replace `memory.allocator` with a short-lived arena, so
-    // allocate and index these through the persistent Runtime account.
-    for (rt.auto_init_descriptors.items) |stored| {
-        if (stored.*.eql(info)) return stored;
-    }
-    const stored = try rt.createRuntime(AutoInit);
-    errdefer rt.destroyRuntime(AutoInit, stored);
-    stored.* = info;
-    try rt.auto_init_descriptors.append(rt.memory.persistent_allocator, stored);
-    return stored;
+    return property_state.internAutoInit(rt, info);
 }
 
 pub fn autoInit(ref: anytype) *const AutoInit {

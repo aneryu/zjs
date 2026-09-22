@@ -65,7 +65,7 @@ pub fn constructErrorObject(rt: *core.JSRuntime, name: []const u8, constructor: 
 }
 
 test "constructErrorObject roots direct symbol message while creating error" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const message_atom = try rt.atoms.newValueSymbol("gc-construct-error-message-symbol");
@@ -86,7 +86,7 @@ test "constructErrorObject roots direct symbol message while creating error" {
     const message_value = try object.getProperty(message_key);
     try expectStringValue(rt, "Symbol(gc-construct-error-message-symbol)", message_value);
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(message_atom) == null);
 }
 
@@ -120,7 +120,7 @@ pub fn constructDOMExceptionObject(rt: *core.JSRuntime, prototype: ?*core.Object
 }
 
 test "constructDOMExceptionObject roots direct symbol args while creating error" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const message_atom = try rt.atoms.newValueSymbol("gc-dom-exception-message-symbol");
@@ -148,14 +148,14 @@ test "constructDOMExceptionObject roots direct symbol args while creating error"
     const name_value = try object.getProperty(name_key);
     try expectStringValue(rt, "Symbol(gc-dom-exception-name-symbol)", name_value);
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(message_atom) == null);
     try std.testing.expect(rt.atoms.name(name_atom) == null);
 }
 
 fn domExceptionCode(rt: *core.JSRuntime, name_value: core.JSValue) !i32 {
     var name = std.ArrayList(u8).empty;
-    defer name.deinit(rt.memory.allocator);
+    defer name.deinit(rt.nativeAllocator());
     try value_ops.appendRawString(rt, &name, name_value);
     const names = [_]?[]const u8{
         "IndexSizeError",
@@ -277,7 +277,7 @@ pub fn weakRefWithPrototype(rt: *core.JSRuntime, target: core.JSValue, prototype
 }
 
 test "weakRefWithPrototype roots direct symbol target while creating weak ref" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-construct-weak-ref-symbol");
@@ -296,7 +296,7 @@ test "weakRefWithPrototype roots direct symbol target while creating weak ref" {
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     rt.clearWeakRefKeptAlive();
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
     try std.testing.expect(weak_ref.weakRefDeref(rt).is(.undefined_value));
 }
@@ -314,7 +314,7 @@ fn constructPrimitiveWrapper(rt: *core.JSRuntime, class_id: core.class.ClassId, 
 }
 
 test "constructPrimitiveWrapper roots direct symbol while creating wrapper" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-construct-wrapper-symbol");
@@ -330,7 +330,7 @@ test "constructPrimitiveWrapper roots direct symbol while creating wrapper" {
     const stored = wrapper.objectData() orelse return error.TypeError;
     try std.testing.expect(stored.same(symbol_value));
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -416,7 +416,7 @@ const expectObject = core.value_semantics.expectObject;
 
 fn expectStringValue(rt: *core.JSRuntime, expected: []const u8, value: core.JSValue) !void {
     var actual = std.ArrayList(u8).empty;
-    defer actual.deinit(rt.memory.allocator);
+    defer actual.deinit(rt.nativeAllocator());
     try value_ops.appendRawString(rt, &actual, value);
     try std.testing.expectEqualStrings(expected, actual.items);
 }
@@ -463,7 +463,7 @@ fn expectConstructor(value: core.JSValue) !*core.Object {
 }
 
 test "legacy constructor gate follows four-class bytecode constructability" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const Case = struct {

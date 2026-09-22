@@ -65,38 +65,38 @@ pub noinline fn appendValueString(
     if (policy.symbol == .describe) {
         if (value.asSymbolAtom()) |atom_id| {
             const description = symbol.description(rt, atom_id) orelse "";
-            try buffer.appendSlice(rt.memory.allocator, "Symbol(");
-            try buffer.appendSlice(rt.memory.allocator, description);
-            try buffer.append(rt.memory.allocator, ')');
+            try buffer.appendSlice(rt.nativeAllocator(), "Symbol(");
+            try buffer.appendSlice(rt.nativeAllocator(), description);
+            try buffer.append(rt.nativeAllocator(), ')');
             return;
         }
     }
     if (value.as(.int)) |int_value| {
         var int_buf: [32]u8 = undefined;
-        try buffer.appendSlice(rt.memory.allocator, dtoa.formatInt32(&int_buf, int_value));
+        try buffer.appendSlice(rt.nativeAllocator(), dtoa.formatInt32(&int_buf, int_value));
         return;
     }
     if (value.as(.float64)) |float_value| return appendFloat(rt, buffer, float_value);
-    if (value.isBigInt()) return value_format.appendBigIntBase10(rt.memory.allocator, buffer, value);
+    if (value.isBigInt()) return value_format.appendBigIntBase10(rt.nativeAllocator(), buffer, value);
     if (value.as(.boolean)) |bool_value| {
-        return buffer.appendSlice(rt.memory.allocator, if (bool_value) "true" else "false");
+        return buffer.appendSlice(rt.nativeAllocator(), if (bool_value) "true" else "false");
     }
-    if (value.is(.undefined_value)) return buffer.appendSlice(rt.memory.allocator, "undefined");
-    if (value.is(.null_value)) return buffer.appendSlice(rt.memory.allocator, "null");
+    if (value.is(.undefined_value)) return buffer.appendSlice(rt.nativeAllocator(), "undefined");
+    if (value.is(.null_value)) return buffer.appendSlice(rt.nativeAllocator(), "null");
     if (value.isString()) return string.appendValueUtf8(rt, buffer, value);
     if (value.is(.object)) return appendObjectString(rt, buffer, value, policy);
     return unsupportedValue(rt, buffer, policy);
 }
 
 fn appendFloat(rt: *JSRuntime, buffer: *std.ArrayList(u8), float_value: f64) AppendStringError!void {
-    if (std.math.isNan(float_value)) return buffer.appendSlice(rt.memory.allocator, "NaN");
-    if (std.math.isPositiveInf(float_value)) return buffer.appendSlice(rt.memory.allocator, "Infinity");
-    if (std.math.isNegativeInf(float_value)) return buffer.appendSlice(rt.memory.allocator, "-Infinity");
+    if (std.math.isNan(float_value)) return buffer.appendSlice(rt.nativeAllocator(), "NaN");
+    if (std.math.isPositiveInf(float_value)) return buffer.appendSlice(rt.nativeAllocator(), "Infinity");
+    if (std.math.isNegativeInf(float_value)) return buffer.appendSlice(rt.nativeAllocator(), "-Infinity");
     // ToString(-0) is "0", not "-0" (ES Number::toString step 2).
-    if (std.math.isNegativeZero(float_value)) return buffer.append(rt.memory.allocator, '0');
+    if (std.math.isNegativeZero(float_value)) return buffer.append(rt.nativeAllocator(), '0');
     var float_buf: [64]u8 = undefined;
     const printed = value_format.formatFiniteNumberAssumeCapacity(&float_buf, float_value);
-    return buffer.appendSlice(rt.memory.allocator, printed);
+    return buffer.appendSlice(rt.nativeAllocator(), printed);
 }
 
 fn appendObjectString(
@@ -120,18 +120,18 @@ fn appendObjectString(
         }
     }
     if (object_value.class_id == class.ids.array_buffer) {
-        return buffer.appendSlice(rt.memory.allocator, "[object ArrayBuffer]");
+        return buffer.appendSlice(rt.nativeAllocator(), "[object ArrayBuffer]");
     }
     if (object_value.class_id == class.ids.promise) {
-        return buffer.appendSlice(rt.memory.allocator, "[object Promise]");
+        return buffer.appendSlice(rt.nativeAllocator(), "[object Promise]");
     }
     if (object_value.isArray()) return appendArrayString(rt, buffer, object_value, policy);
-    return buffer.appendSlice(rt.memory.allocator, "[object Object]");
+    return buffer.appendSlice(rt.nativeAllocator(), "[object Object]");
 }
 
 fn unsupportedValue(rt: *JSRuntime, buffer: *std.ArrayList(u8), policy: Policy) AppendStringError!void {
     return switch (policy.unsupported) {
-        .object_tag => buffer.appendSlice(rt.memory.allocator, "[object Object]"),
+        .object_tag => buffer.appendSlice(rt.nativeAllocator(), "[object Object]"),
         // qjs `JS_ToString` throws for Symbols rather than tagging them; the
         // RegExp constructor legs rely on it.
         .type_error => error.TypeError,
@@ -148,7 +148,7 @@ fn appendArrayString(
 ) AppendStringError!void {
     var index: u32 = 0;
     while (index < array.arrayLength()) : (index += 1) {
-        if (index != 0) try buffer.append(rt.memory.allocator, ',');
+        if (index != 0) try buffer.append(rt.nativeAllocator(), ',');
         const value = try array.getProperty(atom.Atom.taggedInt(index));
         if (!value.is(.undefined_value) and !value.is(.null_value)) try appendValueString(rt, buffer, value, policy);
     }

@@ -291,17 +291,17 @@ pub fn atomNameIsPrivate(s: *State, atom_id: Atom) bool {
 pub fn formatBigIntPropertyName(s: *State, text: []const u8) Error![]const u8 {
     const parse_text = if (std.mem.indexOfScalar(u8, text, '_')) |_| blk: {
         var normalized = std.ArrayList(u8).empty;
-        errdefer normalized.deinit(s.memory.allocator);
+        errdefer normalized.deinit(s.scratch);
         for (text) |ch| {
-            if (ch != '_') try normalized.append(s.memory.allocator, ch);
+            if (ch != '_') try normalized.append(s.scratch, ch);
         }
-        break :blk try normalized.toOwnedSlice(s.memory.allocator);
+        break :blk try normalized.toOwnedSlice(s.scratch);
     } else text;
-    defer if (parse_text.ptr != text.ptr) s.memory.allocator.free(parse_text);
+    defer if (parse_text.ptr != text.ptr) s.scratch.free(parse_text);
 
-    var parsed = libs_bignum.parseAutoAlloc(s.memory.allocator, parse_text) catch return Error.InvalidNumberLiteral;
+    var parsed = libs_bignum.parseAutoAlloc(s.scratch, parse_text) catch return Error.InvalidNumberLiteral;
     defer parsed.deinit();
-    return parsed.formatBase10Alloc(s.memory.allocator) catch |err| switch (err) {
+    return parsed.formatBase10Alloc(s.scratch) catch |err| switch (err) {
         error.OutOfMemory => Error.OutOfMemory,
         // Base 10 is always a valid radix.
         error.InvalidRadix => Error.ParserInvariant,

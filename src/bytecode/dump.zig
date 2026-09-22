@@ -146,7 +146,7 @@ fn printOperandsFromLayout(
 }
 
 test "dyn_env_probe flags byte disassembles as kind[,with]" {
-    const rt = try runtime.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try runtime.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const name = try rt.internAtom("probe-dump");

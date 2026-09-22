@@ -7,6 +7,7 @@
 //! its limb tail around quickjs.c. Core and higher layers may import
 //! this module; it depends only on core/libs, never exec/runtime/binding.
 
+const mem_ops = @import("memory.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const gc = @import("gc.zig");
@@ -132,13 +133,13 @@ pub const BigInt = struct {
     // ---- construction ------------------------------------------------------
 
     pub fn create(rt: *JSRuntime, value: i128) !*BigInt {
-        var big = try libs.bigint.BigInt.fromIntAlloc(rt.memory.accountedAllocator(), value);
+        var big = try libs.bigint.BigInt.fromIntAlloc(rt.nativeAllocator(), value);
         errdefer big.deinit();
         return createFromOwned(rt, big);
     }
 
     pub fn createFromBigInt(rt: *JSRuntime, value: libs.bigint.BigInt) !*BigInt {
-        var cloned = try value.cloneWithAllocator(rt.memory.accountedAllocator());
+        var cloned = try value.cloneWithAllocator(rt.nativeAllocator());
         errdefer cloned.deinit();
         return createFromOwned(rt, cloned);
     }
@@ -152,10 +153,10 @@ pub const BigInt = struct {
     /// `createFromOwned` without the GC publication: the wrapper is on no
     /// list and the tracer neither marks nor sweeps it until `register`.
     pub fn createFromOwnedReserved(rt: *JSRuntime, value: libs.bigint.BigInt) !*BigInt {
-        const self = try rt.memory.create(BigInt);
-        errdefer rt.memory.destroy(BigInt, self);
+        const self = try mem_ops.create(rt, BigInt);
+        errdefer mem_ops.destroy(rt, BigInt, self);
 
-        const accounted_allocator = rt.memory.accountedAllocator();
+        const accounted_allocator = rt.nativeAllocator();
         var owned = value;
         if (value.allocator.ptr != accounted_allocator.ptr or value.allocator.vtable != accounted_allocator.vtable) {
             // Preserve the transfer-on-success contract: clone first while the
@@ -199,11 +200,11 @@ pub const BigInt = struct {
     pub fn createInlineUninitialized(rt: *JSRuntime, capacity: usize) !*BigInt {
         if (capacity > libs.bigint.max_limbs) return error.BigIntTooLarge;
         const fam_bytes = capacity * @sizeOf(Limb);
-        const self = try rt.memory.createWithFam(BigInt, fam_bytes);
+        const self = try mem_ops.createWithFam(rt, BigInt, fam_bytes);
         self.* = .{
             .header = .{},
             .limbs_ptr = if (capacity == 0) null else @ptrCast(@alignCast(inlineBase(self))),
-            .allocator = rt.memory.accountedAllocator(),
+            .allocator = rt.nativeAllocator(),
             .len = 0,
             .capacity = @intCast(capacity),
             .flags = .{ .inline_storage = true },
@@ -234,9 +235,9 @@ pub const BigInt = struct {
     }
 
     /// Bytes this wrapper (plus inline limbs) is registered with. External
-    /// limbs are charged separately through `accountedAllocator`.
+    /// limbs are charged separately through the native allocator.
     pub fn accountedAllocationSize(self: *const BigInt) usize {
-        return memory.MemoryAccount.gcSlabAccountedPayload(self) orelse
+        return mem_ops.gcSlabAccountedPayload(self) orelse
             (@sizeOf(BigInt) + if (self.flags.inline_storage) self.famBytes() else 0);
     }
 
@@ -396,21 +397,31 @@ pub const BigInt = struct {
     // ---- destruction -------------------------------------------------------
 
     pub fn destroyFromHeader(rt: *JSRuntime, header: *gc.Header) void {
-        fromHeader(header).destroyWithAccount(&rt.memory);
+        fromHeader(header).destroyReserved(rt);
     }
 
     /// Free the wrapper (and inline limbs) through the account that created
     /// it. The parser allocates constant-pool literals from the function's
     /// account before any runtime publication, so it frees them here too.
-    pub fn destroyWithAccount(self: *BigInt, account: *memory.MemoryAccount) void {
+    /// Reserved cell for a parser that may not have stored a runtime. The
+    /// native allocator's context is the account that owns the cell.
+    pub fn createExternalReserved(runtime: *JSRuntime) !*BigInt {
+        return mem_ops.create(runtime, BigInt);
+    }
+
+    pub fn destroyExternalReserved(self: *BigInt, runtime: *JSRuntime) void {
+        self.destroyReserved(runtime);
+    }
+
+    pub fn destroyReserved(self: *BigInt, account: *@import("runtime.zig").JSRuntime) void {
         if (self.flags.inline_storage) {
             // Capacity, not len: an inline result normalized down from
             // `lhs.len + rhs.len` would otherwise be released at the wrong size.
-            account.destroyWithFam(BigInt, self, self.famBytes());
+            mem_ops.destroyWithFam(account, BigInt, self, self.famBytes());
             return;
         }
         if (self.capacity != 0) self.allocator.free(self.limbs_ptr.?[0..self.capacity]);
-        account.destroy(BigInt, self);
+        mem_ops.destroy(account, BigInt, self);
     }
 };
 
@@ -445,7 +456,7 @@ fn expectLockstepMul(
     rhs_negative: bool,
 ) !void {
     const bigint = libs.bigint;
-    const allocator = rt.memory.allocator;
+    const allocator = rt.nativeAllocator();
 
     const lhs_value = bigint.BigInt{
         .negative = lhs_negative,
@@ -501,13 +512,13 @@ fn makeLockstepOperand(
     const owned = bigint.BigInt{
         .negative = negative,
         .limbs = @constCast(limbs),
-        .allocator = rt.memory.allocator,
+        .allocator = rt.nativeAllocator(),
     };
     return BigInt.createFromBigInt(rt, owned);
 }
 
 test "heap BigInt value uses reserved QuickJS tag" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const big = try BigInt.create(rt, @as(i128, 1) << 90);
@@ -518,18 +529,18 @@ test "heap BigInt value uses reserved QuickJS tag" {
 }
 
 test "heap BigInt limbs participate in runtime memory limit and accounting" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     var source = try libs.bigint.pow2(std.testing.allocator, 512 * 1024);
     defer source.deinit();
     const limb_bytes = source.limbs.len * @sizeOf(libs.bigint.Limb);
-    const baseline = rt.memory.allocated_bytes;
+    const baseline = rt.diagnostics.allocations.allocated_bytes;
 
     // Leave room for the wrapper and a small margin, but not the retained limb
-    // storage. A raw persistent_allocator clone used to bypass this limit.
-    rt.setMemoryLimit(baseline + @sizeOf(BigInt) + 1024);
-    defer rt.setMemoryLimit(null);
+    // storage. A raw Runtime native allocator clone used to bypass this limit.
+    rt.setNativeBytesLimitForTest(baseline + @sizeOf(BigInt) + 1024);
+    defer rt.setNativeBytesLimitForTest(null);
     if (BigInt.createFromBigInt(rt, source)) |unexpected| {
         unexpected.releaseForTest(rt);
         return error.TestExpectedError;
@@ -537,17 +548,17 @@ test "heap BigInt limbs participate in runtime memory limit and accounting" {
         try std.testing.expectEqual(error.OutOfMemory, err);
     }
 
-    rt.setMemoryLimit(null);
+    rt.setNativeBytesLimitForTest(null);
     const stored = try BigInt.createFromBigInt(rt, source);
-    try std.testing.expect(rt.memory.allocated_bytes >= baseline + @sizeOf(BigInt) + limb_bytes);
+    try std.testing.expect(rt.diagnostics.allocations.allocated_bytes >= baseline + @sizeOf(BigInt) + limb_bytes);
     stored.releaseForTest(rt);
-    try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(baseline, rt.diagnostics.allocations.allocated_bytes);
 }
 
 test "heap BigInt external storage reads through the storage accessors" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
-    const baseline = rt.memory.allocated_bytes;
+    const baseline = rt.diagnostics.allocations.allocated_bytes;
 
     // Zero owns no limbs in either storage mode, so `limbs_ptr` is null and the
     // accessors must still hand back an empty slice rather than deref it.
@@ -570,19 +581,19 @@ test "heap BigInt external storage reads through the storage accessors" {
     try std.testing.expectEqual(negative_multi.limbs().len, negative_multi.capacitySliceMut().len);
     try std.testing.expectEqual(@as(usize, 2 * @sizeOf(libs.bigint.Limb)), negative_multi.famBytes());
 
-    const borrowed = negative_multi.borrowedValue(rt.memory.allocator);
+    const borrowed = negative_multi.borrowedValue(rt.nativeAllocator());
     try std.testing.expect(borrowed.negative);
     try std.testing.expectEqualSlices(libs.bigint.Limb, negative_multi.limbs(), borrowed.limbs);
 
     negative_multi.releaseForTest(rt);
-    try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(baseline, rt.diagnostics.allocations.allocated_bytes);
 }
 
 test "heap BigInt inline storage destroys by capacity across the slab boundary" {
     const bigint = libs.bigint;
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
-    const baseline = rt.memory.allocated_bytes;
+    const baseline = rt.diagnostics.allocations.allocated_bytes;
 
     const slab = memory.SmallObjectSlab;
     const wrapper = @sizeOf(BigInt);
@@ -639,11 +650,11 @@ test "heap BigInt inline storage destroys by capacity across the slab boundary" 
         for (big.limbs(), 0..) |limb, i| {
             try std.testing.expectEqual(@as(bigint.Limb, @intCast(i)) + 1, limb);
         }
-        const borrowed = big.borrowedValue(rt.memory.allocator);
+        const borrowed = big.borrowedValue(rt.nativeAllocator());
         try std.testing.expectEqualSlices(bigint.Limb, big.limbs(), borrowed.limbs);
 
         big.releaseForTest(rt);
-        try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+        try std.testing.expectEqual(baseline, rt.diagnostics.allocations.allocated_bytes);
     }
 
     // len == capacity is the ordinary published shape.
@@ -653,20 +664,20 @@ test "heap BigInt inline storage destroys by capacity across the slab boundary" 
     try std.testing.expectEqual(@as(usize, 3), full.limbs().len);
     try std.testing.expect(!full.negative());
     full.releaseForTest(rt);
-    try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(baseline, rt.diagnostics.allocations.allocated_bytes);
 
     try std.testing.expectError(
         error.BigIntTooLarge,
         BigInt.createInlineUninitialized(rt, bigint.max_limbs + 1),
     );
-    try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(baseline, rt.diagnostics.allocations.allocated_bytes);
 }
 
 test "inline FAM multiplication matches the external kernel limb for limb" {
     const bigint = libs.bigint;
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
-    const baseline = rt.memory.allocated_bytes;
+    const baseline = rt.diagnostics.allocations.allocated_bytes;
     const slab = memory.SmallObjectSlab;
     const max_slab_payload = slab.max_size - slab.block_header_bytes;
     const last_slab_capacity =
@@ -701,7 +712,7 @@ test "inline FAM multiplication matches the external kernel limb for limb" {
                     rhs_limbs[shape[1] - 1] |= 1;
 
                     try expectLockstepMul(rt, lhs_limbs, lhs_negative, rhs_limbs, rhs_negative);
-                    try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+                    try std.testing.expectEqual(baseline, rt.diagnostics.allocations.allocated_bytes);
                 }
             }
         }
@@ -722,13 +733,13 @@ test "inline FAM multiplication matches the external kernel limb for limb" {
         lhs_limbs[lhs_len - 1] |= 1;
         rhs_limbs[rhs_len - 1] |= 1;
         try expectLockstepMul(rt, lhs_limbs, random.boolean(), rhs_limbs, random.boolean());
-        try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+        try std.testing.expectEqual(baseline, rt.diagnostics.allocations.allocated_bytes);
     }
 }
 
 test "heap multiplication costs one allocation and one block" {
     const bigint = libs.bigint;
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     // 2x2 limbs: the shape the JS-level benchmark uses.
@@ -738,31 +749,31 @@ test "heap multiplication costs one allocation and one block" {
     const rhs = try makeLockstepOperand(rt, &operand_limbs, false, false);
     defer rhs.releaseForTest(rt);
 
-    const count_before = rt.memory.allocation_count;
-    const bytes_before = rt.memory.allocated_bytes;
+    const count_before = rt.diagnostics.allocations.allocation_count;
+    const bytes_before = rt.diagnostics.allocations.allocated_bytes;
     const product = try BigInt.createMulInline(rt, lhs, rhs);
 
     // One allocation per multiply, matching qjs's single js_bigint_new. The old
     // topology was two: mulAlloc's limb block plus createFromOwned's wrapper.
-    try std.testing.expectEqual(count_before + 1, rt.memory.allocation_count);
+    try std.testing.expectEqual(count_before + 1, rt.diagnostics.allocations.allocation_count);
 
     const payload = @sizeOf(BigInt) + 4 * @sizeOf(bigint.Limb);
     try std.testing.expectEqual(
-        bytes_before + memory.MemoryAccount.accountedSizeForRequest(payload, .@"8"),
-        rt.memory.allocated_bytes,
+        bytes_before + mem_ops.accountedSizeForRequest(payload, .@"8"),
+        rt.diagnostics.allocations.allocated_bytes,
     );
     // The fused wrapper+limbs payload remains slab-backed in both the RC and
     // compact trace representations.
     try std.testing.expect(memory.SmallObjectSlab.canUse(payload, .@"8"));
 
     product.releaseForTest(rt);
-    try std.testing.expectEqual(count_before, rt.memory.allocation_count);
-    try std.testing.expectEqual(bytes_before, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(count_before, rt.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(bytes_before, rt.diagnostics.allocations.allocated_bytes);
 }
 
 test "heap multiplication crosses the slab boundary into standalone blocks" {
     const bigint = libs.bigint;
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const slab = memory.SmallObjectSlab;
@@ -790,26 +801,26 @@ test "heap multiplication crosses the slab boundary into standalone blocks" {
         const rhs = try makeLockstepOperand(rt, rhs_limbs, false, false);
         defer rhs.releaseForTest(rt);
 
-        const count_before = rt.memory.allocation_count;
-        const bytes_before = rt.memory.allocated_bytes;
+        const count_before = rt.diagnostics.allocations.allocation_count;
+        const bytes_before = rt.diagnostics.allocations.allocated_bytes;
         const product = try BigInt.createMulInline(rt, lhs, rhs);
 
         const payload = @sizeOf(BigInt) + (shape[0] + shape[1]) * @sizeOf(bigint.Limb);
-        try std.testing.expectEqual(count_before + 1, rt.memory.allocation_count);
+        try std.testing.expectEqual(count_before + 1, rt.diagnostics.allocations.allocation_count);
         try std.testing.expectEqual(
             slab.canUse(payload, .@"8"),
             shape[0] + shape[1] <= last_slab_capacity,
         );
 
         product.releaseForTest(rt);
-        try std.testing.expectEqual(count_before, rt.memory.allocation_count);
-        try std.testing.expectEqual(bytes_before, rt.memory.allocated_bytes);
+        try std.testing.expectEqual(count_before, rt.diagnostics.allocations.allocation_count);
+        try std.testing.expectEqual(bytes_before, rt.diagnostics.allocations.allocated_bytes);
     }
 }
 
 test "heap multiplication reports its single allocation failure cleanly" {
     const bigint = libs.bigint;
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const lhs_limbs = try std.testing.allocator.alloc(bigint.Limb, 16);
@@ -828,10 +839,10 @@ test "heap multiplication reports its single allocation failure cleanly" {
     // from a 56-byte wrapper allocation to the whole 312-byte block. Leave room
     // for a wrapper but not for the block, so the fused allocation is the one
     // that has to fail.
-    const count_before = rt.memory.allocation_count;
-    const bytes_before = rt.memory.allocated_bytes;
-    rt.setMemoryLimit(bytes_before + @sizeOf(BigInt) + 16);
-    defer rt.setMemoryLimit(null);
+    const count_before = rt.diagnostics.allocations.allocation_count;
+    const bytes_before = rt.diagnostics.allocations.allocated_bytes;
+    rt.setNativeBytesLimitForTest(bytes_before + @sizeOf(BigInt) + 16);
+    defer rt.setNativeBytesLimitForTest(null);
     if (BigInt.createMulInline(rt, lhs, rhs)) |unexpected| {
         unexpected.releaseForTest(rt);
         return error.TestExpectedError;
@@ -840,20 +851,20 @@ test "heap multiplication reports its single allocation failure cleanly" {
     }
     // The multiply has exactly one failure point, so a rejected allocation
     // leaves nothing behind at all.
-    try std.testing.expectEqual(count_before, rt.memory.allocation_count);
-    try std.testing.expectEqual(bytes_before, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(count_before, rt.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(bytes_before, rt.diagnostics.allocations.allocated_bytes);
 
-    rt.setMemoryLimit(null);
+    rt.setNativeBytesLimitForTest(null);
     const product = try BigInt.createMulInline(rt, lhs, rhs);
     try std.testing.expect(product.negative());
     try std.testing.expectEqual(@as(usize, 32), product.capacitySliceMut().len);
     product.releaseForTest(rt);
-    try std.testing.expectEqual(bytes_before, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(bytes_before, rt.diagnostics.allocations.allocated_bytes);
 }
 
 test "heap multiplication rejects an oversize product before allocating" {
     const bigint = libs.bigint;
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     // max_limbs is the js_bigint_new cap. Two operands
@@ -869,9 +880,9 @@ test "heap multiplication rejects an oversize product before allocating" {
     const rhs = try makeLockstepOperand(rt, limbs, false, false);
     defer rhs.releaseForTest(rt);
 
-    const bytes_before = rt.memory.allocated_bytes;
+    const bytes_before = rt.diagnostics.allocations.allocated_bytes;
     try std.testing.expectError(error.BigIntTooLarge, BigInt.createMulInline(rt, lhs, rhs));
-    try std.testing.expectEqual(bytes_before, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(bytes_before, rt.diagnostics.allocations.allocated_bytes);
 }
 
 test "repeated heap multiplication retains nothing as the count grows" {
@@ -884,29 +895,29 @@ test "repeated heap multiplication retains nothing as the count grows" {
     // in the second.
     var previous_peak: ?usize = null;
     for ([_]usize{ 0, 1, 10, 1000 }) |n| {
-        const rt = try JSRuntime.create(std.testing.allocator, .{});
+        const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
         defer rt.destroy();
         const lhs = try makeLockstepOperand(rt, &operand_limbs, false, false);
         defer lhs.releaseForTest(rt);
         const rhs = try makeLockstepOperand(rt, &operand_limbs, true, false);
         defer rhs.releaseForTest(rt);
 
-        const bytes_before = rt.memory.allocated_bytes;
-        const count_before = rt.memory.allocation_count;
-        const peak_before = rt.memory.peak_allocation_count;
+        const bytes_before = rt.diagnostics.allocations.allocated_bytes;
+        const count_before = rt.diagnostics.allocations.allocation_count;
+        const peak_before = rt.diagnostics.allocations.peak_allocation_count;
 
         for (0..n) |_| {
             const product = try BigInt.createMulInline(rt, lhs, rhs);
             product.releaseForTest(rt);
         }
 
-        try std.testing.expectEqual(bytes_before, rt.memory.allocated_bytes);
-        try std.testing.expectEqual(count_before, rt.memory.allocation_count);
+        try std.testing.expectEqual(bytes_before, rt.diagnostics.allocations.allocated_bytes);
+        try std.testing.expectEqual(count_before, rt.diagnostics.allocations.allocation_count);
         // One live product at a time regardless of n: the peak rises by exactly
         // one over the pre-loop state on the first iteration and never again.
         const expected_peak = if (n == 0) peak_before else @max(peak_before, count_before + 1);
-        try std.testing.expectEqual(expected_peak, rt.memory.peak_allocation_count);
-        if (previous_peak) |p| if (n != 0) try std.testing.expectEqual(p, rt.memory.peak_allocation_count);
-        if (n != 0) previous_peak = rt.memory.peak_allocation_count;
+        try std.testing.expectEqual(expected_peak, rt.diagnostics.allocations.peak_allocation_count);
+        if (previous_peak) |p| if (n != 0) try std.testing.expectEqual(p, rt.diagnostics.allocations.peak_allocation_count);
+        if (n != 0) previous_peak = rt.diagnostics.allocations.peak_allocation_count;
     }
 }

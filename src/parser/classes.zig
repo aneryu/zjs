@@ -364,7 +364,7 @@ fn registerClassPrivateElement(s: *State, atom_id: Atom, kind: ClassPrivateEleme
             return s.failUnexpectedToken();
         }
     }
-    try s.class_private_elements.append(s.memory.allocator, .{
+    try s.class_private_elements.append(s.scratch, .{
         .atom = atom_id,
         .kind = kind,
         .is_static = s.class.is_static,
@@ -404,8 +404,8 @@ fn preparePrivateAccessorBinding(s: *State, atom_id: Atom, is_getter: bool) Erro
 fn privateSetterAtom(s: *State, private_atom: Atom) Error!Atom {
     const name = s.atoms.name(private_atom) orelse return Error.InvalidIdentifier;
     const suffix = "<set>";
-    const bytes = try s.memory.alloc(u8, name.len + suffix.len);
-    defer s.memory.free(u8, bytes);
+    const bytes = try s.allocator.alloc(u8, name.len + suffix.len);
+    defer s.allocator.free(bytes);
     @memcpy(bytes[0..name.len], name);
     @memcpy(bytes[name.len..], suffix);
     return s.atoms.newSymbol(bytes, .private);
@@ -679,7 +679,7 @@ fn registerClassPrivateBoundName(s: *State, atom_id: Atom) Error!void {
         if (existing == atom_id) return;
     }
     // The atom id is borrowed; the enclosing CompileAtomScope is its root.
-    try s.class_private_bound_names.append(s.memory.allocator, atom_id);
+    try s.class_private_bound_names.append(s.scratch, atom_id);
 }
 
 pub fn classPrivateNameIsBound(s: *State, atom_id: Atom) bool {
@@ -741,16 +741,16 @@ fn newClassPrivateAtom(s: *State, atom_id: Atom) Error!Atom {
     if (name.len > 0 and name[0] == '#') {
         return s.atoms.newSymbol(name, .private);
     }
-    const bytes = try s.memory.alloc(u8, name.len + 1);
-    defer s.memory.free(u8, bytes);
+    const bytes = try s.allocator.alloc(u8, name.len + 1);
+    defer s.allocator.free(bytes);
     bytes[0] = '#';
     @memcpy(bytes[1..], name);
     return s.atoms.newSymbol(bytes, .private);
 }
 
 fn classComputedFieldTempAtom(s: *State) Error!Atom {
-    const temp_name = try std.fmt.allocPrint(s.memory.allocator, "__class_computed_field_{d}", .{s.with_scope_id});
-    defer s.memory.allocator.free(temp_name);
+    const temp_name = try std.fmt.allocPrint(s.scratch, "__class_computed_field_{d}", .{s.with_scope_id});
+    defer s.scratch.free(temp_name);
     s.with_scope_id += 1;
     return s.atoms.internString(temp_name);
 }

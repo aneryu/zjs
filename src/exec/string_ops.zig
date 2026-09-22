@@ -305,9 +305,9 @@ fn stringConcatSlow(
     const rt = ctx.runtime;
     var values = std.ArrayList(core.JSValue).empty;
     defer {
-        values.deinit(rt.memory.allocator);
+        values.deinit(rt.nativeAllocator());
     }
-    try values.ensureTotalCapacity(rt.memory.allocator, args.len + 1);
+    try values.ensureTotalCapacity(rt.nativeAllocator(), args.len + 1);
     // `values` is malloc memory: not a traced carrier, not a range the
     // conservative scan walks. Every `toStringForAnnexB` below allocates (and
     // may run a user `toString`), so without this the string appended at
@@ -328,8 +328,8 @@ fn stringConcatSlow(
     }
 
     var resolved = std.ArrayList(core.string.String.ResolvedData).empty;
-    defer resolved.deinit(rt.memory.allocator);
-    try resolved.ensureTotalCapacity(rt.memory.allocator, values.items.len);
+    defer resolved.deinit(rt.nativeAllocator());
+    try resolved.ensureTotalCapacity(rt.nativeAllocator(), values.items.len);
     var total: usize = 0;
     var wide = false;
     for (values.items) |value| {
@@ -437,7 +437,7 @@ noinline fn stringReplaceCore(
                     return throwTypeErrorMessage(ctx, global, "cannot convert to object");
                 const flags_string = try toStringForAnnexB(ctx, output, global, flags, caller_function, caller_frame);
                 var bytes = std.ArrayList(u8).empty;
-                defer bytes.deinit(ctx.runtime.memory.allocator);
+                defer bytes.deinit(ctx.runtime.nativeAllocator());
                 try value_ops.appendRawString(ctx.runtime, &bytes, flags_string);
                 if (std.mem.indexOfScalar(u8, bytes.items, 'g') == null)
                     return throwTypeErrorMessage(ctx, global, "regexp must have the 'g' flag");
@@ -476,7 +476,7 @@ noinline fn stringReplaceCore(
         break :blk rp.resolveData();
     };
 
-    var b = StringBuffer{ .allocator = ctx.runtime.memory.allocator };
+    var b = StringBuffer{ .allocator = ctx.runtime.nativeAllocator() };
     defer b.deinit();
 
     var end_of_last_match: usize = 0;
@@ -654,7 +654,7 @@ noinline fn errorStackStringValue(
     kind: ErrorStackStringKind,
 ) !core.JSValue {
     var bytes: std.ArrayList(u8) = .empty;
-    defer bytes.deinit(ctx.runtime.memory.allocator);
+    defer bytes.deinit(ctx.runtime.nativeAllocator());
     var emitted: usize = 0;
 
     switch (kind) {
@@ -676,11 +676,11 @@ noinline fn errorStackStringValue(
                 }
                 if (emitted >= limit) break;
                 const entry = frames[idx];
-                if (bytes.items.len != 0) try bytes.append(ctx.runtime.memory.allocator, '\n');
-                try bytes.appendSlice(ctx.runtime.memory.allocator, "    at ");
+                if (bytes.items.len != 0) try bytes.append(ctx.runtime.nativeAllocator(), '\n');
+                try bytes.appendSlice(ctx.runtime.nativeAllocator(), "    at ");
                 try appendBacktraceFunctionName(ctx, &bytes, entry.function_name, entry.filename);
                 if (entry.is_native) {
-                    try bytes.appendSlice(ctx.runtime.memory.allocator, " (native)");
+                    try bytes.appendSlice(ctx.runtime.nativeAllocator(), " (native)");
                     emitted += 1;
                     continue;
                 }
@@ -688,9 +688,9 @@ noinline fn errorStackStringValue(
                 const location = entry.location();
                 const line_num = if (location.line_num > 0) location.line_num else 1;
                 const col_num = if (location.col_num > 0) location.col_num else 1;
-                const suffix = try std.fmt.allocPrint(ctx.runtime.memory.allocator, " ({s}:{}:{})", .{ filename, line_num, col_num });
-                defer ctx.runtime.memory.allocator.free(suffix);
-                try bytes.appendSlice(ctx.runtime.memory.allocator, suffix);
+                const suffix = try std.fmt.allocPrint(ctx.runtime.nativeAllocator(), " ({s}:{}:{})", .{ filename, line_num, col_num });
+                defer ctx.runtime.nativeAllocator().free(suffix);
+                try bytes.appendSlice(ctx.runtime.nativeAllocator(), suffix);
                 emitted += 1;
             }
         },
@@ -703,30 +703,30 @@ noinline fn errorStackStringValue(
                 const site_value = try sites.getProperty(core.Atom.taggedInt(@intCast(index)));
                 const site = objectFromValue(site_value) orelse continue;
                 if (!site.isCallSite()) continue;
-                if (bytes.items.len != 0) try bytes.append(ctx.runtime.memory.allocator, '\n');
-                try bytes.appendSlice(ctx.runtime.memory.allocator, "    at ");
+                if (bytes.items.len != 0) try bytes.append(ctx.runtime.nativeAllocator(), '\n');
+                try bytes.appendSlice(ctx.runtime.nativeAllocator(), "    at ");
                 try appendCallSiteFunctionName(ctx.runtime, &bytes, site);
                 if (site.callSiteIsNative()) {
-                    try bytes.appendSlice(ctx.runtime.memory.allocator, " (native)");
+                    try bytes.appendSlice(ctx.runtime.nativeAllocator(), " (native)");
                     emitted += 1;
                     continue;
                 }
 
                 var filename_bytes: std.ArrayList(u8) = .empty;
-                defer filename_bytes.deinit(ctx.runtime.memory.allocator);
+                defer filename_bytes.deinit(ctx.runtime.nativeAllocator());
                 try appendCallSiteFileName(ctx.runtime, &filename_bytes, site);
                 const suffix = try std.fmt.allocPrint(
-                    ctx.runtime.memory.allocator,
+                    ctx.runtime.nativeAllocator(),
                     " ({s}:{}:{})",
                     .{ filename_bytes.items, site.callSiteLine(), site.callSiteColumn() },
                 );
-                defer ctx.runtime.memory.allocator.free(suffix);
-                try bytes.appendSlice(ctx.runtime.memory.allocator, suffix);
+                defer ctx.runtime.nativeAllocator().free(suffix);
+                try bytes.appendSlice(ctx.runtime.nativeAllocator(), suffix);
                 emitted += 1;
             }
         },
     }
-    if (emitted != 0) try bytes.append(ctx.runtime.memory.allocator, '\n');
+    if (emitted != 0) try bytes.append(ctx.runtime.nativeAllocator(), '\n');
     return value_ops.createStringValue(ctx.runtime, bytes.items);
 }
 
@@ -745,7 +745,7 @@ pub fn stringFromCodePoint(
     args: []const core.JSValue,
 ) !core.JSValue {
     var units = std.ArrayList(u16).empty;
-    defer units.deinit(ctx.runtime.memory.allocator);
+    defer units.deinit(ctx.runtime.nativeAllocator());
     for (args) |value| {
         const primitive = try toPrimitiveForNumber(ctx, output, global, value);
         const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
@@ -780,7 +780,7 @@ pub fn stringRaw(
     const length = try toLengthIndex(ctx, output, global, length_value);
 
     var out = std.ArrayList(u16).empty;
-    defer out.deinit(ctx.runtime.memory.allocator);
+    defer out.deinit(ctx.runtime.nativeAllocator());
 
     for (0..length) |index| {
         if (index > std.math.maxInt(u32)) return error.RangeError;
@@ -830,8 +830,8 @@ pub fn stringFromCharCode(
         }
     }
     var units: []u16 = &.{};
-    if (args.len != 0) units = try ctx.runtime.memory.alloc(u16, args.len);
-    defer if (units.len != 0) ctx.runtime.memory.free(u16, units);
+    if (args.len != 0) units = try ctx.runtime.nativeAllocator().alloc(u16, args.len);
+    defer if (units.len != 0) ctx.runtime.nativeAllocator().free(units);
     for (args, 0..) |value, index| {
         const primitive = try toPrimitiveForNumber(ctx, output, global, value);
         if (primitive.isBigInt()) return error.TypeError;
@@ -873,10 +873,10 @@ pub fn regExpToString(
     const flags_string = try toStringForAnnexB(ctx, output, global, flags_value, caller_function, caller_frame);
 
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(ctx.runtime.memory.allocator);
-    try bytes.append(ctx.runtime.memory.allocator, '/');
+    defer bytes.deinit(ctx.runtime.nativeAllocator());
+    try bytes.append(ctx.runtime.nativeAllocator(), '/');
     try value_ops.appendRawString(ctx.runtime, &bytes, source_string);
-    try bytes.append(ctx.runtime.memory.allocator, '/');
+    try bytes.append(ctx.runtime.nativeAllocator(), '/');
     try value_ops.appendRawString(ctx.runtime, &bytes, flags_string);
     return value_ops.createStringValue(ctx.runtime, bytes.items);
 }
@@ -1079,7 +1079,7 @@ pub fn stringValueContainsByte(rt: *core.JSRuntime, string_value: core.JSValue, 
     // place; retain the generic conversion fallback for non-string callers.
     if (string_value.asStringBody() != null) return stringValueContainsUnitByte(string_value, needle);
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try value_ops.appendRawString(rt, &bytes, string_value);
     return std.mem.indexOfScalar(u8, bytes.items, needle) != null;
 }
@@ -1376,7 +1376,7 @@ pub fn regExpSymbolReplaceGeneric(
     }
 
     var matches = std.ArrayList(ReplaceMatch).empty;
-    defer matches.deinit(ctx.runtime.memory.allocator);
+    defer matches.deinit(ctx.runtime.nativeAllocator());
     defer {
         freeReplaceMatches(ctx.runtime, matches.items);
     }
@@ -1393,7 +1393,7 @@ pub fn regExpSymbolReplaceGeneric(
             return error.TypeError;
         }
         const match = try captureReplaceMatch(ctx, output, global, result, string_value, caller_function, caller_frame);
-        try matches.append(ctx.runtime.memory.allocator, match);
+        try matches.append(ctx.runtime.nativeAllocator(), match);
         if (!is_global) break;
         if (isEmptyStringValue(ctx.runtime, match.matched)) {
             const last_index = try getValueProperty(ctx, output, global, rx, core.atom.ids.lastIndex, caller_function, caller_frame);
@@ -1407,17 +1407,17 @@ pub fn regExpSymbolReplaceGeneric(
     const replacement_is_literal = !functional_replace and !replacement_is_empty and !stringValueContainsUnitByte(replacement_string, '$');
 
     var source_units = std.ArrayList(u16).empty;
-    defer source_units.deinit(ctx.runtime.memory.allocator);
+    defer source_units.deinit(ctx.runtime.nativeAllocator());
     try appendStringValueUnits(ctx.runtime, &source_units, string_value);
 
     var out = std.ArrayList(u16).empty;
-    defer out.deinit(ctx.runtime.memory.allocator);
+    defer out.deinit(ctx.runtime.nativeAllocator());
     var next_source_position: usize = 0;
     for (matches.items) |match| {
         const matched_len = try stringLengthIndex(ctx.runtime, match.matched);
         const position = @min(match.index, source_units.items.len);
         if (position < next_source_position) continue;
-        try out.appendSlice(ctx.runtime.memory.allocator, source_units.items[next_source_position..position]);
+        try out.appendSlice(ctx.runtime.nativeAllocator(), source_units.items[next_source_position..position]);
 
         const replacement = if (functional_replace)
             try callReplaceFunction(ctx, output, global, replacer_call.?, match, string_value, caller_function, caller_frame)
@@ -1430,7 +1430,7 @@ pub fn regExpSymbolReplaceGeneric(
         if (!replacement_is_empty) try appendStringValueUnits(ctx.runtime, &out, replacement);
         next_source_position = @min(source_units.items.len, position + matched_len);
     }
-    try out.appendSlice(ctx.runtime.memory.allocator, source_units.items[next_source_position..]);
+    try out.appendSlice(ctx.runtime.nativeAllocator(), source_units.items[next_source_position..]);
     return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
 }
 
@@ -1483,15 +1483,15 @@ pub fn regExpReplaceFast(
     const capture_count = compiled.captureCount();
     var inline_capture_slots: [regexp_adapter.small_exec_slots]usize = undefined;
     var heap_capture_slots: []usize = &.{};
-    defer if (heap_capture_slots.len != 0) ctx.runtime.memory.allocator.free(heap_capture_slots);
+    defer if (heap_capture_slots.len != 0) ctx.runtime.nativeAllocator().free(heap_capture_slots);
     const capture = if (alloc_count <= inline_capture_slots.len)
         inline_capture_slots[0..alloc_count]
     else capture: {
-        heap_capture_slots = try ctx.runtime.memory.allocator.alloc(usize, alloc_count);
+        heap_capture_slots = try ctx.runtime.nativeAllocator().alloc(usize, alloc_count);
         break :capture heap_capture_slots;
     };
 
-    var b = StringBuffer{ .allocator = ctx.runtime.memory.allocator };
+    var b = StringBuffer{ .allocator = ctx.runtime.nativeAllocator() };
     defer b.deinit();
 
     // lastIndex: the caller already reset it to 0 for global regexps. Sticky
@@ -1552,14 +1552,14 @@ fn advanceStringIndexData(data: core.string.String.ResolvedData, index: usize, u
 pub fn appendStringValueUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), value: core.JSValue) !void {
     const string_object = value.asStringBody() orelse {
         var bytes = std.ArrayList(u8).empty;
-        defer bytes.deinit(rt.memory.allocator);
+        defer bytes.deinit(rt.nativeAllocator());
         try value_ops.appendRawString(rt, &bytes, value);
-        for (bytes.items) |byte| try out.append(rt.memory.allocator, byte);
+        for (bytes.items) |byte| try out.append(rt.nativeAllocator(), byte);
         return;
     };
     switch (string_object.resolveData()) {
-        .latin1 => |bytes| for (bytes) |byte| try out.append(rt.memory.allocator, byte),
-        .utf16 => |units| try out.appendSlice(rt.memory.allocator, units),
+        .latin1 => |bytes| for (bytes) |byte| try out.append(rt.nativeAllocator(), byte),
+        .utf16 => |units| try out.appendSlice(rt.nativeAllocator(), units),
     }
 }
 
@@ -1636,8 +1636,8 @@ pub fn captureReplaceMatch(
     const capture_count = if (length == 0) 0 else length - 1;
     var captures: []core.JSValue = &.{};
     if (capture_count != 0) {
-        captures = try ctx.runtime.memory.alloc(core.JSValue, capture_count);
-        errdefer ctx.runtime.memory.free(core.JSValue, captures);
+        captures = try ctx.runtime.nativeAllocator().alloc(core.JSValue, capture_count);
+        errdefer ctx.runtime.nativeAllocator().free(captures);
         var rooted_captures: []core.JSValue = captures[0..0];
         var captures_root = ValueSliceRoot{};
         captures_root.init(ctx.runtime, &rooted_captures);
@@ -1668,7 +1668,7 @@ pub fn captureReplaceMatch(
 
 pub fn freeReplaceMatches(rt: *core.JSRuntime, matches: []ReplaceMatch) void {
     for (matches) |match| {
-        if (match.captures.len != 0) rt.memory.free(core.JSValue, match.captures);
+        if (match.captures.len != 0) rt.nativeAllocator().free(match.captures);
     }
 }
 
@@ -1684,8 +1684,8 @@ pub fn callReplaceFunction(
 ) !core.JSValue {
     const extra: usize = if (match.groups.is(.undefined_value)) 2 else 3;
     const arg_count = 1 + match.captures.len + extra;
-    const args = try ctx.runtime.memory.alloc(core.JSValue, arg_count);
-    defer ctx.runtime.memory.free(core.JSValue, args);
+    const args = try ctx.runtime.nativeAllocator().alloc(core.JSValue, arg_count);
+    defer ctx.runtime.nativeAllocator().free(args);
     args[0] = match.matched;
     for (match.captures, 0..) |capture, index| args[index + 1] = capture;
     args[1 + match.captures.len] = core.JSValue.int32(@intCast(match.index));
@@ -1715,54 +1715,54 @@ pub fn getSubstitutionString(
         try primitiveObjectForAccess(ctx.runtime, global, match.groups);
 
     var source = std.ArrayList(u16).empty;
-    defer source.deinit(ctx.runtime.memory.allocator);
+    defer source.deinit(ctx.runtime.nativeAllocator());
     try appendStringValueUnits(ctx.runtime, &source, string_value);
     var matched = std.ArrayList(u16).empty;
-    defer matched.deinit(ctx.runtime.memory.allocator);
+    defer matched.deinit(ctx.runtime.nativeAllocator());
     try appendStringValueUnits(ctx.runtime, &matched, match.matched);
     var replacement = std.ArrayList(u16).empty;
-    defer replacement.deinit(ctx.runtime.memory.allocator);
+    defer replacement.deinit(ctx.runtime.nativeAllocator());
     try appendStringValueUnits(ctx.runtime, &replacement, replacement_string);
 
     var out = std.ArrayList(u16).empty;
-    defer out.deinit(ctx.runtime.memory.allocator);
+    defer out.deinit(ctx.runtime.nativeAllocator());
     var index: usize = 0;
     while (index < replacement.items.len) : (index += 1) {
         if (replacement.items[index] != '$' or index + 1 >= replacement.items.len) {
-            try out.append(ctx.runtime.memory.allocator, replacement.items[index]);
+            try out.append(ctx.runtime.nativeAllocator(), replacement.items[index]);
             continue;
         }
         const next = replacement.items[index + 1];
         switch (next) {
             '$' => {
-                try out.append(ctx.runtime.memory.allocator, '$');
+                try out.append(ctx.runtime.nativeAllocator(), '$');
                 index += 1;
             },
             '&' => {
-                try out.appendSlice(ctx.runtime.memory.allocator, matched.items);
+                try out.appendSlice(ctx.runtime.nativeAllocator(), matched.items);
                 index += 1;
             },
             '`' => {
-                try out.appendSlice(ctx.runtime.memory.allocator, source.items[0..@min(match.index, source.items.len)]);
+                try out.appendSlice(ctx.runtime.nativeAllocator(), source.items[0..@min(match.index, source.items.len)]);
                 index += 1;
             },
             '\'' => {
                 const tail_start = @min(source.items.len, match.index + matched.items.len);
-                try out.appendSlice(ctx.runtime.memory.allocator, source.items[tail_start..]);
+                try out.appendSlice(ctx.runtime.nativeAllocator(), source.items[tail_start..]);
                 index += 1;
             },
             '0'...'9' => {
                 const capture = replacementCaptureUnits(match, replacement.items, &index) orelse {
-                    try out.append(ctx.runtime.memory.allocator, '$');
+                    try out.append(ctx.runtime.nativeAllocator(), '$');
                     continue;
                 };
                 if (!capture.is(.undefined_value)) try appendStringValueUnits(ctx.runtime, &out, capture);
             },
             '<' => {
                 if (try appendNamedCaptureSubstitution(ctx, output, global, named_captures, replacement.items, &index, &out, caller_function, caller_frame)) continue;
-                try out.append(ctx.runtime.memory.allocator, '$');
+                try out.append(ctx.runtime.nativeAllocator(), '$');
             },
-            else => try out.append(ctx.runtime.memory.allocator, '$'),
+            else => try out.append(ctx.runtime.nativeAllocator(), '$'),
         }
     }
     return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
@@ -1902,7 +1902,7 @@ pub fn isEmptyStringValue(rt: *core.JSRuntime, value: core.JSValue) bool {
     // to the common non-empty case.
     if (value.asStringBody()) |string| return string.len() == 0;
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     value_ops.appendRawString(rt, &bytes, value) catch return false;
     return bytes.items.len == 0;
 }
@@ -2050,23 +2050,23 @@ pub fn stringPrototypeMethod(
 }
 pub fn appendUtf32FromStringValue(rt: *core.JSRuntime, out: *std.ArrayList(u32), value: core.JSValue) !void {
     var units = std.ArrayList(u16).empty;
-    defer units.deinit(rt.memory.allocator);
+    defer units.deinit(rt.nativeAllocator());
     try appendStringValueUnits(rt, &units, value);
     var index: usize = 0;
     while (index < units.items.len) {
         const unit = units.items[index];
         if (isHighSurrogateUnit(unit) and index + 1 < units.items.len and isLowSurrogateUnit(units.items[index + 1])) {
-            try out.append(rt.memory.allocator, combinedSurrogateCodePoint(unit, units.items[index + 1]));
+            try out.append(rt.nativeAllocator(), combinedSurrogateCodePoint(unit, units.items[index + 1]));
             index += 2;
         } else {
-            try out.append(rt.memory.allocator, unit);
+            try out.append(rt.nativeAllocator(), unit);
             index += 1;
         }
     }
 }
 
 pub fn appendUtf16CodePoint(rt: *core.JSRuntime, out: *std.ArrayList(u16), code_point: u32) !void {
-    return unicode_lib.appendUtf16CodePoint(rt.memory.allocator, out, @intCast(code_point));
+    return unicode_lib.appendUtf16CodePoint(rt.nativeAllocator(), out, @intCast(code_point));
 }
 pub fn stringSearchPositionMethod(
     ctx: *core.JSContext,
@@ -2664,7 +2664,7 @@ pub fn updateRegExpLegacyStaticsLazyForMatch(rt: *core.JSRuntime, global: *core.
 }
 
 pub fn appendUtf8CodePointForRegExpName(rt: *core.JSRuntime, out: *std.ArrayList(u8), cp: u21) !void {
-    return unicode_lib.appendUtf8CodePoint(rt.memory.allocator, out, cp);
+    return unicode_lib.appendUtf8CodePoint(rt.nativeAllocator(), out, cp);
 }
 
 pub fn isHighSurrogateCodePoint(cp: u21) bool {
@@ -2726,8 +2726,8 @@ pub fn bigIntPrototypeToString(
     };
     var bigint = try value_ops.cloneBigIntValue(ctx.runtime, primitive);
     defer bigint.deinit();
-    const text = try bigint.formatBaseAlloc(ctx.runtime.memory.allocator, radix);
-    defer ctx.runtime.memory.allocator.free(text);
+    const text = try bigint.formatBaseAlloc(ctx.runtime.nativeAllocator(), radix);
+    defer ctx.runtime.nativeAllocator().free(text);
     return value_ops.createStringValue(ctx.runtime, text);
 }
 
@@ -2821,20 +2821,20 @@ pub fn errorToStringCall(
         try toStringForAnnexB(ctx, output, global, message_value, caller_function, caller_frame);
 
     var name_bytes = std.ArrayList(u8).empty;
-    defer name_bytes.deinit(ctx.runtime.memory.allocator);
+    defer name_bytes.deinit(ctx.runtime.nativeAllocator());
     try value_ops.appendRawString(ctx.runtime, &name_bytes, name_string);
     var message_bytes = std.ArrayList(u8).empty;
-    defer message_bytes.deinit(ctx.runtime.memory.allocator);
+    defer message_bytes.deinit(ctx.runtime.nativeAllocator());
     try value_ops.appendRawString(ctx.runtime, &message_bytes, message_string);
 
     if (name_bytes.items.len == 0) return try value_ops.createStringValue(ctx.runtime, message_bytes.items);
     if (message_bytes.items.len == 0) return try value_ops.createStringValue(ctx.runtime, name_bytes.items);
 
     var out = std.ArrayList(u8).empty;
-    defer out.deinit(ctx.runtime.memory.allocator);
-    try out.appendSlice(ctx.runtime.memory.allocator, name_bytes.items);
-    try out.appendSlice(ctx.runtime.memory.allocator, ": ");
-    try out.appendSlice(ctx.runtime.memory.allocator, message_bytes.items);
+    defer out.deinit(ctx.runtime.nativeAllocator());
+    try out.appendSlice(ctx.runtime.nativeAllocator(), name_bytes.items);
+    try out.appendSlice(ctx.runtime.nativeAllocator(), ": ");
+    try out.appendSlice(ctx.runtime.nativeAllocator(), message_bytes.items);
     return try value_ops.createStringValue(ctx.runtime, out.items);
 }
 
@@ -2853,9 +2853,9 @@ pub fn toStringBytesForSymbol(
         try toStringForAnnexB(ctx, output, global, value, caller_function, caller_frame);
 
     var buffer = std.ArrayList(u8).empty;
-    errdefer buffer.deinit(ctx.runtime.memory.allocator);
+    errdefer buffer.deinit(ctx.runtime.nativeAllocator());
     try value_ops.appendRawString(ctx.runtime, &buffer, string_value);
-    return buffer.toOwnedSlice(ctx.runtime.memory.allocator);
+    return buffer.toOwnedSlice(ctx.runtime.nativeAllocator());
 }
 
 pub fn consumePendingExceptionIfMatchesConstructor(ctx: *core.JSContext, expected_name: []const u8) !bool {
@@ -2881,7 +2881,7 @@ pub fn thrownValueMatchesConstructor(rt: *core.JSRuntime, thrown_value: core.JSV
     const name_value = try thrown_object.getProperty(core.atom.ids.name);
     if (!name_value.isString()) return false;
     var name_bytes = std.ArrayList(u8).empty;
-    defer name_bytes.deinit(rt.memory.allocator);
+    defer name_bytes.deinit(rt.nativeAllocator());
     try value_ops.appendRawString(rt, &name_bytes, name_value);
     return std.mem.eql(u8, name_bytes.items, expected_name);
 }
@@ -3136,7 +3136,7 @@ pub fn isConcatSpreadable(
 pub fn uint8ArrayStringBytes(rt: *core.JSRuntime, value: core.JSValue) !std.ArrayList(u8) {
     if (!value.isString()) return error.TypeError;
     var bytes = std.ArrayList(u8).empty;
-    errdefer bytes.deinit(rt.memory.allocator);
+    errdefer bytes.deinit(rt.nativeAllocator());
     try value_ops.appendRawString(rt, &bytes, value);
     return bytes;
 }
@@ -3147,9 +3147,9 @@ pub fn appendSourceStringUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), v
     // pair becomes one four-byte UTF-8 scalar, while an unmatched surrogate is
     // preserved as its three-byte WTF-8 encoding. Reuse the canonical string
     // view instead of encoding each code unit independently.
-    var utf8 = try core.JSValue.String.Utf8.fromValue(rt.memory.allocator, value);
+    var utf8 = try core.JSValue.String.Utf8.fromValue(rt.nativeAllocator(), value);
     defer utf8.deinit();
-    try buffer.appendSlice(rt.memory.allocator, utf8.slice());
+    try buffer.appendSlice(rt.nativeAllocator(), utf8.slice());
 }
 
 pub fn iteratorConcatCall(
@@ -3321,9 +3321,9 @@ pub fn arrayToLocaleStringCall(
     const to_locale_key = core.atom.ids.toLocaleString;
 
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(ctx.runtime.memory.allocator);
+    defer bytes.deinit(ctx.runtime.nativeAllocator());
     for (0..length) |index| {
-        if (index != 0) try bytes.append(ctx.runtime.memory.allocator, ',');
+        if (index != 0) try bytes.append(ctx.runtime.nativeAllocator(), ',');
         const item = if (is_typed_array) blk: {
             if (!is_typed_method and index >= try arrayMethodTypedArrayLength(ctx.runtime, object, false)) break :blk core.JSValue.undefinedValue();
             break :blk try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(index));
@@ -3383,7 +3383,7 @@ pub fn objectToStringIntrinsic(
     const tag_value = try getValueProperty(ctx, output, global, object_value, tag_atom, caller_function, caller_frame);
     if (tag_value.isString()) {
         var tag = std.ArrayList(u8).empty;
-        defer tag.deinit(ctx.runtime.memory.allocator);
+        defer tag.deinit(ctx.runtime.nativeAllocator());
         try value_ops.appendRawString(ctx.runtime, &tag, tag_value);
         return try objectTagString(ctx.runtime, tag.items);
     }
@@ -3392,10 +3392,10 @@ pub fn objectToStringIntrinsic(
 
 pub fn objectTagString(rt: *core.JSRuntime, tag: []const u8) !core.JSValue {
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
-    try bytes.appendSlice(rt.memory.allocator, "[object ");
-    try bytes.appendSlice(rt.memory.allocator, tag);
-    try bytes.appendSlice(rt.memory.allocator, "]");
+    defer bytes.deinit(rt.nativeAllocator());
+    try bytes.appendSlice(rt.nativeAllocator(), "[object ");
+    try bytes.appendSlice(rt.nativeAllocator(), tag);
+    try bytes.appendSlice(rt.nativeAllocator(), "]");
     return value_ops.createStringValue(rt, bytes.items);
 }
 
@@ -3451,7 +3451,7 @@ test "standard and annexB string method-id tables preserve load-bearing ids" {
 }
 
 test "default object tag distinguishes bytecode function classes" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const class_ids = [_]core.ClassId{
@@ -3492,10 +3492,10 @@ pub fn stringObjectHasIndexProperty(rt: *core.JSRuntime, object: *core.Object, a
 // String unit/byte classification helpers (moved from the VM call runtime).
 
 pub fn appendUtf16UnitsAsUtf8(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), units: []const u16) !void {
-    return unicode_lib.appendUtf16UnitsAsUtf8(rt.memory.allocator, buffer, units);
+    return unicode_lib.appendUtf16UnitsAsUtf8(rt.nativeAllocator(), buffer, units);
 }
 pub fn appendAsciiUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), bytes: []const u8) !void {
-    for (bytes) |byte| try out.append(rt.memory.allocator, byte);
+    for (bytes) |byte| try out.append(rt.nativeAllocator(), byte);
 }
 
 pub fn isAsciiDigitUnit(unit: u16) bool {
@@ -3660,7 +3660,7 @@ pub fn stringPad(
     if (target_length > js_string_len_max) return throwRangeErrorMessage(ctx, global, "invalid string length");
     const pad_count = target_length - source_len;
 
-    var buffer = StringBuffer{ .allocator = ctx.runtime.memory.allocator };
+    var buffer = StringBuffer{ .allocator = ctx.runtime.nativeAllocator() };
     defer buffer.deinit();
     try buffer.ensureCapacity(target_length);
 
@@ -3695,7 +3695,7 @@ pub fn stringNormalize(
     const form: unicode_lib.NormalizationForm = if (args.len == 0 or args[0].is(.undefined_value)) .nfc else blk: {
         const form_value = try toStringForAnnexB(ctx, output, global, args[0], caller_function, caller_frame);
         var form_bytes = std.ArrayList(u8).empty;
-        defer form_bytes.deinit(ctx.runtime.memory.allocator);
+        defer form_bytes.deinit(ctx.runtime.nativeAllocator());
         try value_ops.appendRawString(ctx.runtime, &form_bytes, form_value);
         if (std.mem.eql(u8, form_bytes.items, "NFC")) break :blk unicode_lib.NormalizationForm.nfc;
         if (std.mem.eql(u8, form_bytes.items, "NFD")) break :blk unicode_lib.NormalizationForm.nfd;
@@ -3707,13 +3707,13 @@ pub fn stringNormalize(
     };
 
     var input = std.ArrayList(u32).empty;
-    defer input.deinit(ctx.runtime.memory.allocator);
+    defer input.deinit(ctx.runtime.nativeAllocator());
     try appendUtf32FromStringValue(ctx.runtime, &input, string_value);
-    const normalized_slice = try unicode_lib.normalizeAlloc(ctx.runtime.memory.allocator, input.items, form);
-    defer ctx.runtime.memory.allocator.free(normalized_slice);
+    const normalized_slice = try unicode_lib.normalizeAlloc(ctx.runtime.nativeAllocator(), input.items, form);
+    defer ctx.runtime.nativeAllocator().free(normalized_slice);
 
     var out = std.ArrayList(u16).empty;
-    defer out.deinit(ctx.runtime.memory.allocator);
+    defer out.deinit(ctx.runtime.nativeAllocator());
     for (normalized_slice) |code_point| try appendUtf16CodePoint(ctx.runtime, &out, code_point);
     return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
 }
@@ -3756,11 +3756,11 @@ const NormalizedUtf32 = struct {
 
 fn normalizedUtf32(rt: *core.JSRuntime, value: core.JSValue, form: unicode_lib.NormalizationForm) !NormalizedUtf32 {
     var input = std.ArrayList(u32).empty;
-    defer input.deinit(rt.memory.allocator);
+    defer input.deinit(rt.nativeAllocator());
     try appendUtf32FromStringValue(rt, &input, value);
     return .{
-        .allocator = rt.memory.allocator,
-        .slice = try unicode_lib.normalizeAlloc(rt.memory.allocator, input.items, form),
+        .allocator = rt.nativeAllocator(),
+        .slice = try unicode_lib.normalizeAlloc(rt.nativeAllocator(), input.items, form),
     };
 }
 
@@ -3846,7 +3846,7 @@ pub fn stringSubstr(
     args: []const core.JSValue,
 ) !core.JSValue {
     var units = std.ArrayList(u16).empty;
-    defer units.deinit(ctx.runtime.memory.allocator);
+    defer units.deinit(ctx.runtime.nativeAllocator());
     try appendStringValueUnits(ctx.runtime, &units, string_value);
 
     const size = units.items.len;
@@ -3900,7 +3900,7 @@ pub fn stringHtmlMethod(
     const string_value = try toStringForAnnexB(ctx, output, global, this_value, caller_function, caller_frame);
 
     var string_units = std.ArrayList(u16).empty;
-    defer string_units.deinit(ctx.runtime.memory.allocator);
+    defer string_units.deinit(ctx.runtime.nativeAllocator());
     try appendStringValueUnits(ctx.runtime, &string_units, string_value);
 
     switch (method_id) {
@@ -3934,13 +3934,13 @@ fn stringCreateHtml(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     var out = std.ArrayList(u16).empty;
-    defer out.deinit(ctx.runtime.memory.allocator);
+    defer out.deinit(ctx.runtime.nativeAllocator());
     try appendAsciiUnits(ctx.runtime, &out, "<");
     try appendAsciiUnits(ctx.runtime, &out, tag);
     if (has_attr) {
         const value = try toStringForAnnexB(ctx, output, global, attr_value, caller_function, caller_frame);
         var attr_units = std.ArrayList(u16).empty;
-        defer attr_units.deinit(ctx.runtime.memory.allocator);
+        defer attr_units.deinit(ctx.runtime.nativeAllocator());
         try appendStringValueUnits(ctx.runtime, &attr_units, value);
 
         try appendAsciiUnits(ctx.runtime, &out, " ");
@@ -3950,19 +3950,18 @@ fn stringCreateHtml(
             if (unit == '"') {
                 try appendAsciiUnits(ctx.runtime, &out, "&quot;");
             } else {
-                try out.append(ctx.runtime.memory.allocator, unit);
+                try out.append(ctx.runtime.nativeAllocator(), unit);
             }
         }
         try appendAsciiUnits(ctx.runtime, &out, "\"");
     }
     try appendAsciiUnits(ctx.runtime, &out, ">");
-    try out.appendSlice(ctx.runtime.memory.allocator, string_units);
+    try out.appendSlice(ctx.runtime.nativeAllocator(), string_units);
     try appendAsciiUnits(ctx.runtime, &out, "</");
     try appendAsciiUnits(ctx.runtime, &out, tag);
     try appendAsciiUnits(ctx.runtime, &out, ">");
     return (try core.string.String.createUtf16(ctx.runtime, out.items)).value();
 }
-
 
 // ----- merged from string_builtin_ops.zig -----
 // String constructor/prototype records and their direct builtin bodies.
@@ -4147,7 +4146,7 @@ test "String index reads are prim_self method_leaf entries with their legacy bod
         try std.testing.expectEqual(decl.managed == null, entry.flags.needs_env);
     }
     // The leaf targets own the index rule: negative = fallback.
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const str = try core.string.String.createLatin1(rt, "abc");
     try std.testing.expectEqual(@as(i32, 'b'), stringCharCodeAtLeaf(str, 1));
@@ -4737,7 +4736,7 @@ pub fn charAtValue(rt: *core.JSRuntime, receiver: core.JSValue, index_value: cor
     }
 
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try appendStringReceiverBytes(rt, &bytes, receiver);
     if (index < 0) return createStringValue(rt, "");
     const char_index: usize = @intCast(index);
@@ -4769,7 +4768,7 @@ pub fn methodCall(rt: *core.JSRuntime, receiver: core.JSValue, id: u32, args: []
     if (id == 39) return toWellFormedReceiver(rt, receiver);
 
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try appendStringReceiverBytes(rt, &bytes, receiver);
 
     // Every id handled above returns before this point, so the remaining
@@ -4803,7 +4802,7 @@ fn substringReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const 
     }
 
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try appendStringReceiverBytes(rt, &bytes, receiver);
     return substring(rt, bytes.items, args);
 }
@@ -4813,7 +4812,7 @@ fn trimReceiver(rt: *core.JSRuntime, receiver: core.JSValue, mode: TrimMode) !co
         return trimStringValue(rt, string_value, mode);
     }
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try appendStringReceiverBytes(rt, &bytes, receiver);
     const trimmed = switch (mode) {
         .start => trimStartAscii(bytes.items),
@@ -4844,7 +4843,7 @@ fn trimStringValue(rt: *core.JSRuntime, string_value: *core.string.String, mode:
 /// `stringPrototypeMethod` coercion.
 fn coercedReceiverStringValue(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try appendStringReceiverBytes(rt, &bytes, receiver);
     return createStringValue(rt, bytes.items);
 }
@@ -4892,8 +4891,8 @@ fn isWellFormedString(string_value: *core.string.String) bool {
 
 fn toWellFormedString(rt: *core.JSRuntime, string_value: *core.string.String) !core.JSValue {
     var units = std.ArrayList(u16).empty;
-    defer units.deinit(rt.memory.allocator);
-    try units.ensureTotalCapacity(rt.memory.allocator, string_value.len());
+    defer units.deinit(rt.nativeAllocator());
+    try units.ensureTotalCapacity(rt.nativeAllocator(), string_value.len());
 
     var i: usize = 0;
     while (i < string_value.len()) {
@@ -4951,7 +4950,7 @@ fn split(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !co
     }
 
     var sep = std.ArrayList(u8).empty;
-    defer sep.deinit(rt.memory.allocator);
+    defer sep.deinit(rt.nativeAllocator());
     try appendValueString(rt, &sep, rooted_args[0]);
 
     var out_index: u32 = 0;
@@ -5042,14 +5041,14 @@ fn splitReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core
     }
 
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try appendStringReceiverBytes(rt, &bytes, rooted_receiver);
     return split(rt, bytes.items, rooted_args);
 }
 
 fn search(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
     var needle = std.ArrayList(u8).empty;
-    defer needle.deinit(rt.memory.allocator);
+    defer needle.deinit(rt.nativeAllocator());
     const search_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     try appendValueString(rt, &needle, search_value);
     const index = std.mem.indexOf(u8, bytes, needle.items);
@@ -5077,7 +5076,7 @@ fn matchString(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValu
     defer root_frame.deactivate(rt);
 
     var needle = std.ArrayList(u8).empty;
-    defer needle.deinit(rt.memory.allocator);
+    defer needle.deinit(rt.nativeAllocator());
     const search_value = if (rooted_args.len >= 1) rooted_args[0] else core.JSValue.undefinedValue();
     try appendValueString(rt, &needle, search_value);
     const index = std.mem.indexOf(u8, bytes, needle.items) orelse return core.JSValue.nullValue();
@@ -5094,33 +5093,33 @@ fn matchString(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValu
 
 fn replaceAll(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
     var search_value = std.ArrayList(u8).empty;
-    defer search_value.deinit(rt.memory.allocator);
+    defer search_value.deinit(rt.nativeAllocator());
     const search_input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     try appendValueString(rt, &search_value, search_input);
 
     var replacement = std.ArrayList(u8).empty;
-    defer replacement.deinit(rt.memory.allocator);
+    defer replacement.deinit(rt.nativeAllocator());
     const replacement_input = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     try appendValueString(rt, &replacement, replacement_input);
 
     var out = std.ArrayList(u8).empty;
-    defer out.deinit(rt.memory.allocator);
+    defer out.deinit(rt.nativeAllocator());
     if (search_value.items.len == 0) {
-        try out.appendSlice(rt.memory.allocator, replacement.items);
+        try out.appendSlice(rt.nativeAllocator(), replacement.items);
         for (bytes) |byte| {
-            try out.append(rt.memory.allocator, byte);
-            try out.appendSlice(rt.memory.allocator, replacement.items);
+            try out.append(rt.nativeAllocator(), byte);
+            try out.appendSlice(rt.nativeAllocator(), replacement.items);
         }
         return createStringValue(rt, out.items);
     }
 
     var start: usize = 0;
     while (std.mem.indexOfPos(u8, bytes, start, search_value.items)) |found| {
-        try out.appendSlice(rt.memory.allocator, bytes[start..found]);
-        try out.appendSlice(rt.memory.allocator, replacement.items);
+        try out.appendSlice(rt.nativeAllocator(), bytes[start..found]);
+        try out.appendSlice(rt.nativeAllocator(), replacement.items);
         start = found + search_value.items.len;
     }
-    try out.appendSlice(rt.memory.allocator, bytes[start..]);
+    try out.appendSlice(rt.nativeAllocator(), bytes[start..]);
     return createStringValue(rt, out.items);
 }
 
@@ -5232,9 +5231,9 @@ fn unicodeCaseOwnedString(rt: *core.JSRuntime, primitive: core.JSValue, to_lower
     }
 
     var latin1 = std.ArrayList(u8).empty;
-    defer latin1.deinit(rt.memory.allocator);
+    defer latin1.deinit(rt.nativeAllocator());
     var wide = std.ArrayList(u16).empty;
-    defer wide.deinit(rt.memory.allocator);
+    defer wide.deinit(rt.nativeAllocator());
     var is_wide = false;
 
     var index: usize = 0;
@@ -5251,11 +5250,11 @@ fn unicodeCaseOwnedString(rt: *core.JSRuntime, primitive: core.JSValue, to_lower
 
         for (mapping.codepoints[0..mapping.len]) |cp| {
             if (!is_wide and cp <= 0xff) {
-                try latin1.append(rt.memory.allocator, @intCast(cp));
+                try latin1.append(rt.nativeAllocator(), @intCast(cp));
             } else {
                 if (!is_wide) {
                     is_wide = true;
-                    try wide.ensureTotalCapacity(rt.memory.allocator, latin1.items.len + 1);
+                    try wide.ensureTotalCapacity(rt.nativeAllocator(), latin1.items.len + 1);
                     for (latin1.items) |byte| wide.appendAssumeCapacity(byte);
                     latin1.clearRetainingCapacity();
                 }
@@ -5279,14 +5278,14 @@ fn toStringValueForMethod(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSV
             return (object.objectData() orelse return error.TypeError);
         }
         var bytes = std.ArrayList(u8).empty;
-        defer bytes.deinit(rt.memory.allocator);
+        defer bytes.deinit(rt.nativeAllocator());
         try appendValueString(rt, &bytes, receiver);
         return createStringValue(rt, bytes.items);
     }
     if (receiver.is(.null_value) or receiver.is(.undefined_value)) return error.TypeError;
 
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try appendValueString(rt, &bytes, receiver);
     return createStringValue(rt, bytes.items);
 }
@@ -5351,7 +5350,7 @@ fn isFinalSigma(string_value: *const core.string.String, sigma_start: usize, aft
 fn indexOf(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
     if (args.len < 1 or args.len > 2) return error.TypeError;
     var needle = std.ArrayList(u8).empty;
-    defer needle.deinit(rt.memory.allocator);
+    defer needle.deinit(rt.nativeAllocator());
     try appendValueString(rt, &needle, args[0]);
     const start = if (args.len >= 2) try stringSearchStart(rt, bytes.len, args[1]) else @as(usize, 0);
     const index = if (start <= bytes.len) std.mem.indexOfPos(u8, bytes, start, needle.items) else null;
@@ -5368,7 +5367,7 @@ fn indexOfReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const co
     }
 
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try appendStringReceiverBytes(rt, &bytes, receiver);
     return indexOf(rt, bytes.items, args);
 }
@@ -5376,7 +5375,7 @@ fn indexOfReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const co
 fn lastIndexOf(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
     if (args.len < 1 or args.len > 2) return error.TypeError;
     var needle = std.ArrayList(u8).empty;
-    defer needle.deinit(rt.memory.allocator);
+    defer needle.deinit(rt.nativeAllocator());
     try appendValueString(rt, &needle, args[0]);
 
     const default_start = if (needle.items.len <= bytes.len) bytes.len - needle.items.len else 0;
@@ -5421,7 +5420,7 @@ fn lastIndexOfReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []cons
     }
 
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try appendStringReceiverBytes(rt, &bytes, receiver);
     return lastIndexOf(rt, bytes.items, args);
 }
@@ -5466,7 +5465,7 @@ fn atReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JS
     }
 
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try appendStringReceiverBytes(rt, &bytes, receiver);
     return at(rt, bytes.items, args);
 }
@@ -5489,7 +5488,7 @@ fn sliceReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core
     }
 
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try appendStringReceiverBytes(rt, &bytes, receiver);
     return slice(rt, bytes.items, args);
 }
@@ -5529,7 +5528,7 @@ fn stringSliceRange(rt: *core.JSRuntime, len_usize: usize, args: []const core.JS
 fn repeatReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     const string_value = stringValueFromReceiver(receiver) orelse {
         var bytes = std.ArrayList(u8).empty;
-        defer bytes.deinit(rt.memory.allocator);
+        defer bytes.deinit(rt.nativeAllocator());
         try appendStringReceiverBytes(rt, &bytes, receiver);
         return repeat(rt, bytes.items, args);
     };
@@ -5547,15 +5546,15 @@ fn repeatReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const cor
     if (total > core.string.max_length) return error.InvalidLength;
     switch (string_value.resolveData()) {
         .latin1 => |src| {
-            var out = try rt.memory.allocator.alloc(u8, total);
-            defer rt.memory.allocator.free(out);
+            var out = try rt.nativeAllocator().alloc(u8, total);
+            defer rt.nativeAllocator().free(out);
             var index: usize = 0;
             while (index < total) : (index += unit_len) @memcpy(out[index .. index + unit_len], src);
             return createLatin1SliceValue(rt, out);
         },
         .utf16 => |src| {
-            var out = try rt.memory.allocator.alloc(u16, total);
-            defer rt.memory.allocator.free(out);
+            var out = try rt.nativeAllocator().alloc(u16, total);
+            defer rt.nativeAllocator().free(out);
             var index: usize = 0;
             while (index < total) : (index += unit_len) @memcpy(out[index .. index + unit_len], src);
             return (try core.string.String.createUtf16(rt, out)).value();
@@ -5571,8 +5570,8 @@ fn repeat(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !c
     const repeat_count: usize = @intCast(count);
     const total = try std.math.mul(usize, bytes.len, repeat_count);
     if (total > core.string.max_length) return error.InvalidLength;
-    var out = try rt.memory.allocator.alloc(u8, total);
-    defer rt.memory.allocator.free(out);
+    var out = try rt.nativeAllocator().alloc(u8, total);
+    defer rt.nativeAllocator().free(out);
     var index: usize = 0;
     while (index < total) : (index += bytes.len) @memcpy(out[index .. index + bytes.len], bytes);
     return createStringValue(rt, out);
@@ -5584,16 +5583,16 @@ fn pad(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue, side:
     if (target_len_i <= @as(i64, @intCast(bytes.len))) return createStringValue(rt, bytes);
     const target_len: usize = @intCast(target_len_i);
     var fill = std.ArrayList(u8).empty;
-    defer fill.deinit(rt.memory.allocator);
+    defer fill.deinit(rt.nativeAllocator());
     if (args.len >= 2 and !args[1].is(.undefined_value)) {
         try appendValueString(rt, &fill, args[1]);
     } else {
-        try fill.append(rt.memory.allocator, ' ');
+        try fill.append(rt.nativeAllocator(), ' ');
     }
     if (fill.items.len == 0) return createStringValue(rt, bytes);
 
-    var out = try rt.memory.allocator.alloc(u8, target_len);
-    defer rt.memory.allocator.free(out);
+    var out = try rt.nativeAllocator().alloc(u8, target_len);
+    defer rt.nativeAllocator().free(out);
     const fill_len = target_len - bytes.len;
     switch (side) {
         .start => {
@@ -5612,7 +5611,7 @@ fn pad(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue, side:
 
 fn localeCompare(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
     var other = std.ArrayList(u8).empty;
-    defer other.deinit(rt.memory.allocator);
+    defer other.deinit(rt.nativeAllocator());
     const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     try appendValueString(rt, &other, value);
     const result: i32 = switch (std.mem.order(u8, bytes, other.items)) {
@@ -5626,7 +5625,7 @@ fn localeCompare(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSVa
 fn normalize(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
     if (args.len >= 1 and !args[0].is(.undefined_value)) {
         var form = std.ArrayList(u8).empty;
-        defer form.deinit(rt.memory.allocator);
+        defer form.deinit(rt.nativeAllocator());
         try appendValueString(rt, &form, args[0]);
         if (!std.mem.eql(u8, form.items, "NFC") and
             !std.mem.eql(u8, form.items, "NFD") and
@@ -5640,7 +5639,7 @@ const StringContainsMode = enum { contains, starts, ends };
 fn contains(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue, mode: StringContainsMode) !core.JSValue {
     if (args.len < 1 or args.len > 2) return error.TypeError;
     var needle = std.ArrayList(u8).empty;
-    defer needle.deinit(rt.memory.allocator);
+    defer needle.deinit(rt.nativeAllocator());
     try appendValueString(rt, &needle, args[0]);
     const pos = if (args.len >= 2) try stringSearchStart(rt, bytes.len, args[1]) else 0;
     const found = switch (mode) {
@@ -5673,7 +5672,7 @@ fn containsReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const c
     }
 
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try appendStringReceiverBytes(rt, &bytes, receiver);
     return contains(rt, bytes.items, args, mode);
 }
@@ -5701,7 +5700,7 @@ const createStringValue = value_ops.createStringValue;
 fn stringValueFromSearchArgument(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (value.isString()) return value;
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try appendValueString(rt, &bytes, value);
     return createStringValue(rt, bytes.items);
 }
@@ -5823,7 +5822,7 @@ fn iteratorResult(rt: *core.JSRuntime, global: ?*core.Object, value: core.JSValu
 }
 
 test "string iteratorResult roots direct function bytecode value while creating result" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-string-iterator-result-bytecode-symbol");
@@ -5844,12 +5843,12 @@ test "string iteratorResult roots direct function bytecode value while creating 
         try std.testing.expect(stored.same(result_value));
     }
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
 test "string wrapper iterator split and match helpers keep values under GC" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();

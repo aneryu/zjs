@@ -205,8 +205,8 @@ noinline fn decodeUriUnits(
     const rt = ctx.runtime;
     const unit_len = uriUnitCount(bytes, unit_size);
     var out = std.ArrayList(u16).empty;
-    defer out.deinit(rt.memory.allocator);
-    try out.ensureTotalCapacity(rt.memory.allocator, unit_len);
+    defer out.deinit(rt.nativeAllocator());
+    try out.ensureTotalCapacity(rt.nativeAllocator(), unit_len);
     var k: usize = 0;
     while (k < unit_len) {
         var c: u32 = uriUnitAt(bytes, unit_size, k);
@@ -259,10 +259,10 @@ noinline fn decodeUriUnits(
         }
         if (c > 0xFFFF) {
             const v = c - 0x10000;
-            try out.append(rt.memory.allocator, @intCast(0xD800 + (v >> 10)));
-            try out.append(rt.memory.allocator, @intCast(0xDC00 + (v & 0x3FF)));
+            try out.append(rt.nativeAllocator(), @intCast(0xD800 + (v >> 10)));
+            try out.append(rt.nativeAllocator(), @intCast(0xDC00 + (v & 0x3FF)));
         } else {
-            try out.append(rt.memory.allocator, @intCast(c));
+            try out.append(rt.nativeAllocator(), @intCast(c));
         }
     }
     return (try core.string.String.createUtf16(rt, out.items)).value();
@@ -311,7 +311,7 @@ pub fn call(ctx: *core.JSContext, global: ?*core.Object, mode: u32, input: core.
     } else if (mode == 1 or mode == 2) {
         if (try stringInputValue(input)) |string_value| {
             var out = std.ArrayList(u8).empty;
-            defer out.deinit(rt.memory.allocator);
+            defer out.deinit(rt.nativeAllocator());
             try encodeStringValue(ctx, global, &out, string_value, mode == 2);
             const str = try core.string.String.createUtf8(rt, out.items);
             return str.value();
@@ -319,7 +319,7 @@ pub fn call(ctx: *core.JSContext, global: ?*core.Object, mode: u32, input: core.
     }
 
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try appendValueString(rt, &bytes, input);
 
     if (mode == 3 or mode == 4) {
@@ -333,7 +333,7 @@ pub fn call(ctx: *core.JSContext, global: ?*core.Object, mode: u32, input: core.
     }
 
     var out = std.ArrayList(u8).empty;
-    defer out.deinit(rt.memory.allocator);
+    defer out.deinit(rt.nativeAllocator());
     switch (mode) {
         1 => try encodeBytes(rt, &out, bytes.items, false),
         2 => try encodeBytes(rt, &out, bytes.items, true),
@@ -362,8 +362,8 @@ fn decodeStringDataFast(ctx: *core.JSContext, global: ?*core.Object, string_valu
             var stack_buf: [128]u8 = undefined;
             if (units.len > stack_buf.len) {
                 var bytes = std.ArrayList(u8).empty;
-                defer bytes.deinit(rt.memory.allocator);
-                try bytes.ensureTotalCapacity(rt.memory.allocator, units.len);
+                defer bytes.deinit(rt.nativeAllocator());
+                try bytes.ensureTotalCapacity(rt.nativeAllocator(), units.len);
                 for (units) |unit| bytes.appendAssumeCapacity(@intCast(unit));
                 return try decodeAsciiBytes(ctx, global, bytes.items, component);
             }
@@ -391,7 +391,7 @@ fn decodeAsciiBytes(ctx: *core.JSContext, global: ?*core.Object, bytes: []const 
         return str.value();
     }
     var out = std.ArrayList(u8).empty;
-    defer out.deinit(rt.memory.allocator);
+    defer out.deinit(rt.nativeAllocator());
     try decodeBytes(ctx, global, &out, bytes, component);
     const str = try core.string.String.createUtf8(rt, out.items);
     return str.value();
@@ -405,23 +405,23 @@ fn decodeSingleFourByteEscape(rt: *core.JSRuntime, bytes: []const u8) !?core.JSV
 
 pub fn escape(rt: *core.JSRuntime, input: core.JSValue) !core.JSValue {
     var units = std.ArrayList(u16).empty;
-    defer units.deinit(rt.memory.allocator);
+    defer units.deinit(rt.nativeAllocator());
     try appendValueCodeUnits(rt, &units, input);
 
     var out = std.ArrayList(u8).empty;
-    defer out.deinit(rt.memory.allocator);
+    defer out.deinit(rt.nativeAllocator());
     for (units.items) |unit| {
         if (unit <= 0xff) {
             const ch: u8 = @intCast(unit);
             if (isAnnexBEscapeUnmodified(ch)) {
-                try out.append(rt.memory.allocator, ch);
+                try out.append(rt.nativeAllocator(), ch);
             } else {
                 const encoded = percentEncodedByte(ch);
-                try out.appendSlice(rt.memory.allocator, &encoded);
+                try out.appendSlice(rt.nativeAllocator(), &encoded);
             }
         } else {
             const encoded = percentEncodedUnit(unit);
-            try out.appendSlice(rt.memory.allocator, &encoded);
+            try out.appendSlice(rt.nativeAllocator(), &encoded);
         }
     }
     const str = try core.string.String.createUtf8(rt, out.items);
@@ -430,11 +430,11 @@ pub fn escape(rt: *core.JSRuntime, input: core.JSValue) !core.JSValue {
 
 pub fn unescape(rt: *core.JSRuntime, input: core.JSValue) !core.JSValue {
     var units = std.ArrayList(u16).empty;
-    defer units.deinit(rt.memory.allocator);
+    defer units.deinit(rt.nativeAllocator());
     try appendValueCodeUnits(rt, &units, input);
 
     var out = std.ArrayList(u16).empty;
-    defer out.deinit(rt.memory.allocator);
+    defer out.deinit(rt.nativeAllocator());
     var index: usize = 0;
     while (index < units.items.len) : (index += 1) {
         var unit = units.items[index];
@@ -460,7 +460,7 @@ pub fn unescape(rt: *core.JSRuntime, input: core.JSValue) !core.JSValue {
                 index += 2;
             }
         }
-        try out.append(rt.memory.allocator, unit);
+        try out.append(rt.nativeAllocator(), unit);
     }
 
     const str = try core.string.String.createUtf16(rt, out.items);
@@ -524,7 +524,7 @@ fn encodeCodepoint(rt: *core.JSRuntime, out: *std.ArrayList(u8), codepoint: u21,
     if (codepoint <= 0x7f) {
         const ch: u8 = @intCast(codepoint);
         if (isUnescaped(ch) or (!component and isReserved(ch))) {
-            try out.append(rt.memory.allocator, ch);
+            try out.append(rt.nativeAllocator(), ch);
             return;
         }
     }
@@ -535,7 +535,7 @@ fn encodeCodepoint(rt: *core.JSRuntime, out: *std.ArrayList(u8), codepoint: u21,
 
 fn appendPercentByte(rt: *core.JSRuntime, out: *std.ArrayList(u8), byte: u8) !void {
     const encoded = percentEncodedByte(byte);
-    try out.appendSlice(rt.memory.allocator, &encoded);
+    try out.appendSlice(rt.nativeAllocator(), &encoded);
 }
 
 fn stringDataContainsPercent(string_value: *core.string.String) bool {
@@ -548,10 +548,10 @@ fn stringDataContainsPercent(string_value: *core.string.String) bool {
 fn encodeBytes(rt: *core.JSRuntime, out: *std.ArrayList(u8), bytes: []const u8, component: bool) !void {
     for (bytes) |ch| {
         if (isUnescaped(ch) or (!component and isReserved(ch))) {
-            try out.append(rt.memory.allocator, ch);
+            try out.append(rt.nativeAllocator(), ch);
         } else {
             const encoded = percentEncodedByte(ch);
-            try out.appendSlice(rt.memory.allocator, &encoded);
+            try out.appendSlice(rt.nativeAllocator(), &encoded);
         }
     }
 }
@@ -576,7 +576,7 @@ fn decodeBytes(ctx: *core.JSContext, global: ?*core.Object, out: *std.ArrayList(
     var index: usize = 0;
     while (index < bytes.len) {
         if (bytes[index] != '%') {
-            try out.append(rt.memory.allocator, bytes[index]);
+            try out.append(rt.nativeAllocator(), bytes[index]);
             index += 1;
             continue;
         }
@@ -587,11 +587,11 @@ fn decodeBytes(ctx: *core.JSContext, global: ?*core.Object, out: *std.ArrayList(
         const decoded = fastHexPair(bytes[index + 1], bytes[index + 2]) orelse return throwUriErrorMessage(ctx, global, "expecting hex digit");
         index += 3;
         if (!component and isReserved(decoded)) {
-            try out.append(rt.memory.allocator, '%');
-            try out.append(rt.memory.allocator, bytes[index - 2]);
-            try out.append(rt.memory.allocator, bytes[index - 1]);
+            try out.append(rt.nativeAllocator(), '%');
+            try out.append(rt.nativeAllocator(), bytes[index - 2]);
+            try out.append(rt.nativeAllocator(), bytes[index - 1]);
         } else if (decoded < 0x80) {
-            try out.append(rt.memory.allocator, decoded);
+            try out.append(rt.nativeAllocator(), decoded);
         } else {
             const DecodedUtf8 = struct {
                 count: u3,
@@ -634,7 +634,7 @@ fn decodeBytes(ctx: *core.JSContext, global: ?*core.Object, out: *std.ArrayList(
             }
             var encoded: [4]u8 = undefined;
             const len = std.unicode.utf8Encode(decoded_utf8.codepoint, &encoded) catch return throwUriErrorMessage(ctx, global, "malformed UTF-8");
-            try out.appendSlice(rt.memory.allocator, encoded[0..len]);
+            try out.appendSlice(rt.nativeAllocator(), encoded[0..len]);
         }
     }
 }
@@ -731,16 +731,16 @@ fn appendValueCodeUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), value: co
     }
 
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try appendValueString(rt, &bytes, value);
-    for (bytes.items) |byte| try out.append(rt.memory.allocator, byte);
+    for (bytes.items) |byte| try out.append(rt.nativeAllocator(), byte);
 }
 
 fn appendStringCodeUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), value: core.JSValue) !void {
     const string_value = value.asStringBody() orelse return;
     switch (string_value.resolveData()) {
-        .latin1 => |bytes| for (bytes) |byte| try out.append(rt.memory.allocator, byte),
-        .utf16 => |units| try out.appendSlice(rt.memory.allocator, units),
+        .latin1 => |bytes| for (bytes) |byte| try out.append(rt.nativeAllocator(), byte),
+        .utf16 => |units| try out.appendSlice(rt.nativeAllocator(), units),
     }
 }
 

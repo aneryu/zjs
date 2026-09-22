@@ -8,6 +8,7 @@
 //! and exposes this type as `JSValue.Bytes` to higher layers. QuickJS source
 //! map: `JSArrayBuffer`/`JSTypedArray` at quickjs.c.
 
+const mem_ops = @import("memory.zig");
 const std = @import("std");
 
 pub fn JSBytes(comptime Value: type) type {
@@ -318,7 +319,7 @@ test "JSBytes.Store transfers owned bytes to ArrayBuffer without copying" {
         }
     };
 
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -343,7 +344,7 @@ test "JSBytes.Store transfers owned bytes to ArrayBuffer without copying" {
     // a collection under the tracer rather than this release. `backing` is
     // host memory, not a heap reference, so only the buffer object needs to
     // die and nothing here needs rooting.
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expectEqual(@as(usize, 1), state.calls);
 }
 
@@ -360,7 +361,7 @@ test "JSBytes.Store ArrayBuffer detach releases owned bytes immediately" {
         }
     };
 
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -393,7 +394,7 @@ test "JSBytes.Store transfers shared bytes to SharedArrayBuffer without copying"
         }
     };
 
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -428,7 +429,7 @@ test "JSBytes.Store transfers shared bytes to SharedArrayBuffer without copying"
     // SharedArrayBuffer itself, which under the tracer means a collection
     // rather than this release. Nothing here needs rooting -- the buffer
     // object is the thing that must die.
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expectEqual(@as(usize, 1), state.calls);
 }
 
@@ -445,7 +446,7 @@ test "JSBytes.Store shared transfer failure frees the host bytes once" {
         }
     };
 
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -472,9 +473,9 @@ test "JSBytes.Store shared transfer failure frees the host bytes once" {
     });
 
     // Refuse the SharedArrayBuffer object allocation.
-    rt.setMemoryLimit(rt.memory.allocated_bytes);
+    rt.setNativeBytesLimitForTest(rt.diagnostics.allocations.allocated_bytes);
     const result = ctx.arrayBuffer(&store);
-    rt.setMemoryLimit(null);
+    rt.setNativeBytesLimitForTest(null);
     try std.testing.expectError(error.OutOfMemory, result);
 
     // The failure path released the bytes through the store exactly once, and
@@ -486,12 +487,12 @@ test "JSBytes.Store shared transfer failure frees the host bytes once" {
 
 test "JSBytes views ArrayBuffer storage without copying" {
     const core = @import("root.zig");
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const object = try @import("object.zig").Object.create(rt, @import("class.zig").ids.array_buffer, null);
     const value = object.value();
-    const backing = try rt.memory.alloc(u8, 4);
+    const backing = try mem_ops.alloc(rt, u8, 4);
     const initial = [_]u8{ 1, 2, 3, 4 };
     @memcpy(backing, &initial);
     try object.installByteStorage(rt, backing);
@@ -510,14 +511,14 @@ test "JSBytes views ArrayBuffer storage without copying" {
 
 test "JSBytes views TypedArray byte range without copying" {
     const core = @import("root.zig");
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const Object = @import("object.zig").Object;
     const class_ids = @import("class.zig").ids;
     const buffer = try Object.create(rt, class_ids.array_buffer, null);
     const buffer_value = buffer.value();
-    const backing = try rt.memory.alloc(u8, 6);
+    const backing = try mem_ops.alloc(rt, u8, 6);
     const initial = [_]u8{ 0, 1, 2, 3, 4, 5 };
     @memcpy(backing, &initial);
     try buffer.installByteStorage(rt, backing);
@@ -535,7 +536,7 @@ test "JSBytes views TypedArray byte range without copying" {
 
 test "JSBytes floors length-tracking Uint16Array byteLength to element size" {
     const core = @import("root.zig");
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const Object = @import("object.zig").Object;
@@ -546,7 +547,7 @@ test "JSBytes floors length-tracking Uint16Array byteLength to element size" {
     // length-tracking view starting at offset 1 sees 6 trailing bytes, which is
     // exactly 3 u16 elements (6 bytes) — the 7th byte is an unaddressable partial
     // element and must be excluded from the borrow length.
-    const backing = try rt.memory.alloc(u8, 7);
+    const backing = try mem_ops.alloc(rt, u8, 7);
     const initial = [_]u8{ 0, 1, 2, 3, 4, 5, 6 };
     @memcpy(backing, &initial);
     try buffer.installByteStorage(rt, backing);
@@ -566,7 +567,7 @@ test "JSBytes floors length-tracking Uint16Array byteLength to element size" {
 
 test "JSBytes drops trailing partial element for odd-remaining length-tracking view" {
     const core = @import("root.zig");
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const Object = @import("object.zig").Object;
@@ -575,7 +576,7 @@ test "JSBytes drops trailing partial element for odd-remaining length-tracking v
     const buffer_value = buffer.value();
     // 5 bytes, offset 0, element_size 2: 5 % 2 == 1, so the borrow length must be
     // floored to 4 (2 elements), NOT the raw remaining 5.
-    const backing = try rt.memory.alloc(u8, 5);
+    const backing = try mem_ops.alloc(rt, u8, 5);
     @memcpy(backing, &[_]u8{ 9, 8, 7, 6, 5 });
     try buffer.installByteStorage(rt, backing);
     buffer.arrayBufferMaxByteLengthSlot().* = 16;
@@ -591,14 +592,14 @@ test "JSBytes drops trailing partial element for odd-remaining length-tracking v
 
 test "JSBytes views DataView byte range without copying" {
     const core = @import("root.zig");
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const Object = @import("object.zig").Object;
     const class_ids = @import("class.zig").ids;
     const buffer = try Object.create(rt, class_ids.array_buffer, null);
     const buffer_value = buffer.value();
-    const backing = try rt.memory.alloc(u8, 5);
+    const backing = try mem_ops.alloc(rt, u8, 5);
     const initial = [_]u8{ 10, 11, 12, 13, 14 };
     @memcpy(backing, &initial);
     try buffer.installByteStorage(rt, backing);
@@ -613,14 +614,14 @@ test "JSBytes views DataView byte range without copying" {
 
 test "JSBytes views length-tracking DataView to end of buffer" {
     const core = @import("root.zig");
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const Object = @import("object.zig").Object;
     const class_ids = @import("class.zig").ids;
     const buffer = try Object.create(rt, class_ids.array_buffer, null);
     const buffer_value = buffer.value();
-    const backing = try rt.memory.alloc(u8, 5);
+    const backing = try mem_ops.alloc(rt, u8, 5);
     @memcpy(backing, &[_]u8{ 10, 11, 12, 13, 14 });
     try buffer.installByteStorage(rt, backing);
     buffer.arrayBufferMaxByteLengthSlot().* = 16;

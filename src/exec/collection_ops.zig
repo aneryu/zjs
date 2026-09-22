@@ -752,7 +752,7 @@ fn iteratorResult(rt: *core.JSRuntime, global: ?*core.Object, value: core.JSValu
 }
 
 test "collection iteratorResult roots direct function bytecode value while creating result" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-collection-iterator-result-bytecode-symbol");
@@ -774,12 +774,12 @@ test "collection iteratorResult roots direct function bytecode value while creat
         try std.testing.expect(stored.same(result_value));
     }
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
 test "Map groupBy roots direct symbol key while creating group array" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const map_value = try constructBare(rt, 1);
@@ -802,7 +802,7 @@ test "Map groupBy roots direct symbol key while creating group array" {
     try std.testing.expectEqual(@as(usize, 1), map.collectionEntries().len);
     try std.testing.expect(map.collectionEntries()[0].key.same(item));
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -1231,20 +1231,20 @@ fn appendValue(rt: *core.JSRuntime, values: *[]core.JSValue, value: core.JSValue
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    const next = try rt.memory.alloc(core.JSValue, values.*.len + 1);
-    errdefer rt.memory.free(core.JSValue, next);
+    const next = try rt.allocRuntime(core.JSValue, values.*.len + 1);
+    errdefer rt.nativeAllocator().free(next);
     @memcpy(next[0..values.*.len], values.*);
     next[values.*.len] = rooted_value;
-    if (values.*.len != 0) rt.memory.free(core.JSValue, values.*);
+    if (values.*.len != 0) rt.nativeAllocator().free(values.*);
     values.* = next;
 }
 
 fn freeValueList(rt: *core.JSRuntime, values: []core.JSValue) void {
-    if (values.len != 0) rt.memory.free(core.JSValue, values);
+    if (values.len != 0) rt.nativeAllocator().free(values);
 }
 
 test "appendValue roots existing values and incoming value during growth" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const first_value = try rt.newSymbolValue("gc-collection-value-list-first");
@@ -1273,18 +1273,18 @@ test "appendValue roots existing values and incoming value during growth" {
         }
     };
 
-    const saved_trigger_fn = rt.memory.trigger_gc_fn;
-    const saved_trigger_ctx = rt.memory.trigger_gc_ctx;
+    const saved_trigger_fn = rt.gc.heap_budget.probe;
+    const saved_trigger_ctx = rt.gc.heap_budget.probe_ctx;
     var trigger = Trigger{
         .rt = rt,
         .first_atom = first_atom,
         .second_atom = second_atom,
     };
-    rt.memory.trigger_gc_fn = Trigger.trigger;
-    rt.memory.trigger_gc_ctx = &trigger;
+    rt.gc.heap_budget.probe = Trigger.trigger;
+    rt.gc.heap_budget.probe_ctx = &trigger;
     defer {
-        rt.memory.trigger_gc_fn = saved_trigger_fn;
-        rt.memory.trigger_gc_ctx = saved_trigger_ctx;
+        rt.gc.heap_budget.probe = saved_trigger_fn;
+        rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
     }
 
     try appendValue(rt, &values, second_value);
@@ -1863,8 +1863,8 @@ fn setCloneReceiver(ctx: *core.JSContext, receiver: *core.Object) !core.JSValue 
 fn setSnapshotKeys(rt: *core.JSRuntime, receiver: *core.Object) ![]core.JSValue {
     const count = setStrongSize(receiver);
     if (count == 0) return &.{};
-    const keys = try rt.memory.alloc(core.JSValue, count);
-    errdefer rt.memory.free(core.JSValue, keys);
+    const keys = try rt.nativeAllocator().alloc(core.JSValue, count);
+    errdefer rt.nativeAllocator().free(keys);
     var out: usize = 0;
     for (receiver.collectionEntriesSlot().items) |entry| {
         if (!entry.active) continue;
@@ -1875,10 +1875,10 @@ fn setSnapshotKeys(rt: *core.JSRuntime, receiver: *core.Object) ![]core.JSValue 
 }
 
 test "set difference snapshot key root exposes dynamic key slice" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
-    var keys = try rt.memory.alloc(core.JSValue, 1);
+    var keys = try rt.nativeAllocator().alloc(core.JSValue, 1);
     const first_atom = try rt.atoms.newValueSymbol("gc-set-difference-snapshot-key");
     keys[0] = try rt.takeSymbolValue(first_atom);
     defer freeValueList(rt, keys);
@@ -1887,7 +1887,7 @@ test "set difference snapshot key root exposes dynamic key slice" {
     keys_root.init(rt, &keys);
     defer keys_root.deinit();
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(first_atom) != null);
 }
 
@@ -2283,7 +2283,6 @@ fn mapAppendGroupByValue(
     );
     _ = try methodCall(ctx.runtime, map_value, 1, &.{ key, group.value() });
 }
-
 
 // ----- merged from collection_adapter.zig -----
 // Realm-aware adapter for the core collection callback protocol.

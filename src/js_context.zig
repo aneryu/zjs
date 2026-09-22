@@ -53,22 +53,6 @@ fn PublicValueRootWindow(comptime count: usize) type {
     };
 }
 
-fn ensureStandardGlobalsRegistered(rt: *JSRuntime) void {
-    if (rt.materialize_context_global_cb == null) {
-        rt.materialize_context_global_cb = struct {
-            fn cb(c: *core.JSContext) anyerror!*core.Object {
-                return try exec.zjs_vm.contextGlobal(c);
-            }
-        }.cb;
-    }
-    // The context-global materializer above bootstraps the standard globals
-    // through `rt.installStandardGlobals`; configure the callback and its
-    // matching capacity together before the first realm is materialized.
-    if (rt.install_standard_globals_cb == null) {
-        exec.standard_globals.configureRuntime(rt);
-    }
-}
-
 /// Internal diagnostics for the two stable sub-phases inside public
 /// `JSContext.create`. The complete public-ready boundary remains
 /// the caller's outer measurement around `createMeasured`.
@@ -84,14 +68,6 @@ fn initWithOptionsImpl(
     options: core.ContextOptions,
     timing: if (measure) *ContextCreateTiming else void,
 ) !void {
-    ensureStandardGlobalsRegistered(rt);
-    // Public construction completes intrinsic bootstrap before publication.
-    // That bootstrap may run GC and tune its next threshold; preserve the
-    // embedder's configured Runtime threshold across this formerly-lazy
-    // construction boundary.
-    const gc_threshold = rt.gcThreshold();
-    defer rt.setGCThreshold(gc_threshold);
-
     const raw_create_start = if (measure) platform_clock.monotonicNanos() else {};
     self.* = .{ .core = try core.JSContext.createConstructingWithOptions(rt, options) };
     errdefer self.core.destroy();
@@ -108,8 +84,8 @@ fn createImpl(
     options: core.ContextOptions,
     timing: if (measure) *ContextCreateTiming else void,
 ) !*JSContext {
-    const ctx = try rt.memory.create(JSContext);
-    errdefer rt.memory.destroy(JSContext, ctx);
+    const ctx = try rt.nativeAllocator().create(JSContext);
+    errdefer rt.nativeAllocator().destroy(ctx);
     try initWithOptionsImpl(measure, ctx, rt, options, timing);
     return ctx;
 }
@@ -163,7 +139,7 @@ pub const JSContext = struct {
         const rt = self.core.runtime;
         exec.zjs_vm.cleanupAtomicsWaitersForContext(self.core);
         self.core.destroy();
-        rt.memory.destroy(JSContext, self);
+        rt.nativeAllocator().destroy(self);
     }
 
     // --- Core delegates ---
@@ -278,7 +254,6 @@ pub const JSContext = struct {
 
     // --- Execution / VM / Builtins Helpers (Moved from core/context.zig) ---
     fn globalPtr(self: *JSContext) !*Object {
-        ensureStandardGlobalsRegistered(self.core.runtime);
         return exec.zjs_vm.contextGlobal(self.core);
     }
 
@@ -412,13 +387,12 @@ pub const JSContext = struct {
     pub fn functionName(self: *JSContext, val: JSValue, allocator: std.mem.Allocator) ![]u8 {
         const object = try Object.expect(val);
         const runtime_name = try exec.call.nativeFunctionNameForVm(self.core.runtime, object);
-        defer self.core.runtime.memory.allocator.free(runtime_name);
+        defer self.core.runtime.nativeAllocator().free(runtime_name);
         return allocator.dupe(u8, runtime_name);
     }
 
     pub fn callFunction(self: *JSContext, callee: JSValue, args: []const JSValue, options: core.FunctionCallOptions) !JSValue {
         const global = options.realm_global orelse blk: {
-            ensureStandardGlobalsRegistered(self.core.runtime);
             break :blk try exec.zjs_vm.contextGlobalFast(self.core);
         };
         // NB2 contract C2 (design §7): the callee, the receiver and `args` are
@@ -575,7 +549,6 @@ pub const JSContext = struct {
     }
 
     pub fn evalScriptSource(self: *JSContext, source_text: []const u8, options: core.ScriptEvalOptions) !JSValue {
-        ensureStandardGlobalsRegistered(self.core.runtime);
         const target = if (options.realm_global) |global|
             self.core.runtime.contextForGlobal(global) orelse return error.TypeError
         else
@@ -585,7 +558,6 @@ pub const JSContext = struct {
     }
 
     pub fn evalScriptValue(self: *JSContext, source_value: JSValue, options: core.ScriptEvalOptions) !JSValue {
-        ensureStandardGlobalsRegistered(self.core.runtime);
         const target = if (options.realm_global) |global|
             self.core.runtime.contextForGlobal(global) orelse return error.TypeError
         else
@@ -595,17 +567,13 @@ pub const JSContext = struct {
     }
 
     pub fn eval(self: *JSContext, source_text: []const u8, options: core.EvalOptions) !JSValue {
-        ensureStandardGlobalsRegistered(self.core.runtime);
         return exec.eval_entry.eval(self.core, source_text, options) catch |err|
             self.restoreUncaughtOutOfMemory(err);
     }
 
     pub fn runJobs(self: *JSContext, output: ?*std.Io.Writer) !void {
         const global_object = try self.globalPtr();
-        exec.zjs_vm.drainPendingPromiseJobs(self.core, output, global_object) catch |err| {
-            if (self.hasException() or self.hasUnhandledRejection()) return;
-            return err;
-        };
+        try exec.zjs_vm.drainPendingPromiseJobs(self.core, output, global_object);
     }
 
     /// Install a host function as a writable, non-enumerable, configurable
@@ -709,7 +677,7 @@ pub const JSContext = struct {
         }
 
         var temp_list = std.ArrayList(u8).empty;
-        defer temp_list.deinit(rt.memory.allocator);
+        defer temp_list.deinit(rt.nativeAllocator());
         try exec.value_ops.appendValueString(rt, &temp_list, exc);
         return try allocator.dupe(u8, temp_list.items);
     }
@@ -721,7 +689,7 @@ pub const JSContext = struct {
         if (!val.isString()) return null;
 
         var temp_list = std.ArrayList(u8).empty;
-        defer temp_list.deinit(rt.memory.allocator);
+        defer temp_list.deinit(rt.nativeAllocator());
         try exec.value_ops.appendRawString(rt, &temp_list, val);
         return try allocator.dupe(u8, temp_list.items);
     }
@@ -756,7 +724,7 @@ fn getPropertyString(rt: *JSRuntime, obj: *Object, key: atom.Atom, allocator: st
     if (!val.isString()) return null;
 
     var temp_list = std.ArrayList(u8).empty;
-    defer temp_list.deinit(rt.memory.allocator);
+    defer temp_list.deinit(rt.nativeAllocator());
     try exec.value_ops.appendRawString(rt, &temp_list, val);
     return try allocator.dupe(u8, temp_list.items);
 }

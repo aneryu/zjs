@@ -134,7 +134,7 @@ pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
         ctx.rollbackIntrinsicBootstrap();
         ctx.global = null;
     }
-    try call_mod.installHostGlobals(ctx.runtime, global_object);
+    try call_mod.installHostGlobals(ctx, global_object);
     _ = try throwTypeErrorIntrinsicForGlobal(ctx.runtime, global_object);
     if (ctx.preallocated_oom_error == null) {
         // Preallocate the out-of-memory catch value while the heap still has
@@ -300,7 +300,7 @@ fn pinGlobalForInvocation(env: CallEnv) ?*core.Object {
     const rt = env.ctx.runtime;
     if (!rt.gc.nursery.enabled) return null;
     if (!core.gc.Registry.isNurseryHeader(env.global.gcHeader())) return null;
-    rt.gc.pins.pin(rt.gc.memory, env.global.gcHeader()) catch return null;
+    rt.gc.pins.pin(rt.gc.runtime, env.global.gcHeader()) catch return null;
     return env.global;
 }
 
@@ -411,7 +411,7 @@ fn runWithArgsState(env: CallEnv) HostError!core.JSValue {
     }
     defer {
         if (env.generator_state == null or !frame_storage.isEmptyResidentExecutionShell()) {
-            frame_storage.deinit(&env.ctx.runtime.memory, env.ctx.runtime);
+            frame_storage.deinit(env.ctx.runtime.nativeAllocator(), env.ctx.runtime);
         }
     }
     var catch_target_storage: ?usize = null;
@@ -573,12 +573,12 @@ noinline fn initFreshEntryFrame(
         // separate (`.stack = 0`), as in the arena-less entry below.
         var arena_layout = slab_layout;
         arena_layout.stack = stack_count;
-        if (frame_mod.FrameSlab.carve(&ctx.runtime.memory, arena, arena_layout)) |windows| break :blk windows;
-        const heap_windows = try frame_mod.FrameSlab.allocHeap(&ctx.runtime.memory, slab_layout);
+        if (frame_mod.FrameSlab.carve(ctx.runtime, arena, arena_layout)) |windows| break :blk windows;
+        const heap_windows = try frame_mod.FrameSlab.allocHeap(ctx.runtime.nativeAllocator(), slab_layout);
         frame_storage.installOwnedStorage(heap_windows.storage);
         break :blk heap_windows;
     } else blk: {
-        const heap_windows = try frame_mod.FrameSlab.allocHeap(&ctx.runtime.memory, slab_layout);
+        const heap_windows = try frame_mod.FrameSlab.allocHeap(ctx.runtime.nativeAllocator(), slab_layout);
         frame_storage.installOwnedStorage(heap_windows.storage);
         break :blk heap_windows;
     };
@@ -590,11 +590,11 @@ noinline fn initFreshEntryFrame(
         .open_var_refs = if (slab.open_var_refs.len != 0) slab.open_var_refs else null,
     };
     if (entry_stack.capacity == 0 and slab.stack.len != 0) {
-        entry_stack.* = stack_mod.Stack.initArenaWindow(&ctx.runtime.memory, ctx.runtime.vm_stack_arena_policy, slab.stack);
+        entry_stack.* = stack_mod.Stack.initArenaWindow(ctx.runtime, ctx.runtime.vm_stack_arena_policy, slab.stack);
     }
     try vm_call.initFrameLocals(ctx, entry_function, frame_storage, use_inline_frame_storage, frame_windows);
-    try frame_storage.initArguments(&ctx.runtime.memory, frame_arena, args, need_original_args, frame_windows);
-    if (frame_windows.open_var_refs) |open_refs| try frame_storage.installOpenVarRefSlots(open_refs) else if (open_var_ref_count != 0) try frame_storage.ensureOpenVarRefSlots(&ctx.runtime.memory, frame_arena);
+    try frame_storage.initArguments(ctx.runtime, frame_arena, args, need_original_args, frame_windows);
+    if (frame_windows.open_var_refs) |open_refs| try frame_storage.installOpenVarRefSlots(open_refs) else if (open_var_ref_count != 0) try frame_storage.ensureOpenVarRefSlots(ctx.runtime, frame_arena);
     try vm_call.initFrameVarRefs(ctx, entry_function, frame_storage, var_refs, use_inline_frame_storage, frame_windows);
 }
 

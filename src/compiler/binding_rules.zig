@@ -13,7 +13,6 @@
 const std = @import("std");
 const bytecode = @import("../bytecode.zig");
 const atom = @import("../core/atom.zig");
-const memory = @import("../core/memory.zig");
 const runtime = @import("../core/runtime.zig");
 const compiler = @import("root.zig");
 const FunctionBytecode = bytecode.FunctionBytecode;
@@ -103,7 +102,6 @@ const ScopeLinkProof = enum(u2) {
 /// JSContext for variable resolution.
 pub const JSContext = struct {
     function: *bytecode_function.Bytecode,
-    memory: *memory.MemoryAccount,
     atoms: *atom.AtomTable,
     /// Optional FunctionDef driving local-slot lookup. When non-null,
     /// `resolve_variables` lowers `scope_get_var` / `scope_put_var` to
@@ -120,7 +118,6 @@ pub const JSContext = struct {
     ) JSContext {
         return .{
             .function = function,
-            .memory = function.memory,
             .atoms = function.atoms,
             .function_def = fd,
         };
@@ -547,13 +544,13 @@ fn lowerScopeVarOpForClosure(ctx: *const JSContext, atom_id: atom.Atom, ref_idx:
 }
 
 test "resolved closure identity owns lexical opcode selection" {
-    const rt = try runtime.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try runtime.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const name = try rt.internAtom("resolved-closure-opcode-selection");
     const binding = try rt.internAtom("same-name-closure");
 
-    var fd = function_def_mod.FunctionDef.init(&rt.memory, &rt.atoms, name);
+    var fd = function_def_mod.FunctionDef.init(rt.nativeAllocator(), rt.nativeAllocator(), &rt.atoms, name);
     defer fd.deinit(rt);
     _ = try fd.addClosureVar(.{
         .closure_type = .local,
@@ -572,7 +569,7 @@ test "resolved closure identity owns lexical opcode selection" {
         .var_name = binding,
     });
 
-    var bc = bytecode_function.Bytecode.init(&rt.memory, &rt.atoms, name);
+    var bc = bytecode_function.Bytecode.init(rt.nativeAllocator(), rt.nativeAllocator(), &rt.atoms, name);
     defer bc.deinit();
     const ctx = JSContext.initWithFunctionDef(&bc, &fd);
     try std.testing.expectEqual(

@@ -31,14 +31,14 @@ const ParseHarness = struct {
 
     /// `h` must be a stack local (`var h: ParseHarness = undefined;`).
     fn init(h: *ParseHarness, src: []const u8) !void {
-        h.rt = try core.JSRuntime.create(std.testing.allocator, .{});
+        h.rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
         errdefer h.rt.destroy();
         h.name_atom = try h.rt.atoms.internString("s2g1");
-        h.function = bytecode_mod.Bytecode.init(&h.rt.memory, &h.rt.atoms, h.name_atom);
+        h.function = bytecode_mod.Bytecode.init(h.rt.nativeAllocator(), h.rt.nativeAllocator(), &h.rt.atoms, h.name_atom);
         errdefer h.function.deinit();
         h.lex = parser_mod.Lexer.init(std.testing.allocator, &h.rt.atoms, src);
         errdefer h.lex.deinit();
-        h.state = try P.ParseState.init(&h.lex, &h.rt.memory, &h.rt.atoms, h.name_atom);
+        h.state = try P.ParseState.initFromRuntime(&h.lex, h.rt, &h.rt.atoms, h.name_atom);
         try h.state.beginBuilderEmissionForTest();
     }
 
@@ -73,13 +73,13 @@ const ExecHarness = struct {
 
     /// `h` must be a stack local (`var h: ExecHarness = undefined;`).
     fn init(h: *ExecHarness, src: []const u8) !void {
-        h.rt = try core.JSRuntime.create(std.testing.allocator, .{});
+        h.rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
         errdefer h.rt.destroy();
-        standard_globals.configureRuntime(h.rt);
+
         h.ctx = try core.JSContext.create(h.rt, .{});
         errdefer h.ctx.destroy();
         h.name_atom = try h.rt.atoms.internString("compiler-s4-exec");
-        h.function = bytecode_mod.Bytecode.init(&h.rt.memory, &h.rt.atoms, h.name_atom);
+        h.function = bytecode_mod.Bytecode.init(h.rt.nativeAllocator(), h.rt.nativeAllocator(), &h.rt.atoms, h.name_atom);
         errdefer h.function.deinit();
         h.lex = parser_mod.Lexer.init(std.testing.allocator, &h.rt.atoms, src);
         errdefer h.lex.deinit();
@@ -226,7 +226,7 @@ fn compileAndRunWithHook(h: *ExecHarness, before_finalize: ?*const fn (*ExecHarn
     const root_object = object_ops.objectFromValue(root_fn) orelse
         return error.InvalidBytecode;
 
-    var stack = stack_mod.Stack.init(&h.rt.memory, h.ctx.stackLimit());
+    var stack = stack_mod.Stack.init(h.rt, h.ctx.stackLimit());
     defer stack.deinit(h.rt);
     try stack.reserveAdditional(fb.stack_size);
     return zjs_vm.runWithCallEnv(.{
@@ -378,10 +378,10 @@ fn expectSourceOffsets(b: *const builder_mod.Builder, expected: []const u32) !vo
 }
 
 test "compiler.tests: forward jump binds and relocates" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
-    var b = builder_mod.Builder.init(&rt.memory, &rt.atoms);
+    var b = builder_mod.Builder.init(rt.nativeAllocator(), &rt.atoms);
     defer b.deinit();
 
     const label = try b.newLabel();
@@ -407,10 +407,10 @@ test "compiler.tests: forward jump binds and relocates" {
 }
 
 test "compiler.tests: backward jump marks target and relocates" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
-    var b = builder_mod.Builder.init(&rt.memory, &rt.atoms);
+    var b = builder_mod.Builder.init(rt.nativeAllocator(), &rt.atoms);
     defer b.deinit();
 
     const label = try b.newLabel();
@@ -435,10 +435,10 @@ test "compiler.tests: backward jump marks target and relocates" {
 }
 
 test "compiler.tests: many jumps share a head-first reloc chain" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
-    var b = builder_mod.Builder.init(&rt.memory, &rt.atoms);
+    var b = builder_mod.Builder.init(rt.nativeAllocator(), &rt.atoms);
     defer b.deinit();
 
     const label = try b.newLabel();
@@ -473,10 +473,10 @@ test "compiler.tests: many jumps share a head-first reloc chain" {
 }
 
 test "compiler.tests: first unbound label and binds fail closed" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
-    var b = builder_mod.Builder.init(&rt.memory, &rt.atoms);
+    var b = builder_mod.Builder.init(rt.nativeAllocator(), &rt.atoms);
     defer b.deinit();
 
     const first = try b.newLabel();
@@ -491,10 +491,10 @@ test "compiler.tests: first unbound label and binds fail closed" {
 }
 
 fn oomScript(allocator: std.mem.Allocator) !void {
-    const rt = try core.JSRuntime.create(allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = allocator });
     defer rt.destroy();
 
-    var b = builder_mod.Builder.init(&rt.memory, &rt.atoms);
+    var b = builder_mod.Builder.init(rt.nativeAllocator(), &rt.atoms);
     defer b.deinit();
 
     var initial_labels: [10]labels.LabelId = undefined;
@@ -548,10 +548,10 @@ test "compiler.tests: allocation failure sweep preserves cleanup" {
 }
 
 test "compiler.tests: source slots roll back to snapshot" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
-    var b = builder_mod.Builder.init(&rt.memory, &rt.atoms);
+    var b = builder_mod.Builder.init(rt.nativeAllocator(), &rt.atoms);
     defer b.deinit();
 
     try b.addSourceMarker(21, 22);
@@ -582,12 +582,12 @@ test "compiler.tests: source slots roll back to snapshot" {
 }
 
 test "compiler.tests: atom ownership balances across rollback and deinit" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const atom = try rt.atoms.internString("compiler_atom_ownership");
 
-    var b = builder_mod.Builder.init(&rt.memory, &rt.atoms);
+    var b = builder_mod.Builder.init(rt.nativeAllocator(), &rt.atoms);
     defer b.deinit();
 
     try b.emitAtomOpOwned(0x80, atom);
@@ -604,10 +604,10 @@ test "compiler.tests: atom ownership balances across rollback and deinit" {
 }
 
 test "compiler.tests: rollback restores a shared label reloc chain" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
-    var b = builder_mod.Builder.init(&rt.memory, &rt.atoms);
+    var b = builder_mod.Builder.init(rt.nativeAllocator(), &rt.atoms);
     defer b.deinit();
 
     const shared_label = try b.newLabel();
@@ -3180,7 +3180,7 @@ fn compileRunAndCount(src: []const u8, expected: i32, want: []const u8) !void {
     );
     const root_object = object_ops.objectFromValue(root_fn) orelse
         return error.InvalidBytecode;
-    var stack = stack_mod.Stack.init(&h.rt.memory, h.ctx.stackLimit());
+    var stack = stack_mod.Stack.init(h.rt, h.ctx.stackLimit());
     defer stack.deinit(h.rt);
     try stack.reserveAdditional(fb.stack_size);
     const result = try zjs_vm.runWithCallEnv(.{
@@ -3562,7 +3562,7 @@ fn s3bMajorBeforeFinalize(h: *ExecHarness) anyerror!void {
     // the tagged-template arrays live only in `FunctionDef.cpool`, a Zig-heap
     // `[]JSValue` that neither the conservative stack scan nor any tracer edge
     // reaches. Only `State.traceCompileValueRoots` can keep them.
-    _ = try h.rt.forceMajorGC(null);
+    _ = try h.rt.forceGC(null);
     s3bDrainGc(h.rt);
     var counted: usize = 0;
     try s3bExpectDefTreeMarked(h.rt, &h.state.function_def, &counted);
@@ -3610,7 +3610,7 @@ test "TGC S3-b: a major between parse and finalize keeps cpool constants alive" 
 }
 
 fn s3bExpectTemplateArraysMarked(h: *ExecHarness) anyerror!void {
-    _ = try h.rt.forceMajorGC(null);
+    _ = try h.rt.forceGC(null);
     s3bDrainGc(h.rt);
     var counted: usize = 0;
     try s3bExpectDefTreeMarked(h.rt, &h.state.function_def, &counted);
@@ -3715,9 +3715,9 @@ test "TGC S3-b: a major inside a parse keeps the front end's atoms marked" {
         "zjsS3ParseScopeDelta",
     };
 
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
-    standard_globals.configureRuntime(rt);
+
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
@@ -3738,7 +3738,7 @@ test "TGC S3-b: a major inside a parse keeps the front end's atoms marked" {
     // The parse is complete but nothing has been published: the ids live only
     // in FunctionDef var tables and the Builder's atom-operand ledger, both
     // plain `u32` arrays on the Zig heap that no scan can read.
-    _ = try rt.forceMajorGC(null);
+    _ = try rt.forceGC(null);
     var polls: usize = 0;
     while (rt.gc.morgue.pending) : (polls += 1) {
         std.debug.assert(polls < 100_000);
@@ -3768,8 +3768,8 @@ test "compiler.p5: escaped atoms outlive compiler teardown" {
         \\o.escapeAuditProbeName;
     ;
 
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
-    standard_globals.configureRuntime(rt);
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+
     const ctx = try core.JSContext.create(rt, .{});
     const name_atom = try rt.atoms.internString("compiler-p5-atom-escape");
     var lex = parser_mod.Lexer.init(std.testing.allocator, &rt.atoms, source);
@@ -3814,7 +3814,7 @@ test "compiler.p5: escaped atoms outlive compiler teardown" {
         // collection rather than this release. Nothing needs rooting -- the
         // FunctionBytecode is the thing that must die, and `ctx` is reached
         // through the host create-ref's root provider.
-        _ = rt.runObjectCycleRemoval();
+        _ = rt.collectForTest();
     }
 
     ctx.destroy();

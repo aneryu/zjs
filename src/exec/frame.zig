@@ -16,7 +16,6 @@ const runtime = @import("../core/runtime.zig");
 const JSRuntime = runtime.JSRuntime;
 const JSValue = @import("../core/value.zig").JSValue;
 
-
 pub const FrameSlab = struct {
     storage: []JSValue = &.{},
     args: []JSValue = &.{},
@@ -78,17 +77,17 @@ pub const FrameSlab = struct {
 
     /// Carve one slab from the VM stack arena; null when the layout overflows
     /// or the arena is exhausted (the caller then falls back to `allocHeap`).
-    pub fn carve(account: *memory.MemoryAccount, arena: *runtime.VmStackArena, layout: SlabLayout) ?FrameSlab {
+    pub fn carve(rt: *JSRuntime, arena: *runtime.VmStackArena, layout: SlabLayout) ?FrameSlab {
         const total = layout.totalSlots() catch return null;
-        const slab_values = arena.carve(account, total) orelse return null;
+        const slab_values = arena.carve(rt, total) orelse return null;
         return partition(slab_values, layout);
     }
 
-    pub fn allocHeap(account: *memory.MemoryAccount, layout: SlabLayout) !FrameSlab {
+    pub fn allocHeap(account: std.mem.Allocator, layout: SlabLayout) !FrameSlab {
         const total_value_slots = try layout.totalSlots();
         if (total_value_slots == 0) return .{};
         const storage = try account.alloc(JSValue, total_value_slots);
-        errdefer account.free(JSValue, storage);
+        errdefer account.free(storage);
         return partition(storage, layout);
     }
 };
@@ -240,7 +239,7 @@ pub const Frame = struct {
     };
 
     /// Allocate `cold` on first use. The new struct is fully defaulted.
-    pub fn ensureCold(self: *Frame, account: *memory.MemoryAccount) !*FrameCold {
+    pub fn ensureCold(self: *Frame, account: std.mem.Allocator) !*FrameCold {
         if (self.cold) |c| return c;
         const c = try account.create(FrameCold);
         c.* = .{};
@@ -249,10 +248,10 @@ pub const Frame = struct {
     }
 
     /// Reset cold ownership metadata and free the box.
-    pub fn freeCold(self: *Frame, account: *memory.MemoryAccount) void {
+    pub fn freeCold(self: *Frame, account: std.mem.Allocator) void {
         const c = self.cold orelse return;
         self.ownership.new_target = .borrowed;
-        account.destroy(FrameCold, c);
+        account.destroy(c);
         self.cold = null;
     }
 
@@ -276,7 +275,7 @@ pub const Frame = struct {
     /// spread duplicates the callable into both operand slots, so the common
     /// case still resolves to the alias and drops the redundant reference
     /// instead of allocating a cold box for a value the frame already has.
-    pub fn takeConstructorNewTarget(self: *Frame, account: *memory.MemoryAccount, value: JSValue) !void {
+    pub fn takeConstructorNewTarget(self: *Frame, account: std.mem.Allocator, value: JSValue) !void {
         std.debug.assert(self.ownership.new_target == .aliases_function);
         if (value.same(self.current_function)) return;
         const c = try self.ensureCold(account);
@@ -328,7 +327,7 @@ pub const Frame = struct {
         const binding_cold = if (inputs.new_target_value.is(.undefined_value))
             null
         else
-            try self.ensureCold(&rt.memory);
+            try self.ensureCold(rt.nativeAllocator());
         self.this_value = inputs.initial_this_value;
         self.current_function = inputs.current_function_value;
         if (binding_cold) |c| c.new_target = inputs.new_target_value;
@@ -336,17 +335,18 @@ pub const Frame = struct {
 
     pub fn initArguments(
         self: *Frame,
-        account: *memory.MemoryAccount,
+        rt: *JSRuntime,
         arena: ?*runtime.VmStackArena,
         args: []const JSValue,
         need_original_snapshot: bool,
         windows: FrameStorageWindows,
     ) !void {
+        const account = rt.nativeAllocator();
         self.actual_arg_count = @intCast(args.len);
 
         const frame_arg_count = @max(args.len, @as(usize, @intCast(self.function.arg_count)));
         if (frame_arg_count > 0) {
-            const owned_args = try self.allocArgsSlice(account, arena, frame_arg_count, windows.args);
+            const owned_args = try self.allocArgsSlice(rt, arena, frame_arg_count, windows.args);
             if (frame_arg_count > args.len) @memset(owned_args[args.len..], JSValue.undefinedValue());
             for (args, 0..) |arg, idx| owned_args[idx] = arg;
             self.args = owned_args;
@@ -362,16 +362,17 @@ pub const Frame = struct {
     /// stays responsible for freeing whatever is left in `args`.
     pub fn initArgumentsMoved(
         self: *Frame,
-        account: *memory.MemoryAccount,
+        rt: *JSRuntime,
         arena: ?*runtime.VmStackArena,
         args: []JSValue,
         need_original_snapshot: bool,
         windows: FrameStorageWindows,
     ) !void {
+        const account = rt.nativeAllocator();
         self.actual_arg_count = @intCast(args.len);
         const frame_arg_count = @max(args.len, @as(usize, @intCast(self.function.arg_count)));
         if (frame_arg_count > 0) {
-            const owned_args = try self.allocArgsSlice(account, arena, frame_arg_count, windows.args);
+            const owned_args = try self.allocArgsSlice(rt, arena, frame_arg_count, windows.args);
             @memset(owned_args[args.len..], JSValue.undefinedValue());
             @memcpy(owned_args[0..args.len], args);
             @memset(args, JSValue.undefinedValue());
@@ -389,7 +390,7 @@ pub const Frame = struct {
     /// needed, matching QuickJS's `arg_buf = argv` fast path.
     pub fn initArgumentsBorrowedSlots(
         self: *Frame,
-        account: *memory.MemoryAccount,
+        account: std.mem.Allocator,
         args: []JSValue,
         need_original_snapshot: bool,
         windows: FrameStorageWindows,
@@ -404,24 +405,25 @@ pub const Frame = struct {
 
     fn allocArgsSlice(
         self: *Frame,
-        account: *memory.MemoryAccount,
+        rt: *JSRuntime,
         arena: ?*runtime.VmStackArena,
         frame_arg_count: usize,
         window: ?[]JSValue,
     ) ![]JSValue {
+        const account = rt.nativeAllocator();
         if (window) |values| {
             std.debug.assert(values.len == frame_arg_count);
             return values;
         }
         if (arena) |stack_arena| {
-            if (stack_arena.carve(account, frame_arg_count)) |arg_window| return arg_window;
+            if (stack_arena.carve(rt, frame_arg_count)) |arg_window| return arg_window;
         }
         return try self.allocOwnedStorage(account, frame_arg_count);
     }
 
     fn initOriginalArgsSnapshot(
         self: *Frame,
-        account: *memory.MemoryAccount,
+        account: std.mem.Allocator,
         args: []const JSValue,
         need_original_snapshot: bool,
         window: ?[]JSValue,
@@ -452,20 +454,20 @@ pub const Frame = struct {
         self.storage_values = storage;
     }
 
-    pub fn allocOwnedStorage(self: *Frame, account: *memory.MemoryAccount, count: usize) ![]JSValue {
+    pub fn allocOwnedStorage(self: *Frame, account: std.mem.Allocator, count: usize) ![]JSValue {
         const values = try account.alloc(JSValue, count);
         if (self.ownership.storage == .owned and self.storage_values.len != 0) {
             // Dynamic growth paths that do not receive pre-carved windows are
             // intentionally rare. Keep ownership explicit instead of silently
             // leaking a second backing allocation.
-            account.free(JSValue, values);
+            account.free(values);
             return error.OutOfMemory;
         }
         self.installOwnedStorage(values);
         return values;
     }
 
-    pub fn deinit(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
+    pub fn deinit(self: *Frame, account: std.mem.Allocator, rt: anytype) void {
         self.this_value = JSValue.undefinedValue();
         self.current_function = JSValue.undefinedValue();
 
@@ -475,13 +477,13 @@ pub const Frame = struct {
         self.freeCold(account);
     }
 
-    pub inline fn deinitInlineCall(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
+    pub inline fn deinitInlineCall(self: *Frame, account: std.mem.Allocator, rt: anytype) void {
         if (self.open_var_refs.len != 0) self.closeOpenVarRefs(rt);
         if (self.cold != null) self.freeCold(account);
-        if (self.ownership.storage == .owned and self.storage_values.len != 0) account.free(JSValue, self.storage_values);
+        if (self.ownership.storage == .owned and self.storage_values.len != 0) account.free(self.storage_values);
     }
 
-    pub fn releaseOwnedStorage(self: *Frame, account: *memory.MemoryAccount, rt: anytype) void {
+    pub fn releaseOwnedStorage(self: *Frame, account: std.mem.Allocator, rt: anytype) void {
         self.closeOpenVarRefs(rt);
         const storage_values = self.storage_values;
         const storage_ownership = self.ownership.storage;
@@ -498,7 +500,7 @@ pub const Frame = struct {
         // cold box and its borrowed new-target binding.
         if (self.cold != null) self.releaseColdStorage();
 
-        if (storage_ownership == .owned and storage_values.len != 0) account.free(JSValue, storage_values);
+        if (storage_ownership == .owned and storage_values.len != 0) account.free(storage_values);
     }
 
     pub fn closeOpenVarRefs(self: *Frame, rt: anytype) void {
@@ -585,9 +587,10 @@ pub const Frame = struct {
 
     pub fn ensureOpenVarRefSlots(
         self: *Frame,
-        account: *memory.MemoryAccount,
+        rt: *JSRuntime,
         arena: ?*runtime.VmStackArena,
     ) !void {
+        const account = rt.nativeAllocator();
         const count = self.function.openVarRefCount();
         if (self.open_var_refs.len != 0) {
             if (self.open_var_refs.len != count) return error.InvalidBytecode;
@@ -596,7 +599,7 @@ pub const Frame = struct {
         if (count == 0) return;
         const slots = blk: {
             if (arena) |stack_arena| {
-                if (stack_arena.carveTyped(account, ?*core.VarRef, count)) |window| break :blk window;
+                if (stack_arena.carveTyped(rt, ?*core.VarRef, count)) |window| break :blk window;
             }
             const bytes = try std.math.mul(usize, @sizeOf(?*core.VarRef), count);
             const value_slots = try std.math.divCeil(usize, bytes, @sizeOf(JSValue));
@@ -611,14 +614,14 @@ pub const Frame = struct {
     /// nothing on the exec path grows a locals window. Kept (with
     /// `growLocalsCapacity`) as the fixture entry point that the frame-storage
     /// unit tests use to build and mutate synthetic frames.
-    pub fn setLocal(self: *Frame, account: *memory.MemoryAccount, index: usize, value: JSValue) !void {
+    pub fn setLocal(self: *Frame, account: std.mem.Allocator, index: usize, value: JSValue) !void {
         try growLocalsCapacity(account, self, index);
         self.locals[index] = value;
     }
 };
 
 test "Frame setLocal preserves inline locals while growing" {
-    var rt = try JSRuntime.create(std.testing.allocator, .{});
+    var rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const name = try rt.internAtom("frame-inline-local-growth-test");
@@ -626,10 +629,10 @@ test "Frame setLocal preserves inline locals while growing" {
     defer function.destroyUnpublishedFixture(rt);
 
     var exec_frame = Frame.init(function);
-    defer exec_frame.deinit(&rt.memory, rt);
+    defer exec_frame.deinit(rt.nativeAllocator(), rt);
 
-    try exec_frame.setLocal(&rt.memory, 0, JSValue.int32(11));
-    try exec_frame.setLocal(&rt.memory, 1, JSValue.int32(22));
+    try exec_frame.setLocal(rt.nativeAllocator(), 0, JSValue.int32(11));
+    try exec_frame.setLocal(rt.nativeAllocator(), 1, JSValue.int32(22));
 
     try std.testing.expectEqual(@as(?i32, 11), exec_frame.locals[0].as(.int));
     try std.testing.expectEqual(@as(?i32, 22), exec_frame.locals[1].as(.int));
@@ -657,8 +660,8 @@ pub fn ensureVarRefsCapacity(ctx: *core.JSContext, frame: *Frame, idx: usize) !v
     // covering next_len pointer slots and window them.
     const ptr_bytes = try std.math.mul(usize, @sizeOf(*core.VarRef), next_len);
     const value_slots = try std.math.divCeil(usize, ptr_bytes, @sizeOf(core.JSValue));
-    const next_storage = try ctx.runtime.memory.alloc(core.JSValue, value_slots);
-    errdefer ctx.runtime.memory.free(core.JSValue, next_storage);
+    const next_storage = try ctx.runtime.nativeAllocator().alloc(core.JSValue, value_slots);
+    errdefer ctx.runtime.nativeAllocator().free(next_storage);
     const next: []*core.VarRef = std.mem.bytesAsSlice(*core.VarRef, std.mem.sliceAsBytes(next_storage)[0..ptr_bytes]);
     // Backfill slots are fresh closed cells holding undefined, never raw
     // slots: the slot contract is "every slot is a live JSVarRef*" (qjs
@@ -679,11 +682,11 @@ pub fn ensureVarRefsCapacity(ctx: *core.JSContext, frame: *Frame, idx: usize) !v
     frame.ownership.var_refs = .owned;
     frame.storage_values = next_storage;
     frame.ownership.storage = .owned;
-    if (old_storage.len != 0 and old_storage_ownership == .owned) ctx.runtime.memory.free(core.JSValue, old_storage);
+    if (old_storage.len != 0 and old_storage_ownership == .owned) ctx.runtime.nativeAllocator().free(old_storage);
 }
 
 /// Test-only; see `Frame.setLocal`, its sole caller.
-fn growLocalsCapacity(account: *memory.MemoryAccount, frame: *Frame, idx: usize) !void {
+fn growLocalsCapacity(account: std.mem.Allocator, frame: *Frame, idx: usize) !void {
     if (idx < frame.locals.len) return;
     const next_len = try std.math.add(usize, idx, 1);
     const old_storage = frame.storage_values;
@@ -701,14 +704,14 @@ fn growLocalsCapacity(account: *memory.MemoryAccount, frame: *Frame, idx: usize)
 
     const old_locals = frame.locals;
     const next = try account.alloc(JSValue, next_len);
-    errdefer account.free(JSValue, next);
+    errdefer account.free(next);
     if (old_locals.len != 0) @memcpy(next[0..old_locals.len], old_locals);
     @memset(next[old_locals.len..], JSValue.undefinedValue());
 
     frame.locals = next;
     frame.storage_values = next;
     frame.ownership.storage = .owned;
-    if (old_storage.len != 0 and old_storage_ownership == .owned) account.free(JSValue, old_storage);
+    if (old_storage.len != 0 and old_storage_ownership == .owned) account.free(old_storage);
 }
 
 fn ownedStorageContainsOnlyLocals(frame: *const Frame) bool {
@@ -745,7 +748,6 @@ fn sliceOverlapsStorage(comptime T: type, values: []const T, storage: []const JS
     const storage_end = std.math.add(usize, storage_start, storage_bytes) catch return true;
     return value_start < storage_end and storage_start < value_end;
 }
-
 
 // ----- merged from open_bindings.zig -----
 // Cold binding-identity table for frame locals and arguments.

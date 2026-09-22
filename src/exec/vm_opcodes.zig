@@ -4,7 +4,6 @@
 //! literals, generators/async, eval/module, regexp literals, and `using`.
 //! Property opcodes live in `vm_property.zig`.
 
-
 const std = @import("std");
 
 const bytecode = @import("../bytecode.zig");
@@ -781,10 +780,9 @@ fn looseEqualSameNumberTypes(lhs: core.JSValue, rhs: core.JSValue) bool {
     return lhs_number == rhs_number;
 }
 
-
 // ----- merged from vm_call.zig -----
 // Bytecode call, construct, and tail-call adapters plus call-depth accounting.
-// 
+//
 // Operand-stack values enter as owned slots; frame setup borrows, duplicates,
 // or transfers arguments and VarRef cells according to `Frame`'s explicit
 // dispositions. `CallDepthGuard` balances logical, native, and byte budgets.
@@ -882,23 +880,17 @@ inline fn bytecodeStackBudgetWouldOverflow(
 }
 
 /// The two byte-priced ceilings of a bytecode push, as one predicate over the
-/// already-formed sum: the wrap test (`accumulated` went backwards) and the
-/// qjs `js_check_stack_overflow` native recursion guard. `std.math.add`'s
-/// error union made LLVM materialize the overflow flag into a byte and spill
-/// it (`cset` + `sturb` in front of every crossing); `+%` plus the backwards
-/// compare is the same predicate with the flag consumed where it is produced.
+/// already-formed sum: checked VM bytes and a separate physical native-stack
+/// guard. A wrapping sum cannot be admitted even with an unlimited native stack.
 inline fn admissionCeilingsReject(
     hot: *const core.JSRuntime.HotExecState,
     accumulated: usize,
     planned_stack_bytes: usize,
 ) bool {
-    // No wrap test: every accepted `accumulated` is below a native frame
-    // address (the guard below), and one planned figure is bounded by the
-    // function header's u16 slot counts, so the sum stays under 2^49. The
-    // `std.math.add` error union this replaces cost a `cset` + a `tbnz` per
-    // crossing to carry a flag that is provably never set.
-    std.debug.assert(accumulated >= planned_stack_bytes);
-    return (@frameAddress() -| accumulated) < hot.native_stack_limit;
+    // VM bytes and native stack addresses are independent limits. Detect wrap
+    // before committing a charge; the native guard measures actual stack use.
+    return accumulated < planned_stack_bytes or accumulated > hot.stack_size or
+        @frameAddress() < hot.native_stack_limit;
 }
 
 /// Byte-priced variants: constructors that already hold the planned frame
@@ -1033,7 +1025,7 @@ pub inline fn initFrameLocals(
 ) !void {
     if (function.var_count == 0) return;
     var storage_transferred = false;
-    errdefer if (!storage_transferred) frame.releaseOwnedStorage(&ctx.runtime.memory, ctx.runtime);
+    errdefer if (!storage_transferred) frame.releaseOwnedStorage(ctx.runtime.nativeAllocator(), ctx.runtime);
 
     const locals = blk: {
         if (windows.locals) |values| {
@@ -1041,9 +1033,9 @@ pub inline fn initFrameLocals(
             break :blk values;
         }
         if (use_inline_storage) {
-            if (ctx.runtime.vm_stack.carve(&ctx.runtime.memory, function.var_count)) |window| break :blk window;
+            if (ctx.runtime.vm_stack.carve(ctx.runtime, function.var_count)) |window| break :blk window;
         }
-        break :blk try frame.allocOwnedStorage(&ctx.runtime.memory, function.var_count);
+        break :blk try frame.allocOwnedStorage(ctx.runtime.nativeAllocator(), function.var_count);
     };
     @memset(locals, core.JSValue.undefinedValue());
     frame.locals = locals;
@@ -1065,7 +1057,7 @@ pub inline fn initFrameVarRefs(
             break :blk cells;
         } else blk: {
             if (use_inline_storage) {
-                if (ctx.runtime.vm_stack.carveTyped(&ctx.runtime.memory, *core.VarRef, var_refs.len)) |window| break :blk window;
+                if (ctx.runtime.vm_stack.carveTyped(ctx.runtime, *core.VarRef, var_refs.len)) |window| break :blk window;
             }
             break :blk try allocFrameVarRefWindow(ctx, frame, var_refs.len);
         };
@@ -1088,7 +1080,7 @@ pub inline fn initFrameVarRefs(
 fn allocFrameVarRefWindow(ctx: *core.JSContext, frame: *frame_mod.Frame, count: usize) ![]*core.VarRef {
     const ptr_bytes = try std.math.mul(usize, @sizeOf(*core.VarRef), count);
     const value_slots = try std.math.divCeil(usize, ptr_bytes, @sizeOf(core.JSValue));
-    const values = try frame.allocOwnedStorage(&ctx.runtime.memory, value_slots);
+    const values = try frame.allocOwnedStorage(ctx.runtime.nativeAllocator(), value_slots);
     return std.mem.bytesAsSlice(*core.VarRef, std.mem.sliceAsBytes(values)[0..ptr_bytes]);
 }
 
@@ -1505,8 +1497,8 @@ pub noinline fn constructor(
     const args_buf: []core.JSValue = if (argc <= inline_args.len)
         inline_args[0..argc]
     else
-        try ctx.runtime.memory.alloc(core.JSValue, argc);
-    defer if (argc > inline_args.len) ctx.runtime.memory.free(core.JSValue, args_buf);
+        try ctx.runtime.nativeAllocator().alloc(core.JSValue, argc);
+    defer if (argc > inline_args.len) ctx.runtime.nativeAllocator().free(args_buf);
     var remaining: usize = argc;
     while (remaining > 0) {
         remaining -= 1;
@@ -1617,10 +1609,9 @@ fn readInt(comptime T: type, bytes: []const u8) T {
     return std.mem.readInt(T, bytes[0..@sizeOf(T)], .little);
 }
 
-
 // ----- merged from vm_control.zig -----
 // VM control-transfer helpers: return, jump, throw, catch, and iterator close.
-// 
+//
 // Stack pops are ownership moves, matching QuickJS opcode semantics; handled
 // throws install or route the pending exception before execution resumes.
 // Hot dispatch remains outside this file and calls these focused helpers.
@@ -1766,7 +1757,7 @@ fn createAtomError(
     const prefix_name_len = std.math.add(usize, prefix.len, atom_name.len) catch return error.OutOfMemory;
     const message_len = std.math.add(usize, prefix_name_len, suffix.len) catch return error.OutOfMemory;
     const message = try ctx.runtime.allocRuntime(u8, message_len);
-    defer ctx.runtime.memory.free(u8, message);
+    defer ctx.runtime.nativeAllocator().free(message);
     @memcpy(message[0..prefix.len], prefix);
     @memcpy(message[prefix.len..prefix_name_len], atom_name);
     @memcpy(message[prefix_name_len..], suffix);
@@ -1870,11 +1861,9 @@ fn varRefCellFromValue(value: core.JSValue) ?*core.VarRef {
     return core.VarRef.fromValue(value);
 }
 
-
-
 // ----- merged from vm_eval_module.zig -----
 // VM opcode helpers for direct eval, apply-eval, and dynamic import.
-// 
+//
 // The active frame supplies lexical/caller authority, while module jobs and
 // promise settlement stay in their owning modules. Stack operands are moved
 // or released here before control returns to the dispatch loop.
@@ -1978,11 +1967,9 @@ pub noinline fn dynamicImport(vm: *Vm) HostError!void {
     try stack.pushOwned(promise);
 }
 
-
-
 // ----- merged from vm_gen_async.zig -----
 // Generator, async-function, `yield`, and `await` opcode state transitions.
-// 
+//
 // Parking transfers frame and operand-stack backing into
 // `GeneratorExecutionState`; open VarRefs attach to that owner and live VM
 // views are cleared so resume or teardown releases each value exactly once.
@@ -2111,7 +2098,7 @@ fn parkGeneratorExecutionState(
             old_stack.values.ptr != state.storage.stack.values.ptr and
             !old_stack_uses_combined_storage)
         {
-            rt.memory.free(core.JSValue, old_stack.values.ptr[0..old_stack.capacity]);
+            rt.nativeAllocator().free(old_stack.values.ptr[0..old_stack.capacity]);
         }
         return;
     }
@@ -2147,7 +2134,7 @@ fn parkGeneratorExecutionState(
         old_stack.values.ptr != state.storage.stack.values.ptr and
         !old_stack_uses_combined_storage)
     {
-        rt.memory.free(core.JSValue, old_stack.values.ptr[0..old_stack.capacity]);
+        rt.nativeAllocator().free(old_stack.values.ptr[0..old_stack.capacity]);
     }
 
     if (has_frame and !was_resident_owner and execution.canRetainResidentStorageOwnership()) {
@@ -2660,10 +2647,9 @@ fn closeIteratorForPendingError(
 
 const objectFromValue = core.value_semantics.objectFromValueTrustedExpression;
 
-
 // ----- merged from vm_literal.zig -----
 // Object, array, spread, rest, and special-object literal opcode adapters.
-// 
+//
 // Popped stack values are owned locally; successful property insertion or
 // stack push transfers them, while guarded fast probes remain borrow-until-
 // commit. Observable iterator and property work stays on the explicit call
@@ -2758,8 +2744,8 @@ pub noinline fn arrayFrom(vm: *Vm) HostError!void {
     const values = if (argc <= stack_values.len)
         stack_values[0..argc]
     else
-        try ctx.runtime.memory.alloc(core.JSValue, argc);
-    defer if (argc > stack_values.len) ctx.runtime.memory.free(core.JSValue, values);
+        try ctx.runtime.nativeAllocator().alloc(core.JSValue, argc);
+    defer if (argc > stack_values.len) ctx.runtime.nativeAllocator().free(values);
     var remaining: usize = argc;
     while (remaining > 0) {
         remaining -= 1;
@@ -2971,8 +2957,8 @@ pub noinline fn copyDataProperties(vm: *Vm) HostError!void {
         // observable side effects -- and it freezes which keys copy before any
         // value getter can mutate a later key's enumerability/existence
         // (qjs ENUM_ONLY snapshots tab_atom once up front).
-        const copy_flags = try rt.memory.alloc(bool, keys.len);
-        defer rt.memory.free(bool, copy_flags);
+        const copy_flags = try rt.nativeAllocator().alloc(bool, keys.len);
+        defer rt.nativeAllocator().free(copy_flags);
         for (keys, copy_flags) |key, *copy| {
             if (exclusion) |excluded| {
                 if (excluded.hasOwnProperty(key)) {
@@ -3112,8 +3098,6 @@ fn stackValueFromTop(stack: *const stack_mod.Stack, offset: u8) !core.JSValue {
     return stack.values[stack.len() - 1 - index_from_top];
 }
 
-
-
 // ----- merged from vm_native.zig -----
 // NB2 §5.2: the one VM-side native call dispatcher for both call shapes
 // (`op_call*`: window = [callee, args...]; `op_call_method`: window =
@@ -3122,7 +3106,7 @@ fn stackValueFromTop(stack: *const stack_mod.Stack, offset: u8) !core.JSValue {
 // `builtin_dispatch.callRecordFromVmInRealm` (preflight, backtrace marker,
 // leaf arm without environment, managed arm with environment only when the
 // entry declares `needs_env`).
-// 
+//
 // Per D7 there is no interrupt tick here: qjs `js_call_c_function` does not
 // poll either; JS loops poll at their back-edges and function entries.
 pub const Shape = enum { plain, method };
@@ -3219,10 +3203,9 @@ pub noinline fn failure(
     return err;
 }
 
-
 // ----- merged from vm_regexp.zig -----
 // VM adapter for compiled RegExp literal creation.
-// 
+//
 // The operand stack transfers owned pattern/bytecode constants into this
 // helper; locals release them after construction, and `pushOwned` transfers
 // the fresh RegExp result back to the stack. The active global selects the
@@ -3261,10 +3244,9 @@ pub noinline fn pushLiteral(vm: *Vm) HostError!void {
     try vm.stack.pushOwned(value);
 }
 
-
 // ----- merged from vm_value.zig -----
 // Value, constant, stack-shuffle, `typeof`, and return opcode adapters.
-// 
+//
 // Operand-stack slots are owned; borrowed frame bindings and constant-pool
 // values are duplicated before they are pushed, while explicit pop/drop paths
 // release their slots. Private symbols and completion values transfer only at
@@ -3752,7 +3734,7 @@ fn countLivePrivateAtomsNamed(rt: *core.JSRuntime, expected_name: []const u8) us
 }
 
 test "function object lookup recognizes every bytecode function class" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const class_ids = [_]core.ClassId{
@@ -3771,7 +3753,7 @@ test "function object lookup recognizes every bytecode function class" {
 }
 
 test "push private symbol creates a fresh runtime atom per execution" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -3791,7 +3773,7 @@ test "push private symbol creates a fresh runtime atom per execution" {
     const execution_function = try bytecode.FunctionBytecode.createFixture(rt, .{ .name = function_name, .byte_code = &code });
     defer execution_function.destroyUnpublishedFixture(rt);
     var frame = frame_mod.Frame.init(execution_function);
-    var stack = stack_mod.Stack.init(&rt.memory, 8);
+    var stack = stack_mod.Stack.init(rt, 8);
     defer stack.deinit(rt);
 
     try pushPrivateSymbol(ctx, &stack, execution_function, &frame);
@@ -3814,22 +3796,22 @@ test "push private symbol creates a fresh runtime atom per execution" {
         try std.testing.expectEqual(@as(usize, 3), countLivePrivateAtomsNamed(rt, template_name));
     }
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(first_atom) == null);
     try std.testing.expect(rt.atoms.name(second_atom) == null);
     try std.testing.expectEqual(@as(usize, 1), countLivePrivateAtomsNamed(rt, template_name));
     template_roots.deactivate(rt);
     template_atom_released = true;
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(template_atom) == null);
 }
 
 test "stack rearrange opcodes validate depth before mutating stack" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
-    var stack = stack_mod.Stack.init(&rt.memory, 8);
+    var stack = stack_mod.Stack.init(rt, 8);
     defer stack.deinit(rt);
 
     try stack.pushOwned(core.JSValue.int32(1));
@@ -3846,7 +3828,7 @@ test "stack rearrange opcodes validate depth before mutating stack" {
 }
 
 test "push private symbol stack failure does not retain transient private atom" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -3866,27 +3848,27 @@ test "push private symbol stack failure does not retain transient private atom" 
     const execution_function = try bytecode.FunctionBytecode.createFixture(rt, .{ .name = function_name, .byte_code = &code });
     defer execution_function.destroyUnpublishedFixture(rt);
     var frame = frame_mod.Frame.init(execution_function);
-    var stack = stack_mod.Stack.init(&rt.memory, 0);
+    var stack = stack_mod.Stack.init(rt, 0);
     defer stack.deinit(rt);
 
     // TGC S3-c: `free` no longer retires an entry -- a major does. The
     // calibration atom exists to warm one recyclable slot, so it has to be
     // collected before the measurement.
     _ = try rt.atoms.newSymbol(template_name, .private);
-    _ = rt.runObjectCycleRemoval();
-    const allocated_before = rt.memory.allocated_bytes;
+    _ = rt.collectForTest();
+    const allocated_before = rt.diagnostics.allocations.allocated_bytes;
     try std.testing.expectError(error.StackOverflow, pushPrivateSymbol(ctx, &stack, execution_function, &frame));
-    try std.testing.expectEqual(allocated_before, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(allocated_before, rt.diagnostics.allocations.allocated_bytes);
     try std.testing.expectEqual(@as(usize, 1), countLivePrivateAtomsNamed(rt, template_name));
 
     template_roots.deactivate(rt);
     template_atom_released = true;
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(template_atom) == null);
 }
 
 test "push private symbol releases fresh atom on allocation failure" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -3904,33 +3886,33 @@ test "push private symbol releases fresh atom on allocation failure" {
     const execution_function = try bytecode.FunctionBytecode.createFixture(rt, .{ .name = function_name, .byte_code = &code });
     defer execution_function.destroyUnpublishedFixture(rt);
     var frame = frame_mod.Frame.init(execution_function);
-    var stack = stack_mod.Stack.init(&rt.memory, 1);
+    var stack = stack_mod.Stack.init(rt, 1);
     defer stack.deinit(rt);
-    defer rt.setMemoryLimit(null);
+    defer rt.setNativeBytesLimitForTest(null);
 
     // Warm one recyclable atom-table slot and measure the exact transient
     // description allocation. The following limit then admits newSymbol but
     // rejects the first symbol-body allocation in takeSymbolValue.
     _ = try rt.atoms.newSymbol(template_name, .private);
-    const allocated_with_atom = rt.memory.allocated_bytes;
+    const allocated_with_atom = rt.diagnostics.allocations.allocated_bytes;
     // TGC S3-c: `free` no longer retires an entry -- a major does.
-    _ = rt.runObjectCycleRemoval();
-    const allocated_before = rt.memory.allocated_bytes;
+    _ = rt.collectForTest();
+    const allocated_before = rt.diagnostics.allocations.allocated_bytes;
     try std.testing.expect(allocated_with_atom > allocated_before);
     const atom_allocation_bytes = allocated_with_atom - allocated_before;
     try std.testing.expectEqual(@as(usize, 1), countLivePrivateAtomsNamed(rt, template_name));
 
-    rt.setMemoryLimit(allocated_before);
+    rt.setNativeBytesLimitForTest(allocated_before);
     try std.testing.expectError(error.OutOfMemory, pushPrivateSymbol(ctx, &stack, execution_function, &frame));
-    rt.setMemoryLimit(null);
-    try std.testing.expectEqual(allocated_before, rt.memory.allocated_bytes);
+    rt.setNativeBytesLimitForTest(null);
+    try std.testing.expectEqual(allocated_before, rt.diagnostics.allocations.allocated_bytes);
     try std.testing.expectEqual(@as(usize, 1), countLivePrivateAtomsNamed(rt, template_name));
 
     frame.pc = 0;
-    rt.setMemoryLimit(allocated_before + atom_allocation_bytes);
+    rt.setNativeBytesLimitForTest(allocated_before + atom_allocation_bytes);
     try std.testing.expectError(error.OutOfMemory, pushPrivateSymbol(ctx, &stack, execution_function, &frame));
-    rt.setMemoryLimit(null);
-    try std.testing.expectEqual(allocated_before, rt.memory.allocated_bytes);
+    rt.setNativeBytesLimitForTest(null);
+    try std.testing.expectEqual(allocated_before, rt.diagnostics.allocations.allocated_bytes);
     try std.testing.expectEqual(@as(usize, 1), countLivePrivateAtomsNamed(rt, template_name));
 
     frame.pc = 0;
@@ -3940,7 +3922,6 @@ test "push private symbol releases fresh atom on allocation failure" {
     try std.testing.expect(recovered_atom != template_atom);
     try std.testing.expectEqualStrings(template_name, rt.atoms.name(recovered_atom).?);
 }
-
 
 // ----- merged from using_ops.zig -----
 // Bytecode handlers for explicit-resource-management (`using`) operations.
@@ -4132,3 +4113,13 @@ pub noinline fn disposeStackVm(vm: *Vm, disposition: DisposalDisposition) HostEr
     stack.pushOwnedAssumeCapacity(result);
 }
 
+test "VM byte admission is independent of native stack addresses" {
+    var hot = core.JSRuntime.HotExecState{};
+    hot.stack_size = 1024;
+    hot.native_stack_limit = 0;
+    try std.testing.expect(!admissionCeilingsReject(&hot, 1024, 512));
+    try std.testing.expect(admissionCeilingsReject(&hot, 1025, 512));
+    try std.testing.expect(admissionCeilingsReject(&hot, 2, 512));
+    hot.native_stack_limit = std.math.maxInt(usize);
+    try std.testing.expect(admissionCeilingsReject(&hot, 512, 512));
+}

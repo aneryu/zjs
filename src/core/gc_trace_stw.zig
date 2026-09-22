@@ -8,6 +8,7 @@
 //! live. A collection failure returns to the caller; the runtime aborts the
 //! cycle and retries from fresh marks.
 
+const mem_ops = @import("memory.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -420,7 +421,7 @@ fn computeFullReachable(rt: *JSRuntime, scan: runtime_mod.GCRootScan) !FullReach
     // the heap it is auditing changes the very numbers a settled-account test
     // reads back (and inherits the suite's OOM injection, which only made the
     // probe give up).
-    const allocator = rt.memory.backing_allocator;
+    const allocator = rt.allocator;
     const entry_epoch: u64 = rt.gc.block_heap.mark_epoch;
     var reachable: FullReachable = .{ .allocator = allocator };
     errdefer reachable.deinit();
@@ -582,7 +583,7 @@ inline fn censusEnd(rt: *JSRuntime, started: u64) void {
 
 fn requireInvariant(result: anyerror!void, audit: []const u8, panic_message: []const u8) void {
     result catch |err| {
-        std.debug.print("gc: {s} AUDIT: {s}\n", .{audit, @errorName(err)});
+        std.debug.print("gc: {s} AUDIT: {s}\n", .{ audit, @errorName(err) });
         @panic(panic_message);
     };
 }
@@ -649,7 +650,7 @@ fn recordFinalMarkFootprint(rt: *JSRuntime) void {
     const started = censusStart();
     defer censusEnd(rt, started);
 
-    const footprint = &rt.gc_mark_footprint;
+    const footprint = &rt.diagnostics.mark_footprint;
     footprint.major_censuses +|= 1;
     var marked = rt.gc.objectIterator(.all);
     while (marked.next()) |header| {
@@ -1943,8 +1944,7 @@ const Collector = struct {
                     "gc: STALE YOUNG REFERENCE: slot {x} names {x} (reclaimed page); holder {x} kind={d} class={d} offset={d}\n",
                     .{
                         @intFromPtr(val), @intFromPtr(header), owner_desc.addr,
-                        owner_desc.kind, owner_desc.class,
-                        @intFromPtr(val) -| owner_desc.addr,
+                        owner_desc.kind,  owner_desc.class,    @intFromPtr(val) -| owner_desc.addr,
                     },
                 );
                 if (self.tracing_owner) |owner| {
@@ -2298,7 +2298,7 @@ const Collector = struct {
     fn ephemeronFixedPoint(self: *Collector) CollectError!void {
         while (true) {
             const before = self.report.ephemeron_values_shaded;
-            var holder = self.rt.weak_reference_holder_head;
+            var holder = gc.gc_weak.holderHead(self.rt);
             while (holder) |object| {
                 const next = object.weakReferenceHolderNext();
                 if (self.rt.gc.headerMarked(object.gcHeader())) {
@@ -2322,7 +2322,7 @@ const Collector = struct {
     }
 
     fn processWeak(self: *Collector) void {
-        for (self.rt.weak_root_slots.items) |slot| {
+        for (self.rt.roots.weak_root_slots.items) |slot| {
             const identity = slot.identity orelse continue;
             if (!keyIsMarked(self.rt, identity)) {
                 self.rt.clearWeakRootSlot(slot, true);
@@ -2330,7 +2330,7 @@ const Collector = struct {
         }
 
         var finalization_enqueue_blocked = false;
-        var current = self.rt.weak_reference_holder_head;
+        var current = gc.gc_weak.holderHead(self.rt);
         while (current) |holder| {
             const next = holder.weakReferenceHolderNext();
             if (self.rt.gc.headerMarked(holder.gcHeader())) {
@@ -2499,7 +2499,8 @@ const Collector = struct {
             // because `seedRoots` shades the whole pin ledger before anything
             // else; the pin test below is kept anyway, now that it costs a
             // probe per corpse rather than per cell.
-            self.rt.memory.debitBlockBytes(
+            mem_ops.debitBlockBytes(
+                self.rt,
                 self.rt.gc.block_heap.snapshotYoungDoomed(self.rt.gc.block_heap.mark_epoch).bitmap_bytes,
             );
             self.stampYoungBlockCorpses();
@@ -2565,7 +2566,8 @@ const Collector = struct {
                     condemnIntoBucket(self.rt, header);
                 }
             }
-            self.rt.memory.debitBlockBytes(
+            mem_ops.debitBlockBytes(
+                self.rt,
                 self.rt.gc.block_heap.snapshotYoungDoomed(self.rt.gc.block_heap.mark_epoch).bitmap_bytes,
             );
         }
@@ -2627,7 +2629,8 @@ const Collector = struct {
             }
             gc.Registry.detachBlockObjectCandidate(header);
         }
-        self.rt.memory.debitBlockBytes(
+        mem_ops.debitBlockBytes(
+            self.rt,
             self.rt.gc.block_heap.snapshotAllDoomed(self.rt.gc.block_heap.mark_epoch).bitmap_bytes,
         );
 

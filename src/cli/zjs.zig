@@ -1,5 +1,6 @@
 //! CLI boundary for script/module evaluation, host loading, job draining, and exception/rejection reporting.
 //! Source buffers live through evaluation; `--leak-check` selects explicit event-loop, context, and runtime teardown.
+const mem_ops = @import("zjs").core.memory;
 const std = @import("std");
 const cli_process = @import("cli_process.zig");
 const zjs = @import("zjs");
@@ -263,7 +264,8 @@ fn execute(init: std.process.Init, command: *Command) !void {
     var opcode_profile: zjs.OpcodeProfile = undefined;
     initOpcodeProfile(&opcode_profile);
 
-    const rt = zjs.Runtime.create(allocator, .{
+    const rt = zjs.Runtime.create(.{
+        .allocator = allocator,
         .trace_writer = if (runtime_options.trace_memory) stdout else null,
         .memory_limit = runtime_options.memory_limit,
         .gc_threshold = zjs.default_gc_threshold,
@@ -617,22 +619,22 @@ fn printEvaluationError(io: std.Io, ctx: *zjs.Context, rt: *zjs.Runtime, err: an
 fn printExceptionValue(stderr: *std.Io.Writer, ctx: *zjs.Context, rt: *zjs.Runtime, value: zjs.Value) !bool {
     if (!value.is(.object)) return false;
 
-    const header = try ctx.formatException(value, rt.memory.allocator);
-    defer rt.memory.allocator.free(header);
+    const header = try ctx.formatException(value, rt.nativeAllocator());
+    defer rt.nativeAllocator().free(header);
     if (header.len == 0) {
         try stderr.print("Error\n", .{});
     } else {
         try stderr.print("{s}\n", .{header});
     }
 
-    const stack = ctx.formatExceptionStack(value, rt.memory.allocator) catch |err| blk: {
+    const stack = ctx.formatExceptionStack(value, rt.nativeAllocator()) catch |err| blk: {
         if (ctx.hasException()) {
             ctx.clearException();
             break :blk null;
         }
         return err;
     };
-    defer if (stack) |bytes| rt.memory.allocator.free(bytes);
+    defer if (stack) |bytes| rt.nativeAllocator().free(bytes);
     if (stack) |bytes| {
         if (bytes.len != 0) {
             try stderr.writeAll(bytes);
@@ -694,16 +696,20 @@ fn dumpMemorySnapshot(output: *std.Io.Writer, memory: zjs.RuntimeMemoryUsage) !v
     } else {
         try output.print("0\n", .{});
     }
+    if (!memory.allocation_tracking_enabled) try output.print("  native allocation counters: unavailable in this build\n  heap accounted bytes: {d}\n", .{memory.heap_bytes});
     try output.print("\nNAME                    COUNT     SIZE\n", .{});
-    for ([_]struct { []const u8, usize, usize }{
+    const rows = [_]struct { []const u8, usize, ?usize }{
         .{ "memory allocated", memory.allocation_count, memory.allocated_bytes },
         .{ "atoms", memory.atom_count, memory.atom_bytes },
-        .{ "objects", memory.object_count, memory.object_bytes },
-        .{ "shapes", memory.shape_count, memory.shape_bytes },
-        .{ "modules", memory.module_count, memory.module_bytes },
-        .{ "classes", memory.registered_class_count, memory.class_bytes },
-    }) |row| {
-        try output.print("{s:<22} {d:>5} {d:>8}\n", row);
+        .{ "classes", memory.registered_class_count, null },
+    };
+    for (rows) |row| {
+        try output.print("{s:<22} {d:>5} ", .{ row[0], row[1] });
+        if (row[2]) |size| {
+            try output.print("{d:>8}\n", .{size});
+        } else {
+            try output.print("{s:>8}\n", .{"-"});
+        }
     }
 }
 
@@ -733,7 +739,7 @@ fn dumpGcPanels(writer: *std.Io.Writer, runtime: *zjs.Runtime, runtime_options: 
         try dumpGcDoomedState(writer, "endpoint", runtime);
         zjs.core.runtime.settlePendingDestructionForGateStats(runtime);
     }
-    try dumpGcStats(writer, runtime.gcStats(), &runtime.gc);
+    try dumpGcStats(writer, runtime.gcDetailedStats(), &runtime.gc);
     try dumpAtomAuditStats(writer, runtime);
     try dumpGcPauses(writer, runtime.gcPauseDistribution());
     try dumpGcSpaceStats(writer, &runtime.gc);
@@ -1029,7 +1035,7 @@ fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const zjs.core.gc.Reg
 }
 
 fn dumpGcMarkFootprint(writer: *std.Io.Writer, rt: *const zjs.core.JSRuntime) !void {
-    const fp = rt.gc_mark_footprint;
+    const fp = rt.diagnostics.mark_footprint;
     // An all-zero panel reads like "nothing was marked", which is a wrong
     // answer rather than a missing one. Say which it is.
     if (!zjs.core.gc_trace_stw.mark_footprint_census) {
@@ -1113,7 +1119,8 @@ fn dumpGcMarkFootprint(writer: *std.Io.Writer, rt: *const zjs.core.JSRuntime) !v
     }
 }
 
-fn dumpGcStats(writer: *std.Io.Writer, stats: zjs.GCStats, registry: *const zjs.core.gc.Registry) !void {
+fn dumpGcStats(writer: *std.Io.Writer, detailed: zjs.GCDetailedStats, registry: *const zjs.core.gc.Registry) !void {
+    const stats = detailed.counters;
     const minors = registry.generation.stats.minor_collections;
     try writeCounterLine(writer, &.{
         .{ "gc: collection entries total ", stats.collections },
@@ -1125,12 +1132,12 @@ fn dumpGcStats(writer: *std.Io.Writer, stats: zjs.GCStats, registry: *const zjs.
         .{ "gc: collector counted objects freed ", stats.freed_objects },
     }, " (excludes bytecode)\n");
     try writeCounterLine(writer, &.{
-        .{ "gc: heap live ", stats.heap_live_bytes },
+        .{ "gc: heap live ", detailed.heap_live_bytes },
         .{ " bytes, account peak ", stats.peak_allocated_bytes },
     }, " bytes\n");
     // External is a separate reporting dimension, even where an ordinary
     // ArrayBuffer's engine-owned backing also overlaps the whole
-    // MemoryAccount. The weighted debt is a pacing counter, not current live
+    // mem_ops. The weighted debt is a pacing counter, not current live
     // bytes; printing both prevents either from being mistaken for the other.
     try writeCounterLine(writer, &.{
         .{ "gc: external bytes current ", stats.external_bytes },
@@ -1446,8 +1453,8 @@ test "opcode profile initialization preserves every default field" {
 test "zjs mark footprint serialization preserves populated rows and missing census" {
     // Only the census field is read by this serializer; no collector is run.
     var rt: zjs.core.JSRuntime = undefined;
-    rt.gc_mark_footprint = .{ .major_censuses = 2, .marked_headers = 3, .block_headers = 4 };
-    const fp = &rt.gc_mark_footprint;
+    rt.diagnostics.mark_footprint = .{ .major_censuses = 2, .marked_headers = 3, .block_headers = 4 };
+    const fp = &rt.diagnostics.mark_footprint;
     fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.object)] = 1;
     fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.function_bytecode)] = 2;
     fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.var_ref)] = 3;
@@ -1514,8 +1521,9 @@ test "zjs mark footprint serialization preserves populated rows and missing cens
 }
 
 test "zjs generation diagnostic lines preserve populated snapshot" {
-    var memory = zjs.core.memory.MemoryAccount.init(std.testing.allocator);
-    var registry: zjs.core.gc.Registry = .{ .memory = &memory };
+    const memory = try mem_ops.createTestRuntime(std.testing.allocator);
+    defer memory.destroy();
+    var registry: zjs.core.gc.Registry = .{ .runtime = memory };
     // Position-based fill so every counter prints a distinct value; the
     // minor phase array takes one position per phase.
     comptime var position: usize = 0;
@@ -1606,8 +1614,9 @@ test "zjs doomed state line preserves mixed bools and counters" {
 }
 
 test "zjs registry diagnostic panels preserve populated snapshot" {
-    var memory = zjs.core.memory.MemoryAccount.init(std.testing.allocator);
-    var registry: zjs.core.gc.Registry = .{ .memory = &memory };
+    const memory = try mem_ops.createTestRuntime(std.testing.allocator);
+    defer memory.destroy();
+    var registry: zjs.core.gc.Registry = .{ .runtime = memory };
     inline for (@typeInfo(@TypeOf(registry.stats)).@"struct".fields, 0..) |field, i| {
         if (@typeInfo(field.type) == .int) @field(registry.stats, field.name) = @intCast(i + 11);
     }
@@ -1625,11 +1634,28 @@ test "zjs registry diagnostic panels preserve populated snapshot" {
     try dumpGcSpaceStats(&writer, &registry);
     try dumpGcBlockCensus(&writer, &registry);
     try dumpGcBlockHeapStats(&writer, &registry);
-    var stats: zjs.GCStats = .{};
-    inline for (@typeInfo(zjs.GCStats).@"struct".fields, 0..) |field, i| {
-        if (@typeInfo(field.type) == .int) @field(stats, field.name) = @intCast(i + 301);
-    }
-    try dumpGcStats(&writer, stats, &registry);
+    const detailed = zjs.GCDetailedStats{
+        .heap_live_bytes = 303,
+        .counters = .{
+            .peak_allocated_bytes = 302,
+            .external_bytes = 312,
+            .external_untracked_bytes = 313,
+            .peak_external_bytes = 314,
+            .external_alloc_count = 315,
+            .external_free_count = 316,
+            .external_token_count = 317,
+            .external_token_bytes = 318,
+            .external_invalid_release_count = 319,
+            .allocation_debt = 320,
+            .collections = 321,
+            .major_gc_count = 322,
+            .failed_collections = 326,
+            .freed_objects = 328,
+            .weak_ref_count = 330,
+            .finalizer_queue_length = 331,
+        },
+    };
+    try dumpGcStats(&writer, detailed, &registry);
     try dumpGcPauses(&writer, null);
     try dumpGcPauses(&writer, .{ .samples = 3, .p50_ns = 2, .p95_ns = 3, .p99_ns = 5, .max_ns = 7 });
     const expected =
@@ -1660,25 +1686,16 @@ test "zjs registry diagnostic panels preserve populated snapshot" {
 
 test "zjs memory table preserves widths and populated fields" {
     var memory = std.mem.zeroes(zjs.RuntimeMemoryUsage);
+    memory.allocation_tracking_enabled = true;
     memory.allocation_count = 123456;
     memory.allocated_bytes = 999999999;
     memory.atom_count = 3;
     memory.atom_bytes = 4;
-    memory.object_count = 5;
-    memory.object_bytes = 6;
-    memory.shape_count = 7;
-    memory.shape_bytes = 8;
-    memory.module_count = 9;
-    memory.module_bytes = 10;
     memory.registered_class_count = 11;
-    memory.class_bytes = 12;
     const rows =
         \\memory allocated       123456 999999999
         \\atoms                      3        4
-        \\objects                    5        6
-        \\shapes                     7        8
-        \\modules                    9       10
-        \\classes                   11       12
+        \\classes                   11        -
         \\
     ;
     var buf: [2048]u8 = undefined;

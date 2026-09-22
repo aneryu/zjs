@@ -18,6 +18,7 @@
 //! `exec/vm_property.zig`) and the WeakMap test-support mutator
 //! (`setWeakMapEntry`, consumed by `exec/call.zig`) live here too.
 
+const mem_ops = @import("memory.zig");
 const std = @import("std");
 
 const core = @import("root.zig");
@@ -257,8 +258,8 @@ fn bucketCountForActiveCount(active_count: usize) usize {
 }
 
 fn rebuildStrongIndex(rt: *core.JSRuntime, object: *core.Object, bucket_count: usize) !void {
-    const next = try rt.memory.alloc(usize, bucket_count);
-    errdefer rt.memory.free(usize, next);
+    const next = try mem_ops.alloc(rt, usize, bucket_count);
+    errdefer mem_ops.free(rt, usize, next);
     @memset(next, strong_no_entry);
 
     for (object.collectionEntriesSlot().items, 0..) |*entry, index| {
@@ -271,7 +272,7 @@ fn rebuildStrongIndex(rt: *core.JSRuntime, object: *core.Object, bucket_count: u
     }
 
     const heads = object.collectionBucketHeadsSlot();
-    if (heads.*.len != 0) rt.memory.free(usize, heads.*);
+    if (heads.*.len != 0) mem_ops.free(rt, usize, heads.*);
     heads.* = next;
 }
 
@@ -343,8 +344,8 @@ fn ensureWeakIndexForInsert(rt: *core.JSRuntime, object: *core.Object, next_coun
 }
 
 fn rebuildWeakIndex(rt: *core.JSRuntime, object: *core.Object, bucket_count: usize) !void {
-    const next = try rt.memory.alloc(usize, bucket_count);
-    errdefer rt.memory.free(usize, next);
+    const next = try mem_ops.alloc(rt, usize, bucket_count);
+    errdefer mem_ops.free(rt, usize, next);
     @memset(next, weak_no_entry);
 
     for (object.weakCollectionEntriesSlot().items, 0..) |*entry, index| {
@@ -356,7 +357,7 @@ fn rebuildWeakIndex(rt: *core.JSRuntime, object: *core.Object, bucket_count: usi
     }
 
     const heads = object.collectionBucketHeadsSlot();
-    if (heads.*.len != 0) rt.memory.free(usize, heads.*);
+    if (heads.*.len != 0) mem_ops.free(rt, usize, heads.*);
     heads.* = next;
 }
 
@@ -470,9 +471,9 @@ fn shrinkStrongStorage(rt: *core.JSRuntime, object: *core.Object) void {
         var next_capacity: usize = 8;
         while (next_capacity < live * 2) next_capacity *= 2;
         if (next_capacity < entries.capacity) shrink: {
-            var next = std.ArrayListUnmanaged(core.object.CollectionEntry).initCapacity(rt.memory.persistent_allocator, next_capacity) catch break :shrink;
+            var next = std.ArrayListUnmanaged(core.object.CollectionEntry).initCapacity(rt.nativeAllocator(), next_capacity) catch break :shrink;
             next.appendSliceAssumeCapacity(entries.items);
-            entries.deinit(rt.memory.persistent_allocator);
+            entries.deinit(rt.nativeAllocator());
             entries.* = next;
         }
     }
@@ -481,14 +482,14 @@ fn shrinkStrongStorage(rt: *core.JSRuntime, object: *core.Object) void {
     if (heads.*.len < 32 or live * 4 > heads.*.len) return;
     const next_count = bucketCountForActiveCount(live);
     if (next_count >= heads.*.len) return;
-    const next = rt.memory.alloc(usize, next_count) catch return;
+    const next = mem_ops.alloc(rt, usize, next_count) catch return;
     @memset(next, strong_no_entry);
     for (entries.items, 0..) |*entry, index| {
         const bucket = bucketIndex(entry.hash, next.len);
         entry.hash_next = next[bucket];
         next[bucket] = index;
     }
-    rt.memory.free(usize, heads.*);
+    mem_ops.free(rt, usize, heads.*);
     heads.* = next;
 }
 

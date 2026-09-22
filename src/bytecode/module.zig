@@ -1,7 +1,6 @@
 const std = @import("std");
 const bytecode = @import("../bytecode.zig");
 const atom = @import("../core/atom.zig");
-const memory = @import("../core/memory.zig");
 const FunctionBytecode = bytecode.FunctionBytecode;
 const module = @This();
 
@@ -45,7 +44,7 @@ pub const ImportAttribute = struct {
 };
 
 pub const Record = struct {
-    memory: *memory.MemoryAccount,
+    memory: std.mem.Allocator,
     atoms: *atom.AtomTable,
     requests: []Request = &.{},
     imports: []Import = &.{},
@@ -55,8 +54,8 @@ pub const Record = struct {
     import_attributes: []ImportAttribute = &.{},
     has_top_level_await: bool = false,
 
-    pub fn init(account: *memory.MemoryAccount, atoms: *atom.AtomTable) Record {
-        return .{ .memory = account, .atoms = atoms };
+    pub fn init(allocator: std.mem.Allocator, atoms: *atom.AtomTable) Record {
+        return .{ .memory = allocator, .atoms = atoms };
     }
 
     pub fn deinit(self: *Record) void {
@@ -74,12 +73,12 @@ pub const Record = struct {
         self.import_attributes = &.{};
         self.has_top_level_await = false;
 
-        if (requests.len != 0) self.memory.free(Request, requests);
-        if (imports.len != 0) self.memory.free(Import, imports);
-        if (exports.len != 0) self.memory.free(Export, exports);
-        if (indirect_exports.len != 0) self.memory.free(IndirectExport, indirect_exports);
-        if (star_exports.len != 0) self.memory.free(StarExport, star_exports);
-        if (import_attributes.len != 0) self.memory.free(ImportAttribute, import_attributes);
+        if (requests.len != 0) self.memory.free(requests);
+        if (imports.len != 0) self.memory.free(imports);
+        if (exports.len != 0) self.memory.free(exports);
+        if (indirect_exports.len != 0) self.memory.free(indirect_exports);
+        if (star_exports.len != 0) self.memory.free(star_exports);
+        if (import_attributes.len != 0) self.memory.free(import_attributes);
     }
 
     pub fn addRequest(self: *Record, module_name: atom.Atom) !u32 {
@@ -143,18 +142,14 @@ pub const Record = struct {
     }
 };
 
-inline fn append(account: *memory.MemoryAccount, comptime T: type, slice: *[]T, item: T) !void {
+inline fn append(allocator: std.mem.Allocator, comptime T: type, slice: *[]T, item: T) !void {
     const old = slice.*;
     const new_count = std.math.add(usize, old.len, 1) catch return error.OutOfMemory;
-    const old_ptr: [*]u8 = if (old.len == 0) undefined else @ptrCast(old.ptr);
-    const new_buf = try account.reallocElements(
-        old_ptr,
-        old.len,
-        new_count,
-        @sizeOf(T),
-        comptime std.mem.Alignment.of(T),
-    );
-    const next: []T = @as([*]T, @ptrCast(@alignCast(new_buf.ptr)))[0..new_count];
+    const next = try allocator.alloc(T, new_count);
+    if (old.len != 0) {
+        @memcpy(next[0..old.len], old);
+        allocator.free(old);
+    }
     next[old.len] = item;
     slice.* = next;
 }

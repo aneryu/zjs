@@ -23,7 +23,7 @@ pub fn parseIntValue(rt: *core.JSRuntime, input: core.JSValue, radix_value: ?cor
     }
 
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try core.value_string.appendValueString(rt, &bytes, input, .{ .unwrap_wrappers = true });
 
     const radix = if (radix_value) |value| toInt32(try toNumber(rt, value)) else 0;
@@ -46,7 +46,7 @@ pub fn parseFloatValue(rt: *core.JSRuntime, input: core.JSValue) !f64 {
     }
 
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try core.value_string.appendValueString(rt, &bytes, input, .{ .unwrap_wrappers = true });
     return parseFloatLatin1Bytes(core.value_format.trimJsWhitespace(bytes.items));
 }
@@ -80,7 +80,7 @@ pub fn toNumber(rt: *core.JSRuntime, value: core.JSValue) !f64 {
     if (value.is(.undefined_value)) return std.math.nan(f64);
 
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try core.value_string.appendValueString(rt, &bytes, value, .{ .unwrap_wrappers = true });
     return core.value_format.parseJsNumber(bytes.items);
 }

@@ -64,7 +64,7 @@ pub fn appendJsonAtomName(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), atom_
     if (std.unicode.wtf8ValidateSlice(name) and !std.unicode.utf8ValidateSlice(name)) {
         const view = std.unicode.Wtf8View.init(name) catch return appendEscapedJsonString(rt, buffer, name);
         var iter = view.iterator();
-        try buffer.append(rt.memory.allocator, '"');
+        try buffer.append(rt.nativeAllocator(), '"');
         while (iter.nextCodepoint()) |cp| {
             if (cp >= 0xD800 and cp <= 0xDFFF) {
                 try appendEscapedJsonUnit(rt, buffer, @as(u16, @intCast(cp)));
@@ -74,7 +74,7 @@ pub fn appendJsonAtomName(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), atom_
                 try appendUtf8CodePoint(rt, buffer, cp);
             }
         }
-        try buffer.append(rt.memory.allocator, '"');
+        try buffer.append(rt.nativeAllocator(), '"');
         return;
     }
     return appendEscapedJsonString(rt, buffer, name);
@@ -82,15 +82,15 @@ pub fn appendJsonAtomName(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), atom_
 
 /// Append `bytes` (treated as ASCII/UTF-8 source) as a JSON quoted string.
 pub fn appendEscapedJsonString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), bytes: []const u8) !void {
-    try buffer.append(rt.memory.allocator, '"');
+    try buffer.append(rt.nativeAllocator(), '"');
     for (bytes) |byte| {
         try appendEscapedJsonByte(rt, buffer, byte);
     }
-    try buffer.append(rt.memory.allocator, '"');
+    try buffer.append(rt.nativeAllocator(), '"');
 }
 
 fn appendEscapedJsonLatin1String(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), bytes: []const u8) !void {
-    try buffer.append(rt.memory.allocator, '"');
+    try buffer.append(rt.nativeAllocator(), '"');
     for (bytes) |byte| {
         if (byte <= 0x7f) {
             try appendEscapedJsonByte(rt, buffer, byte);
@@ -98,11 +98,11 @@ fn appendEscapedJsonLatin1String(rt: *core.JSRuntime, buffer: *std.ArrayList(u8)
             try appendUtf8CodePoint(rt, buffer, byte);
         }
     }
-    try buffer.append(rt.memory.allocator, '"');
+    try buffer.append(rt.nativeAllocator(), '"');
 }
 
 fn appendEscapedJsonUtf16String(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), units: []const u16) !void {
-    try buffer.append(rt.memory.allocator, '"');
+    try buffer.append(rt.nativeAllocator(), '"');
     var index: usize = 0;
     while (index < units.len) : (index += 1) {
         const unit = units[index];
@@ -124,29 +124,29 @@ fn appendEscapedJsonUtf16String(rt: *core.JSRuntime, buffer: *std.ArrayList(u8),
             try appendUtf8CodePoint(rt, buffer, unit);
         }
     }
-    try buffer.append(rt.memory.allocator, '"');
+    try buffer.append(rt.nativeAllocator(), '"');
 }
 
 fn appendEscapedJsonByte(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), byte: u8) !void {
     switch (byte) {
-        '"' => try buffer.appendSlice(rt.memory.allocator, "\\\""),
-        '\\' => try buffer.appendSlice(rt.memory.allocator, "\\\\"),
-        0x08 => try buffer.appendSlice(rt.memory.allocator, "\\b"),
-        0x09 => try buffer.appendSlice(rt.memory.allocator, "\\t"),
-        0x0a => try buffer.appendSlice(rt.memory.allocator, "\\n"),
-        0x0c => try buffer.appendSlice(rt.memory.allocator, "\\f"),
-        0x0d => try buffer.appendSlice(rt.memory.allocator, "\\r"),
+        '"' => try buffer.appendSlice(rt.nativeAllocator(), "\\\""),
+        '\\' => try buffer.appendSlice(rt.nativeAllocator(), "\\\\"),
+        0x08 => try buffer.appendSlice(rt.nativeAllocator(), "\\b"),
+        0x09 => try buffer.appendSlice(rt.nativeAllocator(), "\\t"),
+        0x0a => try buffer.appendSlice(rt.nativeAllocator(), "\\n"),
+        0x0c => try buffer.appendSlice(rt.nativeAllocator(), "\\f"),
+        0x0d => try buffer.appendSlice(rt.nativeAllocator(), "\\r"),
         0x00...0x07, 0x0b, 0x0e...0x1f => try appendEscapedJsonUnit(rt, buffer, byte),
-        else => try buffer.append(rt.memory.allocator, byte),
+        else => try buffer.append(rt.nativeAllocator(), byte),
     }
 }
 
 fn appendEscapedJsonUnit(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), unit: anytype) !void {
     const digits = value_format.hex4(@as(u16, unit));
-    try buffer.appendSlice(rt.memory.allocator, "\\u");
-    try buffer.appendSlice(rt.memory.allocator, &digits);
+    try buffer.appendSlice(rt.nativeAllocator(), "\\u");
+    try buffer.appendSlice(rt.nativeAllocator(), &digits);
 }
 
 fn appendUtf8CodePoint(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), cp: u32) !void {
-    return unicode.appendUtf8CodePoint(rt.memory.allocator, buffer, cp);
+    return unicode.appendUtf8CodePoint(rt.nativeAllocator(), buffer, cp);
 }

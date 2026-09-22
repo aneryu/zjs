@@ -74,7 +74,7 @@ pub const CompileContext = struct {
     timing: ?*CompileTiming = null,
 
     pub inline fn artifactAllocator(self: CompileContext) std.mem.Allocator {
-        return self.realm.runtime.memory.persistent_allocator;
+        return self.realm.runtime.nativeAllocator();
     }
 };
 

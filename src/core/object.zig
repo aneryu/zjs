@@ -5,6 +5,7 @@
 //! plus a class/layout-specific tail. For property behavior start at
 //! `shape.zig` and `property.zig`, then the call site in `src/exec/`.
 
+const mem_ops = @import("memory.zig");
 const array = @import("array.zig");
 const atom = @import("atom.zig");
 const class = @import("class.zig");
@@ -20,6 +21,7 @@ const object_gc = @import("object_gc.zig");
 const object_payloads = @import("object_payloads.zig");
 const gc_visit = @import("gc_visit.zig");
 const property = @import("property.zig");
+const property_state = @import("property_state.zig");
 const profile = @import("profile.zig");
 const runtime_mod = @import("runtime.zig");
 const shape = @import("shape.zig");
@@ -185,22 +187,22 @@ pub fn destroyDetachedClassPayload(rt: *JSRuntime, class_id: class.ClassId, payl
             const typed: *IteratorPayload = @ptrCast(@alignCast(ptr));
             Object.releaseIteratorCollectionCursor(class_id, typed);
             typed.destroy(rt);
-            rt.memory.destroy(IteratorPayload, typed);
+            mem_ops.destroy(rt, IteratorPayload, typed);
         },
         .collection => {
             const typed: *CollectionPayload = @ptrCast(@alignCast(ptr));
             typed.destroy(rt);
-            rt.memory.destroy(CollectionPayload, typed);
+            mem_ops.destroy(rt, CollectionPayload, typed);
         },
         .finalization_registry => {
             const typed: *FinalizationRegistryPayload = @ptrCast(@alignCast(ptr));
             typed.destroy(rt);
-            rt.memory.destroy(FinalizationRegistryPayload, typed);
+            mem_ops.destroy(rt, FinalizationRegistryPayload, typed);
         },
         .std_file => {
             const typed: *StdFilePayload = @ptrCast(@alignCast(ptr));
             typed.destroy();
-            rt.memory.destroy(StdFilePayload, typed);
+            mem_ops.destroy(rt, StdFilePayload, typed);
         },
         .realm_record => {
             const typed: *RealmRecordPayload = @ptrCast(@alignCast(ptr));
@@ -210,27 +212,27 @@ pub fn destroyDetachedClassPayload(rt: *JSRuntime, class_id: class.ClassId, payl
         .buffer => {
             const typed: *BufferPayload = @ptrCast(@alignCast(ptr));
             typed.destroy(rt);
-            rt.memory.destroy(BufferPayload, typed);
+            mem_ops.destroy(rt, BufferPayload, typed);
         },
         .typed_array => {
             const typed: *TypedArrayPayload = @ptrCast(@alignCast(ptr));
             typed.destroy();
-            rt.memory.destroy(TypedArrayPayload, typed);
+            mem_ops.destroy(rt, TypedArrayPayload, typed);
         },
         .weak_ref => {
             const typed: *WeakRefPayload = @ptrCast(@alignCast(ptr));
             typed.destroy(rt);
-            rt.memory.destroy(WeakRefPayload, typed);
+            mem_ops.destroy(rt, WeakRefPayload, typed);
         },
         .generator => {
             const typed: *GeneratorPayload = @ptrCast(@alignCast(ptr));
             typed.destroy(rt);
-            rt.memory.destroy(GeneratorPayload, typed);
+            mem_ops.destroy(rt, GeneratorPayload, typed);
         },
         .function => {
             const typed: *FunctionPayload = @ptrCast(@alignCast(ptr));
             typed.destroyNative(rt);
-            rt.memory.destroy(FunctionPayload, typed);
+            mem_ops.destroy(rt, FunctionPayload, typed);
         },
         // Filtered out above; naming them keeps the switch exhaustive so a new
         // payload kind cannot be added without classifying it.
@@ -577,8 +579,35 @@ pub const Object = extern struct {
         return unionArmBytes(class_id) + if (class_id == class.ids.promise) @sizeOf(PromisePayload) else @as(usize, 0);
     }
 
+    /// Heap-limit retry for one constructor, before any unpublished cell exists.
+    /// `object_accounted` is the object cell's budget charge. Property storage
+    /// and a tracer-owned payload are included so the later check-only mints
+    /// cannot exceed a limit that each charge, seen alone, would have passed.
+    fn prepareConstructionCharges(
+        rt: *JSRuntime,
+        object_accounted: usize,
+        property_capacity: usize,
+        payload_bytes: usize,
+    ) void {
+        var total: usize = object_accounted;
+        if (property_capacity != 0) {
+            const bytes = std.math.mul(usize, property_capacity, @sizeOf(property.Entry)) catch
+                return rt.prepareHeapCharge(std.math.maxInt(usize));
+            const with_prefix = std.math.add(usize, gc.metadata_prefix_size, bytes) catch
+                return rt.prepareHeapCharge(std.math.maxInt(usize));
+            total +|= mem_ops.heapChargeForCarrier(with_prefix);
+        }
+        if (payload_bytes != 0) {
+            const with_prefix = std.math.add(usize, gc.metadata_prefix_size, payload_bytes) catch
+                return rt.prepareHeapCharge(std.math.maxInt(usize));
+            total +|= mem_ops.heapChargeForCarrier(with_prefix);
+        }
+        rt.prepareHeapCharge(total);
+    }
+
     inline fn allocCell(rt: *JSRuntime, class_id: class.ClassId, comptime has_trailing: bool) !*Object {
-        return rt.memory.createObjectWithFamNoTrigger(
+        return mem_ops.createObjectWithFamNoTrigger(
+            rt,
             Object,
             objectTailBytes(class_id, has_trailing),
             rt,
@@ -595,7 +624,8 @@ pub const Object = extern struct {
         comptime class_id: class.ClassId,
         comptime has_trailing: bool,
     ) !*Object {
-        return rt.memory.createObjectConstFamNoTrigger(
+        return mem_ops.createObjectConstFamNoTrigger(
+            rt,
             Object,
             comptime objectTailBytes(class_id, has_trailing),
             rt,
@@ -614,14 +644,14 @@ pub const Object = extern struct {
         comptime class_id: class.ClassId,
         comptime has_trailing: bool,
     ) void {
-        rt.memory.destroyConstFam(Object, comptime objectTailBytes(class_id, has_trailing), self);
+        mem_ops.destroyConstFam(rt, Object, comptime objectTailBytes(class_id, has_trailing), self);
     }
 
     /// Free a cell whose head was never initialized past `class_id`: the
     /// construction error paths. `has_trailing` is the caller's own allocation
     /// decision, not a header read.
     inline fn freeRawCell(rt: *JSRuntime, self: *Object, class_id: class.ClassId, comptime has_trailing: bool) void {
-        rt.memory.destroyWithFam(Object, self, objectTailBytes(class_id, has_trailing));
+        mem_ops.destroyWithFam(rt, Object, self, objectTailBytes(class_id, has_trailing));
     }
 
     /// The class-data region's base. Slots2 has no arm: its Entry[2] starts at
@@ -946,7 +976,7 @@ pub const Object = extern struct {
         // The construction pin is published after the cell is initialized, so
         // reserve its ledger slot now. This is the last fallible side
         // allocation before the qjs-style object boundary.
-        try rt.gc.pins.prepareConstructionRoot(rt.gc.memory);
+        try rt.gc.pins.prepareConstructionRoot(rt.gc.runtime);
 
         // qjs creates the public generator object through js_create_from_ctor →
         // JS_NewObjectFromShape, whose js_trigger_gc(sizeof(JSObject))
@@ -955,7 +985,9 @@ pub const Object = extern struct {
         // the block cell as the final fallible step. No collection can observe
         // a raw, uninitialized cell in between.
         const alloc_size = objectBodyBytes(class_id, false);
-        rt.collectBeforeObjectAllocation(prospectiveAccountedBodyBytes(alloc_size));
+        const accounted = prospectiveAccountedBodyBytes(alloc_size);
+        rt.collectBeforeObjectAllocation(accounted);
+        prepareConstructionCharges(rt, accounted, 0, 0);
         const self = try allocCell(rt, class_id, false);
         errdefer freeRawCell(rt, self, class_id, false);
 
@@ -1107,7 +1139,9 @@ pub const Object = extern struct {
         var property_storage: [*]property.Entry = undefined;
 
         const alloc_size = objectBodyBytes(class.ids.array, false);
-        rt.collectBeforeObjectAllocation(prospectiveAccountedBodyBytes(alloc_size));
+        const accounted = prospectiveAccountedBodyBytes(alloc_size);
+        rt.collectBeforeObjectAllocation(accounted);
+        prepareConstructionCharges(rt, accounted, property_capacity, 0);
         if (property_capacity != 0) {
             property_storage = try createPropertyStorageCell(rt, property_capacity);
         }
@@ -1205,7 +1239,9 @@ pub const Object = extern struct {
         errdefer if (shape_owned) rt.shapes.dropUnshared(shape_ref);
 
         const alloc_size = objectBodyBytes(class.ids.object, false);
-        collectBeforeObjectAllocationPublishingShape(rt, shape_ref, prospectiveAccountedBodyBytes(alloc_size));
+        const accounted = prospectiveAccountedBodyBytes(alloc_size);
+        collectBeforeObjectAllocationPublishingShape(rt, shape_ref, accounted);
+        prepareConstructionCharges(rt, accounted, 0, 0);
         const self = try allocCellConst(rt, class.ids.object, false);
         var initialized = false;
         errdefer if (initialized)
@@ -1280,7 +1316,9 @@ pub const Object = extern struct {
         errdefer if (shape_owned) rt.shapes.dropUnshared(shape_ref);
 
         const alloc_size = objectBodyBytes(class.ids.object, true);
-        collectBeforeObjectAllocationPublishingShape(rt, shape_ref, prospectiveAccountedBodyBytes(alloc_size));
+        const accounted = prospectiveAccountedBodyBytes(alloc_size);
+        collectBeforeObjectAllocationPublishingShape(rt, shape_ref, accounted);
+        prepareConstructionCharges(rt, accounted, 0, 0);
         const self = try allocCellConst(rt, class.ids.object, true);
         var initialized = false;
         errdefer if (initialized)
@@ -1388,7 +1426,9 @@ pub const Object = extern struct {
         const property_capacity: usize = initial_shape.prop_size;
         std.debug.assert(property_capacity >= entries.len and entries.len != 0);
         const alloc_size = objectBodyBytes(class_id, false);
-        rt.collectBeforeObjectAllocation(prospectiveAccountedBodyBytes(alloc_size));
+        const accounted = prospectiveAccountedBodyBytes(alloc_size);
+        rt.collectBeforeObjectAllocation(accounted);
+        prepareConstructionCharges(rt, accounted, property_capacity, 0);
         // TGC S4-b: a `.property_storage` GC cell, minted immediately before the
         // object cell (see the optional-capacity constructors); no errdefer
         // free, an abandoned cell is swept.
@@ -1465,7 +1505,9 @@ pub const Object = extern struct {
         // shape. Finish it first, then service the qjs object boundary and take
         // the block cell immediately before initialization/publication.
         const alloc_size = objectBodyBytes(template.class_id, false);
-        rt.collectBeforeObjectAllocation(prospectiveAccountedBodyBytes(alloc_size));
+        const accounted = prospectiveAccountedBodyBytes(alloc_size);
+        rt.collectBeforeObjectAllocation(accounted);
+        prepareConstructionCharges(rt, accounted, property_capacity, 0);
         if (property_capacity != 0) {
             property_storage = try createPropertyStorageCell(rt, property_capacity);
         }
@@ -1625,12 +1667,12 @@ pub const Object = extern struct {
             alloc_size;
         collectBeforeObjectAllocationPublishingShape(rt, shape_ref, accounted_alloc_size);
         // TGC S4-c: two bare cells are live-but-unrooted across the window
-        // below, so EVERY allocation-pressure request has to precede the FIRST
-        // mint. `createPropertyStorageCell` takes its own (nothing is minted
-        // yet when it runs); the payload cell's is taken here so its mint,
-        // which follows the property mint, cannot trigger a collection that
-        // would sweep the property cell out from under this constructor.
-        if (deferred_cell_kind != .none) rt.requestGCForAllocation(classPayloadCellBytes(deferred_cell_kind));
+        // below, so the heap-limit retry has to precede the FIRST mint.
+        // Threshold requests stay here too: a later mint is check-only and
+        // must not collect a property cell that has no precise root yet.
+        const payload_bytes = if (deferred_cell_kind != .none) classPayloadCellBytes(deferred_cell_kind) else 0;
+        prepareConstructionCharges(rt, accounted_alloc_size, property_capacity, payload_bytes);
+        if (deferred_cell_kind != .none) rt.requestGCForAllocation(payload_bytes);
         if (property_capacity != 0) {
             property_storage = try createPropertyStorageCell(rt, property_capacity);
         }
@@ -1639,20 +1681,22 @@ pub const Object = extern struct {
         }
         const self = if (inline_layout) |layout| blk: {
             // The object-level threshold/force-GC hook just ran above. Enter
-            // MemoryAccount directly so this same allocation does not request
+            // Runtime allocation helpers directly so this same allocation does not request
             // a second collection (observable to test allocation probes and
             // unnecessarily expensive in force-GC builds).
             // This allocation is always standalone. Audit builds reserve the
             // shadow carrier record before taking raw bytes; shipped builds do
             // no carrier-authority work until a real consumer migrates.
+            try rt.gc.heap_budget.checkOnly(accounted_alloc_size);
             try rt.gc.prepareNonBlockObjectAuthority();
             const carrier_reservation = if (comptime gc.carrier_audit_enabled)
-                try rt.memory.reserveGcExtent()
+                try mem_ops.reserveGcExtent(rt)
             else {};
-            const bytes = try rt.memory.allocAlignedBytesNoTrigger(layout.allocation_size, layout.allocation_alignment);
+            const bytes = try mem_ops.allocAlignedBytesNoTrigger(rt, layout.allocation_size, layout.allocation_alignment);
             const object_base = @intFromPtr(bytes.ptr) + layout.object_offset;
             if (comptime gc.carrier_audit_enabled) {
-                rt.memory.commitGcExtent(
+                mem_ops.commitGcExtent(
+                    rt,
                     carrier_reservation,
                     object_base,
                     @intFromPtr(bytes.ptr),
@@ -1670,9 +1714,9 @@ pub const Object = extern struct {
                 destroyFromHeader(rt, self.gcHeader());
             } else if (inline_layout) |layout| {
                 const bytes: [*]u8 = @ptrFromInt(@intFromPtr(self) - layout.object_offset);
-                if (comptime gc.carrier_audit_enabled) rt.memory.beginGcRawFree(@intFromPtr(self));
-                rt.memory.freeAlignedBytes(bytes[0..layout.allocation_size], layout.allocation_alignment);
-                if (comptime gc.carrier_audit_enabled) rt.memory.finishExtentGcRawFree(@intFromPtr(self));
+                if (comptime gc.carrier_audit_enabled) mem_ops.beginGcRawFree(rt, @intFromPtr(self));
+                mem_ops.freeAlignedBytes(rt, bytes[0..layout.allocation_size], layout.allocation_alignment);
+                if (comptime gc.carrier_audit_enabled) mem_ops.finishExtentGcRawFree(rt, @intFromPtr(self));
             } else {
                 freeRawCell(rt, self, class_id, false);
             }
@@ -1874,6 +1918,7 @@ pub const Object = extern struct {
     /// then mint. Nothing may collect between the return and the install.
     fn createPayloadCell(rt: *JSRuntime, comptime T: type) !*T {
         rt.requestGCForAllocation(@sizeOf(T));
+        rt.prepareHeapCharge(mem_ops.heapChargeForCarrier(gc.metadata_prefix_size + @sizeOf(T)));
         return mintPayloadCell(rt, T);
     }
 
@@ -1898,6 +1943,7 @@ pub const Object = extern struct {
         const total = std.math.add(usize, gc.metadata_prefix_size, payload_bytes) catch
             return error.OutOfMemory;
         rt.requestGCForAllocation(payload_bytes);
+        rt.prepareHeapCharge(mem_ops.heapChargeForCarrier(total));
         const body = try rt.gc.createStorageCellPublished(
             gc.representation.payload_kind_tag,
             total,
@@ -1959,7 +2005,7 @@ pub const Object = extern struct {
         const payload = if (comptime builtin.is_test or memory_mod.force_gc_on_allocation_enabled)
             try rt.createRuntime(FunctionPayload)
         else
-            try rt.memory.createNoTrigger(FunctionPayload);
+            try mem_ops.createNoTrigger(rt, FunctionPayload);
         payload.* = .{};
         return @ptrCast(payload);
     }
@@ -2000,7 +2046,7 @@ pub const Object = extern struct {
             .generator => {
                 const payload = try rt.createRuntime(GeneratorPayload);
                 payload.* = .{};
-                errdefer rt.memory.destroy(GeneratorPayload, payload);
+                errdefer mem_ops.destroy(rt, GeneratorPayload, payload);
                 const execution = try rt.createRuntime(GeneratorExecutionState);
                 execution.* = .{};
                 payload.execution = execution;
@@ -2043,7 +2089,7 @@ pub const Object = extern struct {
 
     /// Free a payload allocated by `allocClassPayload` when `createInternal`
     /// fails before the object is `initialized` (i.e. before `destroyFromHeader`
-    /// owns teardown). Mirrors the per-arm `errdefer rt.memory.destroy(T, ...)`
+    /// owns teardown). Mirrors the per-arm `errdefer mem_ops.destroy(rt, T, ...)`
     /// of the former inline switch — a single by-kind `destroy`.
     /// TGC S4-c: the a-class arms are `{}`. Their payload is a `.payload` GC
     /// cell -- never hand-returned, and never reached from here either, since
@@ -2052,26 +2098,26 @@ pub const Object = extern struct {
     noinline fn freeClassPayloadAllocation(rt: *JSRuntime, payload: class.Payload, payload_kind: class.PayloadKind) void {
         const ptr = payload orelse return;
         switch (payload_kind) {
-            .iterator => rt.memory.destroy(IteratorPayload, @ptrCast(@alignCast(ptr))),
-            .collection => rt.memory.destroy(CollectionPayload, @ptrCast(@alignCast(ptr))),
-            .buffer => rt.memory.destroy(BufferPayload, @ptrCast(@alignCast(ptr))),
-            .typed_array => rt.memory.destroy(TypedArrayPayload, @ptrCast(@alignCast(ptr))),
+            .iterator => mem_ops.destroy(rt, IteratorPayload, @ptrCast(@alignCast(ptr))),
+            .collection => mem_ops.destroy(rt, CollectionPayload, @ptrCast(@alignCast(ptr))),
+            .buffer => mem_ops.destroy(rt, BufferPayload, @ptrCast(@alignCast(ptr))),
+            .typed_array => mem_ops.destroy(rt, TypedArrayPayload, @ptrCast(@alignCast(ptr))),
             .regexp => {},
             .bound_function => {},
             .proxy => {},
             .arguments => {},
             .object_data => {},
-            .weak_ref => rt.memory.destroy(WeakRefPayload, @ptrCast(@alignCast(ptr))),
+            .weak_ref => mem_ops.destroy(rt, WeakRefPayload, @ptrCast(@alignCast(ptr))),
             .var_ref => {},
             .promise => {},
             .generator => {
                 const typed: *GeneratorPayload = @ptrCast(@alignCast(ptr));
                 typed.destroy(rt);
-                rt.memory.destroy(GeneratorPayload, typed);
+                mem_ops.destroy(rt, GeneratorPayload, typed);
             },
-            .function => rt.memory.destroy(FunctionPayload, @ptrCast(@alignCast(ptr))),
-            .finalization_registry => rt.memory.destroy(FinalizationRegistryPayload, @ptrCast(@alignCast(ptr))),
-            .std_file => rt.memory.destroy(StdFilePayload, @ptrCast(@alignCast(ptr))),
+            .function => mem_ops.destroy(rt, FunctionPayload, @ptrCast(@alignCast(ptr))),
+            .finalization_registry => mem_ops.destroy(rt, FinalizationRegistryPayload, @ptrCast(@alignCast(ptr))),
+            .std_file => mem_ops.destroy(rt, StdFilePayload, @ptrCast(@alignCast(ptr))),
             .disposable_stack => {},
             .realm_record => rt.destroyRuntime(RealmRecordPayload, @ptrCast(@alignCast(ptr))),
             .none, .ordinary, .promise_reaction_record, .global => {},
@@ -2153,20 +2199,20 @@ pub const Object = extern struct {
         // alloc did not request.
         if (self.hasSlots2Layout()) {
             std.debug.assert(self.class_id == class.ids.object);
-            return rt.memory.destroyConstFam(Object, comptime objectTailBytes(class.ids.object, true), self);
+            return mem_ops.destroyConstFam(rt, Object, comptime objectTailBytes(class.ids.object, true), self);
         }
         if (self.class_id == class.ids.object) {
-            return rt.memory.destroyConstFam(Object, comptime objectTailBytes(class.ids.object, false), self);
+            return mem_ops.destroyConstFam(rt, Object, comptime objectTailBytes(class.ids.object, false), self);
         }
-        rt.memory.destroyWithFam(Object, self, objectTailBytes(self.class_id, false));
+        mem_ops.destroyWithFam(rt, Object, self, objectTailBytes(self.class_id, false));
     }
 
     noinline fn freeInlinePayloadObjectAllocation(rt: *JSRuntime, self: *Object, definition: class.Table.DefinitionPlan) void {
         const layout = inlineClassPayloadLayoutForDefinition(definition).?;
         const bytes: [*]u8 = @ptrFromInt(@intFromPtr(self) - layout.object_offset);
-        if (comptime gc.carrier_audit_enabled) rt.memory.beginGcRawFree(@intFromPtr(self));
-        rt.memory.freeAlignedBytes(bytes[0..layout.allocation_size], layout.allocation_alignment);
-        if (comptime gc.carrier_audit_enabled) rt.memory.finishExtentGcRawFree(@intFromPtr(self));
+        if (comptime gc.carrier_audit_enabled) mem_ops.beginGcRawFree(rt, @intFromPtr(self));
+        mem_ops.freeAlignedBytes(rt, bytes[0..layout.allocation_size], layout.allocation_alignment);
+        if (comptime gc.carrier_audit_enabled) mem_ops.finishExtentGcRawFree(rt, @intFromPtr(self));
     }
 
     /// `InlineClassPayloadLayout.object_size` (== the byte count the register
@@ -2212,34 +2258,19 @@ pub const Object = extern struct {
     }
 
     pub fn cachedIteratorNextSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
-        if (self.cachedIteratorNextSlotIfPresent(rt)) |slot| return slot;
-        const entry = try rt.cached_iterator_next_entries.addOne(rt.memory.persistent_allocator);
-        entry.* = .{ .object = self };
-        // TGC S4-d spec 2.4 (§1.1 "must keep": `clearCachedIteratorNext`): this
-        // side table holds a BARE `*Object` and a value only reachable through
-        // it, so the entry has to be removed when the object dies. That is
-        // destructor work -- stamp the bit.
-        self.markNeedsFinalizer(rt);
-        return &entry.value;
+        return property_state.iteratorNextSlot(rt, self);
     }
 
     pub fn cachedIteratorNext(self: *const Object, rt: *JSRuntime) ?JSValue {
-        if (rt.cached_iterator_next_entries.items.len == 0) return null;
-        const slot = self.cachedIteratorNextSlotIfPresent(rt) orelse return null;
-        return slot.*;
+        return property_state.iteratorNext(rt, self);
     }
 
     pub fn clearCachedIteratorNext(self: *Object, rt: *JSRuntime) void {
-        if (rt.cached_iterator_next_entries.items.len == 0) return;
-        const index = cachedIteratorNextEntryIndex(rt, self) orelse return;
-        rt.cached_iterator_next_entries.items[index].value = null;
-        removeCachedIteratorNextEntryAt(rt, index);
+        property_state.clearIteratorNext(rt, self);
     }
 
     fn cachedIteratorNextSlotIfPresent(self: *const Object, rt: *JSRuntime) ?*?JSValue {
-        if (rt.cached_iterator_next_entries.items.len == 0) return null;
-        const index = cachedIteratorNextEntryIndex(rt, self) orelse return null;
-        return &rt.cached_iterator_next_entries.items[index].value;
+        return property_state.iteratorNextSlotIfPresent(rt, self);
     }
 
     /// Narrow cross-file seam for the cycle collector's cached-edge walk.
@@ -2247,16 +2278,8 @@ pub const Object = extern struct {
         return self.cachedIteratorNextSlotIfPresent(rt);
     }
 
-    fn cachedIteratorNextEntryIndex(rt: *const JSRuntime, self: *const Object) ?usize {
-        if (rt.cached_iterator_next_entries.items.len == 0) return null;
-        for (rt.cached_iterator_next_entries.items, 0..) |entry, index| {
-            if (entry.object == self) return index;
-        }
-        return null;
-    }
-
-    fn removeCachedIteratorNextEntryAt(rt: *JSRuntime, index: usize) void {
-        _ = rt.cached_iterator_next_entries.swapRemove(index);
+    pub fn isBorrowedReferenceHolder(self: *const Object) bool {
+        return self.flags.is_borrowed_reference_holder;
     }
 
     /// A reaction is still an ordinary object; only its private payload is
@@ -2297,7 +2320,6 @@ pub const Object = extern struct {
         // payload slot for every layout; the side table this replaced is gone.
         if (self.hasSlots2Layout()) {
             try self.spillInlinePropertyStorageForPayload(rt);
-            rt.slots2_payload_attach_count +|= 1;
         }
         const payload = try createPayloadCell(rt, OrdinaryPayload);
         self.payloadSlot().* = @ptrCast(payload);
@@ -3372,7 +3394,7 @@ pub const Object = extern struct {
         var next_capacity = if (entries.capacity != 0) entries.capacity else entries.items.len;
         if (next_capacity < 8) next_capacity = 8;
         while (next_capacity < min_capacity) next_capacity *= 2;
-        try entries.ensureTotalCapacityPrecise(rt.memory.persistent_allocator, next_capacity);
+        try entries.ensureTotalCapacityPrecise(rt.nativeAllocator(), next_capacity);
     }
 
     pub fn appendCollectionEntryUnindexed(self: *Object, rt: *JSRuntime, entry: CollectionEntry) !usize {
@@ -3392,7 +3414,7 @@ pub const Object = extern struct {
         const heads = self.collectionBucketHeadsSlot();
         const old_heads = heads.*;
         heads.* = &.{};
-        if (old_heads.len != 0) rt.memory.free(usize, old_heads);
+        if (old_heads.len != 0) mem_ops.free(rt, usize, old_heads);
     }
 
     pub fn weakCollectionEntriesSlot(self: *Object) *std.ArrayListUnmanaged(WeakCollectionEntry) {
@@ -3410,7 +3432,7 @@ pub const Object = extern struct {
         var next_capacity = if (entries.capacity != 0) entries.capacity else entries.items.len;
         if (next_capacity < 4) next_capacity = 4;
         while (next_capacity < min_capacity) next_capacity *= 2;
-        try entries.ensureTotalCapacityPrecise(rt.memory.persistent_allocator, next_capacity);
+        try entries.ensureTotalCapacityPrecise(rt.nativeAllocator(), next_capacity);
     }
 
     pub fn finalizationRegistryCleanupCallbackSlot(self: *Object) *?JSValue {
@@ -3474,7 +3496,7 @@ pub const Object = extern struct {
     }
 
     pub fn ensureFinalizationRegistryCellCapacity(self: *Object, rt: *JSRuntime, min_capacity: usize) !void {
-        try self.finalizationRegistryCellsSlot().ensureTotalCapacity(rt.memory.persistent_allocator, min_capacity);
+        try self.finalizationRegistryCellsSlot().ensureTotalCapacity(rt.nativeAllocator(), min_capacity);
     }
 
     pub fn appendFinalizationRegistryCell(
@@ -3816,7 +3838,7 @@ pub const Object = extern struct {
         if (byte_length > BufferPayload.inline_storage_capacity) return false;
         if (self.bufferPayload()) |payload| {
             payload.releaseStorage(rt);
-            rt.reportExternalAllocUntracked(byte_length);
+            rt.gc.reportExternalAllocUntracked(byte_length);
             payload.shared_store = null;
             payload.external_memory = .{};
             payload.external_deinit = null;
@@ -4335,7 +4357,7 @@ pub const Object = extern struct {
     /// cell has no self-interpretation to disagree with.
     ///
     /// Public because the two adopt sites now allocate through here instead of
-    /// handing in a `rt.memory.alloc` slice.
+    /// handing in a `rt.alloc` slice.
     pub fn createArrayStorageCell(rt: *JSRuntime, capacity: usize) ![*]JSValue {
         std.debug.assert(capacity != 0);
         const payload_bytes = std.math.mul(usize, capacity, @sizeOf(JSValue)) catch
@@ -6181,7 +6203,7 @@ pub const Object = extern struct {
         self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
-        rt.memory.destroy(IteratorPayload, payload);
+        mem_ops.destroy(rt, IteratorPayload, payload);
     }
 
     fn collectionPayload(self: *Object) ?*CollectionPayload {
@@ -6202,7 +6224,7 @@ pub const Object = extern struct {
         self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
-        rt.memory.destroy(CollectionPayload, payload);
+        mem_ops.destroy(rt, CollectionPayload, payload);
     }
 
     fn finalizationRegistryPayload(self: *Object) ?*FinalizationRegistryPayload {
@@ -6223,7 +6245,7 @@ pub const Object = extern struct {
         self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
-        rt.memory.destroy(FinalizationRegistryPayload, payload);
+        mem_ops.destroy(rt, FinalizationRegistryPayload, payload);
     }
 
     fn weakRefPayload(self: *Object) ?*WeakRefPayload {
@@ -6244,7 +6266,7 @@ pub const Object = extern struct {
         self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
-        rt.memory.destroy(WeakRefPayload, payload);
+        mem_ops.destroy(rt, WeakRefPayload, payload);
     }
 
     pub fn isWeakReferenceHolderClass(self: *const Object) bool {
@@ -6287,7 +6309,7 @@ pub const Object = extern struct {
         self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy();
-        rt.memory.destroy(StdFilePayload, payload);
+        mem_ops.destroy(rt, StdFilePayload, payload);
     }
 
     fn disposableStackPayload(self: *Object) ?*DisposableStackPayload {
@@ -6329,7 +6351,7 @@ pub const Object = extern struct {
         self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
-        rt.memory.destroy(BufferPayload, payload);
+        mem_ops.destroy(rt, BufferPayload, payload);
     }
 
     fn typedArrayPayload(self: *Object) ?*TypedArrayPayload {
@@ -6345,7 +6367,7 @@ pub const Object = extern struct {
         self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy();
-        rt.memory.destroy(TypedArrayPayload, payload);
+        mem_ops.destroy(rt, TypedArrayPayload, payload);
     }
 
     fn regExpPayload(self: *Object) ?*RegExpPayload {
@@ -6423,7 +6445,7 @@ pub const Object = extern struct {
         self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroy(rt);
-        rt.memory.destroy(GeneratorPayload, payload);
+        mem_ops.destroy(rt, GeneratorPayload, payload);
     }
 
     fn functionPayload(self: *Object) ?*FunctionPayload {
@@ -6460,7 +6482,7 @@ pub const Object = extern struct {
         self.payloadArm().* = null;
         self.flags.class_payload_kind = .none;
         payload.destroyNative(rt);
-        rt.memory.destroy(FunctionPayload, payload);
+        mem_ops.destroy(rt, FunctionPayload, payload);
     }
 
     // ===== visit* / cycle GC =====
@@ -9520,11 +9542,11 @@ pub const Object = extern struct {
             }
         } else {
             var index_keys = std.ArrayList(IndexKey).empty;
-            defer index_keys.deinit(rt.memory.allocator);
+            defer index_keys.deinit(rt.nativeAllocator());
             if (self.class_id == class.ids.mapped_arguments) {
                 for (self.argumentsVarRefs(), 0..) |mapped, mapped_index| {
                     if (mapped == null) continue;
-                    try array_list_erased.append(&index_keys, rt.memory.allocator, .{
+                    try array_list_erased.append(&index_keys, rt.nativeAllocator(), .{
                         .index = @intCast(mapped_index),
                         .atom_id = atom.Atom.taggedInt(@intCast(mapped_index)),
                     });
@@ -9532,7 +9554,7 @@ pub const Object = extern struct {
             }
             var dense_index: u32 = 0;
             while (dense_index < self.arrayElements().len) : (dense_index += 1) {
-                try array_list_erased.append(&index_keys, rt.memory.allocator, .{
+                try array_list_erased.append(&index_keys, rt.nativeAllocator(), .{
                     .index = dense_index,
                     .atom_id = atom.Atom.taggedInt(dense_index),
                 });
@@ -9541,7 +9563,7 @@ pub const Object = extern struct {
                 if (property.Flags.fromBits(prop.flags).deleted) continue;
                 const index = array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) orelse continue;
                 if (self.hasDenseArrayElement(index)) continue;
-                try array_list_erased.append(&index_keys, rt.memory.allocator, .{
+                try array_list_erased.append(&index_keys, rt.nativeAllocator(), .{
                     .index = index,
                     .atom_id = prop.atom_id,
                 });
@@ -9579,7 +9601,7 @@ pub const Object = extern struct {
     }
 
     pub fn freeKeys(rt: *JSRuntime, keys: []atom.Atom) void {
-        if (keys.len != 0) rt.memory.free(atom.Atom, keys);
+        if (keys.len != 0) mem_ops.free(rt, atom.Atom, keys);
     }
 
     pub fn seal(self: *Object, rt: *JSRuntime) !void {
@@ -10240,9 +10262,9 @@ pub const Object = extern struct {
     /// Entries are left UNINITIALIZED, exactly as `allocRuntime` left them:
     /// every caller fills or memcpys the live prefix before the object can be
     /// traced, and a storage cell is a leaf so the tracer never reads a body
-    /// it did not have to. The threshold request mirrors `allocRuntime`'s --
-    /// it records pressure and does NOT collect -- so this batch introduces no
-    /// new collection boundary on any property path.
+    /// it did not have to. The threshold request records pressure and does not
+    /// collect. The heap-limit retry runs before the mint; nothing after the
+    /// mint may collect, because the body has no precise root until install.
     pub fn createPropertyStorageCell(rt: *JSRuntime, capacity: usize) ![*]property.Entry {
         std.debug.assert(capacity != 0);
         const payload_bytes = std.math.mul(usize, capacity, @sizeOf(property.Entry)) catch
@@ -10258,6 +10280,7 @@ pub const Object = extern struct {
         // every caller keeps mint and install adjacent and nothing in this
         // funnel can collect after the mint.
         rt.requestGCForAllocation(payload_bytes);
+        rt.prepareHeapCharge(mem_ops.heapChargeForCarrier(total));
         const body = try rt.gc.createStorageCellPublished(
             gc.representation.property_storage_kind_tag,
             total,
@@ -10770,7 +10793,7 @@ pub const Object = extern struct {
 };
 
 test "object value refs keep nested symbol bodies without external symbol roots" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const object = try Object.create(rt, class.ids.object, null);
@@ -10790,13 +10813,13 @@ test "object value refs keep nested symbol bodies without external symbol roots"
     var roots_active = true;
     defer if (roots_active) live_roots.deactivate(rt);
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(nested_symbol) != null);
 
     live_roots.deactivate(rt);
     roots_active = false;
     object_value = JSValue.undefinedValue();
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(nested_symbol) == null);
 }
 
@@ -11035,8 +11058,8 @@ fn arrayLengthNumber(rt: *JSRuntime, value: JSValue) !?f64 {
 fn arrayLengthStringNumber(rt: *JSRuntime, value: JSValue) !f64 {
     const string_value = value.asStringBody() orelse return std.math.nan(f64);
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
-    try bytes.ensureTotalCapacity(rt.memory.allocator, string_value.len());
+    defer bytes.deinit(rt.nativeAllocator());
+    try bytes.ensureTotalCapacity(rt.nativeAllocator(), string_value.len());
     for (0..string_value.len()) |index| {
         const unit = string_value.codeUnitAt(index);
         if (unit > 0x7f) return std.math.nan(f64);
@@ -11051,12 +11074,12 @@ fn varRefCellFromValue(value: JSValue) ?*var_ref_mod.VarRef {
 
 fn appendAtom(rt: *JSRuntime, keys: *[]atom.Atom, atom_id: atom.Atom) OwnKeysError!void {
     const next = try rt.allocRuntime(atom.Atom, keys.*.len + 1);
-    errdefer rt.memory.free(atom.Atom, next);
+    errdefer mem_ops.free(rt, atom.Atom, next);
     @memcpy(next[0..keys.*.len], keys.*);
     next[keys.*.len] = atom_id;
     const old = keys.*;
     keys.* = next;
-    if (old.len != 0) rt.memory.free(atom.Atom, old);
+    if (old.len != 0) mem_ops.free(rt, atom.Atom, old);
 }
 
 const IndexKey = struct {
@@ -11245,7 +11268,7 @@ pub fn stringIterator(ctx: *context_mod.RealmContext, receiver: JSValue) !JSValu
 }
 
 test "M-cut Object handle conversion keeps the head at the handle address" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const object = try Object.createPlainObject(rt, null);
 
@@ -11262,7 +11285,7 @@ test "M-cut Object handle conversion keeps the head at the handle address" {
 }
 
 test "first named property allocates initial_prop_size slots" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const object = try Object.create(rt, class.ids.object, null);
@@ -11274,7 +11297,7 @@ test "first named property allocates initial_prop_size slots" {
 }
 
 test "block Object accounting uses physical cell body capacity" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const objects = [_]*Object{
@@ -11314,7 +11337,7 @@ test "block Object accounting uses physical cell body capacity" {
 }
 
 test "shape-sized trailing property storage grows externally and compacts in place" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     // Put a wider empty root at the head of the same hash chain. Tracing's
@@ -11378,7 +11401,7 @@ test "shape-sized trailing property storage grows externally and compacts in pla
 }
 
 test "slots2 spill OOM rollback restores inline representation" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const object = try Object.createPlainObjectReserved2(rt, null);
     const names = [_][]const u8{ "m_oom_0", "m_oom_1", "m_oom_2" };
@@ -11394,12 +11417,12 @@ test "slots2 spill OOM rollback restores inline representation" {
     try std.testing.expect(object.propertyStorageIsInline());
 
     const spill_bytes = @sizeOf(property.Entry) * shape.propertyCapacityForNeeded(3);
-    rt.setMemoryLimit(rt.memory.allocated_bytes + spill_bytes);
+    rt.setNativeBytesLimitForTest(rt.diagnostics.allocations.allocated_bytes + spill_bytes);
     try std.testing.expectError(
         error.OutOfMemory,
         object.defineOwnProperty(rt, atoms[2], descriptor.Descriptor.data(JSValue.int32(2), .all)),
     );
-    rt.setMemoryLimit(null);
+    rt.setNativeBytesLimitForTest(null);
 
     try std.testing.expect(object.propertyStorageIsInline());
     try std.testing.expectEqual(@as(u32, 2), object.shape_ref.prop_count);
@@ -11409,7 +11432,7 @@ test "slots2 spill OOM rollback restores inline representation" {
 }
 
 test "plain objects do not allocate class payload storage" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const object = try Object.create(rt, class.ids.object, null);
@@ -11420,7 +11443,7 @@ test "plain objects do not allocate class payload storage" {
 }
 
 test "iterator classes store iterator state in class payload" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const iterator = try Object.create(rt, class.ids.array_iterator, null);
@@ -11433,26 +11456,26 @@ test "iterator classes store iterator state in class payload" {
 }
 
 test "collection classes store entries in class payload" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const map = try Object.create(rt, class.ids.map, null);
 
     try std.testing.expect(map.payloadArm().* != null);
-    try map.collectionEntriesSlot().append(rt.memory.persistent_allocator, .{ .key = JSValue.int32(1), .value = JSValue.int32(2), .active = true });
+    try map.collectionEntriesSlot().append(rt.nativeAllocator(), .{ .key = JSValue.int32(1), .value = JSValue.int32(2), .active = true });
     try std.testing.expectEqual(@as(usize, 1), map.collectionEntries().len);
     try std.testing.expectEqual(@as(i32, 1), map.collectionEntries()[0].key.as(.int).?);
     try std.testing.expectEqual(@as(i32, 2), map.collectionEntries()[0].value.as(.int).?);
 }
 
 test "buffer and typed array state use payload storage" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const buffer = try Object.create(rt, class.ids.array_buffer, null);
     try std.testing.expect(buffer.payloadArm().* != null);
     try std.testing.expectEqual(class.PayloadKind.buffer, buffer.flags.class_payload_kind);
-    const bytes = try rt.memory.alloc(u8, 3);
+    const bytes = try mem_ops.alloc(rt, u8, 3);
     @memset(bytes, 9);
     try buffer.installByteStorage(rt, bytes);
     buffer.arrayBufferMaxByteLengthSlot().* = 8;
@@ -11472,19 +11495,19 @@ test "buffer and typed array state use payload storage" {
 }
 
 test "shared buffer store reports external memory for its owner runtime" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const byte_length: usize = 4096;
-    const account_before = rt.memory.allocated_bytes;
+    const account_before = rt.diagnostics.allocations.allocated_bytes;
     const store = try SharedBufferStore.create(rt, byte_length);
     try std.testing.expectEqual(byte_length, rt.externalMemoryBytes());
     // Shared bytes use the process page allocator, so unlike ordinary
-    // ArrayBuffer backing they are outside MemoryAccount and rely on the
+    // ArrayBuffer backing they are outside Runtime allocation helpers and rely on the
     // external-pressure path for major pacing. The token registry's small
-    // bookkeeping allocation still belongs to MemoryAccount; pin that it is
+    // bookkeeping allocation still belongs to Runtime allocation helpers; pin that it is
     // metadata rather than another byte-for-byte backing charge.
-    try std.testing.expect(rt.memory.allocated_bytes < account_before + byte_length);
+    try std.testing.expect(rt.diagnostics.allocations.allocated_bytes < account_before + byte_length);
     const debt_after_alloc = rt.allocationDebtBytes();
 
     store.release();
@@ -11496,7 +11519,7 @@ test "shared buffer store reports external memory for its owner runtime" {
 }
 
 test "regexp internals use inline storage and lastIndex uses first shape slot" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const source = try string.String.createAscii(rt, "a+");
@@ -11521,7 +11544,7 @@ test "regexp internals use inline storage and lastIndex uses first shape slot" {
 }
 
 test "bound function state uses payload storage" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const bound = try Object.create(rt, class.ids.bound_function, null);
@@ -11546,7 +11569,7 @@ test "bound function state uses payload storage" {
 }
 
 test "proxy state uses payload storage" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const proxy = try Object.create(rt, class.ids.proxy, null);
@@ -11562,7 +11585,7 @@ test "proxy state uses payload storage" {
 }
 
 test "mapped arguments state uses inline var-ref storage" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const arguments = try Object.create(rt, class.ids.mapped_arguments, null);
@@ -11580,7 +11603,7 @@ test "mapped arguments state uses inline var-ref storage" {
 }
 
 test "unmapped arguments share a prepared shape and use dense element storage" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const template = try Object.createWithOwnPropertyCapacity(rt, class.ids.arguments, null, 3);
@@ -11635,7 +11658,7 @@ test "unmapped arguments share a prepared shape and use dense element storage" {
 }
 
 test "object data state uses payload storage" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const object = try Object.create(rt, class.ids.string, null);
@@ -11649,7 +11672,7 @@ test "object data state uses payload storage" {
 }
 
 test "array element state uses inline fast-array storage" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const dense = try Object.createArray(rt, null);
@@ -11665,7 +11688,7 @@ test "array element state uses inline fast-array storage" {
 }
 
 test "promise state uses payload storage" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const promise = try Object.create(rt, class.ids.promise, null);
@@ -11684,7 +11707,7 @@ test "promise state uses payload storage" {
 }
 
 test "generator state uses payload storage" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const generator = try Object.create(rt, class.ids.generator, null);
@@ -11692,9 +11715,9 @@ test "generator state uses payload storage" {
     try std.testing.expect(generator.payloadArm().* != null);
     try std.testing.expectEqual(class.PayloadKind.generator, generator.flags.class_payload_kind);
     generator.generatorThisSlot().* = JSValue.int32(404);
-    const args = try rt.memory.alloc(JSValue, 1);
+    const args = try mem_ops.alloc(rt, JSValue, 1);
     args[0] = JSValue.int32(505);
-    const stack_values = try rt.memory.alloc(JSValue, 1);
+    const stack_values = try mem_ops.alloc(rt, JSValue, 1);
     stack_values[0] = JSValue.int32(606);
     var replacement = SuspendedExecutionStorage{
         .stack = .{ .values = stack_values },

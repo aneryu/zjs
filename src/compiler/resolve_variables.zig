@@ -26,7 +26,7 @@ pub const Error = binding_rules.Error;
 /// buffer, quickjs.c resolve_variables bc_out, plus the function's label
 /// slots updated to output offsets as labels are passed).
 pub const ResolvedProduct = struct {
-    memory: *core.memory.MemoryAccount,
+    memory: std.mem.Allocator,
     atoms: *core.atom.AtomTable,
     code: []u8 = &.{},
     code_capacity: usize = 0,
@@ -61,9 +61,9 @@ pub const ResolvedProduct = struct {
     /// Idempotent, and `deinitUncommitted` remains correct whether or not this
     /// ran.
     pub fn releaseConsumedStreams(self: *ResolvedProduct) void {
-        if (self.code_capacity != 0) self.memory.free(u8, self.code);
-        if (self.atom_capacity != 0) self.memory.free(core.atom.Atom, self.atom_operands);
-        if (self.source_capacity != 0) self.memory.free(builder.SourceSlot, self.source_slots);
+        if (self.code_capacity != 0) self.memory.free(self.code);
+        if (self.atom_capacity != 0) self.memory.free(self.atom_operands);
+        if (self.source_capacity != 0) self.memory.free(self.source_slots);
 
         self.code = &.{};
         self.code_capacity = 0;
@@ -80,10 +80,10 @@ pub const ResolvedProduct = struct {
     /// (rooted by the compile's CompileAtomScope), so there is nothing to
     /// release per item. Idempotent. Mirrors Builder.deinit discipline.
     pub fn deinitUncommitted(self: *ResolvedProduct) void {
-        if (self.code_capacity != 0) self.memory.free(u8, self.code);
-        if (self.atom_capacity != 0) self.memory.free(core.atom.Atom, self.atom_operands);
-        if (self.label_capacity != 0) self.memory.free(labels.LabelSlot, self.label_slots);
-        if (self.source_capacity != 0) self.memory.free(builder.SourceSlot, self.source_slots);
+        if (self.code_capacity != 0) self.memory.free(self.code);
+        if (self.atom_capacity != 0) self.memory.free(self.atom_operands);
+        if (self.label_capacity != 0) self.memory.free(self.label_slots);
+        if (self.source_capacity != 0) self.memory.free(self.source_slots);
 
         self.code = &.{};
         self.code_capacity = 0;
@@ -169,7 +169,7 @@ const Resolver = struct {
 
     fn deinitScratch(self: *Resolver) void {
         if (self.pending_tail_capacity != 0) {
-            self.product.memory.free(PendingTailRewrite, self.pending_tail_rewrites);
+            self.product.memory.free(self.pending_tail_rewrites);
         }
         self.pending_tail_rewrites = &.{};
         self.pending_tail_capacity = 0;
@@ -2082,7 +2082,7 @@ fn preallocateProductStreams(
 }
 
 fn buildBindIndex(
-    memory: *core.memory.MemoryAccount,
+    memory: std.mem.Allocator,
     input: *const builder.Builder,
 ) Error![]BindEntry {
     var bind_count: usize = 0;
@@ -2115,17 +2115,18 @@ pub fn run(
     fd: *bytecode.function_def.FunctionDef,
 ) Error!ResolvedProduct {
     const input = fd.builder orelse return error.InvalidBytecode;
-    if (input.memory != fd.memory or input.atoms != fd.atoms)
+    if (input.memory.ptr != fd.allocator.ptr or input.atoms != fd.atoms)
         return error.InvalidBytecode;
     try validateInput(input);
     var ctx = binding_rules.JSContext.initWithFunctionDef(function, fd);
     try ctx.proveScopeLinksForResolution();
     try rules.resolveEvalGlobalVarTargets(fd);
 
-    const binds = try buildBindIndex(fd.memory, input);
-    defer if (binds.len != 0) fd.memory.free(BindEntry, binds);
+    const allocator = fd.allocator;
+    const binds = try buildBindIndex(allocator, input);
+    defer if (binds.len != 0) allocator.free(binds);
 
-    var product: ResolvedProduct = .{ .memory = fd.memory, .atoms = fd.atoms };
+    var product: ResolvedProduct = .{ .memory = allocator, .atoms = fd.atoms };
     errdefer product.deinitUncommitted();
     try initializeLabels(&product, input);
     try preallocateProductStreams(&product, input);
@@ -2167,27 +2168,29 @@ const ResolveTestHarness = struct {
     fd: bytecode.function_def.FunctionDef,
 
     fn init(harness: *ResolveTestHarness, allocator: std.mem.Allocator) !void {
-        harness.rt = try core.JSRuntime.create(allocator, .{});
+        harness.rt = try core.JSRuntime.create(.{ .allocator = allocator });
         errdefer harness.rt.destroy();
 
         harness.name_atom = try harness.rt.atoms.internString("qcp1-s3-pass-a");
 
         harness.function = bytecode.Bytecode.init(
-            &harness.rt.memory,
+            harness.rt.nativeAllocator(),
+            harness.rt.nativeAllocator(),
             &harness.rt.atoms,
             harness.name_atom,
         );
         errdefer harness.function.deinit();
 
         harness.fd = bytecode.function_def.FunctionDef.init(
-            &harness.rt.memory,
+            harness.rt.nativeAllocator(),
+            harness.rt.nativeAllocator(),
             &harness.rt.atoms,
             harness.name_atom,
         );
         errdefer harness.fd.deinit(harness.rt);
 
-        const input_builder = try harness.rt.memory.create(builder.Builder);
-        input_builder.* = builder.Builder.init(&harness.rt.memory, &harness.rt.atoms);
+        const input_builder = try harness.rt.nativeAllocator().create(builder.Builder);
+        input_builder.* = builder.Builder.init(harness.rt.nativeAllocator(), &harness.rt.atoms);
         harness.fd.builder = input_builder;
     }
 
@@ -2201,7 +2204,7 @@ const ResolveTestHarness = struct {
         if (harness.fd.builder) |input_builder| {
             harness.fd.builder = null;
             input_builder.deinit();
-            harness.rt.memory.destroy(builder.Builder, input_builder);
+            harness.rt.nativeAllocator().destroy(input_builder);
         }
     }
 

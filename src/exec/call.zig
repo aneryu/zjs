@@ -68,13 +68,11 @@ pub fn contextGlobalOwnPropertyCapacity(rt: *core.JSRuntime) usize {
     return hostGlobalOwnPropertyCapacity(rt) + 1; // scriptArgs, installed by the public CLI host setup
 }
 
-pub fn installHostGlobals(rt: *core.JSRuntime, global: *core.Object) !void {
+pub fn installHostGlobals(ctx: *core.JSContext, global: *core.Object) !void {
+    const rt = ctx.runtime;
     try global.reserveOwnPropertyCapacityAssumingPlain(rt, hostGlobalOwnPropertyCapacity(rt));
-    // Standard bootstrap establishes/adopts the Realm-global association that
-    // every lazy host PROP slot must own. Bare-runtime embedders may pass a
-    // fresh global whose context has not adopted it yet, so no Realm-dependent
-    // host placeholder may be published before this call.
-    try rt.installStandardGlobals(global);
+    // Bind the explicitly supplied Realm before publishing lazy host slots.
+    try ctx.installStandardGlobals(global);
     try definePredefinedHostEntryFunction(rt, global, "print", 1, &output_host_entry);
     try defineGlobalThisProperty(rt, global);
     try defineNumberConstantPropertyAssumingNew(rt, global, "NaN", std.math.nan(f64));
@@ -285,7 +283,7 @@ pub fn activeGlobalObject(_: *core.JSRuntime, global: ?*core.Object, globals: []
 
 fn installTestStandardRealm(ctx: *core.JSContext) !*core.Object {
     const rt = ctx.runtime;
-    @import("standard_globals.zig").configureRuntime(rt);
+
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
     ctx.global = global;
@@ -293,7 +291,7 @@ fn installTestStandardRealm(ctx: *core.JSContext) !*core.Object {
         ctx.rollbackIntrinsicBootstrap();
         ctx.global = null;
     }
-    try rt.installStandardGlobals(global);
+    try ctx.installStandardGlobals(global);
     return global;
 }
 
@@ -431,7 +429,7 @@ pub fn callHostGlobalNativeFunctionRecord(
         @intFromEnum(core.function.HostGlobalMethod.btoa) => try globalBtoa(ctx, global, args),
         @intFromEnum(core.function.HostGlobalMethod.atob) => try globalAtob(ctx, global, args),
         @intFromEnum(core.function.HostGlobalMethod.queue_microtask) => try globalQueueMicrotask(ctx, global, args),
-        @intFromEnum(core.function.HostGlobalMethod.gc) => globalGc(ctx),
+        @intFromEnum(core.function.HostGlobalMethod.gc) => globalGc(ctx, global),
         @intFromEnum(core.function.HostGlobalMethod.navigator_user_agent_get) => try value_ops.createStringValue(ctx.runtime, core.function.navigator_user_agent),
         @intFromEnum(core.function.HostGlobalMethod.dom_exception_ctor_call) => {
             const active_global = global orelse return error.InvalidBuiltinRegistry;
@@ -964,7 +962,7 @@ pub fn primitiveWrapper(ctx: *core.JSContext, class_id: core.class.ClassId, prim
 }
 
 test "primitiveWrapper roots direct symbol while creating call wrapper" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -982,7 +980,7 @@ test "primitiveWrapper roots direct symbol while creating call wrapper" {
     const stored = wrapper.objectData() orelse return error.TypeError;
     try std.testing.expect(stored.same(symbol_value));
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -1004,8 +1002,8 @@ fn primitivePrototypeFromGlobal(rt: *core.JSRuntime, global: ?*core.Object, clas
 
 fn boundFunctionNameValue(rt: *core.JSRuntime, target_name: core.JSValue) !core.JSValue {
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
-    try bytes.appendSlice(rt.memory.allocator, "bound ");
+    defer bytes.deinit(rt.nativeAllocator());
+    try bytes.appendSlice(rt.nativeAllocator(), "bound ");
     if (target_name.isString()) {
         try value_ops.appendRawString(rt, &bytes, target_name);
     }
@@ -1097,7 +1095,7 @@ fn createBoundFunction(
 }
 
 test "createBoundFunction roots bound this and args while creating function" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -1132,13 +1130,13 @@ test "createBoundFunction roots bound this and args while creating function" {
     try std.testing.expectEqual(@as(usize, 1), bound.boundArgs().len);
     try std.testing.expect(bound.boundArgs()[0].same(arg_value));
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(this_atom) == null);
     try std.testing.expect(rt.atoms.name(arg_atom) == null);
 }
 
 test "callValueOrBytecodeRoot roots inline args before bound argument merge" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -1172,30 +1170,30 @@ test "callValueOrBytecodeRoot roots inline args before bound argument merge" {
         fn trigger(context: ?*anyopaque, size: usize) void {
             _ = size;
             const self: *@This() = @ptrCast(@alignCast(context.?));
-            const saved_trigger_fn = self.rt.memory.trigger_gc_fn;
-            const saved_trigger_ctx = self.rt.memory.trigger_gc_ctx;
-            self.rt.memory.trigger_gc_fn = null;
-            self.rt.memory.trigger_gc_ctx = null;
+            const saved_trigger_fn = self.rt.gc.heap_budget.probe;
+            const saved_trigger_ctx = self.rt.gc.heap_budget.probe_ctx;
+            self.rt.gc.heap_budget.probe = null;
+            self.rt.gc.heap_budget.probe_ctx = null;
             defer {
-                self.rt.memory.trigger_gc_fn = saved_trigger_fn;
-                self.rt.memory.trigger_gc_ctx = saved_trigger_ctx;
+                self.rt.gc.heap_budget.probe = saved_trigger_fn;
+                self.rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
             }
             _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {}; // engine-frames-active trigger
             self.saw_arg = self.rt.atoms.name(self.atom_id) != null;
         }
     };
 
-    const saved_trigger_fn = rt.memory.trigger_gc_fn;
-    const saved_trigger_ctx = rt.memory.trigger_gc_ctx;
+    const saved_trigger_fn = rt.gc.heap_budget.probe;
+    const saved_trigger_ctx = rt.gc.heap_budget.probe_ctx;
     var trigger = Trigger{
         .rt = rt,
         .atom_id = arg_atom,
     };
-    rt.memory.trigger_gc_fn = Trigger.trigger;
-    rt.memory.trigger_gc_ctx = &trigger;
+    rt.gc.heap_budget.probe = Trigger.trigger;
+    rt.gc.heap_budget.probe_ctx = &trigger;
     defer {
-        rt.memory.trigger_gc_fn = saved_trigger_fn;
-        rt.memory.trigger_gc_ctx = saved_trigger_ctx;
+        rt.gc.heap_budget.probe = saved_trigger_fn;
+        rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
     }
 
     _ = try call_runtime.callValueOrBytecodeRoot(
@@ -1208,18 +1206,18 @@ test "callValueOrBytecodeRoot roots inline args before bound argument merge" {
         null,
         null,
     );
-    rt.memory.trigger_gc_fn = saved_trigger_fn;
-    rt.memory.trigger_gc_ctx = saved_trigger_ctx;
+    rt.gc.heap_budget.probe = saved_trigger_fn;
+    rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
 
     try std.testing.expect(!trigger.trace_failed);
     try std.testing.expect(trigger.saw_arg);
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(arg_atom) == null);
 }
 
 test "callValueOrBytecodeRoot roots overflow args across the copy allocation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -1258,13 +1256,13 @@ test "callValueOrBytecodeRoot roots overflow args across the copy allocation" {
         fn trigger(context: ?*anyopaque, size: usize) void {
             _ = size;
             const self: *@This() = @ptrCast(@alignCast(context.?));
-            const saved_trigger_fn = self.rt.memory.trigger_gc_fn;
-            const saved_trigger_ctx = self.rt.memory.trigger_gc_ctx;
-            self.rt.memory.trigger_gc_fn = null;
-            self.rt.memory.trigger_gc_ctx = null;
+            const saved_trigger_fn = self.rt.gc.heap_budget.probe;
+            const saved_trigger_ctx = self.rt.gc.heap_budget.probe_ctx;
+            self.rt.gc.heap_budget.probe = null;
+            self.rt.gc.heap_budget.probe_ctx = null;
             defer {
-                self.rt.memory.trigger_gc_fn = saved_trigger_fn;
-                self.rt.memory.trigger_gc_ctx = saved_trigger_ctx;
+                self.rt.gc.heap_budget.probe = saved_trigger_fn;
+                self.rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
             }
             _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {};
             self.collections += 1;
@@ -1288,17 +1286,17 @@ test "callValueOrBytecodeRoot roots overflow args across the copy allocation" {
     rt.forcePreciseRootScanForTest();
     defer rt.restoreDefaultRootScanForTest();
 
-    const saved_trigger_fn = rt.memory.trigger_gc_fn;
-    const saved_trigger_ctx = rt.memory.trigger_gc_ctx;
+    const saved_trigger_fn = rt.gc.heap_budget.probe;
+    const saved_trigger_ctx = rt.gc.heap_budget.probe_ctx;
     var trigger = Trigger{
         .rt = rt,
         .atom_ids = arg_atoms[0..],
     };
-    rt.memory.trigger_gc_fn = Trigger.trigger;
-    rt.memory.trigger_gc_ctx = &trigger;
+    rt.gc.heap_budget.probe = Trigger.trigger;
+    rt.gc.heap_budget.probe_ctx = &trigger;
     defer {
-        rt.memory.trigger_gc_fn = saved_trigger_fn;
-        rt.memory.trigger_gc_ctx = saved_trigger_ctx;
+        rt.gc.heap_budget.probe = saved_trigger_fn;
+        rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
     }
 
     const result = try call_runtime.callValueOrBytecodeRoot(
@@ -1311,8 +1309,8 @@ test "callValueOrBytecodeRoot roots overflow args across the copy allocation" {
         null,
         null,
     );
-    rt.memory.trigger_gc_fn = saved_trigger_fn;
-    rt.memory.trigger_gc_ctx = saved_trigger_ctx;
+    rt.gc.heap_budget.probe = saved_trigger_fn;
+    rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
 
     // At least one collection has to have run inside the call, or the
     // assertions below prove nothing.
@@ -1331,13 +1329,13 @@ fn objectToString(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSValue {
     const tag_value = try object.getProperty(tag_atom);
     if (tag_value.isString()) {
         var tag = std.ArrayList(u8).empty;
-        defer tag.deinit(rt.memory.allocator);
+        defer tag.deinit(rt.nativeAllocator());
         try value_ops.appendRawString(rt, &tag, tag_value);
         var out = std.ArrayList(u8).empty;
-        defer out.deinit(rt.memory.allocator);
-        try out.appendSlice(rt.memory.allocator, "[object ");
-        try out.appendSlice(rt.memory.allocator, tag.items);
-        try out.appendSlice(rt.memory.allocator, "]");
+        defer out.deinit(rt.nativeAllocator());
+        try out.appendSlice(rt.nativeAllocator(), "[object ");
+        try out.appendSlice(rt.nativeAllocator(), tag.items);
+        try out.appendSlice(rt.nativeAllocator(), "]");
         return value_ops.createStringValue(rt, out.items);
     }
     return value_ops.createStringValue(rt, defaultObjectTag(object));
@@ -1374,9 +1372,9 @@ fn defaultObjectTag(object: *core.Object) []const u8 {
 pub fn nativeFunctionName(rt: *core.JSRuntime, function_object: *core.Object) ![]u8 {
     const name_value = try nativeFunctionNameValue(rt, function_object, false);
     var buffer = std.ArrayList(u8).empty;
-    errdefer buffer.deinit(rt.memory.allocator);
+    errdefer buffer.deinit(rt.nativeAllocator());
     try value_ops.appendRawString(rt, &buffer, name_value);
-    return buffer.toOwnedSlice(rt.memory.allocator);
+    return buffer.toOwnedSlice(rt.nativeAllocator());
 }
 
 pub fn nativeFunctionNameForVm(rt: *core.JSRuntime, function_object: *core.Object) ![]u8 {
@@ -1398,7 +1396,7 @@ pub const VmDispatchName = struct {
     owned: ?[]u8,
 
     pub fn deinit(self: VmDispatchName, rt: *core.JSRuntime) void {
-        if (self.owned) |bytes| rt.memory.allocator.free(bytes);
+        if (self.owned) |bytes| rt.nativeAllocator().free(bytes);
     }
 };
 
@@ -1514,14 +1512,14 @@ fn nativeFunctionDispatchName(rt: *core.JSRuntime, function_object: *core.Object
     const dispatch_atom = function_object.nativeDispatchName();
     if (dispatch_atom != core.atom.null_atom) {
         if (rt.atoms.name(dispatch_atom)) |bytes| {
-            return try rt.memory.allocator.dupe(u8, bytes);
+            return try rt.nativeAllocator().dupe(u8, bytes);
         }
     }
     const name_value = try nativeFunctionNameValue(rt, function_object, true);
     var buffer = std.ArrayList(u8).empty;
-    errdefer buffer.deinit(rt.memory.allocator);
+    errdefer buffer.deinit(rt.nativeAllocator());
     try value_ops.appendRawString(rt, &buffer, name_value);
-    return buffer.toOwnedSlice(rt.memory.allocator);
+    return buffer.toOwnedSlice(rt.nativeAllocator());
 }
 
 fn nativeFunctionNameValue(rt: *core.JSRuntime, function_object: *core.Object, prefer_dispatch_name: bool) !core.JSValue {
@@ -1550,26 +1548,26 @@ fn functionBytecodeToStringValue(
 
 fn nativeFunctionSourceValue(rt: *core.JSRuntime, object: ?*core.Object) !core.JSValue {
     var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(rt.memory.allocator);
-    try buffer.appendSlice(rt.memory.allocator, "function");
+    defer buffer.deinit(rt.nativeAllocator());
+    try buffer.appendSlice(rt.nativeAllocator(), "function");
     if (object) |function_object| {
         const name_value = nativeFunctionNameValue(rt, function_object, false) catch null;
         if (name_value) |stored_name| {
             try appendNativeFunctionSourceName(rt, &buffer, stored_name);
         }
     }
-    try buffer.appendSlice(rt.memory.allocator, "() {\n    [native code]\n}");
+    try buffer.appendSlice(rt.nativeAllocator(), "() {\n    [native code]\n}");
     return value_ops.createStringValue(rt, buffer.items);
 }
 
 fn appendNativeFunctionSourceName(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), stored_name: core.JSValue) !void {
     var name_buffer = std.ArrayList(u8).empty;
-    defer name_buffer.deinit(rt.memory.allocator);
+    defer name_buffer.deinit(rt.nativeAllocator());
     try value_ops.appendRawString(rt, &name_buffer, stored_name);
 
     const source_name = nativeFunctionSourceName(name_buffer.items) orelse return;
-    try buffer.append(rt.memory.allocator, ' ');
-    try buffer.appendSlice(rt.memory.allocator, source_name);
+    try buffer.append(rt.nativeAllocator(), ' ');
+    try buffer.appendSlice(rt.nativeAllocator(), source_name);
 }
 
 fn nativeFunctionSourceName(name: []const u8) ?[]const u8 {
@@ -1703,9 +1701,9 @@ fn globalBtoa(ctx: *core.JSContext, global: ?*core.Object, args: []const core.JS
         error.InvalidCharacter => return throwInvalidCharacter(ctx, global, "String contains an invalid character"),
         else => |other| return other,
     };
-    defer bytes.deinit(ctx.runtime.memory.allocator);
+    defer bytes.deinit(ctx.runtime.nativeAllocator());
     var encoded = try hostResult(array_ops.encodeBase64Bytes(ctx.runtime, bytes.items, .base64, false));
-    defer encoded.deinit(ctx.runtime.memory.allocator);
+    defer encoded.deinit(ctx.runtime.nativeAllocator());
     return value_ops.createStringValue(ctx.runtime, encoded.items);
 }
 
@@ -1716,12 +1714,12 @@ fn globalAtob(ctx: *core.JSContext, global: ?*core.Object, args: []const core.JS
         error.InvalidCharacter => return throwInvalidCharacter(ctx, global, "The string to be decoded is not correctly encoded"),
         else => |other| return other,
     };
-    defer bytes.deinit(ctx.runtime.memory.allocator);
+    defer bytes.deinit(ctx.runtime.nativeAllocator());
     var decoded = array_ops.decodeBase64Bytes(ctx.runtime, bytes.items, .base64, .loose) catch |err| switch (err) {
         error.SyntaxError => return throwInvalidCharacter(ctx, global, "The string to be decoded is not correctly encoded"),
         else => |other| return other,
     };
-    defer decoded.deinit(ctx.runtime.memory.allocator);
+    defer decoded.deinit(ctx.runtime.nativeAllocator());
     const string = try core.string.String.createAscii(ctx.runtime, decoded.items);
     return string.value();
 }
@@ -1731,16 +1729,16 @@ const Latin1StringError = error{ InvalidCharacter, TypeError } || std.mem.Alloca
 fn stringToLatin1Bytes(rt: *core.JSRuntime, value: core.JSValue, max_unit: u16) Latin1StringError!std.ArrayList(u8) {
     const string_value = value.asStringBody() orelse return error.TypeError;
     var out = std.ArrayList(u8).empty;
-    errdefer out.deinit(rt.memory.allocator);
+    errdefer out.deinit(rt.nativeAllocator());
     switch (string_value.resolveData()) {
         .latin1 => |bytes| {
             for (bytes) |byte| {
                 if (byte > max_unit) return error.InvalidCharacter;
             }
-            try out.appendSlice(rt.memory.allocator, bytes);
+            try out.appendSlice(rt.nativeAllocator(), bytes);
         },
         .utf16 => |units| {
-            try out.ensureTotalCapacity(rt.memory.allocator, units.len);
+            try out.ensureTotalCapacity(rt.nativeAllocator(), units.len);
             for (units) |unit| {
                 if (unit > max_unit) return error.InvalidCharacter;
                 out.appendAssumeCapacity(@intCast(unit));
@@ -1778,8 +1776,11 @@ fn globalQueueMicrotask(ctx: *core.JSContext, global: ?*core.Object, args: []con
     return core.JSValue.undefinedValue();
 }
 
-fn globalGc(ctx: *core.JSContext) core.JSValue {
-    _ = ctx.runtime.runObjectCycleRemoval();
+fn globalGc(ctx: *core.JSContext, global: ?*core.Object) HostError!core.JSValue {
+    _ = ctx.runtime.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.PayloadMarkFailed => return try hostResult(exception_ops.throwInternalErrorMessage(ctx, global orelse ctx.global orelse return error.InvalidBuiltinRegistry, "GC payload marking failed")),
+    };
     return core.JSValue.undefinedValue();
 }
 
@@ -1869,7 +1870,7 @@ fn descriptorObject(rt: *core.JSRuntime, desc: core.Descriptor) !core.JSValue {
 }
 
 test "descriptorObject roots direct symbol value while creating descriptor object" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-call-descriptor-object-symbol");
@@ -1891,7 +1892,7 @@ test "descriptorObject roots direct symbol value while creating descriptor objec
         try std.testing.expect(stored.same(symbol_value));
     }
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -1946,7 +1947,7 @@ fn isFunctionClass(class_id: core.ClassId) bool {
 }
 
 test "four-class bytecode callable consumers accept every class" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const class_ids = [_]core.ClassId{
@@ -2025,7 +2026,7 @@ pub fn evalGlobalScriptSource(
         const root_function_object = object_ops.functionObjectFromValue(root_function_value) orelse break :blk error.InvalidBytecode;
         const root_bytecode_value = root_function_object.functionBytecode() orelse break :blk error.InvalidBytecode;
         const function = call_runtime.functionBytecodeFromValue(root_bytecode_value) orelse break :blk error.InvalidBytecode;
-        var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stackSize());
+        var nested_stack = stack_mod.Stack.init(ctx.runtime, ctx.runtime.stackSize());
         defer nested_stack.deinit(ctx.runtime);
         break :blk zjs_vm.runWithCallEnv(.{
             .ctx = compile_realm,
@@ -2698,8 +2699,8 @@ fn printValueRec(s: *State, value: core.JSValue) Error!void {
     if (value.isBigInt()) {
         var big = value_ops.cloneBigIntValue(s.rt, value) catch return error.OutOfMemory;
         defer big.deinit();
-        const text = big.formatBase10Alloc(s.rt.memory.allocator) catch return error.OutOfMemory;
-        defer s.rt.memory.allocator.free(text);
+        const text = big.formatBase10Alloc(s.rt.nativeAllocator()) catch return error.OutOfMemory;
+        defer s.rt.nativeAllocator().free(text);
         try s.puts(text);
         return s.putc('n');
     }

@@ -1,4 +1,5 @@
 const std = @import("std");
+const mem_ops = @import("../core/memory.zig");
 const bytecode = @import("../bytecode.zig");
 const builtin = @import("builtin");
 const atom = @import("../core/atom.zig");
@@ -1032,10 +1033,10 @@ pub const FunctionBytecodeImpl = extern struct {
     }
 
     fn createRaw(
-        account: *memory.MemoryAccount,
+        rt: *runtime.JSRuntime,
         layout_value: function_bytecode.FunctionLayout,
     ) !*FunctionBytecodeImpl {
-        const result = try account.createWithFam(FunctionBytecodeImpl, layout_value.famBytes());
+        const result = try mem_ops.createWithFam(rt, FunctionBytecodeImpl, layout_value.famBytes());
         const payload: [*]u8 = @ptrCast(result);
         bulk_memory.fillByte(payload[0..layout_value.mainPayloadBytes()], 0);
         assignBit(&result.flag_byte18, byte18_has_debug_mask, layout_value.has_debug);
@@ -1054,9 +1055,13 @@ pub const FunctionBytecodeImpl = extern struct {
     /// Sole production main-allocation owner. It owns no atoms/values until
     /// the finalizer's no-fail commit, but its complete packed payload and
     /// canonical self-pointers already exist.
-    pub fn createProductionShell(account: *memory.MemoryAccount, layout_value: function_bytecode.FunctionLayout) !*FunctionBytecodeImpl {
+    pub fn createProductionShell(rt: *runtime.JSRuntime, layout_value: function_bytecode.FunctionLayout) !*FunctionBytecodeImpl {
         std.debug.assert(layout_value.has_debug and layout_value.has_extension);
-        return createRaw(account, layout_value);
+        return createRaw(rt, layout_value);
+    }
+
+    pub fn destroyProductionShell(rt: *runtime.JSRuntime, fb: *FunctionBytecodeImpl, fam_bytes: usize) void {
+        mem_ops.destroyWithFam(rt, FunctionBytecodeImpl, fb, fam_bytes);
     }
 
     pub const FixtureOptions = struct {
@@ -1098,9 +1103,9 @@ pub const FunctionBytecodeImpl = extern struct {
             options.byte_code.len,
             options.prop_site_count,
         );
-        const fb = try createRaw(&rt.memory, layout_value);
+        const fb = try createRaw(rt, layout_value);
         var raw_owned = true;
-        errdefer if (raw_owned) rt.memory.destroyWithFam(FunctionBytecodeImpl, fb, layout_value.famBytes());
+        errdefer if (raw_owned) mem_ops.destroyWithFam(rt, FunctionBytecodeImpl, fb, layout_value.famBytes());
 
         const byte_code = layout_value.byteCodeSliceMut(fb);
         @memcpy(byte_code, options.byte_code);
@@ -1137,7 +1142,7 @@ pub const FunctionBytecodeImpl = extern struct {
     pub fn destroyUnpublishedFixture(self: *FunctionBytecodeImpl, rt: *runtime.JSRuntime) void {
         const layout_value = self.layout();
         self.deinitWithLayout(rt, layout_value);
-        rt.memory.destroyWithFam(FunctionBytecodeImpl, self, layout_value.famBytes());
+        mem_ops.destroyWithFam(rt, FunctionBytecodeImpl, self, layout_value.famBytes());
     }
 
     /// Final no-fail phase of a fixture transaction. All fallible values,
@@ -1215,7 +1220,7 @@ pub const FunctionBytecodeImpl = extern struct {
         rt: anytype,
         layout_value: function_bytecode.FunctionLayout,
     ) void {
-        const mem = &rt.memory;
+        const mem = rt;
         // Capture the one checked layout and every inline view before
         // clearing an owner field. The hot extension follows code, so no
         // teardown step may try to rediscover it from cleared state.
@@ -1266,14 +1271,14 @@ pub const FunctionBytecodeImpl = extern struct {
                 (dbg.pc2line_buf.?)[0..pc2line_len];
             dbg.pc2line_buf = null;
             dbg.pc2line_len = 0;
-            if (pc2line_buf.len != 0) mem.free(u8, pc2line_buf);
+            if (pc2line_buf.len != 0) mem_ops.free(mem, u8, pc2line_buf);
             if (dbg.source_ptr) |src_ptr| {
                 std.debug.assert(dbg.source_len >= 0);
                 const logical_len: usize = @intCast(dbg.source_len);
                 const src = src_ptr[0 .. logical_len + 1];
                 dbg.source_ptr = null;
                 dbg.source_len = 0;
-                mem.free(u8, @constCast(src));
+                mem_ops.free(mem, u8, @constCast(src));
             }
         }
 
@@ -1534,6 +1539,6 @@ pub fn destroyFromHeader(rt: anytype, header: *gc.Header) void {
     // holds every FunctionBytecode back until all object resource passes
     // have run (`Registry.deinit` phase 2), which is the ordering the
     // park used to express here.
-    rt.memory.destroyWithFam(FunctionBytecodeImpl, self, layout_value.famBytes());
+    mem_ops.destroyWithFam(rt, FunctionBytecodeImpl, self, layout_value.famBytes());
 }
 pub const FunctionBytecode = FunctionBytecodeImpl;

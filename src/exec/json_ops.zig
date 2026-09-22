@@ -166,13 +166,13 @@ pub fn stringify(rt: *core.JSRuntime, value: core.JSValue, replacer: core.JSValu
     property_list_roots.activate(rt);
     defer property_list_roots.deactivate(rt);
     var gap = try stringifyGap(rt, rooted_space);
-    defer gap.deinit(rt.memory.allocator);
+    defer gap.deinit(rt.nativeAllocator());
     const options = StringifyOptions{ .property_list = property_list, .has_property_list = isArrayObject(rooted_replacer), .gap = gap.items };
 
     var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(rt.memory.allocator);
+    defer buffer.deinit(rt.nativeAllocator());
     var stack = std.ArrayList(*core.Object).empty;
-    defer stack.deinit(rt.memory.allocator);
+    defer stack.deinit(rt.nativeAllocator());
     try appendJsonValue(rt, &buffer, rooted_value, false, &stack, options, 0);
     if (buffer.items.len == 0) return core.JSValue.undefinedValue();
 
@@ -186,7 +186,7 @@ pub fn parse(rt: *core.JSRuntime, global: ?*core.Object, value: core.JSValue) !c
     defer root_frame.deactivate(rt);
 
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try appendJsonInputString(rt, &bytes, rooted_value);
 
     if (try parseSimpleJsonValue(rt, global, bytes.items)) |parsed| return parsed;
@@ -230,7 +230,7 @@ pub fn parseWithRecord(rt: *core.JSRuntime, global: ?*core.Object, value: core.J
     }
 
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try appendJsonInputString(rt, &bytes, rooted_value);
     const text = try core.string.String.createUtf8(rt, bytes.items);
     return switch (text.resolveData()) {
@@ -352,17 +352,17 @@ const JsonParseRecord = union(enum) {
     fn deinit(self: *JsonParseRecord, rt: *core.JSRuntime) void {
         switch (self.*) {
             .primitive => |*p| {
-                if (p.source.len != 0) rt.memory.allocator.free(p.source);
+                if (p.source.len != 0) rt.nativeAllocator().free(p.source);
             },
             .array => |*a| {
                 for (a.elements) |*element| element.deinit(rt);
-                rt.memory.allocator.free(a.elements);
+                rt.nativeAllocator().free(a.elements);
             },
             .object => |*o| {
                 for (o.entries) |*entry| {
                     entry.record.deinit(rt);
                 }
-                rt.memory.allocator.free(o.entries);
+                rt.nativeAllocator().free(o.entries);
             },
         }
     }
@@ -577,7 +577,7 @@ fn JsonUnitParser(comptime T: type) type {
 
         fn recordSourceSpan(self: *Self, start: usize, end: usize) ![]u8 {
             var bytes = std.ArrayList(u8).empty;
-            errdefer bytes.deinit(self.rt.memory.allocator);
+            errdefer bytes.deinit(self.rt.nativeAllocator());
             if (T == u16) {
                 try appendWtf8FromUnits(self.rt, &bytes, self.units[start..end]);
             } else {
@@ -588,7 +588,7 @@ fn JsonUnitParser(comptime T: type) type {
                     try appendWtf8FromUnits(self.rt, &bytes, &widened);
                 }
             }
-            return bytes.toOwnedSlice(self.rt.memory.allocator);
+            return bytes.toOwnedSlice(self.rt.nativeAllocator());
         }
 
         fn parseObject(self: *Self, record: ?*JsonParseRecord) JsonParseError!core.JSValue {
@@ -609,7 +609,7 @@ fn JsonUnitParser(comptime T: type) type {
                 for (entries.items) |*entry| {
                     entry.record.deinit(self.rt);
                 }
-                entries.deinit(self.rt.memory.allocator);
+                entries.deinit(self.rt.nativeAllocator());
             };
             // TGC S3-d: the entries built so far are native memory. Declared
             // after the errdefer above so the pop runs BEFORE the free.
@@ -621,7 +621,7 @@ fn JsonUnitParser(comptime T: type) type {
             self.skipWhitespace();
             if (self.peek() == @as(T, '}')) {
                 self.index += 1;
-                if (record) |slot| slot.* = .{ .object = .{ .value = object_value, .entries = try array_list_erased.toOwnedSlice(&entries, self.rt.memory.allocator) } };
+                if (record) |slot| slot.* = .{ .object = .{ .value = object_value, .entries = try array_list_erased.toOwnedSlice(&entries, self.rt.nativeAllocator()) } };
                 return object_value;
             }
             while (true) {
@@ -645,7 +645,7 @@ fn JsonUnitParser(comptime T: type) type {
                 // (json_parse_record_add, quickjs.c).
                 if (child_slot) |slot| {
                     pending_frame.pending = slot;
-                    array_list_erased.append(&entries, self.rt.memory.allocator, .{ .atom = key_atom, .record = slot.* }) catch |err| {
+                    array_list_erased.append(&entries, self.rt.nativeAllocator(), .{ .atom = key_atom, .record = slot.* }) catch |err| {
                         pending_frame.pending = null;
                         slot.deinit(self.rt);
                         return err;
@@ -661,7 +661,7 @@ fn JsonUnitParser(comptime T: type) type {
                 const next = self.peek() orelse return error.SyntaxError;
                 if (next == '}') {
                     self.index += 1;
-                    if (record) |slot| slot.* = .{ .object = .{ .value = object_value, .entries = try array_list_erased.toOwnedSlice(&entries, self.rt.memory.allocator) } };
+                    if (record) |slot| slot.* = .{ .object = .{ .value = object_value, .entries = try array_list_erased.toOwnedSlice(&entries, self.rt.nativeAllocator()) } };
                     return object_value;
                 }
                 if (next != ',') return error.SyntaxError;
@@ -682,7 +682,7 @@ fn JsonUnitParser(comptime T: type) type {
             var elements = std.ArrayList(JsonParseRecord).empty;
             errdefer if (record != null) {
                 for (elements.items) |*element| element.deinit(self.rt);
-                elements.deinit(self.rt.memory.allocator);
+                elements.deinit(self.rt.nativeAllocator());
             };
             // Array elements are never overwritten, so their values stay
             // reachable through the array itself; the frame is here for the
@@ -695,7 +695,7 @@ fn JsonUnitParser(comptime T: type) type {
             self.skipWhitespace();
             if (self.peek() == @as(T, ']')) {
                 self.index += 1;
-                if (record) |slot| slot.* = .{ .array = .{ .value = object_value, .elements = try array_list_erased.toOwnedSlice(&elements, self.rt.memory.allocator) } };
+                if (record) |slot| slot.* = .{ .array = .{ .value = object_value, .elements = try array_list_erased.toOwnedSlice(&elements, self.rt.nativeAllocator()) } };
                 return object_value;
             }
             var index: u32 = 0;
@@ -707,7 +707,7 @@ fn JsonUnitParser(comptime T: type) type {
                 // later failure is covered by the `elements` errdefer.
                 if (child_slot) |slot| {
                     pending_frame.pending = slot;
-                    array_list_erased.append(&elements, self.rt.memory.allocator, slot.*) catch |err| {
+                    array_list_erased.append(&elements, self.rt.nativeAllocator(), slot.*) catch |err| {
                         pending_frame.pending = null;
                         slot.deinit(self.rt);
                         return err;
@@ -725,7 +725,7 @@ fn JsonUnitParser(comptime T: type) type {
                 const next = self.peek() orelse return error.SyntaxError;
                 if (next == ']') {
                     self.index += 1;
-                    if (record) |slot| slot.* = .{ .array = .{ .value = object_value, .elements = try array_list_erased.toOwnedSlice(&elements, self.rt.memory.allocator) } };
+                    if (record) |slot| slot.* = .{ .array = .{ .value = object_value, .elements = try array_list_erased.toOwnedSlice(&elements, self.rt.nativeAllocator()) } };
                     return object_value;
                 }
                 if (next != ',') return error.SyntaxError;
@@ -735,17 +735,17 @@ fn JsonUnitParser(comptime T: type) type {
 
         fn parseKeyAtom(self: *Self) !core.Atom {
             var key_units = std.ArrayList(u16).empty;
-            defer key_units.deinit(self.rt.memory.allocator);
+            defer key_units.deinit(self.rt.nativeAllocator());
             try self.parseStringUnits(&key_units);
             var key_bytes = std.ArrayList(u8).empty;
-            defer key_bytes.deinit(self.rt.memory.allocator);
+            defer key_bytes.deinit(self.rt.nativeAllocator());
             try appendWtf8FromUnits(self.rt, &key_bytes, key_units.items);
             return self.rt.internAtom(key_bytes.items);
         }
 
         fn parseString(self: *Self) !core.JSValue {
             var out = std.ArrayList(u16).empty;
-            defer out.deinit(self.rt.memory.allocator);
+            defer out.deinit(self.rt.nativeAllocator());
             try self.parseStringUnits(&out);
             return (try core.string.String.createUtf16(self.rt, out.items)).value();
         }
@@ -764,14 +764,14 @@ fn JsonUnitParser(comptime T: type) type {
                     const escape = self.units[self.index];
                     self.index += 1;
                     switch (escape) {
-                        '"' => try out.append(self.rt.memory.allocator, '"'),
-                        '\\' => try out.append(self.rt.memory.allocator, '\\'),
-                        '/' => try out.append(self.rt.memory.allocator, '/'),
-                        'b' => try out.append(self.rt.memory.allocator, 0x08),
-                        'f' => try out.append(self.rt.memory.allocator, 0x0c),
-                        'n' => try out.append(self.rt.memory.allocator, 0x0a),
-                        'r' => try out.append(self.rt.memory.allocator, 0x0d),
-                        't' => try out.append(self.rt.memory.allocator, 0x09),
+                        '"' => try out.append(self.rt.nativeAllocator(), '"'),
+                        '\\' => try out.append(self.rt.nativeAllocator(), '\\'),
+                        '/' => try out.append(self.rt.nativeAllocator(), '/'),
+                        'b' => try out.append(self.rt.nativeAllocator(), 0x08),
+                        'f' => try out.append(self.rt.nativeAllocator(), 0x0c),
+                        'n' => try out.append(self.rt.nativeAllocator(), 0x0a),
+                        'r' => try out.append(self.rt.nativeAllocator(), 0x0d),
+                        't' => try out.append(self.rt.nativeAllocator(), 0x09),
                         'u' => {
                             if (self.index + 4 > self.units.len) return error.SyntaxError;
                             var code: u16 = 0;
@@ -780,7 +780,7 @@ fn JsonUnitParser(comptime T: type) type {
                                 code = (code << 4) | digit;
                                 self.index += 1;
                             }
-                            try out.append(self.rt.memory.allocator, code);
+                            try out.append(self.rt.nativeAllocator(), code);
                         },
                         else => return error.SyntaxError,
                     }
@@ -788,14 +788,14 @@ fn JsonUnitParser(comptime T: type) type {
                 }
                 if (unit < 0x20) return error.SyntaxError;
                 // A `u8` source unit widens implicitly into the `u16` output.
-                try out.append(self.rt.memory.allocator, unit);
+                try out.append(self.rt.nativeAllocator(), unit);
             }
         }
 
         fn parseNumber(self: *Self) !core.JSValue {
             const start = self.index;
             var ascii = std.ArrayList(u8).empty;
-            defer ascii.deinit(self.rt.memory.allocator);
+            defer ascii.deinit(self.rt.nativeAllocator());
             var had_fraction = false;
             if (self.peek() == @as(T, '-')) self.index += 1;
             // integer part: 0 | [1-9][0-9]*
@@ -831,7 +831,7 @@ fn JsonUnitParser(comptime T: type) type {
                 }
                 if (digits == 0) return error.SyntaxError;
             }
-            try ascii.ensureTotalCapacity(self.rt.memory.allocator, self.index - start);
+            try ascii.ensureTotalCapacity(self.rt.nativeAllocator(), self.index - start);
             for (self.units[start..self.index]) |unit| ascii.appendAssumeCapacity(@intCast(unit));
             const text = ascii.items;
             if (!had_fraction) {
@@ -872,19 +872,19 @@ fn appendWtf8FromUnits(rt: *core.JSRuntime, out: *std.ArrayList(u8), units: []co
             }
         }
         if (cp < 0x80) {
-            try out.append(rt.memory.allocator, @intCast(cp));
+            try out.append(rt.nativeAllocator(), @intCast(cp));
         } else if (cp < 0x800) {
-            try out.append(rt.memory.allocator, @intCast(0xc0 | (cp >> 6)));
-            try out.append(rt.memory.allocator, @intCast(0x80 | (cp & 0x3f)));
+            try out.append(rt.nativeAllocator(), @intCast(0xc0 | (cp >> 6)));
+            try out.append(rt.nativeAllocator(), @intCast(0x80 | (cp & 0x3f)));
         } else if (cp < 0x10000) {
-            try out.append(rt.memory.allocator, @intCast(0xe0 | (cp >> 12)));
-            try out.append(rt.memory.allocator, @intCast(0x80 | ((cp >> 6) & 0x3f)));
-            try out.append(rt.memory.allocator, @intCast(0x80 | (cp & 0x3f)));
+            try out.append(rt.nativeAllocator(), @intCast(0xe0 | (cp >> 12)));
+            try out.append(rt.nativeAllocator(), @intCast(0x80 | ((cp >> 6) & 0x3f)));
+            try out.append(rt.nativeAllocator(), @intCast(0x80 | (cp & 0x3f)));
         } else {
-            try out.append(rt.memory.allocator, @intCast(0xf0 | (cp >> 18)));
-            try out.append(rt.memory.allocator, @intCast(0x80 | ((cp >> 12) & 0x3f)));
-            try out.append(rt.memory.allocator, @intCast(0x80 | ((cp >> 6) & 0x3f)));
-            try out.append(rt.memory.allocator, @intCast(0x80 | (cp & 0x3f)));
+            try out.append(rt.nativeAllocator(), @intCast(0xf0 | (cp >> 18)));
+            try out.append(rt.nativeAllocator(), @intCast(0x80 | ((cp >> 12) & 0x3f)));
+            try out.append(rt.nativeAllocator(), @intCast(0x80 | ((cp >> 6) & 0x3f)));
+            try out.append(rt.nativeAllocator(), @intCast(0x80 | (cp & 0x3f)));
         }
     }
 }
@@ -905,7 +905,7 @@ pub fn rawJSON(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     defer root_frame.deactivate(rt);
 
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     appendJsonInputString(rt, &bytes, rooted_value) catch |err| switch (err) {
         error.TypeError => {
             if (rooted_value.is(.object)) return error.SyntaxError;
@@ -953,27 +953,27 @@ fn appendJsonValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.
     defer root_frame.deactivate(rt);
 
     if (rooted_value.is(.undefined_value)) {
-        try buffer.appendSlice(rt.memory.allocator, if (array_slot) "null" else "");
+        try buffer.appendSlice(rt.nativeAllocator(), if (array_slot) "null" else "");
     } else if (rooted_value.is(.null_value)) {
-        try buffer.appendSlice(rt.memory.allocator, "null");
+        try buffer.appendSlice(rt.nativeAllocator(), "null");
     } else if (rooted_value.is(.symbol)) {
-        try buffer.appendSlice(rt.memory.allocator, if (array_slot) "null" else "");
+        try buffer.appendSlice(rt.nativeAllocator(), if (array_slot) "null" else "");
     } else if (rooted_value.as(.int)) |int_value| {
         var int_buf: [20]u8 = undefined;
         const printed = number_format.formatInt64(&int_buf, @as(i64, int_value));
-        try buffer.appendSlice(rt.memory.allocator, printed);
+        try buffer.appendSlice(rt.nativeAllocator(), printed);
     } else if (rooted_value.as(.float64)) |float_value| {
         if (!std.math.isFinite(float_value)) {
-            try buffer.appendSlice(rt.memory.allocator, "null");
+            try buffer.appendSlice(rt.nativeAllocator(), "null");
         } else if (float_value == 0) {
-            try buffer.append(rt.memory.allocator, '0');
+            try buffer.append(rt.nativeAllocator(), '0');
         } else {
             var number_buf: [128]u8 = undefined;
             const printed = value_ops.formatFiniteNumberAssumeCapacity(&number_buf, float_value);
-            try buffer.appendSlice(rt.memory.allocator, printed);
+            try buffer.appendSlice(rt.nativeAllocator(), printed);
         }
     } else if (rooted_value.as(.boolean)) |bool_value| {
-        try buffer.appendSlice(rt.memory.allocator, if (bool_value) "true" else "false");
+        try buffer.appendSlice(rt.nativeAllocator(), if (bool_value) "true" else "false");
     } else if (rooted_value.isString()) {
         try appendJsonStringValue(rt, buffer, rooted_value);
     } else if (rooted_value.isBigInt()) {
@@ -985,7 +985,7 @@ fn appendJsonValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.
             raw = try object_value.getProperty(core.atom.ids.rawJSON);
             try core.string.appendValueUtf8(rt, buffer, raw);
         } else if (isCallableJsonOmittedObject(object_value)) {
-            try buffer.appendSlice(rt.memory.allocator, if (array_slot) "null" else "");
+            try buffer.appendSlice(rt.nativeAllocator(), if (array_slot) "null" else "");
         } else if (object_value.class_id == core.class.ids.number or object_value.class_id == core.class.ids.string or object_value.class_id == core.class.ids.boolean) {
             primitive = jsonPrimitiveWrapperValue(object_value) orelse core.JSValue.undefinedValue();
             try appendJsonValue(rt, buffer, primitive, array_slot, stack, options, depth);
@@ -995,21 +995,21 @@ fn appendJsonValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.
             try appendJsonObject(rt, buffer, object_value, stack, options, depth);
         }
     } else {
-        try buffer.appendSlice(rt.memory.allocator, "null");
+        try buffer.appendSlice(rt.nativeAllocator(), "null");
     }
 }
 
 fn appendJsonArray(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *core.Object, stack: *std.ArrayList(*core.Object), options: StringifyOptions, depth: usize) JsonStringifyError!void {
     if (objectInStack(stack.items, object)) return error.TypeError;
-    try array_list_erased.append(stack, rt.memory.allocator, object);
+    try array_list_erased.append(stack, rt.nativeAllocator(), object);
     defer _ = stack.pop();
 
-    try buffer.append(rt.memory.allocator, '[');
+    try buffer.append(rt.nativeAllocator(), '[');
     var index: u32 = 0;
     while (index < object.arrayLength()) : (index += 1) {
-        if (index != 0) try buffer.append(rt.memory.allocator, ',');
+        if (index != 0) try buffer.append(rt.nativeAllocator(), ',');
         if (options.gap.len != 0) {
-            try buffer.append(rt.memory.allocator, '\n');
+            try buffer.append(rt.nativeAllocator(), '\n');
             try appendIndent(rt, buffer, options.gap, depth + 1);
         }
         const value = try object.getDenseArrayElementValue(index) orelse object.getProperty(core.Atom.taggedInt(index));
@@ -1020,18 +1020,18 @@ fn appendJsonArray(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *cor
         try appendJsonValue(rt, buffer, rooted_value, true, stack, options, depth + 1);
     }
     if (options.gap.len != 0 and object.arrayLength() != 0) {
-        try buffer.append(rt.memory.allocator, '\n');
+        try buffer.append(rt.nativeAllocator(), '\n');
         try appendIndent(rt, buffer, options.gap, depth);
     }
-    try buffer.append(rt.memory.allocator, ']');
+    try buffer.append(rt.nativeAllocator(), ']');
 }
 
 fn appendJsonObject(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *core.Object, stack: *std.ArrayList(*core.Object), options: StringifyOptions, depth: usize) JsonStringifyError!void {
     if (objectInStack(stack.items, object)) return error.TypeError;
-    try array_list_erased.append(stack, rt.memory.allocator, object);
+    try array_list_erased.append(stack, rt.nativeAllocator(), object);
     defer _ = stack.pop();
 
-    try buffer.append(rt.memory.allocator, '{');
+    try buffer.append(rt.nativeAllocator(), '{');
     const owned_keys: []core.Atom = if (!options.has_property_list) try object.ownKeys(rt) else &.{};
     defer if (!options.has_property_list) core.Object.freeKeys(rt, owned_keys);
     const keys = if (options.has_property_list) options.property_list else owned_keys;
@@ -1049,21 +1049,21 @@ fn appendJsonObject(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), object: *co
             const child_object = core.Object.fromHeader(header);
             if (isCallableJsonOmittedObject(child_object)) continue;
         }
-        if (emitted) try buffer.append(rt.memory.allocator, ',');
+        if (emitted) try buffer.append(rt.nativeAllocator(), ',');
         if (options.gap.len != 0) {
-            try buffer.append(rt.memory.allocator, '\n');
+            try buffer.append(rt.nativeAllocator(), '\n');
             try appendIndent(rt, buffer, options.gap, depth + 1);
         }
         emitted = true;
         try appendJsonAtomName(rt, buffer, key);
-        try buffer.appendSlice(rt.memory.allocator, if (options.gap.len == 0) ":" else ": ");
+        try buffer.appendSlice(rt.nativeAllocator(), if (options.gap.len == 0) ":" else ": ");
         try appendJsonValue(rt, buffer, rooted_value, false, stack, options, depth + 1);
     }
     if (options.gap.len != 0 and emitted) {
-        try buffer.append(rt.memory.allocator, '\n');
+        try buffer.append(rt.nativeAllocator(), '\n');
         try appendIndent(rt, buffer, options.gap, depth);
     }
-    try buffer.append(rt.memory.allocator, '}');
+    try buffer.append(rt.nativeAllocator(), '}');
 }
 
 const SimpleJsonParser = struct {
@@ -1259,7 +1259,7 @@ fn parseSimpleJsonValue(rt: *core.JSRuntime, global: ?*core.Object, bytes: []con
 }
 
 test "simple JSON parser uses shared ASCII digit classification for integers" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const int_value = (try parseSimpleJsonValue(rt, null, "12345")).?;
@@ -1326,7 +1326,7 @@ fn isCallableJsonOmittedObject(object: *core.Object) bool {
 }
 
 test "JSON callable omission recognizes every bytecode function class" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const class_ids = [_]core.ClassId{
@@ -1364,7 +1364,7 @@ fn stringifyPropertyList(rt: *core.JSRuntime, replacer: core.JSValue) ![]core.At
 
     var list = std.ArrayList(core.Atom).empty;
     errdefer {
-        list.deinit(rt.memory.allocator);
+        list.deinit(rt.nativeAllocator());
     }
     // TGC S3 §4 class B: the accumulated ids live in a native array across
     // `getProperty`, which can reach a JS accessor.
@@ -1382,9 +1382,9 @@ fn stringifyPropertyList(rt: *core.JSRuntime, replacer: core.JSValue) ![]core.At
         if (atomListContains(list.items, atom)) {
             continue;
         }
-        try list.append(rt.memory.allocator, atom);
+        try list.append(rt.nativeAllocator(), atom);
     }
-    return try list.toOwnedSlice(rt.memory.allocator);
+    return try list.toOwnedSlice(rt.nativeAllocator());
 }
 
 fn stringifyPropertyListAtom(rt: *core.JSRuntime, value: core.JSValue) !?core.Atom {
@@ -1449,7 +1449,7 @@ fn stringifyGap(rt: *core.JSRuntime, space: core.JSValue) !std.ArrayList(u8) {
     };
     if (number) |raw_number| {
         const count: usize = @intFromFloat(@min(@max(raw_number, 0), 10));
-        try out.appendNTimes(rt.memory.allocator, ' ', count);
+        try out.appendNTimes(rt.nativeAllocator(), ' ', count);
         return out;
     }
 
@@ -1475,12 +1475,12 @@ fn atomListContains(list: []const core.Atom, atom: core.Atom) bool {
 }
 
 fn freePropertyList(rt: *core.JSRuntime, list: []core.Atom) void {
-    if (list.len != 0) rt.memory.allocator.free(list);
+    if (list.len != 0) rt.nativeAllocator().free(list);
 }
 
 fn appendIndent(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), gap: []const u8, depth: usize) !void {
     var index: usize = 0;
-    while (index < depth) : (index += 1) try buffer.appendSlice(rt.memory.allocator, gap);
+    while (index < depth) : (index += 1) try buffer.appendSlice(rt.nativeAllocator(), gap);
 }
 
 fn defineData(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, value: core.JSValue, enumerable: bool) !void {
@@ -1502,21 +1502,21 @@ fn appendJsonInputString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value:
 
     if (rooted_value.isString()) return core.string.appendValueUtf8(rt, buffer, rooted_value);
     if (rooted_value.is(.symbol)) return error.TypeError;
-    if (rooted_value.is(.null_value)) return buffer.appendSlice(rt.memory.allocator, "null");
-    if (rooted_value.is(.undefined_value)) return buffer.appendSlice(rt.memory.allocator, "undefined");
-    if (rooted_value.as(.boolean)) |bool_value| return buffer.appendSlice(rt.memory.allocator, if (bool_value) "true" else "false");
+    if (rooted_value.is(.null_value)) return buffer.appendSlice(rt.nativeAllocator(), "null");
+    if (rooted_value.is(.undefined_value)) return buffer.appendSlice(rt.nativeAllocator(), "undefined");
+    if (rooted_value.as(.boolean)) |bool_value| return buffer.appendSlice(rt.nativeAllocator(), if (bool_value) "true" else "false");
     if (rooted_value.as(.int)) |int_value| {
         var int_buf: [20]u8 = undefined;
         const printed = number_format.formatInt64(&int_buf, @as(i64, int_value));
-        return buffer.appendSlice(rt.memory.allocator, printed);
+        return buffer.appendSlice(rt.nativeAllocator(), printed);
     }
     if (rooted_value.as(.float64)) |float_value| {
-        if (float_value == 0) return buffer.append(rt.memory.allocator, '0');
+        if (float_value == 0) return buffer.append(rt.nativeAllocator(), '0');
         var float_buf: [128]u8 = undefined;
         const printed = value_ops.formatFiniteNumberAssumeCapacity(&float_buf, float_value);
-        return buffer.appendSlice(rt.memory.allocator, printed);
+        return buffer.appendSlice(rt.nativeAllocator(), printed);
     }
-    if (rooted_value.isBigInt()) return core.value_format.appendBigIntBase10(rt.memory.allocator, buffer, rooted_value);
+    if (rooted_value.isBigInt()) return core.value_format.appendBigIntBase10(rt.nativeAllocator(), buffer, rooted_value);
     if (rooted_value.is(.object)) {
         const header = rooted_value.refHeader() orelse return error.TypeError;
         const object = core.Object.fromHeader(header);
@@ -1557,7 +1557,7 @@ const JsonStringifyPropertyList = struct {
     has_property_list: bool = false,
 
     fn deinit(self: JsonStringifyPropertyList, rt: *core.JSRuntime) void {
-        rt.memory.allocator.free(self.items);
+        rt.nativeAllocator().free(self.items);
     }
 };
 
@@ -1636,7 +1636,7 @@ pub fn jsonParseCall(
 }
 
 test "JSON.parse roots direct function bytecode input while coercing to string" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const ctx = try core.JSContext.create(rt, .{});
@@ -1656,7 +1656,7 @@ test "JSON.parse roots direct function bytecode input while coercing to string" 
     try std.testing.expectError(error.SyntaxError, jsonParseCall(ctx, null, global, &args, null, null));
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -1730,12 +1730,12 @@ pub fn jsonInternalizeProperty(
             const keys = try object_ops.objectRestOwnKeys(ctx, output, global, object);
             defer core.Object.freeKeys(ctx.runtime, keys);
             var enumerable_keys = std.ArrayList(core.Atom).empty;
-            defer enumerable_keys.deinit(ctx.runtime.memory.allocator);
+            defer enumerable_keys.deinit(ctx.runtime.nativeAllocator());
             for (keys) |child_key| {
                 if (ctx.runtime.atoms.isPublicSymbol(child_key)) continue;
                 const desc = try object_ops.objectRestOwnPropertyDescriptor(ctx, output, global, object, child_key) orelse continue;
                 if (desc.enumerable != true) continue;
-                try enumerable_keys.append(ctx.runtime.memory.allocator, child_key);
+                try enumerable_keys.append(ctx.runtime.nativeAllocator(), child_key);
             }
             for (enumerable_keys.items) |child_key| {
                 const child_record: ?*const JsonParseRecord = if (active_record) |rec| rec.findObjectEntry(child_key) else null;
@@ -1866,7 +1866,7 @@ pub fn jsonStringifyCall(
     const property_list = try jsonStringifyPropertyList(ctx, output, global, replacer, caller_function, caller_frame);
     defer property_list.deinit(ctx.runtime);
     var gap = try jsonStringifyGap(ctx, output, global, space, caller_function, caller_frame);
-    defer gap.deinit(ctx.runtime.memory.allocator);
+    defer gap.deinit(ctx.runtime.nativeAllocator());
     var replacer_call_storage: CallSite = undefined;
     const replacer_call: ?*CallSite = if (call_runtime.isCallableValue(replacer)) blk: {
         replacer_call_storage = CallSite.initInternal(
@@ -1894,16 +1894,16 @@ pub fn jsonStringifyCall(
     try holder.defineOwnProperty(ctx.runtime, root_key, core.Descriptor.data(value, .all));
 
     var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(ctx.runtime.memory.allocator);
+    defer buffer.deinit(ctx.runtime.nativeAllocator());
     var stack = std.ArrayList(*core.Object).empty;
-    defer stack.deinit(ctx.runtime.memory.allocator);
+    defer stack.deinit(ctx.runtime.nativeAllocator());
     try jsonSerializeProperty(ctx, output, global, &buffer, holder_value, holder, root_key, false, &stack, options, 0, caller_function, caller_frame);
     if (buffer.items.len == 0) return core.JSValue.undefinedValue();
     return try createJsonStringValue(ctx.runtime, buffer.items);
 }
 
 test "JSON.stringify roots direct function bytecode value while creating holder" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const ctx = try core.JSContext.create(rt, .{});
@@ -1928,20 +1928,20 @@ test "JSON.stringify roots direct function bytecode value while creating holder"
     try std.testing.expect(maybe_result != null);
     const result = maybe_result.?;
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try core.string.appendValueUtf8(rt, &bytes, result);
     try std.testing.expectEqualStrings("null", bytes.items);
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
 fn jsonStringifySimpleNoOptions(rt: *core.JSRuntime, global: *core.Object, value: core.JSValue) SimpleJsonStringifyError!?core.JSValue {
     var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(rt.memory.allocator);
+    defer buffer.deinit(rt.nativeAllocator());
     var stack = std.ArrayList(*core.Object).empty;
-    defer stack.deinit(rt.memory.allocator);
+    defer stack.deinit(rt.nativeAllocator());
     return switch (try jsonAppendSimpleValue(rt, global, &buffer, value, false, &stack)) {
         .appended => try createJsonStringValue(rt, buffer.items),
         .omitted => core.JSValue.undefinedValue(),
@@ -1964,13 +1964,13 @@ fn jsonAppendSimpleValue(
     if (rt.checkNativeStackOverflow(0)) return error.StackOverflow;
     if (value.is(.undefined_value) or value.is(.symbol)) {
         if (array_slot) {
-            try buffer.appendSlice(rt.memory.allocator, "null");
+            try buffer.appendSlice(rt.nativeAllocator(), "null");
             return .appended;
         }
         return .omitted;
     }
     if (value.is(.null_value)) {
-        try buffer.appendSlice(rt.memory.allocator, "null");
+        try buffer.appendSlice(rt.nativeAllocator(), "null");
         return .appended;
     }
     if (value.isString()) {
@@ -1978,31 +1978,31 @@ fn jsonAppendSimpleValue(
         return .appended;
     }
     if (value.as(.boolean)) |bool_value| {
-        try buffer.appendSlice(rt.memory.allocator, if (bool_value) "true" else "false");
+        try buffer.appendSlice(rt.nativeAllocator(), if (bool_value) "true" else "false");
         return .appended;
     }
     if (value.as(.int)) |int_value| {
         var int_buf: [20]u8 = undefined;
         const printed = number_format.formatInt64(&int_buf, @as(i64, int_value));
-        try buffer.appendSlice(rt.memory.allocator, printed);
+        try buffer.appendSlice(rt.nativeAllocator(), printed);
         return .appended;
     }
     if (value_ops.numberValue(value)) |number| {
         if (!std.math.isFinite(number)) {
-            try buffer.appendSlice(rt.memory.allocator, "null");
+            try buffer.appendSlice(rt.nativeAllocator(), "null");
         } else if (number == 0) {
-            try buffer.append(rt.memory.allocator, '0');
+            try buffer.append(rt.nativeAllocator(), '0');
         } else {
             var number_buf: [128]u8 = undefined;
             const printed = value_ops.formatFiniteNumberAssumeCapacity(&number_buf, number);
-            try buffer.appendSlice(rt.memory.allocator, printed);
+            try buffer.appendSlice(rt.nativeAllocator(), printed);
         }
         return .appended;
     }
     if (value.isBigInt()) return .fallback;
 
     const object = object_ops.objectFromValue(value) orelse {
-        try buffer.appendSlice(rt.memory.allocator, "null");
+        try buffer.appendSlice(rt.nativeAllocator(), "null");
         return .appended;
     };
     if (call_runtime.isCallableValue(value)) return .fallback;
@@ -2039,25 +2039,25 @@ fn jsonAppendSimpleArray(
         if (core.array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) != null) return .fallback;
     }
 
-    try array_list_erased.append(stack, rt.memory.allocator, object);
+    try array_list_erased.append(stack, rt.nativeAllocator(), object);
     defer _ = stack.pop();
     errdefer buffer.shrinkRetainingCapacity(start);
 
-    try buffer.append(rt.memory.allocator, '[');
+    try buffer.append(rt.nativeAllocator(), '[');
     var index: usize = 0;
     while (index < object.arrayLength()) : (index += 1) {
-        if (index != 0) try buffer.append(rt.memory.allocator, ',');
+        if (index != 0) try buffer.append(rt.nativeAllocator(), ',');
         const element = elements[index];
         switch (try jsonAppendSimpleValue(rt, global, buffer, element, true, stack)) {
             .appended => {},
-            .omitted => try buffer.appendSlice(rt.memory.allocator, "null"),
+            .omitted => try buffer.appendSlice(rt.nativeAllocator(), "null"),
             .fallback => {
                 buffer.shrinkRetainingCapacity(start);
                 return .fallback;
             },
         }
     }
-    try buffer.append(rt.memory.allocator, ']');
+    try buffer.append(rt.nativeAllocator(), ']');
     return .appended;
 }
 
@@ -2072,11 +2072,11 @@ fn jsonAppendSimpleObject(
     if (object.hasExoticMethods() or object.isProxy() or object.class_id != core.class.ids.object) return .fallback;
     if (jsonObjectInStack(stack.items, object)) return error.TypeError;
 
-    try array_list_erased.append(stack, rt.memory.allocator, object);
+    try array_list_erased.append(stack, rt.nativeAllocator(), object);
     defer _ = stack.pop();
     errdefer buffer.shrinkRetainingCapacity(start);
 
-    try buffer.append(rt.memory.allocator, '{');
+    try buffer.append(rt.nativeAllocator(), '{');
     var emitted = false;
     for (object.shapeProps(), 0..) |prop, property_index| {
         const prop_flags = core.property.Flags.fromBits(prop.flags);
@@ -2096,9 +2096,9 @@ fn jsonAppendSimpleObject(
             return .fallback;
         };
         const property_start = buffer.items.len;
-        if (emitted) try buffer.append(rt.memory.allocator, ',');
+        if (emitted) try buffer.append(rt.nativeAllocator(), ',');
         try appendJsonAtomName(rt, buffer, prop.atom_id);
-        try buffer.append(rt.memory.allocator, ':');
+        try buffer.append(rt.nativeAllocator(), ':');
         switch (try jsonAppendSimpleValue(rt, global, buffer, child_value, false, stack)) {
             .appended => emitted = true,
             .omitted => {
@@ -2111,7 +2111,7 @@ fn jsonAppendSimpleObject(
             },
         }
     }
-    try buffer.append(rt.memory.allocator, '}');
+    try buffer.append(rt.nativeAllocator(), '}');
     return .appended;
 }
 
@@ -2133,7 +2133,7 @@ pub fn jsonStringifyPropertyList(
 
     var list = std.ArrayList(core.Atom).empty;
     errdefer {
-        list.deinit(ctx.runtime.memory.allocator);
+        list.deinit(ctx.runtime.nativeAllocator());
     }
 
     const length_value = try object_ops.getValueProperty(ctx, output, global, rooted_replacer, core.atom.ids.length, caller_function, caller_frame);
@@ -2147,11 +2147,11 @@ pub fn jsonStringifyPropertyList(
         if (jsonAtomListContains(list.items, atom)) {
             continue;
         }
-        try list.append(ctx.runtime.memory.allocator, atom);
+        try list.append(ctx.runtime.nativeAllocator(), atom);
     }
 
     return .{
-        .items = try list.toOwnedSlice(ctx.runtime.memory.allocator),
+        .items = try list.toOwnedSlice(ctx.runtime.nativeAllocator()),
         .has_property_list = true,
     };
 }
@@ -2236,10 +2236,10 @@ pub fn jsonStringifyGap(
                     const take = @min(bytes.len, 10);
                     for (bytes[0..take]) |byte| {
                         if (byte < 0x80) {
-                            try out.append(ctx.runtime.memory.allocator, byte);
+                            try out.append(ctx.runtime.nativeAllocator(), byte);
                         } else {
-                            try out.append(ctx.runtime.memory.allocator, 0xc0 | (byte >> 6));
-                            try out.append(ctx.runtime.memory.allocator, 0x80 | (byte & 0x3f));
+                            try out.append(ctx.runtime.nativeAllocator(), 0xc0 | (byte >> 6));
+                            try out.append(ctx.runtime.nativeAllocator(), 0x80 | (byte & 0x3f));
                         }
                     }
                 },
@@ -2255,14 +2255,14 @@ pub fn jsonStringifyGap(
                             var cp_buf: [4]u8 = undefined;
                             const cp: u21 = @intCast(unicode.codePointFromSurrogatePair(unit, units[index + 1]));
                             const cp_len = std.unicode.utf8Encode(cp, &cp_buf) catch continue;
-                            try out.appendSlice(ctx.runtime.memory.allocator, cp_buf[0..cp_len]);
+                            try out.appendSlice(ctx.runtime.nativeAllocator(), cp_buf[0..cp_len]);
                             index += 1;
                         } else if (unit < 0x80) {
-                            try out.append(ctx.runtime.memory.allocator, @intCast(unit));
+                            try out.append(ctx.runtime.nativeAllocator(), @intCast(unit));
                         } else if (!unicode.isHighSurrogateUnit(unit) and !unicode.isLowSurrogateUnit(unit)) {
                             var cp_buf: [4]u8 = undefined;
                             const cp_len = std.unicode.utf8Encode(@intCast(unit), &cp_buf) catch continue;
-                            try out.appendSlice(ctx.runtime.memory.allocator, cp_buf[0..cp_len]);
+                            try out.appendSlice(ctx.runtime.nativeAllocator(), cp_buf[0..cp_len]);
                         }
                     }
                 },
@@ -2271,7 +2271,7 @@ pub fn jsonStringifyGap(
     } else if (value_ops.numberValue(rooted_space)) |number| {
         const count_float = @min(@max(@floor(number), 0), 10);
         const count: usize = @intFromFloat(count_float);
-        try out.appendNTimes(ctx.runtime.memory.allocator, ' ', count);
+        try out.appendNTimes(ctx.runtime.nativeAllocator(), ' ', count);
     }
     return out;
 }
@@ -2360,22 +2360,22 @@ pub fn jsonAppendValue(
     defer root_frame.deactivate(ctx.runtime);
 
     if (rooted_value.is(.undefined_value) or rooted_value.is(.symbol)) {
-        try buffer.appendSlice(ctx.runtime.memory.allocator, if (array_slot) "null" else "");
+        try buffer.appendSlice(ctx.runtime.nativeAllocator(), if (array_slot) "null" else "");
     } else if (rooted_value.is(.null_value)) {
-        try buffer.appendSlice(ctx.runtime.memory.allocator, "null");
+        try buffer.appendSlice(ctx.runtime.nativeAllocator(), "null");
     } else if (rooted_value.isString()) {
         try appendJsonStringValue(ctx.runtime, buffer, rooted_value);
     } else if (rooted_value.as(.boolean)) |bool_value| {
-        try buffer.appendSlice(ctx.runtime.memory.allocator, if (bool_value) "true" else "false");
+        try buffer.appendSlice(ctx.runtime.nativeAllocator(), if (bool_value) "true" else "false");
     } else if (value_ops.numberValue(rooted_value)) |number| {
         if (!std.math.isFinite(number)) {
-            try buffer.appendSlice(ctx.runtime.memory.allocator, "null");
+            try buffer.appendSlice(ctx.runtime.nativeAllocator(), "null");
         } else if (number == 0) {
-            try buffer.append(ctx.runtime.memory.allocator, '0');
+            try buffer.append(ctx.runtime.nativeAllocator(), '0');
         } else {
             var number_buf: [128]u8 = undefined;
             const printed = value_ops.formatFiniteNumberAssumeCapacity(&number_buf, number);
-            try buffer.appendSlice(ctx.runtime.memory.allocator, printed);
+            try buffer.appendSlice(ctx.runtime.nativeAllocator(), printed);
         }
     } else if (rooted_value.isBigInt()) {
         return error.TypeError;
@@ -2383,11 +2383,11 @@ pub fn jsonAppendValue(
         if (object.class_id == core.class.ids.raw_json) {
             raw = try object.getProperty(core.atom.ids.rawJSON);
             var raw_bytes = std.ArrayList(u8).empty;
-            defer raw_bytes.deinit(ctx.runtime.memory.allocator);
+            defer raw_bytes.deinit(ctx.runtime.nativeAllocator());
             try core.string.appendValueUtf8(ctx.runtime, &raw_bytes, raw);
-            try buffer.appendSlice(ctx.runtime.memory.allocator, raw_bytes.items);
+            try buffer.appendSlice(ctx.runtime.nativeAllocator(), raw_bytes.items);
         } else if (call_runtime.isCallableValue(rooted_value)) {
-            try buffer.appendSlice(ctx.runtime.memory.allocator, if (array_slot) "null" else "");
+            try buffer.appendSlice(ctx.runtime.nativeAllocator(), if (array_slot) "null" else "");
         } else if (object.class_id == core.class.ids.number) {
             primitive = try coercion_ops.toPrimitiveForNumber(ctx, output, global, rooted_value);
             number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
@@ -2407,7 +2407,7 @@ pub fn jsonAppendValue(
             try jsonAppendObject(ctx, output, global, buffer, rooted_value, object, stack, options, depth, caller_function, caller_frame);
         }
     } else {
-        try buffer.appendSlice(ctx.runtime.memory.allocator, "null");
+        try buffer.appendSlice(ctx.runtime.nativeAllocator(), "null");
     }
 }
 
@@ -2430,15 +2430,15 @@ pub fn jsonAppendArray(
     defer root_frame.deactivate(ctx.runtime);
 
     if (jsonObjectInStack(stack.items, object)) return error.TypeError;
-    try array_list_erased.append(stack, ctx.runtime.memory.allocator, object);
+    try array_list_erased.append(stack, ctx.runtime.nativeAllocator(), object);
     defer _ = stack.pop();
     const length_value = try object_ops.getValueProperty(ctx, output, global, rooted_value, core.atom.ids.length, caller_function, caller_frame);
     const length = try coercion_ops.toLengthIndex(ctx, output, global, length_value);
-    try buffer.append(ctx.runtime.memory.allocator, '[');
+    try buffer.append(ctx.runtime.nativeAllocator(), '[');
     for (0..length) |index| {
-        if (index != 0) try buffer.append(ctx.runtime.memory.allocator, ',');
+        if (index != 0) try buffer.append(ctx.runtime.nativeAllocator(), ',');
         if (options.gap.len != 0) {
-            try buffer.append(ctx.runtime.memory.allocator, '\n');
+            try buffer.append(ctx.runtime.nativeAllocator(), '\n');
             try jsonAppendIndent(ctx.runtime, buffer, options.gap, depth + 1);
         }
         const child_key = try object_ops.propertyAtomFromLengthIndex(ctx.runtime, index);
@@ -2446,10 +2446,10 @@ pub fn jsonAppendArray(
         try jsonSerializeProperty(ctx, output, global, buffer, rooted_value, object, child_key.atom, true, stack, options, depth + 1, caller_function, caller_frame);
     }
     if (options.gap.len != 0 and length != 0) {
-        try buffer.append(ctx.runtime.memory.allocator, '\n');
+        try buffer.append(ctx.runtime.nativeAllocator(), '\n');
         try jsonAppendIndent(ctx.runtime, buffer, options.gap, depth);
     }
-    try buffer.append(ctx.runtime.memory.allocator, ']');
+    try buffer.append(ctx.runtime.nativeAllocator(), ']');
 }
 
 pub fn jsonAppendObject(
@@ -2471,18 +2471,18 @@ pub fn jsonAppendObject(
     defer root_frame.deactivate(ctx.runtime);
 
     if (jsonObjectInStack(stack.items, object)) return error.TypeError;
-    try array_list_erased.append(stack, ctx.runtime.memory.allocator, object);
+    try array_list_erased.append(stack, ctx.runtime.nativeAllocator(), object);
     defer _ = stack.pop();
-    try buffer.append(ctx.runtime.memory.allocator, '{');
+    try buffer.append(ctx.runtime.nativeAllocator(), '{');
     const owned_keys: []core.Atom = if (!options.has_property_list) try object_ops.objectRestOwnKeys(ctx, output, global, object) else &.{};
     defer if (!options.has_property_list) core.Object.freeKeys(ctx.runtime, owned_keys);
     var enumerable_keys = std.ArrayList(core.Atom).empty;
-    defer enumerable_keys.deinit(ctx.runtime.memory.allocator);
+    defer enumerable_keys.deinit(ctx.runtime.nativeAllocator());
     if (!options.has_property_list) {
         for (owned_keys) |key| {
             if (ctx.runtime.atoms.isPublicSymbol(key)) continue;
             const desc = try object_ops.objectRestOwnPropertyDescriptor(ctx, output, global, object, key) orelse continue;
-            if (desc.enumerable == true) try enumerable_keys.append(ctx.runtime.memory.allocator, key);
+            if (desc.enumerable == true) try enumerable_keys.append(ctx.runtime.nativeAllocator(), key);
         }
     }
     const keys = if (options.has_property_list) options.property_list else enumerable_keys.items;
@@ -2491,27 +2491,27 @@ pub fn jsonAppendObject(
         if (ctx.runtime.atoms.isPublicSymbol(key)) continue;
         const before = buffer.items.len;
         var child = std.ArrayList(u8).empty;
-        defer child.deinit(ctx.runtime.memory.allocator);
+        defer child.deinit(ctx.runtime.nativeAllocator());
         try jsonSerializeProperty(ctx, output, global, &child, rooted_value, object, key, false, stack, options, depth + 1, caller_function, caller_frame);
         if (child.items.len == 0) {
             buffer.shrinkRetainingCapacity(before);
             continue;
         }
-        if (emitted) try buffer.append(ctx.runtime.memory.allocator, ',');
+        if (emitted) try buffer.append(ctx.runtime.nativeAllocator(), ',');
         if (options.gap.len != 0) {
-            try buffer.append(ctx.runtime.memory.allocator, '\n');
+            try buffer.append(ctx.runtime.nativeAllocator(), '\n');
             try jsonAppendIndent(ctx.runtime, buffer, options.gap, depth + 1);
         }
         emitted = true;
         try appendJsonAtomName(ctx.runtime, buffer, key);
-        try buffer.appendSlice(ctx.runtime.memory.allocator, if (options.gap.len == 0) ":" else ": ");
-        try buffer.appendSlice(ctx.runtime.memory.allocator, child.items);
+        try buffer.appendSlice(ctx.runtime.nativeAllocator(), if (options.gap.len == 0) ":" else ": ");
+        try buffer.appendSlice(ctx.runtime.nativeAllocator(), child.items);
     }
     if (options.gap.len != 0 and emitted) {
-        try buffer.append(ctx.runtime.memory.allocator, '\n');
+        try buffer.append(ctx.runtime.nativeAllocator(), '\n');
         try jsonAppendIndent(ctx.runtime, buffer, options.gap, depth);
     }
-    try buffer.append(ctx.runtime.memory.allocator, '}');
+    try buffer.append(ctx.runtime.nativeAllocator(), '}');
 }
 
 /// Unwrap a Number/String/Boolean/BigInt/Symbol wrapper's stored primitive;
@@ -2538,7 +2538,7 @@ pub fn jsonObjectInStack(items: []const *core.Object, object: *core.Object) bool
 
 pub fn jsonAppendIndent(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), gap: []const u8, depth: usize) !void {
     var index: usize = 0;
-    while (index < depth) : (index += 1) try buffer.appendSlice(rt.memory.allocator, gap);
+    while (index < depth) : (index += 1) try buffer.appendSlice(rt.nativeAllocator(), gap);
 }
 
 // TGC S3-d: allocation-point majors while the parse-record tree is being
@@ -2555,13 +2555,13 @@ const S3DupKeyMajorProbe = struct {
         _ = size;
         const self: *@This() = @ptrCast(@alignCast(context.?));
         if (!self.active) return;
-        const saved_fn = self.rt.memory.trigger_gc_fn;
-        const saved_ctx = self.rt.memory.trigger_gc_ctx;
-        self.rt.memory.trigger_gc_fn = null;
-        self.rt.memory.trigger_gc_ctx = null;
+        const saved_fn = self.rt.gc.heap_budget.probe;
+        const saved_ctx = self.rt.gc.heap_budget.probe_ctx;
+        self.rt.gc.heap_budget.probe = null;
+        self.rt.gc.heap_budget.probe_ctx = null;
         defer {
-            self.rt.memory.trigger_gc_fn = saved_fn;
-            self.rt.memory.trigger_gc_ctx = saved_ctx;
+            self.rt.gc.heap_budget.probe = saved_fn;
+            self.rt.gc.heap_budget.probe_ctx = saved_ctx;
         }
         const before = self.rt.gc.block_heap.mark_epoch;
         _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {};
@@ -2570,7 +2570,7 @@ const S3DupKeyMajorProbe = struct {
 };
 
 test "TGC S3-d: a duplicate JSON key's shadowed record value survives majors taken mid-parse" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     // `findObjectEntry` returns the FIRST entry for a key (qjs
@@ -2588,14 +2588,14 @@ test "TGC S3-d: a duplicate JSON key's shadowed record value survives majors tak
     text_roots.activate(rt);
     defer text_roots.deactivate(rt);
 
-    const saved_fn = rt.memory.trigger_gc_fn;
-    const saved_ctx = rt.memory.trigger_gc_ctx;
+    const saved_fn = rt.gc.heap_budget.probe;
+    const saved_ctx = rt.gc.heap_budget.probe_ctx;
     var probe = S3DupKeyMajorProbe{ .rt = rt };
-    rt.memory.trigger_gc_fn = S3DupKeyMajorProbe.trigger;
-    rt.memory.trigger_gc_ctx = &probe;
+    rt.gc.heap_budget.probe = S3DupKeyMajorProbe.trigger;
+    rt.gc.heap_budget.probe_ctx = &probe;
     defer {
-        rt.memory.trigger_gc_fn = saved_fn;
-        rt.memory.trigger_gc_ctx = saved_ctx;
+        rt.gc.heap_budget.probe = saved_fn;
+        rt.gc.heap_budget.probe_ctx = saved_ctx;
     }
 
     probe.active = true;
@@ -2630,7 +2630,7 @@ test "TGC S3-d: a duplicate JSON key's shadowed record value survives majors tak
     const shadowed_object = object_ops.objectFromValue(shadowed_record.recordValue()) orelse
         return error.TestUnexpectedResult;
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try core.string.appendValueUtf8(rt, &bytes, try shadowed_object.getProperty(inner));
     try std.testing.expectEqualStrings("zjsS3DupPayload", bytes.items);
 }

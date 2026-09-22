@@ -92,8 +92,8 @@ const FunctionFrame = struct {
 /// flags are the caller's. The caller owns the allocation until it is
 /// pushed or added to the parent.
 pub fn newChildFunctionDef(s: *State, parent_fd: *function_def_mod.FunctionDef, name: Atom, source: SourcePosition) Error!*function_def_mod.FunctionDef {
-    const child_fd = try s.memory.create(function_def_mod.FunctionDef);
-    child_fd.* = function_def_mod.FunctionDef.init(s.memory, s.atoms, name);
+    const child_fd = try s.allocator.create(function_def_mod.FunctionDef);
+    child_fd.* = function_def_mod.FunctionDef.init(s.allocator, s.artifacts, s.atoms, name);
     child_fd.filename = parent_fd.filename;
     child_fd.script_or_module = parent_fd.script_or_module;
     child_fd.line_num = @intCast(source.line_num);
@@ -280,12 +280,12 @@ pub fn parseAnonymousDefaultFunctionDecl(
 }
 
 fn appendOwnedParserAtom(s: *State, list: *std.ArrayList(Atom), atom_id: Atom) Error!void {
-    try list.ensureUnusedCapacity(s.memory.allocator, 1);
+    try list.ensureUnusedCapacity(s.scratch, 1);
     list.appendAssumeCapacity(atom_id);
 }
 
 pub fn deinitOwnedParserAtoms(s: *State, list: *std.ArrayList(Atom)) void {
-    list.deinit(s.memory.allocator);
+    list.deinit(s.scratch);
 }
 
 const FunctionParameters = struct {

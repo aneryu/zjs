@@ -46,7 +46,7 @@
 | `test_engine.zig` | 一次性 `TestEngine`、host probe、scratch dir |
 | `shared.zig` | 进程级共享 Runtime 与 leak-census 门 |
 
-调用点仍写 `helpers.foo`（`tests/core.zig` / `tests/exec.zig` 的 `@import("harness.zig")`）。包内单测只用本地 `runObjectCycleRemoval`。
+调用点仍写 `helpers.foo`（`tests/core.zig` / `tests/exec.zig` 的 `@import("harness.zig")`）。包内单测只用本地 `collectForTest`。
 
 ### 类型
 
@@ -70,25 +70,18 @@
 - **实现**：Every TypeScript execution test goes through here.。关键调用：`engine_instance.evalWithOptions`。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。返回 `RuntimeError!core.JSValue`，由测试 `try`/`expectError` 消费。
 
-### `registerStandardGlobalsBare` (`tests/harness/test_engine.zig:27`)
-
-- **签名**：`pub fn registerStandardGlobalsBare(rt: *core.JSRuntime) void`。
-- **作用**：给绕过宿主门面、直接 `JSRuntime.create` 的测试安装标准全局；与 installer 容量不变量绑在一起，幂等。
-- **实现**：Install the standard + host globals on a bare `core.JSRuntime` global for tests that build a runtime directly (bypassing the `js_context` create that wires the installer). The deep setup interface keeps the installer callback and its capacity invariant together. Idempotent.。关键调用：`engine.exec.standard_globals.configureRuntime`。
-- **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。无独立 error set 时失败以断言或 panic 终止测试。
-
 ### `installHostGlobalsBare` (`tests/harness/test_engine.zig:31`)
 
-- **签名**：`pub fn installHostGlobalsBare(rt: *core.JSRuntime, global: *core.Object) !void`。
-- **作用**：先 `configureRuntime`，再 `installHostGlobals` 把宿主 print 等装到给定 global。
-- **实现**：热路径用 `try` 传播分配/引擎错误。关键调用：`registerStandardGlobalsBare`、`exec_call.installHostGlobals`。
+- **签名**：`pub fn installHostGlobalsBare(ctx: *core.JSContext, global: *core.Object) !void`。
+- **作用**：明确传入 Context，由 `installHostGlobals` 把标准及宿主全局安装到该 Realm；固定接线在 Runtime 创建时完成。
+- **实现**：热路径用 `try` 传播分配/引擎错误。关键调用：`exec.call.installHostGlobals`。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。返回 `!void`，由测试 `try`/`expectError` 消费。
 
 ### `reclaimNow` (`tests/harness/gc.zig:17`)
 
 - **签名**：`pub fn reclaimNow(rt: *core.JSRuntime) void`。
-- **作用**：跑 `runObjectCycleRemoval`（declared_only）。测试仍持有的对象必须出现在 root frame，缺根会失败而不是靠 conservative 碰巧活。
-- **实现**：Reclaim whatever the test has made unreachable.  The scan is `declared_only` (via `runObjectCycleRemoval`), so anything the test still holds must be named in a `rootValues`/`rootObjects` frame. That is deliberate: it is the precise-scan discipline that makes these tests deterministic, and it is what turns a missing root into a test failure rather than into a conservative-scan accident.。主动触发/轮询 GC，断言存活集。关键调用：`rt.runObjectCycleRemoval`。
+- **作用**：跑 `collectForTest`（declared_only）。测试仍持有的对象必须出现在 root frame，缺根会失败而不是靠 conservative 碰巧活。
+- **实现**：Reclaim whatever the test has made unreachable.  The scan is `declared_only` (via `collectForTest`), so anything the test still holds must be named in a `rootValues`/`rootObjects` frame. That is deliberate: it is the precise-scan discipline that makes these tests deterministic, and it is what turns a missing root into a test failure rather than into a conservative-scan accident.。主动触发/轮询 GC，断言存活集。关键调用：`rt.collectForTest`。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。无独立 error set 时失败以断言或 panic 终止测试。
 
 ### `objectFromValue` (`tests/harness/gc.zig:21`)
@@ -270,7 +263,7 @@
 
 - **签名**：`pub fn installLegacyProbeEntry(rt: *core.JSRuntime, function_object: *core.Object, ptr: *anyopaque, call: core.host_function.ExternalCallFn) !void`。
 - **作用**：堆上 `LegacyProbeState`，register finalizer，alloc NativeEntry，install 到函数对象。
-- **实现**：热路径用 `try` 传播分配/引擎错误。`errdefer` 回滚本次失败路径上的分配。关键调用：`rt.memory.create`、`rt.memory.destroy`、`rt.registerNativeEntryFinalizer`、`rt.allocNativeEntry`、`core.NativeEntry.code`。
+- **实现**：热路径用 `try` 传播分配/引擎错误。`errdefer` 回滚本次失败路径上的分配。关键调用：`rt.nativeAllocator().create`、`rt.nativeAllocator().destroy`、`rt.registerNativeEntryFinalizer`、`rt.allocNativeEntry`、`core.NativeEntry.code`。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。失败路径靠 `errdefer` 对称释放。返回 `!void`，由测试 `try`/`expectError` 消费。
 
 ### `TestEngine.createExternalHostFunctionValue` (`tests/harness/test_engine.zig:260`)
@@ -333,7 +326,7 @@
 
 - **签名**：`pub fn sharedTestEngine() *TestEngine`。
 - **作用**：进程级单例 TestEngine：首次建、空 eval 快照全局、注册 atexit。
-- **实现**：首次调用时 `TestEngine.init(std.heap.page_allocator)`，跑一次空 `eval(";")` 逼出 `installHostGlobals`，清掉残留异常/未处理 rejection，然后把 global 的 `shape_ref.prop_count`/`hash`/`deletedPropCount` 与属性槽、VARREF 状态（值/is_lexical/is_const/is_deletable）快照到 `page_allocator` 数组；再 `runObjectCycleRemoval` 并记下 allocation_count/allocated_bytes/modules.count 基线，最后注册 atexit teardown。关键调用：`TestEngine.init`、`eng.eval`、`eng.context.takeException`、`g.propertyEntries`、`g.propFlagsAt`、`eng.runtime.runObjectCycleRemoval`、`registerSharedEngineProcessTeardown`。
+- **实现**：首次调用时 `TestEngine.init(std.heap.page_allocator)`，跑一次空 `eval(";")` 逼出 `installHostGlobals`，清掉残留异常/未处理 rejection，然后把 global 的 `shape_ref.prop_count`/`hash`/`deletedPropCount` 与属性槽、VARREF 状态（值/is_lexical/is_const/is_deletable）快照到 `page_allocator` 数组；再 `collectForTest` 并记下 allocation_count/allocated_bytes/modules.count 基线，最后注册 atexit teardown。关键调用：`TestEngine.init`、`eng.eval`、`eng.context.takeException`、`g.propertyEntries`、`g.propFlagsAt`、`eng.runtime.collectForTest`、`registerSharedEngineProcessTeardown`。
 - **所有权 / 错误 / 调用**：共享引擎走 `page_allocator`，寿命跨单测。无独立 error set 时失败以断言或 panic 终止测试。
 
 ### `registerSharedEngineProcessTeardown` (`tests/harness/shared.zig:151`)
@@ -375,7 +368,7 @@
 
 - **签名**：`fn resetSharedEngineAfterTest(eng: *TestEngine) void`。
 - **作用**：清异常/rejection、排空 job、清 atomics waiter、丢掉 lexicals、关 trigger_gc 后按快照重建全局属性与 shape，再环回收。
-- **实现**：线性复位序列，其中排空 job 用 `while (true) switch (drainOnePendingJob(...))`（`.empty`/`.exception` 跳出）。属性还原期间把 `memory.trigger_gc_fn/ctx` 暂存置 null 并 `defer` 复原，使 slot 与 shape flags 的多步互换对 GC 原子。主动触发/轮询 GC，断言存活集。关键调用：`eng.context.hasException`、`eng.context.takeException`、`eng.context.hasUnhandledRejection`、`eng.context.takeUnhandledRejection`、`engine.exec.promise_ops.drainOnePendingJob`、`engine.exec.zjs_vm.cleanupAtomicsWaitersForContext`、`global.reserveOwnPropertyCapacity`、`eng.runtime.shapes.restorePropertyLayout`、`eng.runtime.runObjectCycleRemoval`。
+- **实现**：线性复位序列，其中排空 job 用 `while (true) switch (drainOnePendingJob(...))`（`.empty`/`.exception` 跳出）。属性还原期间暂存并清空 `gc.heap_budget.probe/probe_ctx`，置 `suspend_alloc_notify = true`，再由 `defer` 恢复，使 slot 与 shape flags 的多步互换对 GC 原子。主动触发/轮询 GC，断言存活集。关键调用：`eng.context.hasException`、`eng.context.takeException`、`eng.context.hasUnhandledRejection`、`eng.context.takeUnhandledRejection`、`engine.exec.promise_ops.drainOnePendingJob`、`engine.exec.zjs_vm.cleanupAtomicsWaitersForContext`、`global.reserveOwnPropertyCapacity`、`eng.runtime.shapes.restorePropertyLayout`、`eng.runtime.collectForTest`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
 ### `vm_helpers.parseAndRunWithTopLevelChildren` (`tests/harness/fixture.zig:123`)
@@ -577,7 +570,7 @@
 
 进统一套件。钉 eecf6c8：硬上限下 JS `catch` 看到 `InternalError`，同一 context 还能继续 eval；耗尽堆投递 OOM 时 backing allocator 零分配。
 
-文件头：8MB memory-cap OOM behaviour fixtures (engine production gate).  Pins the catchable-OOM contract from eecf6c8 at the embedding surface:   - under a hard 8MB runtime cap, unbounded JS growth OOMs into a JS     `catch` as InternalError (QuickJS-aligned mapping), the process stays     alive, and the same context keeps evaluating afterwards;   - delivering the OOM exception to a JS catch handler while the heap is     fully exhausted performs zero allocations (preallocated OOM error +     `tryCatchInFrame` zero-allocation delivery), asserted with a counting     backing allocator so even paths that bypass the MemoryAccount limit     would be caught.  Sub-second tests: they run inside the regular `zig build test` unified suite (referenced from src/all_tests.zig) and as a focused binary wired into the `engine-production-gate` step in build.zig.
+文件头：8MB memory-cap OOM behaviour fixtures (engine production gate).  Pins the catchable-OOM contract from eecf6c8 at the embedding surface:   - under a hard 8MB runtime cap, unbounded JS growth OOMs into a JS     `catch` as InternalError (QuickJS-aligned mapping), the process stays     alive, and the same context keeps evaluating afterwards;   - delivering the OOM exception to a JS catch handler while the heap is     fully exhausted performs zero allocations (preallocated OOM error +     `tryCatchInFrame` zero-allocation delivery), asserted with a counting     backing allocator so even paths that bypass the test-only native allocation limit     would be caught.  Sub-second tests: they run inside the regular `zig build test` unified suite (referenced from src/all_tests.zig) and as a focused binary wired into the `engine-production-gate` step in build.zig.
 
 ### 函数（清单 8）
 
@@ -626,15 +619,15 @@
 ### `ExhaustState.exhaust` (`src/tests/oom_cap.zig:136`)
 
 - **签名**：`fn exhaust(call: *zjs.native.Call) core.JSValue`。
-- **作用**：JS 侧 `__exhaust()` 的 managed 原生实现：先记下当前 `counting.success_count` 作为窗口起点，再 `memory.setLimit(memory.allocated_bytes)` 把堆冻死，使之后每一笔记账分配都失败。
-- **实现**：关键调用：`call.state`、`self.rt.memory.setLimit`、`core.JSValue.undefinedValue`。
+- **作用**：JS 侧 `__exhaust()` 的 managed 原生实现：先记下当前 `counting.success_count` 作为窗口起点，再 `mem_ops.setLimit(rt, rt.diagnostics.allocations.allocated_bytes)` 注入后续原生分配失败。
+- **实现**：关键调用：`call.state`、`mem_ops.setLimit`、`core.JSValue.undefinedValue`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
 ### `ExhaustState.report` (`src/tests/oom_cap.zig:144`)
 
 - **签名**：`fn report(call: *zjs.native.Call) core.JSValue`。
 - **作用**：JS 侧 `__report()`：把 `success_count - snapshot` 记进 `window_allocations`（即 `__exhaust`..`__report` 窗口内真正打到 backing allocator 的分配数），并 `setLimit(null)` 解冻堆。
-- **实现**：关键调用：`call.state`、`self.rt.memory.setLimit`、`core.JSValue.undefinedValue`。
+- **实现**：关键调用：`call.state`、`mem_ops.setLimit`、`core.JSValue.undefinedValue`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
 ### 测试块（2）
@@ -643,14 +636,14 @@
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住生产引擎边界：engine production: 8MB cap OOM reaches JS catch as InternalError and the context stays usable。
-- **实现**：`core.JSRuntime.create(std.testing.allocator, .{ .memory_limit = 8MB })` + `JSContext.create`，经 `BindingContext.borrowCore` eval（不经 TestEngine）。脚本/输入：`var oomName = ""; var oomCaught = false; var n = 65536; var s = ""; try {   for (;;) { n *= 2; s = "x".repeat(n); } } catch (e) {   // zjs m`；`var arrName = ""; try {   var a = [];   for (;;) { a.push("y".repeat(65536)); } } catch (e) {   arrName = e.name;   a = null; } arrName`。两段之间还夹一次 `6 * 7` 与末尾 `"alive"`，证明同一 context OOM 之后仍可用。约 1 个 Zig expect、0 个 JS `assert.*`（其余断言走 `expectStringValue`）。
+- **实现**：`core.JSRuntime.create(.{ .allocator = std.testing.allocator, .memory_limit = 8MB })` + `JSContext.create`，经 `BindingContext.borrowCore` eval（不经 TestEngine）。脚本/输入：`var oomName = ""; var oomCaught = false; var n = 65536; var s = ""; try {   for (;;) { n *= 2; s = "x".repeat(n); } } catch (e) {   // zjs m`；`var arrName = ""; try {   var a = [];   for (;;) { a.push("y".repeat(65536)); } } catch (e) {   arrName = e.name;   a = null; } arrName`。两段之间还夹一次 `6 * 7` 与末尾 `"alive"`，证明同一 context OOM 之后仍可用。约 1 个 Zig expect、0 个 JS `assert.*`（其余断言走 `expectStringValue`）。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
 ### `test "engine production: exhausted-heap OOM delivery to JS catch allocates nothing"` (`src/tests/oom_cap.zig:152`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住生产引擎边界：engine production: exhausted-heap OOM delivery to JS catch allocates nothing。
-- **实现**：用 `CountingAllocator` 包住 `std.testing.allocator` 再 `core.JSRuntime.create(counting.allocator(), .{})`（不经 TestEngine，无预设 cap），`defineFunction` 装上 `__exhaust`/`__report` 两个 managed 原生探针。先在正常内存下编好 `probe()`（phase 2 不再解析），再 eval `probe()`：窗口内 catch 到的必须是预分配的 `InternalError`，且 `window_allocations` 必须是 0。约 2 个 Zig expect、0 个 JS `assert.*`。
+- **实现**：用 `CountingAllocator` 包住 `std.testing.allocator` 再 `core.JSRuntime.create(.{ .allocator = counting.allocator() })`（不经 TestEngine，无预设 cap），`defineFunction` 装上 `__exhaust`/`__report` 两个 managed 原生探针。先在正常内存下编好 `probe()`（phase 2 不再解析），再 eval `probe()`：窗口内 catch 到的必须是预分配的 `InternalError`，且 `window_allocations` 必须是 0。约 2 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
 ## `src/tests/engine_production.zig` — 生产嵌入边界
@@ -699,7 +692,7 @@
 ### `S3HostDefineMajorProbe.trigger` (`src/tests/engine_production.zig:1001`)
 
 - **签名**：`fn trigger(context: ?*anyopaque, size: usize) void`。
-- **作用**：挂在 `memory.trigger_gc_fn` 上的分配钩子：`active` 时先把 `trigger_gc_fn/ctx` 暂时摘掉（防重入）并 `defer` 复原，跑一次 `tryRunObjectCycleRemovalWithValueRoots(null, .engine_active)`，若 `gc.block_heap.mark_epoch` 变了就 `majors += 1`——即在 host 侧 define 的中途强插一次 major。
+- **作用**：挂在 `gc.heap_budget.probe` 上的分配钩子：`active` 时先把 `probe/probe_ctx` 暂时摘掉（防重入）并 `defer` 复原，跑一次 `tryRunObjectCycleRemovalWithValueRoots(null, .engine_active)`，若 `gc.block_heap.mark_epoch` 变了就 `majors += 1`——即在 host 侧 define 的中途强插一次 major。
 - **实现**：`defer` 释放本次成功路径上的临时资源。关键调用：`self.rt.tryRunObjectCycleRemovalWithValueRoots`。
 - **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
@@ -716,7 +709,7 @@
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住生产契约：embedding can own JSRuntime and JSContext directly。
-- **实现**：宿主自己持有 `zjs.JSRuntime`/`zjs.JSContext` 的存储，用 `rt.init(allocator, .{})` / `ctx.init(&rt, .{})` + `defer deinit()`（不是 create/destroy，也不经 TestEngine）。脚本/输入：`1 + 1`；`({ answer: 42 })`，末尾还 `globalObject()` 断言 `isGlobal()`。约 3 个 Zig expect、0 个 JS `assert.*`。
+- **实现**：宿主用 `zjs.JSRuntime.create(.{ .allocator = allocator })` / `ctx.init(rt, .{})`，Runtime 以 `destroy()` 释放，Context 仍 `deinit()`。脚本/输入：`1 + 1`；`({ answer: 42 })`，末尾还 `globalObject()` 断言 `isGlobal()`。约 3 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
 ### `test "production embedding API applies limits and releases eval handles"` (`src/tests/engine_production.zig:90`)
@@ -877,7 +870,7 @@
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住生产契约：embedding public API allocation failures keep host ownership intact。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。先 `runObjectCycleRemoval()` 再把 `setMemoryLimit` 钉到当前 `allocated_bytes`（否则限额处的应急回收可能腾出空间，测试就变成在断言「此刻恰好没垃圾」）。随后四个公共 API（`createPersistentValue`/`createString`/`createFunction`/`arrayBuffer`）必须各自返回 `error.OutOfMemory`，且 persistent/local root 计数、finalizer 调用数、store 的 bytes 长度都不变。脚本/输入：`({ answer: 42 })`。约 11 个 Zig expect、0 个 JS `assert.*`。
+- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。先 `collectForTest()` 再把 `setMemoryLimit` 钉到当前 `allocated_bytes`（否则限额处的应急回收可能腾出空间，测试就变成在断言「此刻恰好没垃圾」）。随后四个公共 API（`createPersistentValue`/`createString`/`createFunction`/`arrayBuffer`）必须各自返回 `error.OutOfMemory`，且 persistent/local root 计数、finalizer 调用数、store 的 bytes 长度都不变。脚本/输入：`({ answer: 42 })`。约 11 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
 ### `test "production embedding interrupt handler aborts unbounded execution"` (`src/tests/engine_production.zig:748`)
@@ -954,7 +947,7 @@
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住场景「TGC S3: a host-defined property name stays reachable across a major taken mid-define」。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。先 `globalObject()` 把标准全局的 atom 流量排除在外，再把 `S3HostDefineMajorProbe` 挂上 `memory.trigger_gc_fn` 并 `probe.active = true`，让 `defineDataProperty("zjsS3HostDefinedPropertyName")` 中途真的吃到一次 major；事后要求 `probe.majors > 0`、`atoms.atom_audit_stale_edge == 0`，并能把值读回来。断言 3 处 `std.testing.expect*`。约 3 个 Zig expect、0 个 JS `assert.*`。
+- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。先 `globalObject()` 把标准全局的 atom 流量排除在外，再把 `S3HostDefineMajorProbe` 挂上 `gc.heap_budget.probe` 并 `probe.active = true`，让 `defineDataProperty("zjsS3HostDefinedPropertyName")` 中途真的吃到一次 major；事后要求 `probe.majors > 0`、`atoms.atom_audit_stale_edge == 0`，并能把值读回来。断言 3 处 `std.testing.expect*`。约 3 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
 ## `src/tests/embedding_examples.zig` — 嵌入 cookbook 可编译可跑
@@ -1188,7 +1181,7 @@
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住嵌入面：cookbook strings and bytes examples compile and run。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。走公共的显式回收接口 `rt.runObjectCycleRemoval()`（这是公共嵌入编译目标，不能 import 依赖 `zjs.core` 的 test helpers），回收前 `bytes_state.calls` 必须是 0、回收后必须是 1。脚本/输入：`({ toString() { return 'path'; } })`。约 4 个 Zig expect、0 个 JS `assert.*`。
+- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。走公共的显式回收接口 `rt.collectForTest()`（这是公共嵌入编译目标，不能 import 依赖 `zjs.core` 的 test helpers），回收前 `bytes_state.calls` 必须是 0、回收后必须是 1。脚本/输入：`({ toString() { return 'path'; } })`。约 4 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
 ### `test "embedding cookbook construction with limits example compiles and runs"` (`src/tests/embedding_examples.zig:459`)
@@ -1230,7 +1223,7 @@
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住嵌入面：destroy of one context keeps auto_init-bearing objects from that realm alive。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。`stealArrayPrototype(ctx_b → ctx_a)` 制造跨 realm 引用后 destroy ctx_b：`liveRealmCount` 在 destroy 前、destroy 后、`runObjectCycleRemoval()` 后都必须是 2，且 `contextForGlobal(b_global)` 仍非 null。断言 4 处 `std.testing.expect*`。约 4 个 Zig expect、0 个 JS `assert.*`。
+- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。`stealArrayPrototype(ctx_b → ctx_a)` 制造跨 realm 引用后 destroy ctx_b：`liveRealmCount` 在 destroy 前、destroy 后、`collectForTest()` 后都必须是 2，且 `contextForGlobal(b_global)` 仍非 null。断言 4 处 `std.testing.expect*`。约 4 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
 ### `test "embedding newest-first context destroy with cross-realm Array.prototype still tears down"` (`src/tests/embedding_examples.zig:622`)
@@ -1251,14 +1244,14 @@
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住嵌入面：createRealm leftover is collected without JSContext.destroy on the child。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。`ctx.createRealm()` 后把子 realm 的 `Array.prototype` 挂到主 realm 全局，`liveRealmCount` 在 `runObjectCycleRemoval()` 前后都是 2；子 context 不调用 `JSContext.destroy`，只 destroy 主 context 与 runtime。脚本/输入：`globalThis`。约 2 个 Zig expect、0 个 JS `assert.*`。
+- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。`ctx.createRealm()` 后把子 realm 的 `Array.prototype` 挂到主 realm 全局，`liveRealmCount` 在 `collectForTest()` 前后都是 2；子 context 不调用 `JSContext.destroy`，只 destroy 主 context 与 runtime。脚本/输入：`globalThis`。约 2 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
 ### `test "embedding cookbook native class covers create, unwrap, methods, accessors, constructor, dispose and finalizer"` (`src/tests/embedding_examples.zig:750`)
 
 - **签名**：无参数测试块，返回 `!void`。
 - **作用**：钉住嵌入面：cookbook native class covers create, unwrap, methods, accessors, constructor, dispose and finalizer。
-- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。绝大多数断言是 `evalBool` 回传的 JS 表达式：K2 typed/managed 方法、K3 getter/setter、原型属性形状与不可枚举、外来 receiver 抛 TypeError、`new World` / 无 `new` / 子类化、dispose 后再调用抛错。GC 侧用 `rt.runObjectCycleRemoval()` 让不可达实例走 finalizer（`WorldState.finalized` 从 ≤1 变成 1），最后 destroy context+runtime 再断言总计 3 个实例被终结。断言 36 处 `std.testing.expect*`。约 36 个 Zig expect、0 个 JS `assert.*`。
+- **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。绝大多数断言是 `evalBool` 回传的 JS 表达式：K2 typed/managed 方法、K3 getter/setter、原型属性形状与不可枚举、外来 receiver 抛 TypeError、`new World` / 无 `new` / 子类化、dispose 后再调用抛错。GC 侧用 `rt.collectForTest()` 让不可达实例走 finalizer（`WorldState.finalized` 从 ≤1 变成 1），最后 destroy context+runtime 再断言总计 3 个实例被终结。断言 36 处 `std.testing.expect*`。约 36 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
 ### `test "embedding native class accessor descriptors keep identity across reads"` (`src/tests/embedding_examples.zig:832`)
@@ -1296,13 +1289,6 @@
 - **作用**：断言完成值是字符串且字节等于 expected；非 string、取不到 body、字节不等都返回 `error.TestUnexpectedResult`。原先的 `rt` 形参入口即 `_ = rt;`，已连同 `expectValue` 的同款形参从签名与全部调用点删除，两处形状现与 `oom_cap.zig:25` 的同名函数一致。
 - **实现**：关键调用：`value.isString`、`value.asStringBody`、`string_value.eqlBytes`。显式 `return error.TestUnexpectedResult`。
 - **所有权 / 错误 / 调用**：堆对象归 tracing GC；测试必须 `destroy`/`deinit` Runtime，或由 `endSharedTest` 复位。返回 `!void`，由测试 `try`/`expectError` 消费。
-
-### `ensureStandardGlobalsInstaller` (`src/tests/oom.zig:543`)
-
-- **签名**：`fn ensureStandardGlobalsInstaller() void`。
-- **作用**：Register the builtins standard-globals installer as the process-global default so every `core.JSRuntime.create` below copies it into the new runtime's `install_standard_globals_cb`. Phase 6b-3 STEP 7B routed global installation through that callback, which the binding-layer `JSContext.create` wires up; this suite drives the core API directly, so it must register the installer itself or the first `contextGlobal` fails with `error.InvalidBuiltinRegistry` (a non-OOM error that derails the sweep). Mirrors `installHostGlobalsBare` in the exec test tree. Idempotent and allocation-free, so it is safe to call before each injected attempt.。
-- **实现**：Register the builtins standard-globals installer as the process-global default so every `core.JSRuntime.create` below copies it into the new runtime's `install_standard_globals_cb`. Phase 6b-3 STEP 7B routed global installation through that callback, which the binding-layer `JSContext.create` wires up; this suite drives the core API directly, so it must register the installer itself or the first `contextGlobal` fails with `error.InvalidBuiltinRegistry` (a non-OOM error that derails the sweep). Mirrors `installHostGlobalsBare` in the exec test tree. Idempotent and allocation-free, so it is safe to call before each injected attempt.。关键调用：`zjs.exec.standard_globals.registerStandardGlobalsDefault`。
-- **所有权 / 错误 / 调用**：无独立 error set 时失败以断言或 panic 终止测试。
 
 ### `runSnippet` (`src/tests/oom.zig:551`)
 

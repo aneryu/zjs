@@ -6,6 +6,7 @@
 //! not GC `TraceHeader` lists. `u8` / `u64` append sites and `u8`
 //! `toOwnedSlice` sites stay on std (`u64` includes GC pause samples).
 
+const mem_ops = @import("memory.zig");
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;
@@ -214,20 +215,21 @@ test "array_list_erased append matches std ArrayList growth" {
     );
 }
 
-test "array_list_erased append matches MemoryAccount allocator ledger" {
+test "array_list_erased append matches Runtime allocation helpers allocator ledger" {
     const Sample = struct { a: u64, b: u64, c: u32 };
-    const account_mod = @import("memory.zig");
 
     for ([_]bool{ false, true }) |slab_enabled| {
-        var typed = account_mod.MemoryAccount.init(std.testing.allocator);
-        defer typed.small_slab.deinit(std.testing.allocator);
-        typed.small_slab_enabled = slab_enabled;
-        var erased_account = account_mod.MemoryAccount.init(std.testing.allocator);
-        defer erased_account.small_slab.deinit(std.testing.allocator);
-        erased_account.small_slab_enabled = slab_enabled;
+        const typed = try mem_ops.createTestRuntime(std.testing.allocator);
+        defer typed.destroy();
+        defer typed.gc.cell_storage.slab.deinit(std.testing.allocator);
+        typed.gc.cell_storage.slab_enabled = slab_enabled;
+        const erased_account = try mem_ops.createTestRuntime(std.testing.allocator);
+        defer erased_account.destroy();
+        defer erased_account.gc.cell_storage.slab.deinit(std.testing.allocator);
+        erased_account.gc.cell_storage.slab_enabled = slab_enabled;
 
-        const typed_gpa = typed.accountedAllocator();
-        const erased_gpa = erased_account.accountedAllocator();
+        const typed_gpa = typed.nativeAllocator();
+        const erased_gpa = erased_account.nativeAllocator();
         var std_list: std.ArrayList(Sample) = .empty;
         defer std_list.deinit(typed_gpa);
         var erased: std.ArrayList(Sample) = .empty;
@@ -238,7 +240,7 @@ test "array_list_erased append matches MemoryAccount allocator ledger" {
             const item = Sample{ .a = i, .b = i + 1, .c = i };
             try std_list.append(typed_gpa, item);
             try append(&erased, erased_gpa, item);
-            try std.testing.expectEqual(typed.allocated_bytes, erased_account.allocated_bytes);
+            try std.testing.expectEqual(typed.diagnostics.allocations.allocated_bytes, erased_account.diagnostics.allocations.allocated_bytes);
             try std.testing.expectEqual(std_list.capacity, erased.capacity);
             try std.testing.expectEqual(std_list.items.len, erased.items.len);
         }
@@ -287,20 +289,21 @@ test "array_list_erased toOwnedSlice matches std ArrayList shrink-to-fit" {
     }
 }
 
-test "array_list_erased toOwnedSlice matches MemoryAccount allocator ledger" {
+test "array_list_erased toOwnedSlice matches Runtime allocation helpers allocator ledger" {
     const Sample = struct { a: u64, b: u64, c: u32 };
-    const account_mod = @import("memory.zig");
 
     for ([_]bool{ false, true }) |slab_enabled| {
-        var typed = account_mod.MemoryAccount.init(std.testing.allocator);
-        defer typed.small_slab.deinit(std.testing.allocator);
-        typed.small_slab_enabled = slab_enabled;
-        var erased_account = account_mod.MemoryAccount.init(std.testing.allocator);
-        defer erased_account.small_slab.deinit(std.testing.allocator);
-        erased_account.small_slab_enabled = slab_enabled;
+        const typed = try mem_ops.createTestRuntime(std.testing.allocator);
+        defer typed.destroy();
+        defer typed.gc.cell_storage.slab.deinit(std.testing.allocator);
+        typed.gc.cell_storage.slab_enabled = slab_enabled;
+        const erased_account = try mem_ops.createTestRuntime(std.testing.allocator);
+        defer erased_account.destroy();
+        defer erased_account.gc.cell_storage.slab.deinit(std.testing.allocator);
+        erased_account.gc.cell_storage.slab_enabled = slab_enabled;
 
-        const typed_gpa = typed.accountedAllocator();
-        const erased_gpa = erased_account.accountedAllocator();
+        const typed_gpa = typed.nativeAllocator();
+        const erased_gpa = erased_account.nativeAllocator();
         var std_list: std.ArrayList(Sample) = .empty;
         defer std_list.deinit(typed_gpa);
         var erased: std.ArrayList(Sample) = .empty;
@@ -317,7 +320,7 @@ test "array_list_erased toOwnedSlice matches MemoryAccount allocator ledger" {
         defer typed_gpa.free(std_owned);
         const erased_owned = try toOwnedSlice(&erased, erased_gpa);
         defer erased_gpa.free(erased_owned);
-        try std.testing.expectEqual(typed.allocated_bytes, erased_account.allocated_bytes);
+        try std.testing.expectEqual(typed.diagnostics.allocations.allocated_bytes, erased_account.diagnostics.allocations.allocated_bytes);
         try std.testing.expectEqual(std_owned.len, erased_owned.len);
         try std.testing.expectEqualSlices(Sample, std_owned, erased_owned);
         try std.testing.expectEqual(@as(usize, 0), std_list.capacity);

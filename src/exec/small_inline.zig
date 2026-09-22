@@ -219,7 +219,7 @@ pub fn destroyCallerState(rt: *JSRuntime, fb: *FunctionBytecode) void {
     const state = callerStateMut(fb) orelse return;
     setCallerState(fb, null);
     setBorrowedRealm(fb, null);
-    rt.memory.destroy(CallerState, state);
+    rt.nativeAllocator().destroy(state);
 }
 
 fn destroyCallerStateOpaque(rt: *JSRuntime, fb_ptr: *anyopaque) void {
@@ -261,10 +261,9 @@ fn fillDefaultCallerState(state: *CallerState) void {
 }
 
 fn ensureCallerState(rt: *JSRuntime, fb: *FunctionBytecode) ?*CallerState {
-    if (rt.small_inline_destroy == null) rt.small_inline_destroy = destroyCallerStateOpaque;
-    if (rt.small_inline_trace_atoms == null) rt.small_inline_trace_atoms = traceCallerStateAtoms;
+    core.execution.installSmallInlineHooks(rt, destroyCallerStateOpaque, traceCallerStateAtoms);
     if (callerStateMut(fb)) |existing| return existing;
-    const state = rt.memory.create(CallerState) catch return null;
+    const state = rt.nativeAllocator().create(CallerState) catch return null;
     fillDefaultCallerState(state);
     setCallerState(fb, state);
     return state;
@@ -1157,9 +1156,9 @@ fn cloneAndExpand(
         src_layout.prop_site_count,
     ) catch return null;
 
-    const spec = FunctionBytecode.createProductionShell(&rt.memory, new_layout) catch return null;
+    const spec = FunctionBytecode.createProductionShell(rt, new_layout) catch return null;
     var owned = true;
-    errdefer if (owned) rt.memory.destroyWithFam(FunctionBytecode, spec, new_layout.famBytes());
+    errdefer if (owned) FunctionBytecode.destroyProductionShell(rt, spec, new_layout.famBytes());
 
     spec.applyFlags(.{
         .is_strict_mode = caller.isStrictMode(),
@@ -1225,7 +1224,7 @@ fn cloneAndExpand(
         dbg.filename = rt.atoms.noteHolderStore(caller.filenameAtom());
         const src_pc2 = caller.pc2lineBuf();
         if (src_pc2.len != 0) {
-            const copy = rt.memory.alloc(u8, src_pc2.len) catch {
+            const copy = rt.nativeAllocator().alloc(u8, src_pc2.len) catch {
                 return null;
             };
             @memcpy(copy, src_pc2);
@@ -1316,7 +1315,7 @@ fn cloneAndExpand(
 
     owned = false;
     rt.gc.addInitializedWithSizeNoFail(&spec.header, spec.heapByteSize());
-    rt.small_inline_specialized_bytes +|= new_len;
+    core.execution.addSmallInlineSpecialized(rt, new_len);
     return spec;
 }
 

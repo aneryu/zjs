@@ -220,7 +220,7 @@ const Resolver = struct {
     function: *bytecode.Bytecode,
     fd: ?*const bytecode.function_def.FunctionDef,
     product: *resolve_variables.ResolvedProduct,
-    memory: *core.memory.MemoryAccount,
+    memory: std.mem.Allocator,
     atoms: *core.atom.AtomTable,
     code: []const u8,
     input_atoms: []const core.atom.Atom,
@@ -281,14 +281,14 @@ const Resolver = struct {
 
     fn deinit(self: *Resolver) void {
         if (self.output_atom_capacity != 0)
-            self.memory.free(core.atom.Atom, self.output_atoms);
-        if (self.output_capacity != 0) self.memory.free(u8, self.output);
+            self.memory.free(self.output_atoms);
+        if (self.output_capacity != 0) self.memory.free(self.output);
         if (self.output_source_capacity != 0)
-            self.memory.free(SourceLocSlot, self.output_sources);
-        if (self.reloc_capacity != 0) self.memory.free(FinalReloc, self.relocs);
-        if (self.addr.len != 0) self.memory.free(u32, self.addr);
-        if (self.binds.len != 0) self.memory.free(BindEntry, self.binds);
-        if (self.jump_slots.len != 0) self.memory.free(JumpSlot, self.jump_slots);
+            self.memory.free(self.output_sources);
+        if (self.reloc_capacity != 0) self.memory.free(self.relocs);
+        if (self.addr.len != 0) self.memory.free(self.addr);
+        if (self.binds.len != 0) self.memory.free(self.binds);
+        if (self.jump_slots.len != 0) self.memory.free(self.jump_slots);
 
         self.output_atoms = &.{};
         self.output_atom_capacity = 0;
@@ -3003,7 +3003,7 @@ const Resolver = struct {
         function.source_loc_slots = owned;
         function.source_loc_capacity = owned_capacity;
         if (old_capacity != 0)
-            self.memory.free(SourceLocSlot, old.ptr[0..old_capacity]);
+            self.memory.free(old.ptr[0..old_capacity]);
     }
 
     /// Sole ownership-transfer point for the growable final outputs. Every
@@ -3045,10 +3045,10 @@ pub fn run(
     fd: ?*const bytecode.function_def.FunctionDef,
     product: *resolve_variables.ResolvedProduct,
 ) Error!void {
-    if (function.memory != product.memory or function.atoms != product.atoms)
+    if (product.memory.ptr != function.allocator.ptr or function.atoms != product.atoms)
         return error.InvalidBytecode;
     if (fd) |function_def| {
-        if (function_def.memory != product.memory or function_def.atoms != product.atoms)
+        if (product.memory.ptr != function_def.allocator.ptr or function_def.atoms != product.atoms)
             return error.InvalidBytecode;
     }
     try validateProductMetadata(product);
@@ -3088,23 +3088,25 @@ const ResolveLabelsTestHarness = struct {
     fd: bytecode.function_def.FunctionDef,
 
     fn init(harness: *ResolveLabelsTestHarness, allocator: std.mem.Allocator) !void {
-        harness.rt = try core.JSRuntime.create(allocator, .{});
+        harness.rt = try core.JSRuntime.create(.{ .allocator = allocator });
         errdefer harness.rt.destroy();
         harness.name_atom = try harness.rt.atoms.internString("qcp1-s4-pass-a");
         harness.function = bytecode.Bytecode.init(
-            &harness.rt.memory,
+            harness.rt.nativeAllocator(),
+            harness.rt.nativeAllocator(),
             &harness.rt.atoms,
             harness.name_atom,
         );
         errdefer harness.function.deinit();
         harness.fd = bytecode.function_def.FunctionDef.init(
-            &harness.rt.memory,
+            harness.rt.nativeAllocator(),
+            harness.rt.nativeAllocator(),
             &harness.rt.atoms,
             harness.name_atom,
         );
         errdefer harness.fd.deinit(harness.rt);
-        const input_builder = try harness.rt.memory.create(builder.Builder);
-        input_builder.* = builder.Builder.init(&harness.rt.memory, &harness.rt.atoms);
+        const input_builder = try harness.rt.nativeAllocator().create(builder.Builder);
+        input_builder.* = builder.Builder.init(harness.rt.nativeAllocator(), &harness.rt.atoms);
         harness.fd.builder = input_builder;
     }
 

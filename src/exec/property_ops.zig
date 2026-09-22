@@ -75,13 +75,12 @@ pub fn propertyKeyAtom(rt: *core.JSRuntime, value: core.JSValue) !core.Atom {
         if (index >= 0) return core.Atom.taggedInt(@intCast(index));
     }
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try value_ops.appendValueString(rt, &bytes, value);
     return rt.internAtom(bytes.items);
 }
 
 pub const expectObject = core.value_semantics.expectObject;
-
 
 // ----- merged from property_direct.zig -----
 // Guarded property and global fast probes that cannot invoke user code.
@@ -458,7 +457,7 @@ fn dataSlotAt(object: *core.Object, index: usize, atom_id: core.Atom) ?DataSlot 
 }
 
 test "fast own data property replacement retains private brand atom" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const object = try core.Object.create(rt, core.class.ids.object, null);
 
@@ -487,7 +486,7 @@ test "fast own data property replacement retains private brand atom" {
 }
 
 test "global own data slot helpers preserve lookup and write ownership" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
 
@@ -568,7 +567,7 @@ test "global own data slot helpers preserve lookup and write ownership" {
 }
 
 test "global own data slot helpers reject readonly and accessor writes" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const global = try core.Object.create(rt, core.class.ids.object, null);
 
@@ -605,7 +604,6 @@ test "global own data slot helpers reject readonly and accessor writes" {
     try std.testing.expect(!setGlobalDataPropertyLookup(rt, global, accessor_lookup, accessor_key, core.JSValue.int32(3)));
     try std.testing.expect(!setGlobalOwnWritableDataPropertyAtOwned(rt, global, accessor_index, accessor_key, core.JSValue.int32(3)));
 }
-
 
 // ----- merged from slot_ops.zig -----
 // Local, argument, var-ref and global-lexical slot operations shared between the VM and call runtime.

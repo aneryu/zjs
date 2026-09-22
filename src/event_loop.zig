@@ -68,7 +68,7 @@ fn HostList(comptime T: type) type {
             const capacity = self.capacity;
             self.items = &.{};
             self.capacity = 0;
-            if (capacity != 0) rt.memory.free(T, items.ptr[0..capacity]);
+            if (capacity != 0) rt.nativeAllocator().free(items.ptr[0..capacity]);
         }
 
         fn ensureCapacity(self: *@This(), ctx: *core.JSContext, min_capacity: usize) !void {
@@ -76,15 +76,15 @@ fn HostList(comptime T: type) type {
             var next_capacity = if (self.capacity == 0) @as(usize, 2) else self.capacity * 2;
             while (next_capacity < min_capacity) : (next_capacity *= 2) {}
             const rt = ctx.runtimePtr();
-            const next = try rt.memory.alloc(T, next_capacity);
-            errdefer rt.memory.free(T, next);
+            const next = try rt.nativeAllocator().alloc(T, next_capacity);
+            errdefer rt.nativeAllocator().free(next);
             const old_items = self.items;
             const old_capacity = self.capacity;
             @memcpy(next[0..old_items.len], old_items);
             self.items = next[0..old_items.len];
             self.capacity = next_capacity;
             if (old_capacity != 0) {
-                rt.memory.free(T, old_items.ptr[0..old_capacity]);
+                rt.nativeAllocator().free(old_items.ptr[0..old_capacity]);
             }
         }
 
@@ -106,7 +106,7 @@ fn HostList(comptime T: type) type {
                 const old = self.items.ptr[0..self.capacity];
                 self.items = &.{};
                 self.capacity = 0;
-                ctx.runtimePtr().memory.free(T, old);
+                ctx.runtimePtr().nativeAllocator().free(old);
             }
         }
     };
@@ -168,9 +168,15 @@ pub const EventLoop = struct {
 
     pub fn drain(self: *EventLoop) !EventLoopRunResult {
         const global = try self.context.globalObject();
-        exec.zjs_vm.drainPendingPromiseJobs(self.context, self.output, global) catch |err| {
-            if (!self.context.hasException() and !self.context.hasUnhandledRejection()) return err;
-        };
+        while (true) {
+            try exec.atomics_ops.processExpiredAtomicsWaiters(self.context);
+            try exec.zjs_vm.drainPendingPromiseJobs(self.context, self.output, global);
+            if (try exec.call.runNextOsSignalHandler(self.context, self.output, global)) continue;
+            if (try exec.call_runtime.runNextOsRwHandler(self.context, self.output, global)) continue;
+            if (try exec.call_runtime.runNextOsTimer(self.context, self.output, global)) continue;
+            if (try exec.atomics_ops.runNextAtomicsHostCompletion(self.context, false)) continue;
+            break;
+        }
         return self.result();
     }
 
@@ -353,8 +359,8 @@ pub const EventLoop = struct {
     fn runNextRwHandlerPosix(self: *EventLoop, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
         if (self.rw_handlers.items.len == 0) return false;
         const rt = ctx.runtimePtr();
-        var pollfds = try rt.memory.alloc(libc.struct_pollfd, self.rw_handlers.items.len);
-        defer rt.memory.free(libc.struct_pollfd, pollfds);
+        var pollfds = try rt.nativeAllocator().alloc(libc.struct_pollfd, self.rw_handlers.items.len);
+        defer rt.nativeAllocator().free(pollfds);
         var count: usize = 0;
         for (self.rw_handlers.items) |handler| {
             var events: c_short = 0;
@@ -612,7 +618,7 @@ fn hostTimerIo() std.Io {
 }
 
 test "runtime.EventLoop drains queued JS callbacks" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const ctx = try js_context.JSContext.create(rt, .{});
@@ -636,7 +642,7 @@ test "runtime.EventLoop drains queued JS callbacks" {
 }
 
 test "runtime.EventLoop removes timers without allocation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try js_context.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -661,17 +667,17 @@ test "runtime.EventLoop removes timers without allocation" {
         .repeats = true,
     };
 
-    const old_bytes = rt.memory.allocated_bytes;
-    const old_allocations = rt.memory.allocation_count;
-    rt.setMemoryLimit(old_bytes);
+    const old_bytes = rt.diagnostics.allocations.allocated_bytes;
+    const old_allocations = rt.diagnostics.allocations.allocation_count;
+    rt.setNativeBytesLimitForTest(old_bytes);
     loop.timers.removeAt(ctx.core, 0);
-    rt.setMemoryLimit(null);
+    rt.setNativeBytesLimitForTest(null);
 
     try std.testing.expectEqual(@as(usize, 1), loop.timers.items.len);
     try std.testing.expectEqual(@as(usize, 2), loop.timers.capacity);
     try std.testing.expectEqual(@as(i64, 11), loop.timers.items[0].id);
-    try std.testing.expectEqual(old_bytes, rt.memory.allocated_bytes);
-    try std.testing.expectEqual(old_allocations, rt.memory.allocation_count);
+    try std.testing.expectEqual(old_bytes, rt.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(old_allocations, rt.diagnostics.allocations.allocation_count);
 
     loop.timers.removeAt(ctx.core, 0);
     try std.testing.expectEqual(@as(usize, 0), loop.timers.items.len);
@@ -679,7 +685,7 @@ test "runtime.EventLoop removes timers without allocation" {
 }
 
 test "runtime.EventLoop removes rw handlers without allocation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try js_context.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -700,17 +706,17 @@ test "runtime.EventLoop removes rw handlers without allocation" {
         .write_callback = core.JSValue.nullValue(),
     };
 
-    const old_bytes = rt.memory.allocated_bytes;
-    const old_allocations = rt.memory.allocation_count;
-    rt.setMemoryLimit(old_bytes);
+    const old_bytes = rt.diagnostics.allocations.allocated_bytes;
+    const old_allocations = rt.diagnostics.allocations.allocation_count;
+    rt.setNativeBytesLimitForTest(old_bytes);
     loop.rw_handlers.removeAt(ctx.core, 0);
-    rt.setMemoryLimit(null);
+    rt.setNativeBytesLimitForTest(null);
 
     try std.testing.expectEqual(@as(usize, 1), loop.rw_handlers.items.len);
     try std.testing.expectEqual(@as(usize, 2), loop.rw_handlers.capacity);
     try std.testing.expectEqual(@as(i32, 11), loop.rw_handlers.items[0].fd);
-    try std.testing.expectEqual(old_bytes, rt.memory.allocated_bytes);
-    try std.testing.expectEqual(old_allocations, rt.memory.allocation_count);
+    try std.testing.expectEqual(old_bytes, rt.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(old_allocations, rt.diagnostics.allocations.allocation_count);
 
     loop.rw_handlers.removeAt(ctx.core, 0);
     try std.testing.expectEqual(@as(usize, 0), loop.rw_handlers.items.len);
@@ -718,7 +724,7 @@ test "runtime.EventLoop removes rw handlers without allocation" {
 }
 
 test "runtime.EventLoop removes signal handlers without allocation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try js_context.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -737,17 +743,17 @@ test "runtime.EventLoop removes signal handlers without allocation" {
         .callback = core.JSValue.int32(2),
     };
 
-    const old_bytes = rt.memory.allocated_bytes;
-    const old_allocations = rt.memory.allocation_count;
-    rt.setMemoryLimit(old_bytes);
+    const old_bytes = rt.diagnostics.allocations.allocated_bytes;
+    const old_allocations = rt.diagnostics.allocations.allocation_count;
+    rt.setNativeBytesLimitForTest(old_bytes);
     loop.signal_handlers.removeAt(ctx.core, 0);
-    rt.setMemoryLimit(null);
+    rt.setNativeBytesLimitForTest(null);
 
     try std.testing.expectEqual(@as(usize, 1), loop.signal_handlers.items.len);
     try std.testing.expectEqual(@as(usize, 2), loop.signal_handlers.capacity);
     try std.testing.expectEqual(@as(u32, 2), loop.signal_handlers.items[0].sig);
-    try std.testing.expectEqual(old_bytes, rt.memory.allocated_bytes);
-    try std.testing.expectEqual(old_allocations, rt.memory.allocation_count);
+    try std.testing.expectEqual(old_bytes, rt.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(old_allocations, rt.diagnostics.allocations.allocation_count);
 
     loop.signal_handlers.removeAt(ctx.core, 0);
     try std.testing.expectEqual(@as(usize, 0), loop.signal_handlers.items.len);
@@ -755,7 +761,7 @@ test "runtime.EventLoop removes signal handlers without allocation" {
 }
 
 test "runtime.EventLoop keeps host-held unique symbol atoms until release" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try js_context.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -779,7 +785,7 @@ test "runtime.EventLoop keeps host-held unique symbol atoms until release" {
     const signal_value = try rt.takeSymbolValue(signal_symbol);
     try loop.signal_handlers.append(ctx.core, SignalHandler.init(2, signal_value));
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(timer_symbol) != null);
     try std.testing.expect(rt.atoms.name(rw_read_symbol) != null);
     try std.testing.expect(rt.atoms.name(rw_write_symbol) != null);
@@ -790,7 +796,7 @@ test "runtime.EventLoop keeps host-held unique symbol atoms until release" {
     loop.clearRwHandler(ctx.core, 1, true);
     loop.signal_handlers.removeAt(ctx.core, 0);
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(timer_symbol) == null);
     try std.testing.expect(rt.atoms.name(rw_read_symbol) == null);
     try std.testing.expect(rt.atoms.name(rw_write_symbol) == null);
@@ -798,12 +804,11 @@ test "runtime.EventLoop keeps host-held unique symbol atoms until release" {
 }
 
 test "runtime.root tracer visits EventLoop host roots" {
-    var rt: core.JSRuntime = undefined;
-    try rt.init(std.testing.allocator, .{});
-    defer rt.deinit();
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    defer rt.destroy();
 
     var ctx: js_context.JSContext = undefined;
-    try ctx.init(&rt, .{});
+    try ctx.init(rt, .{});
     defer ctx.deinit();
 
     var loop = EventLoop.init(&ctx, .{});
@@ -844,7 +849,7 @@ test "runtime.root tracer visits EventLoop host roots" {
 test "runtime.EventLoop roots one-shot function bytecode timer callback after dequeue" {
     const bytecode = @import("bytecode.zig");
 
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     const ctx = try js_context.JSContext.create(rt, .{});
     const global = try js_context.globalObjectPtr(ctx);
     defer {
@@ -872,7 +877,7 @@ test "runtime.EventLoop roots one-shot function bytecode timer callback after de
 
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 

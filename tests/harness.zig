@@ -36,7 +36,6 @@ pub const createTailOpcodeFixture = fixture.createTailOpcodeFixture;
 pub const vm_helpers = fixture.vm_helpers;
 
 pub const evalTypeScriptChecked = test_engine.evalTypeScriptChecked;
-pub const registerStandardGlobalsBare = test_engine.registerStandardGlobalsBare;
 pub const installHostGlobalsBare = test_engine.installHostGlobalsBare;
 pub const countJob = test_engine.countJob;
 pub const countJobArgs = test_engine.countJobArgs;

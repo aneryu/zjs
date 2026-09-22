@@ -8,10 +8,13 @@
 //! exec/runtime/binding may consume it, but context must not import those
 //! higher layers.
 
+const mem_ops = @import("memory.zig");
 const std = @import("std");
 
 const atom = @import("atom.zig");
 const errors = @import("errors.zig");
+const exception_state = @import("exception.zig");
+const execution = @import("execution.zig");
 const class = @import("class.zig");
 const module = @import("module.zig");
 const object_mod = @import("object.zig");
@@ -369,7 +372,7 @@ pub const JSContext = struct {
     }
 
     /// QuickJS `JSContext.header`: realm identity is itself a refcounted cycle
-    /// collector node. Keep this first; `MemoryAccount` places the common
+    /// collector node. Keep this first; `Runtime allocation helpers` places the common
     /// lifetime metadata immediately before it.
     header: gc.Header align(16) = .{},
     runtime: *JSRuntime,
@@ -497,7 +500,7 @@ pub const JSContext = struct {
             .header = .{},
             .runtime = rt,
             .track_unhandled_rejections = options.track_unhandled_rejections,
-            .modules = module.Registry.init(&rt.memory, &rt.atoms, &rt.gc),
+            .modules = module.Registry.init(rt, &rt.atoms, &rt.gc),
             .random_state = runtime_mod.newRealmRandomSeed(),
             .class_prototypes_inline = undefined,
         };
@@ -507,8 +510,8 @@ pub const JSContext = struct {
         if (initial_len <= self.class_prototypes_inline.len) {
             self.class_prototypes = self.class_prototypes_inline[0..initial_len];
         } else {
-            const prototypes = try rt.memory.alloc(JSValue, initial_len);
-            errdefer rt.memory.free(JSValue, prototypes);
+            const prototypes = try mem_ops.alloc(rt, JSValue, initial_len);
+            errdefer mem_ops.free(rt, JSValue, prototypes);
             @memset(prototypes, JSValue.nullValue());
             self.class_prototypes = prototypes;
         }
@@ -581,6 +584,7 @@ pub const JSContext = struct {
     /// when the Runtime handler requests termination. The counter advances and
     /// resets even while no handler is installed.
     pub inline fn pollInterrupt(self: *JSContext) bool {
+        if (self.runtime.isExecutionTerminating()) return true;
         if (!self.pollInterruptTick()) return false;
         return self.pollInterruptSlow();
     }
@@ -658,7 +662,7 @@ pub const JSContext = struct {
             slot.* = JSValue.nullValue();
         }
         if (!using_inline and class_prototypes.len != 0) {
-            rt.memory.free(JSValue, class_prototypes);
+            mem_ops.free(rt, JSValue, class_prototypes);
         }
     }
 
@@ -669,8 +673,8 @@ pub const JSContext = struct {
             var next_len = if (self.class_prototypes.len == 0) @as(usize, 1) else self.class_prototypes.len + self.class_prototypes.len / 2;
             while (next_len <= index) : (next_len += next_len / 2 + 1) {}
 
-            const next = try self.runtime.memory.alloc(JSValue, next_len);
-            errdefer self.runtime.memory.free(JSValue, next);
+            const next = try mem_ops.alloc(self.runtime, JSValue, next_len);
+            errdefer mem_ops.free(self.runtime, JSValue, next);
             @memcpy(next[0..self.class_prototypes.len], self.class_prototypes);
             @memset(next[self.class_prototypes.len..], JSValue.nullValue());
 
@@ -680,7 +684,7 @@ pub const JSContext = struct {
             if (old_using_inline) {
                 @memset(old, JSValue.nullValue());
             } else if (old.len != 0) {
-                self.runtime.memory.free(JSValue, old);
+                mem_ops.free(self.runtime, JSValue, old);
             }
         }
         return &self.class_prototypes[index];
@@ -1023,16 +1027,13 @@ pub const JSContext = struct {
     }
 
     pub fn throwValue(self: *JSContext, value: JSValue) JSValue {
-        self.runtime.current_exception = JSValue.uninitialized();
-        self.runtime.current_exception_uncatchable = false;
-        self.runtime.current_exception_out_of_memory = false;
-        self.runtime.current_exception = value;
+        exception_state.install(self.runtime, value);
         return JSValue.exception();
     }
 
     pub fn setExceptionUncatchable(self: *JSContext, uncatchable: bool) void {
         std.debug.assert(!uncatchable or self.hasException());
-        self.runtime.current_exception_uncatchable = uncatchable;
+        exception_state.setUncatchable(self.runtime, uncatchable);
     }
 
     pub fn exceptionIsUncatchable(self: JSContext) bool {
@@ -1044,7 +1045,7 @@ pub const JSContext = struct {
     /// it: `throwValue` resets the flag, like it does the uncatchable one.
     pub fn markExceptionOutOfMemory(self: *JSContext) void {
         std.debug.assert(self.hasException());
-        self.runtime.current_exception_out_of_memory = true;
+        exception_state.markOutOfMemory(self.runtime);
     }
 
     pub fn exceptionIsOutOfMemory(self: JSContext) bool {
@@ -1056,18 +1057,11 @@ pub const JSContext = struct {
     }
 
     pub fn takeException(self: *JSContext) JSValue {
-        if (!self.hasException()) return JSValue.undefinedValue();
-        const result = self.runtime.current_exception;
-        self.runtime.current_exception = JSValue.uninitialized();
-        self.runtime.current_exception_uncatchable = false;
-        self.runtime.current_exception_out_of_memory = false;
-        return result;
+        return exception_state.take(self.runtime);
     }
 
     pub fn clearException(self: *JSContext) void {
-        self.runtime.current_exception = JSValue.uninitialized();
-        self.runtime.current_exception_uncatchable = false;
-        self.runtime.current_exception_out_of_memory = false;
+        exception_state.clear(self.runtime);
     }
 
     pub fn recordUnhandledRejection(self: *JSContext, value: JSValue) void {
@@ -1097,13 +1091,13 @@ pub const JSContext = struct {
         if (index + 1 > self.unhandled_rejections_capacity) {
             var next_capacity = if (self.unhandled_rejections_capacity == 0) @as(usize, 4) else self.unhandled_rejections_capacity * 2;
             while (next_capacity < index + 1) : (next_capacity *= 2) {}
-            const next = try self.runtime.memory.alloc(UnhandledRejectionEntry, next_capacity);
+            const next = try mem_ops.alloc(self.runtime, UnhandledRejectionEntry, next_capacity);
             const old = self.unhandled_rejections;
             const old_capacity = self.unhandled_rejections_capacity;
             @memcpy(next[0..old.len], old);
             self.unhandled_rejections = next[0..old.len];
             self.unhandled_rejections_capacity = next_capacity;
-            if (old_capacity != 0) self.runtime.memory.free(UnhandledRejectionEntry, old.ptr[0..old_capacity]);
+            if (old_capacity != 0) mem_ops.free(self.runtime, UnhandledRejectionEntry, old.ptr[0..old_capacity]);
         }
         self.unhandled_rejections = self.unhandled_rejections.ptr[0 .. index + 1];
         self.unhandled_rejections[index] = .{
@@ -1153,7 +1147,7 @@ pub const JSContext = struct {
         const capacity = self.unhandled_rejections_capacity;
         self.unhandled_rejections = &.{};
         self.unhandled_rejections_capacity = 0;
-        if (capacity != 0) rt.memory.free(UnhandledRejectionEntry, entries.ptr[0..capacity]);
+        if (capacity != 0) mem_ops.free(rt, UnhandledRejectionEntry, entries.ptr[0..capacity]);
     }
 
     pub fn classPrototypeSlotCount(self: JSContext) usize {
@@ -1183,14 +1177,11 @@ pub const JSContext = struct {
     }
 
     pub fn pushActiveBacktraceFrame(self: *JSContext, frame: *ActiveBacktraceFrame) void {
-        frame.previous = self.runtime.hot.current_backtrace_frame;
-        self.runtime.hot.current_backtrace_frame = frame;
+        execution.linkActiveBacktrace(self.runtime, frame);
     }
 
     pub fn popActiveBacktraceFrame(self: *JSContext, frame: *ActiveBacktraceFrame) void {
-        std.debug.assert(self.runtime.hot.current_backtrace_frame == frame);
-        self.runtime.hot.current_backtrace_frame = frame.previous;
-        frame.previous = null;
+        execution.unlinkActiveBacktrace(self.runtime, frame);
     }
 
     pub fn snapshotBacktraceFrames(self: *JSContext) ![]BacktraceFrame {
@@ -1213,7 +1204,7 @@ pub const JSContext = struct {
 
         const total = self.runtime.backtrace_frames.len + active_count;
         if (total == 0) return &.{};
-        const frames = try self.runtime.memory.alloc(BacktraceFrame, total);
+        const frames = try mem_ops.alloc(self.runtime, BacktraceFrame, total);
 
         for (self.runtime.backtrace_frames, 0..) |frame, idx| {
             frames[idx] = self.dupBacktraceFrame(frame);
@@ -1239,7 +1230,7 @@ pub const JSContext = struct {
     }
 
     pub fn freeBacktraceFrameSnapshot(self: *JSContext, frames: []BacktraceFrame) void {
-        if (frames.len != 0) self.runtime.memory.free(BacktraceFrame, frames);
+        if (frames.len != 0) mem_ops.free(self.runtime, BacktraceFrame, frames);
     }
 
     fn dupBacktraceFrame(self: *JSContext, frame: BacktraceFrame) BacktraceFrame {
@@ -1283,55 +1274,31 @@ pub const JSContext = struct {
         location_resolver: ?BacktraceLocationResolver,
         function_value: JSValue,
     ) !void {
-        if (self.runtime.backtrace_frames.len == self.runtime.backtrace_capacity) {
-            var next_capacity: usize = if (self.runtime.backtrace_capacity == 0) 16 else self.runtime.backtrace_capacity * 2;
-            if (next_capacity < self.runtime.backtrace_frames.len + 1) next_capacity = self.runtime.backtrace_frames.len + 1;
-            const next = try self.runtime.memory.alloc(BacktraceFrame, next_capacity);
-            const old_frames = self.runtime.backtrace_frames;
-            const old_capacity = self.runtime.backtrace_capacity;
-            @memcpy(next[0..old_frames.len], old_frames);
-            self.runtime.backtrace_frames = next[0..old_frames.len];
-            self.runtime.backtrace_capacity = next_capacity;
-            if (old_capacity != 0) self.runtime.memory.free(BacktraceFrame, old_frames.ptr[0..old_capacity]);
-        }
-        const stored_function_value = if (function_value.is(.object)) function_value else JSValue.undefinedValue();
-        self.runtime.backtrace_frames.ptr[self.runtime.backtrace_frames.len] = .{
+        try execution.appendStoredBacktrace(self.runtime, .{
             .function_name = self.runtime.atoms.noteHolderStore(function_name),
             .filename = self.runtime.atoms.noteHolderStore(filename),
             .line_num = line_num,
             .col_num = col_num,
             .location_data = location_data,
             .location_resolver = location_resolver,
-            .function_value = stored_function_value,
-        };
-        self.runtime.backtrace_frames = self.runtime.backtrace_frames.ptr[0 .. self.runtime.backtrace_frames.len + 1];
+            .function_value = execution.storedFunctionValue(function_value),
+        });
     }
 
     pub fn popBacktraceFrame(self: *JSContext) void {
-        if (self.runtime.backtrace_frames.len == 0) return;
-        const idx = self.runtime.backtrace_frames.len - 1;
-        self.runtime.backtrace_frames = self.runtime.backtrace_frames.ptr[0..idx];
+        execution.popStoredBacktrace(self.runtime);
     }
 
     pub fn updateBacktracePc(self: *JSContext, pc: usize) void {
-        if (self.runtime.backtrace_frames.len == 0) return;
-        const idx = self.runtime.backtrace_frames.len - 1;
-        self.runtime.backtrace_frames[idx].pc_source = null;
-        self.runtime.backtrace_frames[idx].pc = pc;
+        execution.setStoredBacktracePc(self.runtime, pc);
     }
 
     pub fn borrowBacktracePc(self: *JSContext, pc_source: *const usize) void {
-        if (self.runtime.backtrace_frames.len == 0) return;
-        self.runtime.backtrace_frames[self.runtime.backtrace_frames.len - 1].pc_source = pc_source;
+        execution.borrowStoredBacktracePc(self.runtime, pc_source);
     }
 
     pub fn updateBacktraceLocation(self: *JSContext, pc: usize, line_num: i32, col_num: i32) void {
-        if (self.runtime.backtrace_frames.len == 0) return;
-        const idx = self.runtime.backtrace_frames.len - 1;
-        self.runtime.backtrace_frames[idx].pc_source = null;
-        self.runtime.backtrace_frames[idx].pc = pc;
-        self.runtime.backtrace_frames[idx].line_num = line_num;
-        self.runtime.backtrace_frames[idx].col_num = col_num;
+        execution.setStoredBacktraceLocation(self.runtime, pc, line_num, col_num);
     }
 
     pub fn takePendingException(self: *JSContext) JSValue {
@@ -1341,6 +1308,28 @@ pub const JSContext = struct {
             return rejection;
         }
         return self.takeException();
+    }
+
+    /// Bind and bootstrap this Realm explicitly; never select another empty Realm.
+    pub fn installStandardGlobals(self: *JSContext, global: *Object) errors.RuntimeError!void {
+        const rt = self.runtime;
+        rt.assertOwnerThread();
+        if (!rt.ownsObject(global)) return error.InvalidBuiltinRegistry;
+        if (self.global) |existing| {
+            if (existing != global) return error.InvalidBuiltinRegistry;
+        }
+        if (rt.contextForGlobalIncludingConstructing(global)) |owner| {
+            if (owner != self) return error.InvalidBuiltinRegistry;
+        }
+        const adopted = self.global == null;
+        self.global = global;
+        errdefer if (adopted) {
+            self.rollbackIntrinsicBootstrap();
+            self.global = null;
+        };
+        global.promoteToGlobalObjectClass(rt);
+        _ = global.ensureGlobalPayload(rt) catch |err| return @errorCast(err);
+        rt.hooks.install_standard_globals(self, global) catch |err| return @errorCast(err);
     }
 
     pub fn globalObject(self: *JSContext) !*Object {

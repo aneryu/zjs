@@ -46,7 +46,7 @@ embedder / CLI / tests
 以嵌入代码为例：
 
 ```zig
-const rt = try zjs.Runtime.create(allocator, .{});
+const rt = try zjs.Runtime.create(.{ .allocator = allocator });
 const ctx = try zjs.Context.create(rt, .{});
 const result = try ctx.eval("let x = 1 + 2; x;", .{});
 ```

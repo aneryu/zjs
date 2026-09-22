@@ -77,7 +77,7 @@ pub fn parseEnumDeclaration(s: *State) Error!void {
 
     try s.expectToken(.lbrace);
 
-    const allocator = s.memory.allocator;
+    const allocator = s.scratch;
     var members = std.ArrayList(TsEnumMember).empty;
     defer {
         for (members.items) |member| tsFreeEnumValue(s, member.value);
@@ -1420,7 +1420,7 @@ const TsEnumMember = struct {
 
 fn tsFreeEnumValue(s: *State, value: TsEnumValue) void {
     switch (value) {
-        .string => |bytes| s.memory.allocator.free(bytes),
+        .string => |bytes| s.scratch.free(bytes),
         .number => {},
     }
 }
@@ -1499,7 +1499,7 @@ fn tsFoldEnumBinary(s: *State, enum_atom: Atom, members: []const TsEnumMember, m
 fn tsFoldEnumApply(s: *State, op: tok.TokenKind, left: TsEnumValue, right: TsEnumValue) Error!?TsEnumValue {
     if (left == .string or right == .string) {
         if (op != .plus or left != .string or right != .string) return null;
-        const joined = try s.memory.allocator.alloc(u8, left.string.len + right.string.len);
+        const joined = try s.scratch.alloc(u8, left.string.len + right.string.len);
         @memcpy(joined[0..left.string.len], left.string);
         @memcpy(joined[left.string.len..], right.string);
         return .{ .string = joined };
@@ -1562,16 +1562,16 @@ fn tsFoldEnumPrimary(s: *State, enum_atom: Atom, members: []const TsEnumMember) 
         return .{ .number = value };
     }
     if (k == .string) {
-        const bytes = try s.memory.allocator.dupe(u8, s.token.payload.str.bytes);
-        errdefer s.memory.allocator.free(bytes);
+        const bytes = try s.scratch.dupe(u8, s.token.payload.str.bytes);
+        errdefer s.scratch.free(bytes);
         try s.advance();
         return .{ .string = bytes };
     }
     if (k == .template) {
         const part = s.token.payload.str;
         if (part.template != .no_substitution or part.cooked_invalid) return null;
-        const bytes = try s.memory.allocator.dupe(u8, part.bytes);
-        errdefer s.memory.allocator.free(bytes);
+        const bytes = try s.scratch.dupe(u8, part.bytes);
+        errdefer s.scratch.free(bytes);
         try s.advance();
         return .{ .string = bytes };
     }
@@ -1595,7 +1595,7 @@ fn tsFoldEnumPrimary(s: *State, enum_atom: Atom, members: []const TsEnumMember) 
             if (member.name != name) continue;
             return switch (member.value) {
                 .number => |n| .{ .number = n },
-                .string => |bytes| .{ .string = try s.memory.allocator.dupe(u8, bytes) },
+                .string => |bytes| .{ .string = try s.scratch.dupe(u8, bytes) },
             };
         }
         return null;

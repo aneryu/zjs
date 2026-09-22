@@ -8,6 +8,7 @@
 //! and consumes runners. QuickJS analogue: the Runtime job list and
 //! `JS_EnqueueJob`/`JS_ExecutePendingJob` machinery.
 
+const mem_ops = @import("memory.zig");
 const memory = @import("memory.zig");
 const core = @import("root.zig");
 
@@ -418,7 +419,7 @@ pub const Job = struct {
 };
 
 pub const Queue = struct {
-    memory: *memory.MemoryAccount,
+    runtime: *@import("runtime.zig").JSRuntime,
     /// Live FIFO window inside the backing block. Every reader keeps treating
     /// this as an ordinary slice; `head` records how far the window sits from
     /// the block start so head removal never touches the tail.
@@ -438,8 +439,8 @@ pub const Queue = struct {
     /// the compaction and the empty-window reset must preserve them.
     unlinked_head_slots: usize = 0,
 
-    pub fn init(account: *memory.MemoryAccount) Queue {
-        return .{ .memory = account };
+    pub fn init(account: *@import("runtime.zig").JSRuntime) Queue {
+        return .{ .runtime = account };
     }
 
     pub fn deinit(self: *Queue) void {
@@ -454,7 +455,7 @@ pub const Queue = struct {
         self.capacity = 0;
         self.head = 0;
         for (jobs) |*job| job.deinit();
-        if (capacity != 0) self.memory.free(Job, block[0..capacity]);
+        if (capacity != 0) mem_ops.free(self.runtime, Job, block[0..capacity]);
     }
 
     fn blockStart(self: *const Queue) [*]Job {
@@ -501,7 +502,7 @@ pub const Queue = struct {
         }
         var next_capacity = if (self.capacity == 0) @as(usize, 4) else self.capacity * 2;
         while (next_capacity - floor < min_capacity) : (next_capacity *= 2) {}
-        const next = try self.memory.alloc(Job, next_capacity);
+        const next = try mem_ops.alloc(self.runtime, Job, next_capacity);
         const old_jobs = self.jobs;
         const old_capacity = self.capacity;
         const old_block = self.blockStart();
@@ -509,7 +510,7 @@ pub const Queue = struct {
         self.jobs = next[floor..][0..old_jobs.len];
         self.head = floor;
         self.capacity = next_capacity;
-        if (old_capacity != 0) self.memory.free(Job, old_block[0..old_capacity]);
+        if (old_capacity != 0) mem_ops.free(self.runtime, Job, old_block[0..old_capacity]);
     }
 
     /// Reserve queue storage for a transaction whose payload ownership is
@@ -737,6 +738,16 @@ pub const Queue = struct {
     }
 };
 
+/// WeakRef [[KeptAlive]]. Cleared at job end, not at an arbitrary safepoint.
+/// Allocation failure drops the keep-alive.
+pub fn keepAliveWeakRef(rt: *core.JSRuntime, value: core.JSValue) void {
+    rt.weakref_kept_alive.append(rt.nativeAllocator(), value) catch return;
+}
+
+pub fn clearKeptAlive(rt: *core.JSRuntime) void {
+    rt.weakref_kept_alive.clearAndFree(rt.nativeAllocator());
+}
+
 const std = @import("std");
 
 fn runGenericOneForTest(queue: *Queue) RunOneStatus {
@@ -749,7 +760,7 @@ fn runGenericOneForTest(queue: *Queue) RunOneStatus {
 }
 
 test "Queue runOne reports three states and preserves FIFO after exception" {
-    const runtime = try core.JSRuntime.create(std.testing.allocator, .{});
+    const runtime = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer runtime.destroy();
     const context = try core.JSContext.create(runtime, .{});
     defer context.destroy();
@@ -779,7 +790,7 @@ test "Queue runOne reports three states and preserves FIFO after exception" {
 }
 
 test "Promise settlement continuation owns target and direct symbol completion" {
-    const runtime = try core.JSRuntime.create(std.testing.allocator, .{});
+    const runtime = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer runtime.destroy();
     const context = try core.JSContext.create(runtime, .{});
     defer context.destroy();
@@ -794,18 +805,18 @@ test "Promise settlement continuation owns target and direct symbol completion" 
     runtime.job_queue.enqueueReserved(Job.initPromiseSettlementNoFail(context, target.value(), completion, false));
     reservation_live = false;
 
-    _ = runtime.runObjectCycleRemoval();
+    _ = runtime.collectForTest();
     try std.testing.expect(runtime.atoms.name(symbol_atom) != null);
     try std.testing.expectEqual(symbol_atom, runtime.job_queue.jobs[0].payload.promise_settlement.completion.asSymbolAtom().?);
 
     var job = runtime.job_queue.takeFirst().?;
     job.deinit();
-    _ = runtime.runObjectCycleRemoval();
+    _ = runtime.collectForTest();
     try std.testing.expect(runtime.atoms.name(symbol_atom) == null);
 }
 
 test "Queue runOne keeps existing tail ahead of jobs enqueued by the active job" {
-    const runtime = try core.JSRuntime.create(std.testing.allocator, .{});
+    const runtime = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer runtime.destroy();
     const context = try core.JSContext.create(runtime, .{});
     defer context.destroy();
@@ -855,7 +866,7 @@ test "Queue runOne keeps existing tail ahead of jobs enqueued by the active job"
 }
 
 test "runtime takes typed Promise jobs without allocation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -864,19 +875,19 @@ test "runtime takes typed Promise jobs without allocation" {
     try rt.job_queue.enqueuePromise(ctx, core.JSValue.int32(10));
     try rt.job_queue.enqueuePromise(ctx, core.JSValue.int32(11));
 
-    const old_bytes = rt.memory.allocated_bytes;
-    const old_allocations = rt.memory.allocation_count;
-    rt.setMemoryLimit(old_bytes);
+    const old_bytes = rt.diagnostics.allocations.allocated_bytes;
+    const old_allocations = rt.diagnostics.allocations.allocation_count;
+    rt.setNativeBytesLimitForTest(old_bytes);
     var first = rt.job_queue.takeFirst().?;
-    rt.setMemoryLimit(null);
+    rt.setNativeBytesLimitForTest(null);
     defer first.deinit();
 
     try std.testing.expectEqual(@as(?i32, 10), first.payload.promise.value.as(.int));
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
     try std.testing.expectEqual(@as(usize, 4), rt.job_queue.capacity);
     try std.testing.expectEqual(@as(?i32, 11), rt.job_queue.jobs[0].payload.promise.value.as(.int));
-    try std.testing.expectEqual(old_bytes, rt.memory.allocated_bytes);
-    try std.testing.expectEqual(old_allocations, rt.memory.allocation_count);
+    try std.testing.expectEqual(old_bytes, rt.diagnostics.allocations.allocated_bytes);
+    try std.testing.expectEqual(old_allocations, rt.diagnostics.allocations.allocation_count);
 
     var second = rt.job_queue.takeFirst().?;
     defer second.deinit();
@@ -887,7 +898,7 @@ test "runtime takes typed Promise jobs without allocation" {
 }
 
 test "typed job reservations preserve capacity without claiming a FIFO position" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -933,3 +944,111 @@ comptime {
     if (@sizeOf(DynamicImportPayload) != pins[5]) @compileError("DynamicImportPayload size drifted from the D1a pin");
     if (@sizeOf(FinalizationPayload) != pins[6]) @compileError("FinalizationPayload size drifted from the D1a pin");
 }
+
+/// The value is borrowed and precisely rooted throughout the notification.
+pub const ExceptionHandler = *const fn (*core.JSRuntime, core.JSValue, ?*anyopaque) core.errors.HostError!void;
+
+pub const Policy = enum { auto, explicit, scoped };
+
+pub const Checkpoint = struct {
+    policy: Policy = .auto,
+    scope_depth: usize = 0,
+    running: bool = false,
+    reporting: bool = false,
+    handler: ?ExceptionHandler = null,
+    userdata: ?*anyopaque = null,
+    /// Borrowed only while an exec/host entry is on the stack.
+    output: ?*std.Io.Writer = null,
+};
+
+fn discardTerminatedJobs(rt: *core.JSRuntime) void {
+    // Keep outstanding finalization reservations: their owners are still live.
+    while (rt.job_queue.takeFirst()) |job| {
+        var owned = job;
+        owned.deinit();
+    }
+    rt.clearWeakRefKeptAlive();
+}
+
+/// Shared ordinary-job reporting for checkpoints and the module continuation
+/// scheduler. The latter retains its existing interleaving with TLA work.
+pub fn reportException(rt: *core.JSRuntime) core.errors.HostError!void {
+    const state = &rt.microtasks;
+    if (rt.current_exception_out_of_memory) return error.OutOfMemory;
+    if (rt.current_exception_uncatchable) return error.Interrupted;
+    const handler = state.handler orelse return error.JSException;
+    var values = [_]core.JSValue{@import("exception.zig").take(rt)};
+    const slices = [_]core.runtime.ValueRootSlice{.{ .borrowed = &values }};
+    var root = core.runtime.ValueRootFrame{ .slices = &slices };
+    root.activate(rt);
+    defer root.deactivate(rt);
+    state.reporting = true;
+    defer state.reporting = false;
+    handler(rt, values[0], state.userdata) catch |err| {
+        if (rt.isExecutionTerminating()) {
+            discardTerminatedJobs(rt);
+            return error.Interrupted;
+        }
+        if (rt.current_exception.is(.uninitialized)) @import("exception.zig").install(rt, values[0]);
+        return err;
+    };
+    try checkTermination(rt);
+    if (rt.current_exception_out_of_memory) return error.OutOfMemory;
+    if (rt.current_exception_uncatchable) return error.Interrupted;
+    if (!rt.current_exception.is(.uninitialized)) return error.JSException;
+}
+
+/// Shared execution boundary for the ordinary checkpoint and the module
+/// continuation scheduler. Internal TLA scheduling may advance one job while
+/// a checkpoint is active; host reentry still goes through runCheckpoint.
+pub fn runCheckpointStep(rt: *core.JSRuntime) core.errors.HostError!RunOneStatus {
+    const state = &rt.microtasks;
+    if (state.reporting) return error.MicrotaskReentry;
+    const was_running = state.running;
+    state.running = true;
+    defer state.running = was_running;
+    try checkTermination(rt);
+    const status = rt.hooks.run_microtask(rt) catch |err| {
+        try checkTermination(rt);
+        return err;
+    };
+    try checkTermination(rt);
+    if (status == .exception) {
+        try reportException(rt);
+        return .success;
+    }
+    return status;
+}
+
+pub fn checkTermination(rt: *core.JSRuntime) core.errors.HostError!void {
+    if (!rt.isExecutionTerminating()) return;
+    discardTerminatedJobs(rt);
+    return error.Interrupted;
+}
+
+pub fn runCheckpoint(rt: *core.JSRuntime) core.errors.HostError!void {
+    const state = &rt.microtasks;
+    if (state.reporting) return error.MicrotaskReentry;
+    if (state.running or state.scope_depth != 0) return;
+    state.running = true;
+    defer state.running = false;
+    while (try runCheckpointStep(rt) != .empty) {}
+    rt.clearWeakRefKeptAlive();
+}
+
+/// Finish is fallible because leaving the outermost scope may execute jobs.
+/// Scopes must finish in LIFO order, including when the scope body fails.
+pub const Scope = struct {
+    runtime: *core.JSRuntime,
+    depth: usize,
+    active: bool = true,
+
+    pub fn finish(self: *Scope) core.errors.HostError!void {
+        try self.runtime.requireOwnerThread();
+        if (!self.active or self.runtime.microtasks.scope_depth != self.depth) return error.InvalidMicrotaskScope;
+        self.active = false;
+        self.runtime.microtasks.scope_depth -= 1;
+        if (self.runtime.microtasks.scope_depth == 0 and self.runtime.microtasks.policy == .scoped)
+            try self.runtime.runMicrotasks();
+    }
+};

@@ -23,7 +23,7 @@ pub const Fixture = struct {
 
     pub fn release(self: *Fixture, rt: *core.JSRuntime) void {
         self.scope.deactivate(rt);
-        rt.memory.destroy(Fixture, self);
+        rt.nativeAllocator().destroy(self);
     }
 };
 
@@ -69,7 +69,7 @@ pub fn makeFixture(rt: *core.JSRuntime, realm: ?*core.JSContext, spec: FixtureSp
             .var_name = name,
         });
     }
-    const item = try rt.memory.create(Fixture);
+    const item = try rt.nativeAllocator().create(Fixture);
     item.* = .{
         .fb = fb,
         .value = core.JSValue.functionBytecode(&fb.header),
@@ -82,8 +82,7 @@ pub fn makeFixture(rt: *core.JSRuntime, realm: ?*core.JSContext, spec: FixtureSp
 }
 
 /// Run a fixture as a script root on a fresh VM with the bare host globals.
-pub fn runFixture(rt: *core.JSRuntime, ctx: *core.JSContext, fb: *const bytecode.FunctionBytecode) !core.JSValue {
-    test_engine.registerStandardGlobalsBare(rt);
+pub fn runFixture(_: *core.JSRuntime, ctx: *core.JSContext, fb: *const bytecode.FunctionBytecode) !core.JSValue {
     var vm_instance = exec.Vm.init(ctx);
     defer vm_instance.deinit();
     return vm_instance.run(fb);

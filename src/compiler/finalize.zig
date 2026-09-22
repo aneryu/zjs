@@ -347,8 +347,8 @@ fn prepareCurrentBeforeChildren(
 /// is still available. No vars/args grouping is part of the contract:
 /// every assigned index must be unique and the complete set must be dense.
 fn validateOpenBindingIndices(fd: *const function_def_mod.FunctionDef, count: u16) FinalizeError!void {
-    const seen = fd.memory.alloc(bool, count) catch return error.OutOfMemory;
-    defer fd.memory.free(bool, seen);
+    const seen = fd.allocator.alloc(bool, count) catch return error.OutOfMemory;
+    defer fd.allocator.free(seen);
     @memset(seen, false);
 
     var captured_count: u32 = 0;
@@ -402,7 +402,7 @@ pub fn createModuleFunctionBytecode(
     const disasm_enabled = std.c.getenv("ZJS_DISASM") != null;
     if (!fd.is_module) return error.InvalidBytecode;
     try validateRuntimeIdentity(fd, compile_context.realm.runtime);
-    if (record.memory != fd.memory or record.atoms != fd.atoms) return error.InvalidBytecode;
+    if (record.memory.ptr != fd.allocator.ptr or record.atoms != fd.atoms) return error.InvalidBytecode;
     try installChildFunctionBytecodes(fd, record, compile_context, disasm_enabled);
     return createFunctionBytecodeAfterChildren(fd, compile_context, disasm_enabled);
 }
@@ -411,7 +411,11 @@ fn validateRuntimeIdentity(fd: *const function_def_mod.FunctionDef, rt: *runtime
     // FunctionDef buffers and atom owners must be released by the same
     // Runtime that accounts, registers, and eventually destroys the FB.
     // Reject a mismatched public caller before any owner is moved.
-    if (fd.memory != &rt.memory or fd.atoms != &rt.atoms) return error.InvalidBytecode;
+    // Allocator context is not an owner identity: production uses the host
+    // allocator directly, and multiple Runtimes may share that allocator.
+    const allocator = rt.nativeAllocator();
+    if (fd.atoms != &rt.atoms or fd.allocator.ptr != allocator.ptr or
+        fd.allocator.vtable != allocator.vtable) return error.InvalidBytecode;
 }
 
 fn validatePreLoweringArtifactShape(fd: *const function_def_mod.FunctionDef) FinalizeError!void {
@@ -464,7 +468,7 @@ fn createFunctionBytecodeAfterChildren(
     try validatePreLoweringArtifactShape(fd);
     // The canonical lowering carrier has no diagnostic/name owners of its
     // own. FunctionDef remains the source of those owners until commit.
-    var lowered = bytecode_function.Bytecode.init(fd.memory, fd.atoms, atom.null_atom);
+    var lowered = bytecode_function.Bytecode.init(fd.allocator, fd.artifacts, fd.atoms, atom.null_atom);
     defer lowered.deinit();
     lowered.line_num = fd.line_num;
     lowered.col_num = fd.col_num;
@@ -508,10 +512,10 @@ fn createFunctionBytecodeAfterChildren(
     );
 
     // Every fallible artifact allocation happens before owner commit.
-    const fb = try fb_mod.FunctionBytecode.createProductionShell(fd.memory, layout);
+    const fb = try fb_mod.FunctionBytecode.createProductionShell(rt, layout);
     const slice = fb[0..1];
     var shell_owned = true;
-    errdefer if (shell_owned) fd.memory.destroyWithFam(fb_mod.FunctionBytecode, fb, layout.famBytes());
+    errdefer if (shell_owned) fb_mod.FunctionBytecode.destroyProductionShell(rt, fb, layout.famBytes());
     const dbg = fb.debugInfoMut().?;
     const hot_extension = layout.hotExtensionPtrMut(fb).?;
 
@@ -702,10 +706,10 @@ noinline fn computeStackSizeForCurrentBytecode(
     leaf_returns_balanced: *bool,
     final_artifact: stack_size.FinalArtifactValidation,
 ) FinalizeError!u16 {
-    // Parser compilation switches MemoryAccount.allocator to the stable,
-    // accounted artifact allocator before entering finalization.
+    // Finalization keeps transient stack analysis in this compile's scratch
+    // allocator; published artifacts retain their explicit Runtime owner.
     return stack_size.compute(function.code, .{
-        .scratch_allocator = function.memory.allocator,
+        .scratch_allocator = function.scratch,
         .returns_balanced_out = leaf_returns_balanced,
         .final_artifact = final_artifact,
     }) catch |err| switch (err) {
@@ -718,7 +722,7 @@ noinline fn computeStackSizeForCurrentBytecode(
 }
 
 fn encodePc2Line(function: *bytecode_function.Bytecode) !void {
-    var encoded = try pc2line.encode(function.memory, function.source_loc_slots, function.line_num, function.col_num);
+    var encoded = try pc2line.encode(function.allocator, function.source_loc_slots, function.line_num, function.col_num);
     defer encoded.deinit();
     // `encode` already produced the exact-sized final owner. Transfer it
     // into the lowered carrier; FunctionBytecode takes the same allocation
@@ -745,10 +749,10 @@ fn installChildFunctionBytecodes(
         // Also revoke every outstanding proof on preparation, allocation
         // or lowering failure. No proof may escape this traversal.
         for (frames.items) |frame| frame.function_def.scope_link_cache = .disabled;
-        frames.deinit(fd.memory.allocator);
+        frames.deinit(fd.artifacts);
     }
     try prepareCurrentBeforeChildren(fd, root_module_record);
-    try array_list_erased.append(&frames, fd.memory.allocator, .{ .function_def = fd });
+    try array_list_erased.append(&frames, fd.artifacts, .{ .function_def = fd });
     fd.scope_link_cache = .unproven;
 
     while (frames.items.len != 0) {
@@ -761,7 +765,7 @@ fn installChildFunctionBytecodes(
             const cpool_idx = child.parent_cpool_idx orelse return error.InvalidBytecode;
             if (cpool_idx >= current.cpool.len) return error.InvalidBytecode;
             try prepareCurrentBeforeChildren(child, null);
-            try array_list_erased.append(&frames, fd.memory.allocator, .{ .function_def = child });
+            try array_list_erased.append(&frames, fd.artifacts, .{ .function_def = child });
             child.scope_link_cache = .unproven;
             continue;
         }
@@ -782,36 +786,36 @@ fn installChildFunctionBytecodes(
 }
 
 test "scope proof cache is revoked on successful and failed finalization" {
-    const rt = try runtime.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try runtime.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const realm = try context.RealmContext.create(rt, .{});
     defer realm.destroy();
     const name = try rt.internAtom("scope-cache-cleanup");
     const Exit = enum { success, prepare_error, lowering_error };
     for ([_]Exit{ .success, .prepare_error, .lowering_error }) |exit_kind| {
-        var parent = function_def_mod.FunctionDef.init(&rt.memory, &rt.atoms, name);
+        var parent = function_def_mod.FunctionDef.init(rt.nativeAllocator(), rt.nativeAllocator(), &rt.atoms, name);
         defer parent.deinit(rt);
         _ = try parent.appendScope(-1);
         _ = try parent.addScopeVar(name, .normal, 0, .{});
-        const input = try rt.memory.create(compiler.Builder);
-        input.* = compiler.Builder.init(&rt.memory, &rt.atoms);
+        const input = try rt.nativeAllocator().create(compiler.Builder);
+        input.* = compiler.Builder.init(rt.nativeAllocator(), &rt.atoms);
         parent.builder = input;
         try input.emitOp(opcode.op.return_undef);
 
         const child_count: usize = if (exit_kind == .lowering_error) 2 else 1;
         for (0..child_count) |child_index| {
             const child = blk: {
-                const def = try rt.memory.create(function_def_mod.FunctionDef);
-                errdefer rt.memory.destroy(function_def_mod.FunctionDef, def);
-                def.* = function_def_mod.FunctionDef.init(&rt.memory, &rt.atoms, name);
+                const def = try rt.nativeAllocator().create(function_def_mod.FunctionDef);
+                errdefer rt.nativeAllocator().destroy(def);
+                def.* = function_def_mod.FunctionDef.init(rt.nativeAllocator(), rt.nativeAllocator(), &rt.atoms, name);
                 try parent.addChild(def);
                 break :blk def;
             };
             child.parent_cpool_idx = @intCast(try parent.appendCpoolOwned(JSValue.undefinedValue()));
             _ = try child.appendScope(-1);
             if (exit_kind != .prepare_error) {
-                const body = try rt.memory.create(compiler.Builder);
-                body.* = compiler.Builder.init(&rt.memory, &rt.atoms);
+                const body = try rt.nativeAllocator().create(compiler.Builder);
+                body.* = compiler.Builder.init(rt.nativeAllocator(), &rt.atoms);
                 child.builder = body;
                 try body.emitAtomOpU16Owned(opcode.op.scope_get_var, name, 0);
                 try body.emitOp(opcode.op.drop);

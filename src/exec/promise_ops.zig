@@ -79,13 +79,10 @@ const objectPrototypeFromGlobal = object_ops.objectPrototypeFromGlobal;
 const objectRealmGlobal = object_ops.objectRealmGlobal;
 const objectRestOwnKeys = object_ops.objectRestOwnKeys;
 const pollGCSafePoint = call_runtime.pollGCSafePoint;
-const processExpiredAtomicsWaiters = atomics_ops.processExpiredAtomicsWaiters;
 const proxyAwareOwnPropertyDescriptor = object_ops.proxyAwareOwnPropertyDescriptor;
 const proxyTrapKeyValue = object_ops.proxyTrapKeyValue;
 const defineToStringTag = iterator_ops.defineToStringTag;
 const runNextAtomicsHostCompletion = atomics_ops.runNextAtomicsHostCompletion;
-const runNextOsRwHandler = call_runtime.runNextOsRwHandler;
-const runNextOsTimer = call_runtime.runNextOsTimer;
 const storeRealmValue = builtin_glue.storeRealmValue;
 const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
 const valueTruthy = coercion_ops.valueTruthy;
@@ -377,12 +374,11 @@ pub fn createPromiseResolvingFunction(rt: *core.JSRuntime, global: *core.Object,
 }
 
 fn testStandardGlobal(ctx: *core.JSContext) !*core.Object {
-    @import("standard_globals.zig").configureRuntime(ctx.runtime);
     return zjs_vm.contextGlobal(ctx);
 }
 
 test "createPromiseResolvingFunction roots promise and state while allocating function" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -423,7 +419,7 @@ test "createPromiseResolvingFunction roots promise and state while allocating fu
     try std.testing.expect(function_object.functionPromiseResolvingReject());
 
     state_alive = false;
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(promise_symbol) != null);
     try std.testing.expect(rt.atoms.name(state_symbol) != null);
     const stored_state_value = function_object.functionPromiseResolvingState() orelse return error.TypeError;
@@ -435,13 +431,13 @@ test "createPromiseResolvingFunction roots promise and state while allocating fu
 
     live_roots.deactivate(rt);
     live_roots_active = false;
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(promise_symbol) == null);
     try std.testing.expect(rt.atoms.name(state_symbol) == null);
 }
 
 test "internalPromiseCapability roots promise and shared resolving pair under GC" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -478,7 +474,7 @@ test "internalPromiseCapability roots promise and shared resolving pair under GC
     var live_roots_active = true;
     defer if (live_roots_active) live_roots.deactivate(rt);
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(promise_symbol) != null);
     const stored_target = resolve_slot.?.functionPromiseResolvingTarget() orelse return error.TypeError;
     const stored_promise = objectFromValue(stored_target) orelse return error.TypeError;
@@ -489,12 +485,12 @@ test "internalPromiseCapability roots promise and shared resolving pair under GC
 
     live_roots.deactivate(rt);
     live_roots_active = false;
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(promise_symbol) == null);
 }
 
 test "internalPromiseCapability passes a null prototype through" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -516,7 +512,7 @@ test "internalPromiseCapability passes a null prototype through" {
 }
 
 test "no-proto Promise then/catch dispatch by nativeFunctionIdSlot" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -623,7 +619,7 @@ pub fn promiseReactionRecord(
 }
 
 test "promiseReactionRecord roots direct symbol fields while allocating slots" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const on_fulfilled_symbol = try rt.atoms.newValueSymbol("gc-reaction-on-fulfilled-symbol");
@@ -678,7 +674,7 @@ test "promiseReactionRecord roots direct symbol fields while allocating slots" {
     try std.testing.expectEqual(resolve_symbol, record.promiseReactionResolve().?.asSymbolAtom().?);
     try std.testing.expectEqual(reject_symbol, record.promiseReactionReject().?.asSymbolAtom().?);
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(on_fulfilled_symbol) == null);
     try std.testing.expect(rt.atoms.name(on_rejected_symbol) == null);
     try std.testing.expect(rt.atoms.name(resolve_symbol) == null);
@@ -695,7 +691,7 @@ pub fn promiseReactionJob(
 }
 
 test "promiseReactionJob roots reaction and value while allocating job" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -738,7 +734,7 @@ test "promiseReactionJob roots reaction and value while allocating job" {
     try std.testing.expectEqual(value_symbol, job.payload.promise_reaction.value.asSymbolAtom().?);
     try std.testing.expect(job.payload.promise_reaction.rejected);
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(reaction_symbol) != null);
     try std.testing.expect(rt.atoms.name(value_symbol) != null);
     const stored_reaction_value = job.payload.promise_reaction.reaction;
@@ -752,7 +748,7 @@ test "promiseReactionJob roots reaction and value while allocating job" {
     job_roots_active = false;
     job.deinit();
     job_alive = false;
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(reaction_symbol) == null);
     try std.testing.expect(rt.atoms.name(value_symbol) == null);
 }
@@ -767,7 +763,7 @@ pub const PreparedPromiseReactionJobs = struct {
             rt.job_queue.releaseReservedEntries(self.reserved_entries);
         }
         for (self.jobs[0..self.initialized]) |*job| job.deinit();
-        if (self.jobs.len != 0) rt.memory.free(jobs_mod.Job, self.jobs);
+        if (self.jobs.len != 0) rt.nativeAllocator().free(self.jobs);
         self.* = .{};
     }
 
@@ -790,19 +786,19 @@ pub const PreparedPromiseReactionJobs = struct {
             self.reserved_entries -= 1;
         }
 
-        ctx.runtime.memory.free(jobs_mod.Job, self.jobs);
+        ctx.runtime.nativeAllocator().free(self.jobs);
         self.* = .{};
     }
 };
 
 test "prepared promise reaction jobs expose direct symbol payloads to an explicit root frame" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const reaction = try core.Object.create(rt, core.class.ids.object, null);
 
-    const jobs = try rt.memory.alloc(jobs_mod.Job, 2);
+    const jobs = try rt.nativeAllocator().alloc(jobs_mod.Job, 2);
     const first_atom = try rt.atoms.newValueSymbol("gc-prepared-promise-job-root-first");
     const first = try rt.takeSymbolValue(first_atom);
     jobs[0] = jobs_mod.Job.initPromiseReaction(ctx, reaction.value(), first, false);
@@ -826,13 +822,13 @@ test "prepared promise reaction jobs expose direct symbol payloads to an explici
     var roots_active = true;
     defer if (roots_active) roots.deactivate(rt);
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(first_atom) != null);
     try std.testing.expect(rt.atoms.name(second_atom) != null);
 
     roots.deactivate(rt);
     roots_active = false;
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(first_atom) == null);
     try std.testing.expect(rt.atoms.name(second_atom) == null);
 }
@@ -856,7 +852,7 @@ pub fn preparePromiseReactionJobs(
     promise_roots.activate(ctx.runtime);
     defer promise_roots.deactivate(ctx.runtime);
 
-    const jobs = try ctx.runtime.memory.alloc(jobs_mod.Job, rooted_promise.?.promiseReactions().len);
+    const jobs = try ctx.runtime.nativeAllocator().alloc(jobs_mod.Job, rooted_promise.?.promiseReactions().len);
     var prepared = PreparedPromiseReactionJobs{ .jobs = jobs };
     errdefer prepared.deinit(ctx.runtime);
 
@@ -930,7 +926,7 @@ pub fn promiseSettleValue(
 }
 
 test "promiseSettleValue handles result self-assignment" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -950,7 +946,7 @@ test "promiseSettleValue handles result self-assignment" {
 }
 
 test "promiseSettleValue roots direct symbol result while preparing reaction jobs" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     const ctx = try core.JSContext.create(rt, .{});
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
@@ -981,12 +977,12 @@ test "promiseSettleValue roots direct symbol result while preparing reaction job
     var pending_job = ctx.runtime.job_queue.takeFirst() orelse return error.TypeError;
     pending_job.deinit();
     try promise.setPromiseResult(rt, null);
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
 test "promiseSettleValue preserves pending state across reaction prepare and FIFO reserve OOM" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -1004,23 +1000,23 @@ test "promiseSettleValue preserves pending state across reaction prepare and FIF
     );
     try appendPromiseReaction(rt, promise, reaction);
 
-    const baseline = rt.memory.allocated_bytes;
+    const baseline = rt.diagnostics.allocations.allocated_bytes;
     const limits = [_]usize{
         baseline,
         baseline + @sizeOf(jobs_mod.Job),
     };
     for (limits) |limit| {
-        rt.setMemoryLimit(limit);
+        rt.setNativeBytesLimitForTest(limit);
         try std.testing.expectError(
             error.OutOfMemory,
             promiseSettleValue(ctx, global, promise, core.JSValue.int32(42), false),
         );
-        rt.setMemoryLimit(null);
+        rt.setNativeBytesLimitForTest(null);
         try std.testing.expect(promise.promiseResult() == null);
         try std.testing.expectEqual(@as(usize, 1), promise.promiseReactions().len);
         try std.testing.expectEqual(@as(usize, 0), rt.job_queue.jobs.len);
         try std.testing.expectEqual(@as(usize, 0), rt.job_queue.reserved_entries);
-        try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+        try std.testing.expectEqual(baseline, rt.diagnostics.allocations.allocated_bytes);
     }
 
     try promiseSettleValue(ctx, global, promise, core.JSValue.int32(42), false);
@@ -1223,7 +1219,7 @@ const PromiseJobOomProbe = struct {
         // collected carriers now, so `checkAllocation`'s retry collection
         // would otherwise find real bytes to give back.
         _ = rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {};
-        rt.setMemoryLimit(rt.memory.allocated_bytes);
+        rt.setNativeBytesLimitForTest(rt.diagnostics.allocations.allocated_bytes);
         if (self.fail) return error.TypeError;
         return core.JSValue.int32(77);
     }
@@ -1286,12 +1282,12 @@ fn appendDummyPromiseReaction(rt: *core.JSRuntime, promise: *core.Object) !void 
 }
 
 test "Promise executor recursive OOM rejects with preallocated reason" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
-    @import("standard_globals.zig").configureRuntime(rt);
+
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
-    defer rt.setMemoryLimit(null);
+    defer rt.setNativeBytesLimitForTest(null);
     const global = try zjs_vm.contextGlobal(ctx);
     const preallocated = ctx.preallocated_oom_error orelse return error.TestUnexpectedResult;
 
@@ -1320,12 +1316,12 @@ test "Promise executor recursive OOM rejects with preallocated reason" {
 }
 
 test "direct Promise resolve OOM is owned by FIFO after resolving pair collection" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
-    @import("standard_globals.zig").configureRuntime(rt);
+
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
-    defer rt.setMemoryLimit(null);
+    defer rt.setNativeBytesLimitForTest(null);
     const global = try zjs_vm.contextGlobal(ctx);
 
     const target = try core.Object.create(rt, core.class.ids.promise, null);
@@ -1340,7 +1336,7 @@ test "direct Promise resolve OOM is owned by FIFO after resolving pair collectio
     try rt.job_queue.ensureCapacity(1);
     // TGC S4-b: see `PromiseJobOomProbe.call`.
     _ = rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {};
-    rt.setMemoryLimit(rt.memory.allocated_bytes);
+    rt.setNativeBytesLimitForTest(rt.diagnostics.allocations.allocated_bytes);
     _ = (try promiseResolvingFunctionCall(
         ctx,
         null,
@@ -1367,9 +1363,9 @@ test "direct Promise resolve OOM is owned by FIFO after resolving pair collectio
     )).?;
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
 
-    rt.setMemoryLimit(null);
+    rt.setNativeBytesLimitForTest(null);
     try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
     try std.testing.expectEqual(@as(?i32, 41), target.promiseResult().?.as(.int));
     try std.testing.expect(!target.promiseIsRejected());
@@ -1378,9 +1374,9 @@ test "direct Promise resolve OOM is owned by FIFO after resolving pair collectio
 }
 
 test "custom Promise reaction capability bare error becomes runOne exception exactly once" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
-    @import("standard_globals.zig").configureRuntime(rt);
+
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try zjs_vm.contextGlobal(ctx);
@@ -1415,12 +1411,12 @@ test "custom Promise reaction capability bare error becomes runOne exception exa
 }
 
 test "Promise reaction OOM transfers internal settle to FIFO without invoking handler twice" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
-    @import("standard_globals.zig").configureRuntime(rt);
+
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
-    defer rt.setMemoryLimit(null);
+    defer rt.setNativeBytesLimitForTest(null);
     const global = try zjs_vm.contextGlobal(ctx);
 
     const target = try core.Object.create(rt, core.class.ids.promise, null);
@@ -1446,7 +1442,7 @@ test "Promise reaction OOM transfers internal settle to FIFO without invoking ha
     try std.testing.expectEqual(jobs_mod.Kind.promise_settlement, std.meta.activeTag(rt.job_queue.jobs[0].payload));
     try std.testing.expectEqual(@as(?i32, 77), rt.job_queue.jobs[0].payload.promise_settlement.completion.as(.int));
 
-    rt.setMemoryLimit(null);
+    rt.setNativeBytesLimitForTest(null);
     try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
     try std.testing.expectEqual(@as(?i32, 77), target.promiseResult().?.as(.int));
@@ -1455,12 +1451,12 @@ test "Promise reaction OOM transfers internal settle to FIFO without invoking ha
 }
 
 test "Promise resolving OOM keeps FIFO owner after then getter and resolver collection" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
-    @import("standard_globals.zig").configureRuntime(rt);
+
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
-    defer rt.setMemoryLimit(null);
+    defer rt.setNativeBytesLimitForTest(null);
     const global = try zjs_vm.contextGlobal(ctx);
 
     const target = try core.Object.create(rt, core.class.ids.promise, null);
@@ -1486,9 +1482,9 @@ test "Promise resolving OOM keeps FIFO owner after then getter and resolver coll
     try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
     try std.testing.expectEqual(jobs_mod.Kind.promise_settlement, std.meta.activeTag(rt.job_queue.jobs[0].payload));
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
 
-    rt.setMemoryLimit(null);
+    rt.setNativeBytesLimitForTest(null);
     try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
     try std.testing.expect(target.promiseResult().?.same(thenable.value()));
@@ -1497,12 +1493,12 @@ test "Promise resolving OOM keeps FIFO owner after then getter and resolver coll
 }
 
 test "Promise resolving getter throw plus settle OOM rejects once after resolver collection" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
-    @import("standard_globals.zig").configureRuntime(rt);
+
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
-    defer rt.setMemoryLimit(null);
+    defer rt.setNativeBytesLimitForTest(null);
     const global = try zjs_vm.contextGlobal(ctx);
 
     const target = try core.Object.create(rt, core.class.ids.promise, null);
@@ -1527,9 +1523,9 @@ test "Promise resolving getter throw plus settle OOM rejects once after resolver
     try std.testing.expectEqual(jobs_mod.Kind.promise_settlement, std.meta.activeTag(rt.job_queue.jobs[0].payload));
     try std.testing.expect(rt.job_queue.jobs[0].payload.promise_settlement.rejected);
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
 
-    rt.setMemoryLimit(null);
+    rt.setNativeBytesLimitForTest(null);
     try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
     try std.testing.expect(target.promiseResult() != null);
@@ -1539,12 +1535,12 @@ test "Promise resolving getter throw plus settle OOM rejects once after resolver
 }
 
 test "Promise thenable OOM resumes rejection without invoking then twice" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
-    @import("standard_globals.zig").configureRuntime(rt);
+
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
-    defer rt.setMemoryLimit(null);
+    defer rt.setNativeBytesLimitForTest(null);
     const global = try zjs_vm.contextGlobal(ctx);
 
     const target = try core.Object.create(rt, core.class.ids.promise, null);
@@ -1562,7 +1558,7 @@ test "Promise thenable OOM resumes rejection without invoking then twice" {
     try std.testing.expectEqual(jobs_mod.Kind.promise_settlement, std.meta.activeTag(rt.job_queue.jobs[0].payload));
     try std.testing.expect(rt.job_queue.jobs[0].payload.promise_settlement.rejected);
 
-    rt.setMemoryLimit(null);
+    rt.setNativeBytesLimitForTest(null);
     try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
     try std.testing.expect(target.promiseResult() != null);
@@ -1572,7 +1568,7 @@ test "Promise thenable OOM resumes rejection without invoking then twice" {
 }
 
 test "Job.initPromiseThenable roots direct function bytecode then callback while creating job" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -1605,7 +1601,7 @@ test "Job.initPromiseThenable roots direct function bytecode then callback while
 
     job.deinit();
     job_alive = false;
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -2071,7 +2067,7 @@ pub fn promiseKeyedResult(rt: *core.JSRuntime, keys: *core.Object, values: *core
 }
 
 test "promiseKeyedResult roots direct symbol values while defining keyed result" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const keys = try core.Object.createArray(rt, null);
@@ -2101,7 +2097,7 @@ test "promiseKeyedResult roots direct symbol values while defining keyed result"
     defer if (result_roots_active) result_roots.deactivate(rt);
 
     try std.testing.expect(rt.atoms.name(value_symbol) != null);
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(value_symbol) != null);
     const answer_atom = try rt.internAtom("answer");
     {
@@ -2113,7 +2109,7 @@ test "promiseKeyedResult roots direct symbol values while defining keyed result"
 
     result_roots.deactivate(rt);
     result_roots_active = false;
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(value_symbol) == null);
 }
 
@@ -2132,7 +2128,7 @@ pub noinline fn promiseSettlementRecord(rt: *core.JSRuntime, rejected: bool, pay
 }
 
 test "promiseSettlementRecord roots direct symbol payload while defining status" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-promise-settlement-record-symbol");
@@ -2151,7 +2147,7 @@ test "promiseSettlementRecord roots direct symbol payload while defining status"
         try std.testing.expectEqual(symbol_atom, value.asSymbolAtom().?);
     }
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -2173,7 +2169,7 @@ pub fn promiseCombinatorState(rt: *core.JSRuntime, resolve_value: core.JSValue, 
 }
 
 test "promiseCombinatorState roots direct function bytecode resolve while creating state" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const values = try core.Object.create(rt, core.class.ids.array, null);
@@ -2203,7 +2199,7 @@ test "promiseCombinatorState roots direct function bytecode resolve while creati
     rt.gc.abortCycle();
     core.Object.destroyFromHeader(rt, state.gcHeader());
     state_alive = false;
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -2819,7 +2815,7 @@ pub fn asyncFunctionRunState(
     if (continuation.generatorExecuting()) return error.TypeError;
     const function_value = continuation.generatorFunctionBytecode() orelse return error.TypeError;
     const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
-    var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stackSize());
+    var nested_stack = stack_mod.Stack.init(ctx.runtime, ctx.runtime.stackSize());
     defer continuation.finalizeGeneratorExecutionCompletion(ctx.runtime);
     defer nested_stack.deinit(ctx.runtime);
 
@@ -2952,7 +2948,7 @@ test "fulfilled await preparation OOM never publishes a partial FIFO job" {
     var failures: usize = 0;
     var successes: usize = 0;
     for ([_]usize{ 0, 40, 80, 160, 240, 320, 640, 1280 }) |allowance| {
-        const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+        const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
         defer rt.destroy();
         const ctx = try core.JSContext.create(rt, .{});
         defer ctx.destroy();
@@ -2969,8 +2965,8 @@ test "fulfilled await preparation OOM never publishes a partial FIFO job" {
         try std.testing.expectEqual(@as(usize, 0), rt.job_queue.capacity);
         rt.suppressLimitCollectionForTest(true);
         defer rt.suppressLimitCollectionForTest(false);
-        rt.setMemoryLimit(rt.memory.allocated_bytes + allowance);
-        defer rt.setMemoryLimit(null);
+        rt.setNativeBytesLimitForTest(rt.diagnostics.allocations.allocated_bytes + allowance);
+        defer rt.setNativeBytesLimitForTest(null);
         asyncFunctionAwait(ctx, null, global, try core.Object.expect(continuation), awaited, null, null) catch |err| {
             try std.testing.expectEqual(error.OutOfMemory, err);
             try std.testing.expectEqual(@as(usize, 0), rt.job_queue.jobs.len);
@@ -3040,7 +3036,7 @@ pub fn asyncFunctionResumeCallbackCall(
 }
 
 test "async resume callbacks keep only internal state and trace their continuation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -3076,18 +3072,18 @@ test "async resume callbacks keep only internal state and trace their continuati
 
         // The callback must be the sole root of its continuation at this boundary.
         continuation = null;
-        _ = rt.runObjectCycleRemoval();
+        _ = rt.collectForTest();
         try std.testing.expect(rt.atoms.name(marker) != null);
         const retained = callback.?.asyncResumeContinuation().?;
         try std.testing.expectEqual(marker, (try retained.getProperty(marker_key)).asSymbolAtom().?);
         callback = null;
-        _ = rt.runObjectCycleRemoval();
+        _ = rt.collectForTest();
         try std.testing.expect(rt.atoms.name(marker) == null);
     }
 }
 
 test "async resume callback allocation failure preserves its continuation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -3100,18 +3096,18 @@ test "async resume callback allocation failure preserves its continuation" {
     try continuation.?.defineOwnProperty(rt, marker_key, core.Descriptor.data(core.JSValue.int32(42), .all));
     // The object boundary may collect unrelated bootstrap garbage first;
     // zero keeps the allocation forbidden even after that reclamation.
-    rt.setMemoryLimit(0);
-    defer rt.setMemoryLimit(null);
+    rt.setNativeBytesLimitForTest(0);
+    defer rt.setNativeBytesLimitForTest(null);
     try std.testing.expectError(error.OutOfMemory, asyncFunctionResumeCallback(rt, global, continuation.?, false));
-    rt.setMemoryLimit(null);
-    _ = rt.runObjectCycleRemoval();
+    rt.setNativeBytesLimitForTest(null);
+    _ = rt.collectForTest();
     try std.testing.expectEqual(@as(?i32, 42), (try continuation.?.getProperty(marker_key)).as(.int));
     const callback = try core.Object.expect(try asyncFunctionResumeCallback(rt, global, continuation.?, true));
     try std.testing.expectEqual(continuation.?, callback.asyncResumeContinuation().?);
 }
 
 test "async resume callback continuation barrier preserves young state" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -3191,11 +3187,11 @@ test "asyncFunctionSettle roots continuation target and result through interrupt
         fn run(rt: *core.JSRuntime, user_context: ?*anyopaque) bool {
             const self: *@This() = @ptrCast(@alignCast(user_context.?));
             self.calls += 1;
-            _ = rt.runObjectCycleRemoval();
+            _ = rt.collectForTest();
             return false;
         }
     };
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -3230,14 +3226,14 @@ test "asyncFunctionSettle roots continuation target and result through interrupt
     try std.testing.expect(rt.ownsObject(target));
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     try std.testing.expectEqual(symbol_atom, target.promiseResult().?.asSymbolAtom().?);
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(!rt.ownsObject(continuation));
     try std.testing.expect(!rt.ownsObject(target));
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
 test "asyncFunctionSettle needs no allocation for scalar completion" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -3252,12 +3248,12 @@ test "asyncFunctionSettle needs no allocation for scalar completion" {
         const continuation = try core.Object.create(rt, core.class.ids.generator, null);
         continuation_value = continuation.value();
         try continuation.setOptionalValueSlot(rt, continuation.generatorAsyncPromiseSlot(), promise_value);
-        _ = rt.runObjectCycleRemoval();
+        _ = rt.collectForTest();
         rt.suppressLimitCollectionForTest(true);
         defer rt.suppressLimitCollectionForTest(false);
-        const allocated = rt.memory.allocated_bytes;
-        rt.setMemoryLimit(allocated);
-        defer rt.setMemoryLimit(null);
+        const allocated = rt.diagnostics.allocations.allocated_bytes;
+        rt.setNativeBytesLimitForTest(allocated);
+        defer rt.setNativeBytesLimitForTest(null);
         // Keep this an allocation test; interrupt-triggered collection has
         // its own coverage and must not release memory to hide an allocation.
         ctx.interrupt_counter = core.JSContext.interrupt_counter_reset;
@@ -3265,13 +3261,13 @@ test "asyncFunctionSettle needs no allocation for scalar completion" {
         const target = objectFromValue(promise_value).?;
         try std.testing.expectEqual(@as(?i32, 42), target.promiseResult().?.as(.int));
         try std.testing.expectEqual(rejected, target.promiseIsRejected());
-        try std.testing.expectEqual(allocated, rt.memory.allocated_bytes);
+        try std.testing.expectEqual(allocated, rt.diagnostics.allocations.allocated_bytes);
         try std.testing.expectEqual(@as(usize, 0), rt.job_queue.jobs.len);
     }
 }
 
 test "asyncFunctionSettle fits the allocation budget of its shared state" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -3288,9 +3284,9 @@ test "asyncFunctionSettle fits the allocation budget of its shared state" {
 
     rt.suppressLimitCollectionForTest(true);
     defer rt.suppressLimitCollectionForTest(false);
-    const allocated = rt.memory.allocated_bytes;
-    rt.setMemoryLimit(allocated + 1024);
-    defer rt.setMemoryLimit(null);
+    const allocated = rt.diagnostics.allocations.allocated_bytes;
+    rt.setNativeBytesLimitForTest(allocated + 1024);
+    defer rt.setNativeBytesLimitForTest(null);
     try asyncFunctionSettle(ctx, null, global, continuation, core.JSValue.int32(42), false, null, null);
     const target = objectFromValue(promise).?;
     try std.testing.expectEqual(@as(?i32, 42), target.promiseResult().?.as(.int));
@@ -3298,12 +3294,12 @@ test "asyncFunctionSettle fits the allocation budget of its shared state" {
 }
 
 test "asyncFunctionSettle transfers getter OOM completion to FIFO exactly once" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try testStandardGlobal(ctx);
-    defer rt.setMemoryLimit(null);
+    defer rt.setNativeBytesLimitForTest(null);
 
     var target_value = core.JSValue.undefinedValue();
     var continuation_value = core.JSValue.undefinedValue();
@@ -3332,8 +3328,8 @@ test "asyncFunctionSettle transfers getter OOM completion to FIFO exactly once" 
     // target and observed completion; retrying must not read the getter again.
     continuation_value = core.JSValue.undefinedValue();
     thenable_value = core.JSValue.undefinedValue();
-    _ = rt.runObjectCycleRemoval();
-    rt.setMemoryLimit(null);
+    _ = rt.collectForTest();
+    rt.setNativeBytesLimitForTest(null);
     try std.testing.expectEqual(jobs_mod.RunOneStatus.success, try drainOnePendingJob(ctx, null, global));
     try std.testing.expect(target.promiseResult().?.sameValue(thenable.value()));
     try std.testing.expectEqual(@as(usize, 1), probe.calls);
@@ -3343,7 +3339,7 @@ test "asyncFunctionSettle transfers getter OOM completion to FIFO exactly once" 
 }
 
 test "asyncFunctionSettle roots direct symbol result before promise stores it" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     const ctx = try core.JSContext.create(rt, .{});
     const global = try testStandardGlobal(ctx);
     const continuation = try core.Object.create(rt, core.class.ids.generator, null);
@@ -3368,7 +3364,7 @@ test "asyncFunctionSettle roots direct symbol result before promise stores it" {
     try std.testing.expectEqual(symbol_atom, result.asSymbolAtom().?);
 
     try promise_object.setPromiseResult(rt, null);
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -3671,7 +3667,7 @@ pub fn promiseFinallyCallback(
 }
 
 test "promiseFinallyCallback roots direct symbol payload while allocating callback" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -3697,7 +3693,7 @@ test "promiseFinallyCallback roots direct symbol payload while allocating callba
     const stored = callback_object.functionPromiseFinallyPayload() orelse return error.TypeError;
     try std.testing.expectEqual(symbol_atom, stored.asSymbolAtom().?);
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -3836,12 +3832,12 @@ pub fn performPromiseThen(
 }
 
 test "already-rejected Promise remains tracked when then preparation OOMs" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
-    @import("standard_globals.zig").configureRuntime(rt);
+
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
-    defer rt.setMemoryLimit(null);
+    defer rt.setNativeBytesLimitForTest(null);
     const global = try zjs_vm.contextGlobal(ctx);
 
     const reason = core.JSValue.int32(73);
@@ -3854,8 +3850,8 @@ test "already-rejected Promise remains tracked when then preparation OOMs" {
     // limit-triggered retry collection inside `checkAllocation` can free real
     // bytes. Sweep first so the baseline is the LIVE size.
     _ = rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {};
-    const baseline = rt.memory.allocated_bytes;
-    rt.setMemoryLimit(baseline);
+    const baseline = rt.diagnostics.allocations.allocated_bytes;
+    rt.setNativeBytesLimitForTest(baseline);
     try std.testing.expectError(error.OutOfMemory, performPromiseThen(
         ctx,
         null,
@@ -3871,9 +3867,9 @@ test "already-rejected Promise remains tracked when then preparation OOMs" {
     try std.testing.expect(ctx.runtime.current_exception.sameValue(reason));
     try std.testing.expectEqual(@as(usize, 0), rt.job_queue.jobs.len);
     try std.testing.expectEqual(@as(usize, 0), rt.job_queue.reserved_entries);
-    try std.testing.expectEqual(baseline, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(baseline, rt.diagnostics.allocations.allocated_bytes);
 
-    rt.setMemoryLimit(null);
+    rt.setNativeBytesLimitForTest(null);
     try performPromiseThen(
         ctx,
         null,
@@ -4033,7 +4029,7 @@ pub fn settlePendingPromiseReaction(
 }
 
 test "settlePendingPromiseReaction roots callback and arg after clearing promise slots" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     const ctx = try core.JSContext.create(rt, .{});
     const global = try testStandardGlobal(ctx);
     const promise = try core.Object.create(rt, core.class.ids.promise, null);
@@ -4071,7 +4067,7 @@ test "settlePendingPromiseReaction roots callback and arg after clearing promise
     try std.testing.expectEqual(arg_symbol, generator.generatorArgs()[0].asSymbolAtom().?);
 
     try promise.setPromiseResult(rt, null);
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(callback_symbol) == null);
     try std.testing.expect(rt.atoms.name(arg_symbol) == null);
 }
@@ -4101,18 +4097,18 @@ pub fn drainPendingPromiseJobs(
     output: ?*std.Io.Writer,
     global: *core.Object,
 ) HostError!void {
-    while (true) {
-        while (true) switch (try drainOnePendingJob(ctx, output, global)) {
-            .empty => break,
-            .success => {},
-            .exception => return error.JSException,
-        };
-        if (try call_mod.runNextOsSignalHandler(ctx, output, global)) continue;
-        if (try runNextOsRwHandler(ctx, output, global)) continue;
-        if (try runNextOsTimer(ctx, output, global)) continue;
-        if (try runNextAtomicsHostCompletion(ctx, false)) continue;
-        break;
-    }
+    _ = global;
+    const state = &ctx.runtime.microtasks;
+    const previous_output = state.output;
+    state.output = output;
+    defer state.output = previous_output;
+    try ctx.runtime.runMicrotasks();
+}
+
+pub fn runRuntimeMicrotask(rt: *core.JSRuntime) HostError!jobs_mod.RunOneStatus {
+    if (!rt.job_queue.hasJobs()) return .empty;
+    const ctx = rt.job_queue.jobs[0].realm.borrow() orelse return error.InvalidBuiltinRegistry;
+    return drainOnePendingJob(ctx, rt.microtasks.output, ctx.global orelse return error.InvalidBuiltinRegistry);
 }
 
 fn promiseReactionInternalSettleCanRetry(payload: *const jobs_mod.PromiseReactionPayload) bool {
@@ -4139,7 +4135,6 @@ pub fn drainOnePendingJob(
     global: *core.Object,
 ) HostError!jobs_mod.RunOneStatus {
     _ = global;
-    try processExpiredAtomicsWaiters(ctx);
     if (!ctx.runtime.job_queue.hasJobs()) return .empty;
 
     var entry = ctx.runtime.job_queue.takeFirst().?;
@@ -4148,7 +4143,7 @@ pub fn drainOnePendingJob(
     var active_job_root: core.runtime.ActiveJobRoot = .{};
     active_job_root.activate(ctx.runtime, &entry);
     defer active_job_root.deactivate(ctx.runtime);
-    defer ctx.runtime.clearWeakRefKeptAlive();
+    defer if (!ctx.runtime.microtasks.running) ctx.runtime.clearWeakRefKeptAlive();
     const job_ctx = entry.realm.borrow().?;
     const job_global = job_ctx.global orelse return error.InvalidBuiltinRegistry;
     var result: ?core.JSValue = null;
@@ -4161,17 +4156,20 @@ pub fn drainOnePendingJob(
             if (objectFromValue(job)) |object| {
                 if (object.class_id == core.class.ids.promise) {
                     settlePendingPromiseReaction(job_ctx, output, job_global, object) catch |err| {
+                        if (err == error.OutOfMemory or err == error.Interrupted) return err;
                         if (job_ctx.hasException()) return .exception;
                         return err;
                     };
                 } else if (isCallableValue(job)) {
                     result = callValueOrBytecodeRoot(job_ctx, output, job_global, job_global.value(), job, &.{}, null, null) catch |err| {
+                        if (err == error.OutOfMemory or err == error.Interrupted) return err;
                         if (job_ctx.hasException()) return .exception;
                         return err;
                     };
                 }
             } else if (isCallableValue(job)) {
                 result = callValueOrBytecodeRoot(job_ctx, output, job_global, job_global.value(), job, &.{}, null, null) catch |err| {
+                    if (err == error.OutOfMemory or err == error.Interrupted) return err;
                     if (job_ctx.hasException()) return .exception;
                     return err;
                 };
@@ -4188,6 +4186,7 @@ pub fn drainOnePendingJob(
                     return err;
                 }
                 ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
+                if (err == error.OutOfMemory or err == error.Interrupted) return err;
                 if (job_ctx.hasException()) return .exception;
                 return err;
             };
@@ -4213,6 +4212,7 @@ pub fn drainOnePendingJob(
                     return err;
                 }
                 ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
+                if (err == error.OutOfMemory or err == error.Interrupted) return err;
                 if (job_ctx.hasException()) return .exception;
                 return err;
             };
@@ -4230,6 +4230,7 @@ pub fn drainOnePendingJob(
                     return err;
                 }
                 ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
+                if (err == error.OutOfMemory or err == error.Interrupted) return err;
                 if (job_ctx.hasException()) return .exception;
                 return err;
             };
@@ -4247,6 +4248,7 @@ pub fn drainOnePendingJob(
                     return error.OutOfMemory;
                 }
                 ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
+                if (err == error.OutOfMemory or err == error.Interrupted) return err;
                 if (job_ctx.hasException()) return .exception;
                 return err;
             };
@@ -4266,6 +4268,7 @@ pub fn drainOnePendingJob(
         },
         .finalization => |*payload| {
             result = callValueOrBytecodeRoot(job_ctx, output, job_global, core.JSValue.undefinedValue(), payload.callback, &.{payload.held_value}, null, null) catch |err| {
+                if (err == error.OutOfMemory or err == error.Interrupted) return err;
                 if (job_ctx.hasException()) return .exception;
                 return err;
             };
@@ -4276,6 +4279,7 @@ pub fn drainOnePendingJob(
         if (status == .exception) return .exception;
     }
     pollGCSafePoint(job_ctx) catch |err| {
+        if (err == error.OutOfMemory or err == error.Interrupted) return err;
         if (job_ctx.hasException()) return .exception;
         return err;
     };
@@ -4356,7 +4360,7 @@ fn countPromiseJob(_: *core.JSContext, args: []const core.JSValue) core.JSValue 
 }
 
 test "promise enqueues reactions and executes jobs via engine" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -4373,7 +4377,7 @@ test "promise enqueues reactions and executes jobs via engine" {
 }
 
 test "promise reaction carrier uses a dedicated traced payload" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const u = core.JSValue.undefinedValue();
     const value = try promiseReactionRecord(rt, u, u, u, u);
@@ -4386,7 +4390,7 @@ test "promise reaction carrier uses a dedicated traced payload" {
 }
 
 test "promise reaction carrier barriers cover all four slots" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const u = core.JSValue.undefinedValue();
     var record: ?*core.Object = try core.Object.expect(try promiseReactionRecord(rt, u, u, u, u));
@@ -4417,7 +4421,7 @@ test "promise reaction carrier barriers cover all four slots" {
 }
 
 test "promise reaction carrier promotion preserves values across OOM and GC" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     var values: [4]core.JSValue = undefined;
     var symbols: [4]core.Atom = undefined;
@@ -4430,53 +4434,53 @@ test "promise reaction carrier promotion preserves values across OOM and GC" {
     roots.activate(rt);
     defer roots.deactivate(rt);
     values = @splat(core.JSValue.undefinedValue());
-    _ = rt.runObjectCycleRemoval();
-    rt.setMemoryLimit(0);
-    defer rt.setMemoryLimit(null);
+    _ = rt.collectForTest();
+    rt.setNativeBytesLimitForTest(0);
+    defer rt.setNativeBytesLimitForTest(null);
     try std.testing.expectError(error.OutOfMemory, record.?.ensureOrdinaryPayload(rt));
     try std.testing.expectEqual(core.class.PayloadKind.promise_reaction_record, record.?.flags.class_payload_kind);
-    rt.setMemoryLimit(null);
+    rt.setNativeBytesLimitForTest(null);
     rt.setGCThreshold(0);
     (try record.?.promiseAlreadyResolvedSlot(rt)).* = true;
     try std.testing.expect(record.?.promiseAlreadyResolved());
     try std.testing.expectEqual(core.class.PayloadKind.ordinary, record.?.flags.class_payload_kind);
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     const getters = .{ "promiseReactionOnFulfilled", "promiseReactionOnRejected", "promiseReactionResolve", "promiseReactionReject" };
     inline for (getters, 0..) |getter, i| {
         try std.testing.expect(rt.atoms.name(symbols[i]) != null);
         try std.testing.expectEqual(symbols[i], @field(core.Object, getter)(record.?).?.asSymbolAtom().?);
     }
     record = null;
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     for (symbols) |symbol| try std.testing.expect(rt.atoms.name(symbol) == null);
 }
 
 test "promise reaction carrier allocation failure preserves input roots" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     var input: ?*core.Object = try core.Object.create(rt, core.class.ids.object, null);
     var record: ?*core.Object = null;
     var roots = core.runtime.rootObjects(.{ &input, &record });
     roots.activate(rt);
     defer roots.deactivate(rt);
-    rt.setMemoryLimit(0);
-    defer rt.setMemoryLimit(null);
+    rt.setNativeBytesLimitForTest(0);
+    defer rt.setNativeBytesLimitForTest(null);
     try std.testing.expectError(error.OutOfMemory, promiseReactionRecord(rt, input.?.value(), input.?.value(), input.?.value(), input.?.value()));
-    rt.setMemoryLimit(null);
+    rt.setNativeBytesLimitForTest(null);
     rt.setGCThreshold(0);
     record = try core.Object.expect(try promiseReactionRecord(rt, input.?.value(), input.?.value(), input.?.value(), input.?.value()));
     const child = input.?;
     input = null;
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.ownsObject(child));
     try std.testing.expect(record.?.promiseReactionReject().?.same(child.value()));
     record = null;
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(!rt.ownsObject(child));
 }
 
 test "P-Cap target and error realm edges survive remembered and declared-only tracing" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -4511,7 +4515,7 @@ test "P-Cap target and error realm edges survive remembered and declared-only tr
 }
 
 test "P-Cap intrinsic construction OOM leaves no published reaction" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -4523,8 +4527,8 @@ test "P-Cap intrinsic construction OOM leaves no published reaction" {
     defer roots.deactivate(rt);
     rt.suppressLimitCollectionForTest(true);
     defer rt.suppressLimitCollectionForTest(false);
-    rt.setMemoryLimit(0);
-    defer rt.setMemoryLimit(null);
+    rt.setNativeBytesLimitForTest(0);
+    defer rt.setNativeBytesLimitForTest(null);
     resetThenCapabilityTestMetrics();
     try std.testing.expectError(error.OutOfMemory, thenCapability(ctx, null, global, constructor, false, null, null));
     try std.testing.expectEqual(@as(usize, 1), thenCapabilityTestMetrics().intrinsic_prepare);
@@ -4536,7 +4540,7 @@ test "P-Cap intrinsic construction OOM leaves no published reaction" {
 
 test "fulfilled await uses only its reserved FIFO slot" {
     for (0..3) |kind| {
-        const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+        const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
         defer rt.destroy();
         const ctx = try core.JSContext.create(rt, .{});
         defer ctx.destroy();
@@ -4556,13 +4560,13 @@ test "fulfilled await uses only its reserved FIFO slot" {
         _ = try promiseDefaultConstructor(ctx, global);
         try rt.job_queue.reserveEntries(1);
         rt.job_queue.releaseReservedEntries(1);
-        const before = rt.memory.allocated_bytes;
+        const before = rt.diagnostics.allocations.allocated_bytes;
         rt.suppressLimitCollectionForTest(true);
         defer rt.suppressLimitCollectionForTest(false);
-        rt.setMemoryLimit(before);
-        defer rt.setMemoryLimit(null);
+        rt.setNativeBytesLimitForTest(before);
+        defer rt.setNativeBytesLimitForTest(null);
         try asyncFunctionAwait(ctx, null, global, try core.Object.expect(continuation), awaited, null, null);
-        try std.testing.expectEqual(before, rt.memory.allocated_bytes);
+        try std.testing.expectEqual(before, rt.diagnostics.allocations.allocated_bytes);
         try std.testing.expectEqual(@as(usize, 1), rt.job_queue.jobs.len);
         try std.testing.expectEqual(@as(usize, 0), rt.job_queue.reserved_entries);
         const job = &rt.job_queue.jobs[0];
@@ -4572,7 +4576,6 @@ test "fulfilled await uses only its reserved FIFO slot" {
         try std.testing.expectEqual(ctx, job.realm.borrow().?);
     }
 }
-
 
 // ----- merged from promise_builtin_ops.zig -----
 // Internal-record declarations for Promise static methods.
@@ -4728,7 +4731,6 @@ fn promiseStaticCallNative(
     );
 }
 
-
 // ----- merged from async_generator.zig -----
 // Async-generator request queue + state machine.
 //
@@ -4779,7 +4781,7 @@ fn setState(gen: *core.Object, s: State) void {
 // ---------------------------------------------------------------------------
 
 fn pushRequest(rt: *core.JSRuntime, gen: *core.Object, req: AsyncGeneratorRequest) !void {
-    try gen.asyncGeneratorQueueSlot().append(rt.memory.persistent_allocator, req);
+    try gen.asyncGeneratorQueueSlot().append(rt.nativeAllocator(), req);
     // The request's four values live in the generator's payload queue, so the
     // generator owns them: a long-lived async generator queuing a freshly made
     // promise and its resolving functions is an old-to-young edge.

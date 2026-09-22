@@ -12,7 +12,7 @@ The examples below are covered by `tests/embedding_examples.zig`.
 const std = @import("std");
 const zjs = @import("zjs");
 
-const rt = try zjs.Runtime.create(allocator, .{});
+const rt = try zjs.Runtime.create(.{ .allocator = allocator });
 defer rt.destroy();
 
 const ctx = try zjs.Context.create(rt, .{});
@@ -230,8 +230,7 @@ teardown), not when the host's last reference goes away.
 ## Construction With Limits
 
 ```zig
-const rt = try zjs.Runtime.create(allocator, .{
-    .stack_size = 512 * 1024,
+const rt = try zjs.Runtime.create(.{ .allocator = allocator, .stack_size = 512 * 1024,
     .gc_threshold = 2 * 1024 * 1024,
 });
 defer rt.destroy();

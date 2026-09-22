@@ -2,8 +2,8 @@ const std = @import("std");
 const bytecode = @import("../bytecode.zig");
 const atom = @import("../core/atom.zig");
 const context = @import("../core/context.zig");
-const memory = @import("../core/memory.zig");
 const runtime = @import("../core/runtime.zig");
+const execution = @import("../core/execution.zig");
 const FunctionBytecode = bytecode.FunctionBytecode;
 const CallFacts = bytecode.CallFacts;
 const FunctionDef = bytecode.FunctionDef;
@@ -23,7 +23,7 @@ const pc2line = pipeline_pc2line;
 /// freshly grown tail (length `n`).
 fn growSliceBy(
     comptime T: type,
-    mem: *memory.MemoryAccount,
+    allocator: std.mem.Allocator,
     slice: *[]T,
     capacity: *usize,
     n: usize,
@@ -36,19 +36,19 @@ fn growSliceBy(
     }
     var new_cap: usize = if (capacity.* == 0) 8 else capacity.* * 2;
     if (new_cap < new_used) new_cap = new_used;
-    const new_buf = try mem.alloc(T, new_cap);
+    const new_buf = try allocator.alloc(T, new_cap);
     @memcpy(new_buf[0..used], slice.*);
     var old_buf: []T = &.{};
     if (capacity.* != 0) old_buf = slice.ptr[0..capacity.*];
     slice.* = new_buf[0..new_used];
     capacity.* = new_cap;
-    if (old_buf.len != 0) mem.free(T, old_buf);
+    if (old_buf.len != 0) allocator.free(old_buf);
     return slice.ptr[used..new_used];
 }
 
 fn freeGrowableSlice(
     comptime T: type,
-    mem: *memory.MemoryAccount,
+    allocator: std.mem.Allocator,
     slice: *[]T,
     capacity: *usize,
 ) void {
@@ -56,17 +56,17 @@ fn freeGrowableSlice(
     if (capacity.* != 0) old_buf = slice.ptr[0..capacity.*];
     slice.* = &.{};
     capacity.* = 0;
-    if (old_buf.len != 0) mem.free(T, old_buf);
+    if (old_buf.len != 0) allocator.free(old_buf);
 }
 
-fn freeOwnedAtomSlice(mem: *memory.MemoryAccount, slot: *[]atom.Atom) void {
+fn freeOwnedAtomSlice(allocator: std.mem.Allocator, slot: *[]atom.Atom) void {
     const items = slot.*;
     slot.* = &.{};
-    if (items.len != 0) mem.free(atom.Atom, items);
+    if (items.len != 0) allocator.free(items);
 }
 
 fn freeGrowableAtomSlice(
-    mem: *memory.MemoryAccount,
+    allocator: std.mem.Allocator,
     slice: *[]atom.Atom,
     capacity: *usize,
 ) void {
@@ -75,9 +75,9 @@ fn freeGrowableAtomSlice(
     slice.* = &.{};
     capacity.* = 0;
     if (old_capacity != 0) {
-        mem.free(atom.Atom, items.ptr[0..old_capacity]);
+        allocator.free(items.ptr[0..old_capacity]);
     } else if (items.len != 0) {
-        mem.free(atom.Atom, items);
+        allocator.free(items);
     }
 }
 
@@ -126,7 +126,10 @@ pub const ExactArgsLeafKind = function_bytecode_mod.ExactArgsLeafKind;
 /// `FunctionBytecode`. It lives on the finalizer's stack for one function
 /// and is never executed.
 pub const BytecodeImpl = struct {
-    memory: *memory.MemoryAccount,
+    /// Ordinary code, atom, and pc2line buffers.
+    allocator: std.mem.Allocator,
+    /// NoTrigger facade for stack-size scratch. Same account as `allocator`.
+    scratch: std.mem.Allocator,
     atoms: *atom.AtomTable,
     /// Borrowed realm pointer copied into the canonical FB. Mutable legacy
     /// module/test bytecode leaves this null and supplies its realm at the
@@ -229,9 +232,10 @@ pub const BytecodeImpl = struct {
     atom_operands: []atom.Atom = &.{},
     atom_operands_capacity: usize = 0,
 
-    pub fn init(account: *memory.MemoryAccount, atoms: *atom.AtomTable, name: atom.Atom) BytecodeImpl {
+    pub fn init(allocator: std.mem.Allocator, scratch: std.mem.Allocator, atoms: *atom.AtomTable, name: atom.Atom) BytecodeImpl {
         return .{
-            .memory = account,
+            .allocator = allocator,
+            .scratch = scratch,
             .atoms = atoms,
             .name = name,
             .filename = name,
@@ -243,14 +247,14 @@ pub const BytecodeImpl = struct {
         self.name = atom.null_atom;
         self.filename = atom.null_atom;
         self.script_or_module = atom.null_atom;
-        freeGrowableAtomSlice(self.memory, &self.atom_operands, &self.atom_operands_capacity);
-        freeGrowableSlice(u8, self.memory, &self.code, &self.code_capacity);
-        freeGrowableSlice(pipeline_pc2line.SourceLocSlot, self.memory, &self.source_loc_slots, &self.source_loc_capacity);
+        freeGrowableAtomSlice(self.allocator, &self.atom_operands, &self.atom_operands_capacity);
+        freeGrowableSlice(u8, self.allocator, &self.code, &self.code_capacity);
+        freeGrowableSlice(pipeline_pc2line.SourceLocSlot, self.allocator, &self.source_loc_slots, &self.source_loc_capacity);
         const pc2line_buf = self.pc2line_buf;
         const owns_pc2line_buf = self.owns_pc2line_buf;
         self.pc2line_buf = &.{};
         self.owns_pc2line_buf = false;
-        if (owns_pc2line_buf and pc2line_buf.len != 0) self.memory.free(u8, pc2line_buf);
+        if (owns_pc2line_buf and pc2line_buf.len != 0) self.allocator.free(pc2line_buf);
     }
 
     pub inline fn byteCode(self: *const BytecodeImpl) []const u8 {
@@ -360,10 +364,10 @@ pub const BytecodeImpl = struct {
         return self.exact_args_leaf_kind;
     }
     pub fn setCode(self: *BytecodeImpl, bytes: []const u8) !void {
-        freeGrowableSlice(u8, self.memory, &self.code, &self.code_capacity);
+        freeGrowableSlice(u8, self.allocator, &self.code, &self.code_capacity);
         if (bytes.len == 0) return;
-        const owned = try self.memory.alloc(u8, bytes.len);
-        errdefer self.memory.free(u8, owned);
+        const owned = try self.allocator.alloc(u8, bytes.len);
+        errdefer self.allocator.free(owned);
         @memcpy(owned, bytes);
         self.code = owned;
         self.code_capacity = bytes.len;
@@ -374,7 +378,7 @@ pub const BytecodeImpl = struct {
     /// the current size, while reallocations are amortised O(1).
     pub fn appendCode(self: *BytecodeImpl, bytes: []const u8) !void {
         if (bytes.len == 0) return;
-        const tail = try growSliceBy(u8, self.memory, &self.code, &self.code_capacity, bytes.len);
+        const tail = try growSliceBy(u8, self.allocator, &self.code, &self.code_capacity, bytes.len);
         @memcpy(tail, bytes);
     }
 
@@ -396,7 +400,7 @@ pub const BytecodeImpl = struct {
     pub fn installCodeWithCapacity(self: *BytecodeImpl, owned_used: []u8, owned_capacity: usize) void {
         std.debug.assert(owned_used.len <= owned_capacity);
         std.debug.assert(owned_capacity != 0 or owned_used.len == 0);
-        freeGrowableSlice(u8, self.memory, &self.code, &self.code_capacity);
+        freeGrowableSlice(u8, self.allocator, &self.code, &self.code_capacity);
         self.code = owned_used;
         self.code_capacity = owned_capacity;
     }
@@ -406,7 +410,7 @@ pub const BytecodeImpl = struct {
         const old_owned = self.owns_pc2line_buf;
         self.pc2line_buf = owned;
         self.owns_pc2line_buf = owned.len != 0;
-        if (old_owned and old.len != 0) self.memory.free(u8, old);
+        if (old_owned and old.len != 0) self.allocator.free(old);
     }
 
     /// Replace the `atom_operands` buffer with a caller-owned backing
@@ -417,7 +421,7 @@ pub const BytecodeImpl = struct {
     pub fn installAtomOperandsWithCapacity(self: *BytecodeImpl, owned_used: []atom.Atom, owned_capacity: usize) void {
         std.debug.assert(owned_used.len <= owned_capacity);
         std.debug.assert(owned_capacity != 0 or owned_used.len == 0);
-        freeGrowableSlice(atom.Atom, self.memory, &self.atom_operands, &self.atom_operands_capacity);
+        freeGrowableSlice(atom.Atom, self.allocator, &self.atom_operands, &self.atom_operands_capacity);
         self.atom_operands = owned_used;
         self.atom_operands_capacity = owned_capacity;
     }
@@ -557,7 +561,7 @@ pub fn publishExecutionFlags(fb: *FunctionBytecode, facts: ExecutionFacts) void 
     // bodies never enter noteMonomorphic. Not a shape special case.
     const small_inline_eligible = scanSmallInlineEligible(fb, facts) and leaf_returns_balanced;
     if (fb.realmContext()) |realm| {
-        realm.runtime.small_inline_published_bytes +|= entry_code.len;
+        execution.addSmallInlinePublished(realm.runtime, entry_code.len);
     }
 
     call_facts.execution = .{

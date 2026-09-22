@@ -227,7 +227,6 @@ pub fn fastArrayOwnIntElementSet(rt: *core.JSRuntime, value: core.JSValue, key: 
 
 const objectFromValue = core.value_semantics.objectFromValueTrustedExpression;
 
-
 // ----- merged from vm_property_field.zig -----
 // Property field and array-element opcode handlers (get/put_field, get/put_array_el, in/instanceof, to_prop_key).
 const builtin = @import("builtin");
@@ -1573,8 +1572,7 @@ pub const site_own: u8 = @intFromEnum(PropSiteCache.State.own);
 pub const site_proto: u8 = @intFromEnum(PropSiteCache.State.proto);
 pub const site_native_getter: u8 = @intFromEnum(PropSiteCache.State.native_getter);
 pub const site_mega: u8 = @intFromEnum(PropSiteCache.State.mega);
-var no_prop_sites: [256]PropSiteCache = [_]PropSiteCache{.{ .state = site_mega }}
-** 256;
+var no_prop_sites: [256]PropSiteCache = [_]PropSiteCache{.{ .state = site_mega }} ** 256;
 pub inline fn noPropSite() *PropSiteCache {
     return &no_prop_sites[0];
 }
@@ -1773,7 +1771,6 @@ pub noinline fn capturePutSite(site: *PropSiteCache, object: *core.Object, atom_
     }
     _ = retireSite(site);
 }
-
 
 // ----- merged from vm_property_globals.zig -----
 // Global variable read/write/define opcode handlers and their fused fast paths.
@@ -2160,7 +2157,7 @@ pub fn validateGlobalVarDeclarations(
 }
 
 test "QuickJS global declaration validation does not materialize auto-init properties" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -2226,7 +2223,6 @@ pub noinline fn globalDefinition(vm: *Vm, opc: u8) HostError!void {
         else => unreachable,
     }
 }
-
 
 // ----- merged from vm_property_locals.zig -----
 // Local/arg/var-ref slot opcode handlers (get/put/set_loc, get/put_arg, var_ref forms, close_loc).
@@ -2468,7 +2464,6 @@ pub noinline fn closeLoc(vm: *Vm) HostError!void {
     try vm.frame.closeLocalBinding(vm.ctx.runtime, idx);
 }
 
-
 // ----- merged from vm_property_private.zig -----
 // Private-field opcode handlers (get/put/define_private_field).
 fn privateFieldAtom(
@@ -2557,7 +2552,6 @@ pub noinline fn definePrivateFieldVm(vm: *Vm) HostError!void {
         return err;
     };
 }
-
 
 // ----- merged from vm_property_ref.zig -----
 // With-statement and reference opcode handlers (make_ref/get_ref_value/put_ref_value/with_*).

@@ -406,7 +406,7 @@ const OwnedArgList = struct {
             self.inline_values[0..total]
         else blk: {
             self.heap_backed = true;
-            break :blk try rt.memory.alloc(core.JSValue, total);
+            break :blk try rt.nativeAllocator().alloc(core.JSValue, total);
         };
         self.rooted_prefix = self.values[0..0];
         self.root.init(rt, &self.rooted_prefix);
@@ -436,7 +436,7 @@ const OwnedArgList = struct {
             self.inline_values[0..total]
         else blk: {
             self.heap_backed = true;
-            break :blk try rt.memory.alloc(core.JSValue, total);
+            break :blk try rt.nativeAllocator().alloc(core.JSValue, total);
         };
         self.rooted_prefix = self.values[0..0];
         self.root.init(rt, &self.rooted_prefix);
@@ -460,7 +460,7 @@ const OwnedArgList = struct {
         }
         self.rooted_prefix = self.values[0..0];
         self.root.deinit();
-        if (self.heap_backed) rt.memory.free(core.JSValue, self.values);
+        if (self.heap_backed) rt.nativeAllocator().free(self.values);
         self.values = &.{};
         self.rt = null;
         self.heap_backed = false;
@@ -1428,9 +1428,9 @@ noinline fn callNativeCallableByName(
 }
 
 test "callValueOrBytecodeRoot roots inline args before bytecode frame allocation" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
-    @import("standard_globals.zig").configureRuntime(rt);
+
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const global = try zjs_vm.contextGlobal(ctx);
@@ -1460,30 +1460,30 @@ test "callValueOrBytecodeRoot roots inline args before bytecode frame allocation
         fn trigger(context: ?*anyopaque, size: usize) void {
             _ = size;
             const self: *@This() = @ptrCast(@alignCast(context.?));
-            const saved_trigger_fn = self.rt.memory.trigger_gc_fn;
-            const saved_trigger_ctx = self.rt.memory.trigger_gc_ctx;
-            self.rt.memory.trigger_gc_fn = null;
-            self.rt.memory.trigger_gc_ctx = null;
+            const saved_trigger_fn = self.rt.gc.heap_budget.probe;
+            const saved_trigger_ctx = self.rt.gc.heap_budget.probe_ctx;
+            self.rt.gc.heap_budget.probe = null;
+            self.rt.gc.heap_budget.probe_ctx = null;
             defer {
-                self.rt.memory.trigger_gc_fn = saved_trigger_fn;
-                self.rt.memory.trigger_gc_ctx = saved_trigger_ctx;
+                self.rt.gc.heap_budget.probe = saved_trigger_fn;
+                self.rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
             }
             _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {}; // engine-frames-active trigger
             self.saw_arg = self.rt.atoms.name(self.atom_id) != null;
         }
     };
 
-    const saved_trigger_fn = rt.memory.trigger_gc_fn;
-    const saved_trigger_ctx = rt.memory.trigger_gc_ctx;
+    const saved_trigger_fn = rt.gc.heap_budget.probe;
+    const saved_trigger_ctx = rt.gc.heap_budget.probe_ctx;
     var trigger = Trigger{
         .rt = rt,
         .atom_id = arg_atom,
     };
-    rt.memory.trigger_gc_fn = Trigger.trigger;
-    rt.memory.trigger_gc_ctx = &trigger;
+    rt.gc.heap_budget.probe = Trigger.trigger;
+    rt.gc.heap_budget.probe_ctx = &trigger;
     defer {
-        rt.memory.trigger_gc_fn = saved_trigger_fn;
-        rt.memory.trigger_gc_ctx = saved_trigger_ctx;
+        rt.gc.heap_budget.probe = saved_trigger_fn;
+        rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
     }
 
     _ = try callValueOrBytecodeRoot(
@@ -1496,13 +1496,13 @@ test "callValueOrBytecodeRoot roots inline args before bytecode frame allocation
         null,
         null,
     );
-    rt.memory.trigger_gc_fn = saved_trigger_fn;
-    rt.memory.trigger_gc_ctx = saved_trigger_ctx;
+    rt.gc.heap_budget.probe = saved_trigger_fn;
+    rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
 
     try std.testing.expect(!trigger.trace_failed);
     try std.testing.expect(trigger.saw_arg);
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(arg_atom) == null);
 }
 
@@ -2229,7 +2229,7 @@ fn constructValueOrBytecodeInEnvironment(
         if (function_object.typedArrayElementSize() != 0 and function_object.typedArrayKind() != .none) {
             if (!new_target.sameValue(func)) {
                 const name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
-                defer ctx.runtime.memory.allocator.free(name);
+                defer ctx.runtime.nativeAllocator().free(name);
                 if (try class_init_ops.constructBuiltinSuperConstructor(ctx, output, global, func, name, args, caller_function, caller_frame, new_target)) |constructed| {
                     return constructed;
                 }
@@ -2274,7 +2274,7 @@ fn constructValueOrBytecodeInEnvironment(
         }
         const dispatch_name = call_mod.nativeFunctionDispatchNameRef(ctx.runtime, function_object);
         var owned_name: ?[]u8 = null;
-        defer if (owned_name) |name_bytes| ctx.runtime.memory.allocator.free(name_bytes);
+        defer if (owned_name) |name_bytes| ctx.runtime.nativeAllocator().free(name_bytes);
         const name = if (dispatch_name) |dispatch|
             dispatch.name
         else blk: {
@@ -2469,7 +2469,7 @@ fn constructExternalHostFunction(
 }
 
 test "constructWeakRefWithPrototype roots direct symbol target while creating weak ref" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-qjs-weak-ref-symbol");
@@ -2488,13 +2488,13 @@ test "constructWeakRefWithPrototype roots direct symbol target while creating we
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     rt.clearWeakRefKeptAlive();
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
     try std.testing.expect(weak_ref.weakRefDeref(rt).is(.undefined_value));
 }
 
 test "constructFinalizationRegistryWithPrototype roots function bytecode cleanup while creating registry" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -2518,12 +2518,12 @@ test "constructFinalizationRegistryWithPrototype roots function bytecode cleanup
     const stored = registry.finalizationRegistryCleanupCallback() orelse return error.TypeError;
     try std.testing.expect(stored.same(cleanup_callback));
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
 test "finalizationRegistryAppendCell roots direct symbol fields while allocating cell" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
@@ -2556,7 +2556,7 @@ test "finalizationRegistryAppendCell roots direct symbol fields while allocating
         cell.unregister_token_identity,
     );
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(target_atom) == null);
     try std.testing.expect(rt.atoms.name(held_atom) == null);
     try std.testing.expect(rt.atoms.name(token_atom) == null);
@@ -2719,7 +2719,7 @@ pub fn assertThrows(
     if (args.len < 2) return error.TypeError;
     const expected = try property_ops.expectObject(args[0]);
     const expected_name = try call_mod.nativeFunctionNameForVm(ctx.runtime, expected);
-    defer ctx.runtime.memory.allocator.free(expected_name);
+    defer ctx.runtime.nativeAllocator().free(expected_name);
     _ = callAssertThrowsCallback(ctx, output, global, args[1], caller_function, caller_frame) catch |err| {
         if (exception_ops.pendingExceptionMatchesError(ctx, err)) {
             if (try string_ops.consumePendingExceptionIfMatchesConstructor(ctx, expected_name)) {
@@ -3348,7 +3348,7 @@ pub fn indirectEval(
     if (args.len == 0) return core.JSValue.undefinedValue();
     if (!args[0].isString()) return args[0];
     var source = std.ArrayList(u8).empty;
-    defer source.deinit(ctx.runtime.memory.allocator);
+    defer source.deinit(ctx.runtime.nativeAllocator());
     try string_ops.appendSourceStringUtf8(ctx.runtime, &source, args[0]);
 
     const context_global = ctx.global;
@@ -3389,7 +3389,7 @@ pub fn indirectEval(
         const root_function_object = object_ops.functionObjectFromValue(root_function_value) orelse break :blk error.InvalidBytecode;
         const root_bytecode_value = root_function_object.functionBytecode() orelse break :blk error.InvalidBytecode;
         const function = functionBytecodeFromValue(root_bytecode_value) orelse break :blk error.InvalidBytecode;
-        var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stackSize());
+        var nested_stack = stack_mod.Stack.init(ctx.runtime, ctx.runtime.stackSize());
         defer nested_stack.deinit(ctx.runtime);
         break :blk runWithCallEnv(.{
             .ctx = compile_realm,
@@ -3439,24 +3439,24 @@ pub const ActiveRootValueProbe = struct {
     pub fn trigger(context: ?*anyopaque, size: usize) void {
         _ = size;
         const self: *@This() = @ptrCast(@alignCast(context.?));
-        const saved_trigger_fn = self.rt.memory.trigger_gc_fn;
-        const saved_trigger_ctx = self.rt.memory.trigger_gc_ctx;
-        self.rt.memory.trigger_gc_fn = null;
-        self.rt.memory.trigger_gc_ctx = null;
+        const saved_trigger_fn = self.rt.gc.heap_budget.probe;
+        const saved_trigger_ctx = self.rt.gc.heap_budget.probe_ctx;
+        self.rt.gc.heap_budget.probe = null;
+        self.rt.gc.heap_budget.probe_ctx = null;
         defer {
-            self.rt.memory.trigger_gc_fn = saved_trigger_fn;
-            self.rt.memory.trigger_gc_ctx = saved_trigger_ctx;
+            self.rt.gc.heap_budget.probe = saved_trigger_fn;
+            self.rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
         }
         _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {}; // engine-frames-active trigger
     }
 };
 
 pub fn freeArgs(rt: *core.JSRuntime, args: []core.JSValue) void {
-    if (args.len != 0) rt.memory.free(core.JSValue, args);
+    if (args.len != 0) rt.nativeAllocator().free(args);
 }
 
 test "argsFromArrayLike roots initialized prefix while reading source" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -3486,30 +3486,30 @@ test "argsFromArrayLike roots initialized prefix while reading source" {
         fn trigger(context: ?*anyopaque, size: usize) void {
             _ = size;
             const self: *@This() = @ptrCast(@alignCast(context.?));
-            const saved_trigger_fn = self.rt.memory.trigger_gc_fn;
-            const saved_trigger_ctx = self.rt.memory.trigger_gc_ctx;
-            self.rt.memory.trigger_gc_fn = null;
-            self.rt.memory.trigger_gc_ctx = null;
+            const saved_trigger_fn = self.rt.gc.heap_budget.probe;
+            const saved_trigger_ctx = self.rt.gc.heap_budget.probe_ctx;
+            self.rt.gc.heap_budget.probe = null;
+            self.rt.gc.heap_budget.probe_ctx = null;
             defer {
-                self.rt.memory.trigger_gc_fn = saved_trigger_fn;
-                self.rt.memory.trigger_gc_ctx = saved_trigger_ctx;
+                self.rt.gc.heap_budget.probe = saved_trigger_fn;
+                self.rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
             }
             _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {}; // engine-frames-active trigger
             self.saw_symbol = self.rt.atoms.name(self.atom_id) != null;
         }
     };
 
-    const saved_trigger_fn = rt.memory.trigger_gc_fn;
-    const saved_trigger_ctx = rt.memory.trigger_gc_ctx;
+    const saved_trigger_fn = rt.gc.heap_budget.probe;
+    const saved_trigger_ctx = rt.gc.heap_budget.probe_ctx;
     var probe = Probe{
         .rt = rt,
         .atom_id = symbol_atom,
     };
-    rt.memory.trigger_gc_fn = Probe.trigger;
-    rt.memory.trigger_gc_ctx = &probe;
+    rt.gc.heap_budget.probe = Probe.trigger;
+    rt.gc.heap_budget.probe_ctx = &probe;
     defer {
-        rt.memory.trigger_gc_fn = saved_trigger_fn;
-        rt.memory.trigger_gc_ctx = saved_trigger_ctx;
+        rt.gc.heap_budget.probe = saved_trigger_fn;
+        rt.gc.heap_budget.probe_ctx = saved_trigger_ctx;
     }
 
     const args = try array_ops.argsFromArrayLike(ctx, null, global, source.value(), null, null);
@@ -3522,7 +3522,7 @@ test "argsFromArrayLike roots initialized prefix while reading source" {
 
     freeArgs(rt, args);
     args_alive = false;
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -3703,13 +3703,13 @@ fn callFunctionBytecodeModeStateAfterInterruptPoll(
     const arena_mark = if (arena_eligible) ctx.runtime.vm_stack.mark() else null;
     defer if (arena_mark) |mark| ctx.runtime.vm_stack.restore(mark);
     const operand_window: ?[]core.JSValue = if (arena_eligible)
-        ctx.runtime.vm_stack.carve(&ctx.runtime.memory, @as(usize, fb.stack_size) + 1)
+        ctx.runtime.vm_stack.carve(ctx.runtime, @as(usize, fb.stack_size) + 1)
     else
         null;
     var nested_stack = if (operand_window) |window|
-        stack_mod.Stack.initArenaWindow(&ctx.runtime.memory, ctx.runtime.vm_stack_arena_policy, window)
+        stack_mod.Stack.initArenaWindow(ctx.runtime, ctx.runtime.vm_stack_arena_policy, window)
     else
-        stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stackSize());
+        stack_mod.Stack.init(ctx.runtime, ctx.runtime.stackSize());
     defer if (generator_state) |generator| generator.finalizeGeneratorExecutionCompletion(ctx.runtime);
     defer nested_stack.deinit(ctx.runtime);
     // Async-generator bodies return their raw suspension/completion value to
@@ -3752,7 +3752,7 @@ pub fn runGeneratorParameterInit(
     call_entry_ctx: *core.JSContext,
     call_entry_global: *core.Object,
 ) !core.JSValue {
-    var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stackSize());
+    var nested_stack = stack_mod.Stack.init(ctx.runtime, ctx.runtime.stackSize());
     defer object.finalizeGeneratorExecutionCompletion(ctx.runtime);
     defer nested_stack.deinit(ctx.runtime);
     // Canonical generators suspend on their explicit OP_initial_yield after
@@ -4325,7 +4325,7 @@ pub fn wrapIteratorFromIterator(ctx: *core.JSContext, global: *core.Object, iter
 }
 
 test "wrapIteratorFromIterator roots direct function bytecode next method while creating wrapper" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const ctx = try core.JSContext.create(rt, .{});
@@ -4358,7 +4358,7 @@ test "wrapIteratorFromIterator roots direct function bytecode next method while 
     const stored = wrapper.iteratorNext() orelse return error.TypeError;
     try std.testing.expect(stored.same(next_method));
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -4388,7 +4388,7 @@ pub fn enqueuePendingMicrotask(ctx: *core.JSContext, callback: core.JSValue) !vo
 }
 
 test "iterator_ops.createIteratorResult roots direct function bytecode value while creating result" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -4417,7 +4417,7 @@ test "iterator_ops.createIteratorResult roots direct function bytecode value whi
         try std.testing.expect(stored.same(result_value));
     }
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -4490,7 +4490,7 @@ pub fn isConstructibleBytecodeFunctionObject(function_object: *const core.Object
 }
 
 test "four-class bytecode constructability follows class and function flags" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -4568,7 +4568,7 @@ pub fn isConstructorLike(ctx: *core.JSContext, value: core.JSValue) error{OutOfM
             error.OutOfMemory => return error.OutOfMemory,
             else => return false,
         };
-        defer ctx.runtime.memory.allocator.free(name);
+        defer ctx.runtime.nativeAllocator().free(name);
         return isBuiltinConstructorName(name);
     }
     return object_ops.proxyTargetIsConstructor(ctx, value);
@@ -4594,8 +4594,8 @@ pub fn boundFunctionArgs(rt: *core.JSRuntime, object: *core.Object, args: []cons
     const bound_args = object.boundArgs();
     const bound_count = bound_args.len;
     if (bound_count == 0 and args.len == 0) return &.{};
-    const combined = try rt.memory.alloc(core.JSValue, bound_count + args.len);
-    errdefer rt.memory.free(core.JSValue, combined);
+    const combined = try rt.allocRuntime(core.JSValue, bound_count + args.len);
+    errdefer rt.nativeAllocator().free(combined);
     for (bound_args, 0..) |arg, index| {
         combined[index] = arg;
     }
@@ -4617,11 +4617,11 @@ pub fn throwPrivateBrandTypeError(
     } else global;
     const atom_name = ctx.runtime.atoms.name(atom_id) orelse "";
     const message = try std.fmt.allocPrint(
-        ctx.runtime.memory.allocator,
+        ctx.runtime.nativeAllocator(),
         "private class field '{s}' does not exist",
         .{atom_name},
     );
-    defer ctx.runtime.memory.allocator.free(message);
+    defer ctx.runtime.nativeAllocator().free(message);
     return exception_ops.throwTypeErrorMessage(ctx, error_global, message);
 }
 
@@ -4642,8 +4642,8 @@ pub fn throwSetFailureTypeError(ctx: *core.JSContext, global: *core.Object, atom
     if (static_message) |message| return exception_ops.throwTypeErrorMessage(ctx, global, message);
 
     if (ctx.runtime.atoms.name(atom_id)) |name| {
-        const message = try std.fmt.allocPrint(ctx.runtime.memory.allocator, "'{s}' is read-only", .{name});
-        defer ctx.runtime.memory.allocator.free(message);
+        const message = try std.fmt.allocPrint(ctx.runtime.nativeAllocator(), "'{s}' is read-only", .{name});
+        defer ctx.runtime.nativeAllocator().free(message);
         return exception_ops.throwTypeErrorMessage(ctx, global, message);
     }
     return exception_ops.throwTypeErrorMessage(ctx, global, "property is read-only");
@@ -4769,7 +4769,7 @@ pub fn definePropertiesOnTarget(
     var pending = std.ArrayList(object_ops.PendingPropertyDescriptor).empty;
     defer {
         for (pending.items) |item| item.destroy(ctx.runtime);
-        pending.deinit(ctx.runtime.memory.allocator);
+        pending.deinit(ctx.runtime.nativeAllocator());
     }
     // TGC S3 §2.2 root G: `PendingPropertyDescriptor` is a frame-resident atom
     // box, and its heap-allocated backing array is visible to neither the
@@ -4790,7 +4790,7 @@ pub fn definePropertiesOnTarget(
         const desc = try object_ops.descriptorFromObject(ctx, output, global, desc_value, desc_object, target, key, caller_function, caller_frame);
         const pending_key = key;
         var pending_key_owned = true;
-        try pending.append(ctx.runtime.memory.allocator, .{ .atom_id = pending_key, .desc = desc });
+        try pending.append(ctx.runtime.nativeAllocator(), .{ .atom_id = pending_key, .desc = desc });
         pending_key_owned = false;
     }
 
@@ -4968,7 +4968,7 @@ pub fn instanceofValueWithMethod(
 pub fn constructorNameEqlLocal(rt: *core.JSRuntime, object: *core.Object, expected: []const u8) !bool {
     const name_value = nativeFunctionNameValueLocal(rt, object) catch return false;
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try value_ops.appendRawString(rt, &bytes, name_value);
     return std.mem.eql(u8, bytes.items, expected);
 }
@@ -5056,26 +5056,26 @@ pub fn functionNameValueFromAtom(rt: *core.JSRuntime, atom_id: core.Atom, prefix
     }
 
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     if (prefix) |text| {
-        try bytes.appendSlice(rt.memory.allocator, text);
-        try bytes.append(rt.memory.allocator, ' ');
+        try bytes.appendSlice(rt.nativeAllocator(), text);
+        try bytes.append(rt.nativeAllocator(), ' ');
     }
     if (atom_id.isTaggedInt()) {
         var buf: [10]u8 = undefined;
         const text = std.fmt.bufPrint(&buf, "{d}", .{atom_id.toUInt32()}) catch unreachable;
-        try bytes.appendSlice(rt.memory.allocator, text);
+        try bytes.appendSlice(rt.nativeAllocator(), text);
         return value_ops.createStringValue(rt, bytes.items);
     }
     const atom_name = rt.atoms.name(atom_id) orelse "";
     if (rt.atoms.isPublicSymbol(atom_id)) {
         if (core.symbol.description(rt, atom_id)) |description| {
-            try bytes.append(rt.memory.allocator, '[');
-            try bytes.appendSlice(rt.memory.allocator, description);
-            try bytes.append(rt.memory.allocator, ']');
+            try bytes.append(rt.nativeAllocator(), '[');
+            try bytes.appendSlice(rt.nativeAllocator(), description);
+            try bytes.append(rt.nativeAllocator(), ']');
         }
     } else {
-        try bytes.appendSlice(rt.memory.allocator, atom_name);
+        try bytes.appendSlice(rt.nativeAllocator(), atom_name);
     }
     return value_ops.createStringValue(rt, bytes.items);
 }

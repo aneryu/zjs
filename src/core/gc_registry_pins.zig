@@ -15,7 +15,7 @@
 //! what freed `BlockFlags` bit 6 for `needs_finalizer`.
 //!
 //! The ledger does not own an allocator. Every fallible mutator takes the
-//! runtime's `MemoryAccount` as a parameter: a second copy of that pointer
+//! runtime's `Runtime allocation helpers` as a parameter: a second copy of that pointer
 //! inside every `JSRuntime` would buy nothing, and the Registry is the thing
 //! that has one. One insertion-ordered hash map holds both the membership
 //! index and the counts, so the sweep's "is this pinned?" is a single lookup
@@ -35,8 +35,8 @@ pub const Ledger = struct {
     /// Idempotent: a Registry rolled back halfway through construction can
     /// reach this twice, and a second call has to be a no-op rather than a
     /// double free.
-    pub fn deinit(self: *Ledger, account: *memory.MemoryAccount) void {
-        self.counts.deinit(account.persistent_allocator);
+    pub fn deinit(self: *Ledger, account: *@import("runtime.zig").JSRuntime) void {
+        self.counts.deinit(account.nativeAllocator());
         self.counts = .empty;
     }
 
@@ -59,13 +59,13 @@ pub const Ledger = struct {
         return self.counts.values();
     }
 
-    pub fn pin(self: *Ledger, account: *memory.MemoryAccount, header: *Header) !void {
+    pub fn pin(self: *Ledger, account: *@import("runtime.zig").JSRuntime, header: *Header) !void {
         if (self.counts.getPtr(header)) |existing| {
             std.debug.assert(existing.* != gc.construction_pin_count);
             existing.* +|= 1;
             return;
         }
-        try self.counts.putNoClobber(account.persistent_allocator, header, 1);
+        try self.counts.putNoClobber(account.nativeAllocator(), header, 1);
     }
 
     pub fn unpin(self: *Ledger, header: *Header) void {
@@ -80,8 +80,8 @@ pub const Ledger = struct {
 
     /// Reserve the existing pin ledger before taking a block cell, so adding
     /// the construction pin after initialization is a no-fail scalar publish.
-    pub fn prepareConstructionRoot(self: *Ledger, account: *memory.MemoryAccount) !void {
-        try self.counts.ensureUnusedCapacity(account.persistent_allocator, 1);
+    pub fn prepareConstructionRoot(self: *Ledger, account: *@import("runtime.zig").JSRuntime) !void {
+        try self.counts.ensureUnusedCapacity(account.nativeAllocator(), 1);
     }
 
     /// Protect a fully initialized Object whose shape is intentionally not

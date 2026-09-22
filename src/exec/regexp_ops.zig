@@ -492,7 +492,7 @@ fn constructWithPrototypeInRealm(rt: *core.JSRuntime, realm_global: ?*core.Objec
         try regExpStringValue(rt, flags);
 
     var compiled = try compileSourceAndFlags(rt, realm_global, source_val, flags_val);
-    defer compiled.deinit(rt.memory.allocator);
+    defer compiled.deinit(rt.nativeAllocator());
 
     return constructCompiled(rt, realm_global, source_val, compiled.bytecode, prototype);
 }
@@ -500,7 +500,7 @@ fn constructWithPrototypeInRealm(rt: *core.JSRuntime, realm_global: ?*core.Objec
 fn regExpStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (value.isString()) return value;
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try appendValueString(rt, &bytes, value);
     return try createStringValue(rt, bytes.items);
 }
@@ -532,7 +532,7 @@ fn compileSourceAndFlags(rt: *core.JSRuntime, global: ?*core.Object, source: cor
     // a temporary buffer. `JSString.Utf8` has that same borrowed/owned
     // contract, so do not unconditionally copy every source and flags string
     // into separate ArrayLists before compiling.
-    var flag_bytes = try core.JSValue.String.Utf8.fromValue(rt.memory.allocator, flags);
+    var flag_bytes = try core.JSValue.String.Utf8.fromValue(rt.nativeAllocator(), flags);
     defer flag_bytes.deinit();
     // js_compile_regexp validates flags before converting the source, then
     // passes `cesu8 = !unicode` to JS_ToCStringLen2. Besides preserving its
@@ -547,10 +547,10 @@ fn compileSourceAndFlags(rt: *core.JSRuntime, global: ?*core.Object, source: cor
         else => |other| return other,
     };
     const cesu8 = !re_flags.fullUnicode();
-    var source_bytes = try core.JSValue.String.Utf8.fromValueCesu8(rt.memory.allocator, source, cesu8);
+    var source_bytes = try core.JSValue.String.Utf8.fromValueCesu8(rt.nativeAllocator(), source, cesu8);
     defer source_bytes.deinit();
 
-    return regexp_lib.compilePatternWithFlagsAndOptions(rt.memory.allocator, source_bytes.slice(), re_flags, regexpCompileOptions(rt)) catch |err| switch (err) {
+    return regexp_lib.compilePatternWithFlagsAndOptions(rt.nativeAllocator(), source_bytes.slice(), re_flags, regexpCompileOptions(rt)) catch |err| switch (err) {
         error.InvalidPattern, error.Unsupported => return error.SyntaxError,
         error.StackOverflow => {
             try throwRegExpStackOverflow(rt, global);
@@ -593,13 +593,13 @@ fn constructCompiled(rt: *core.JSRuntime, realm_global: ?*core.Object, source: c
 }
 
 test "constructCompiled roots string source while creating regexp object" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const source = try core.string.String.createAscii(rt, "a");
     const source_value = source.value();
-    var compiled = try regexp_lib.compilePatternAndFlags(rt.memory.allocator, "a", "g");
-    defer compiled.deinit(rt.memory.allocator);
+    var compiled = try regexp_lib.compilePatternAndFlags(rt.nativeAllocator(), "a", "g");
+    defer compiled.deinit(rt.nativeAllocator());
     const old_threshold = rt.gcThreshold();
     rt.setGCThreshold(0);
     defer rt.setGCThreshold(old_threshold);
@@ -644,40 +644,40 @@ pub fn accessor(rt: *core.JSRuntime, object_value: core.JSValue, name: []const u
 fn escapedSource(rt: *core.JSRuntime, source: core.JSValue) !core.JSValue {
     if (regexpSourceCanReturnRaw(source)) return source;
     var bytes = std.ArrayList(u8).empty;
-    defer bytes.deinit(rt.memory.allocator);
+    defer bytes.deinit(rt.nativeAllocator());
     try appendValueString(rt, &bytes, source);
     if (bytes.items.len == 0) return createStringValue(rt, "(?:)");
 
     var escaped = std.ArrayList(u8).empty;
-    defer escaped.deinit(rt.memory.allocator);
+    defer escaped.deinit(rt.nativeAllocator());
     var in_class = false;
     var index: usize = 0;
     while (index < bytes.items.len) : (index += 1) {
         const byte = bytes.items[index];
         if (byte == '\\') {
-            try escaped.append(rt.memory.allocator, byte);
+            try escaped.append(rt.nativeAllocator(), byte);
             if (index + 1 < bytes.items.len) {
                 index += 1;
-                try escaped.append(rt.memory.allocator, bytes.items[index]);
+                try escaped.append(rt.nativeAllocator(), bytes.items[index]);
             }
             continue;
         }
         switch (byte) {
             '[' => {
                 in_class = true;
-                try escaped.append(rt.memory.allocator, byte);
+                try escaped.append(rt.nativeAllocator(), byte);
             },
             ']' => {
                 in_class = false;
-                try escaped.append(rt.memory.allocator, byte);
+                try escaped.append(rt.nativeAllocator(), byte);
             },
             '/' => {
-                if (!in_class) try escaped.append(rt.memory.allocator, '\\');
-                try escaped.append(rt.memory.allocator, byte);
+                if (!in_class) try escaped.append(rt.nativeAllocator(), '\\');
+                try escaped.append(rt.nativeAllocator(), byte);
             },
-            '\n' => try escaped.appendSlice(rt.memory.allocator, "\\n"),
-            '\r' => try escaped.appendSlice(rt.memory.allocator, "\\r"),
-            else => try escaped.append(rt.memory.allocator, byte),
+            '\n' => try escaped.appendSlice(rt.nativeAllocator(), "\\n"),
+            '\r' => try escaped.appendSlice(rt.nativeAllocator(), "\\r"),
+            else => try escaped.append(rt.nativeAllocator(), byte),
         }
     }
     return createStringValue(rt, escaped.items);
@@ -704,7 +704,7 @@ pub fn escape(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
 
     const input = try expectString(args[0]);
     var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(rt.memory.allocator);
+    defer buffer.deinit(rt.nativeAllocator());
 
     switch (input.resolveData()) {
         .latin1 => |bytes| {
@@ -717,7 +717,7 @@ pub fn escape(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
                 if (unicode.isHighSurrogateUnit(unit)) {
                     if (index + 1 < units.len and unicode.isLowSurrogateUnit(units[index + 1])) {
                         const cp = surrogateCodePoint(unit, units[index + 1]);
-                        try unicode.appendUtf8CodePoint(rt.memory.allocator, &buffer, cp);
+                        try unicode.appendUtf8CodePoint(rt.nativeAllocator(), &buffer, cp);
                         index += 2;
                         continue;
                     }
@@ -741,11 +741,11 @@ fn toString(rt: *core.JSRuntime, object: *core.Object) !core.JSValue {
     const flags = try regexpFlags(object);
 
     var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(rt.memory.allocator);
-    try buffer.append(rt.memory.allocator, '/');
+    defer buffer.deinit(rt.nativeAllocator());
+    try buffer.append(rt.nativeAllocator(), '/');
     try appendValueString(rt, &buffer, source);
-    try buffer.append(rt.memory.allocator, '/');
-    try appendCanonicalFlags(rt.memory.allocator, &buffer, flags);
+    try buffer.append(rt.nativeAllocator(), '/');
+    try appendCanonicalFlags(rt.nativeAllocator(), &buffer, flags);
 
     const str = try core.string.String.createUtf8(rt, buffer.items);
     return str.value();
@@ -753,8 +753,8 @@ fn toString(rt: *core.JSRuntime, object: *core.Object) !core.JSValue {
 
 fn canonicalFlagsValue(rt: *core.JSRuntime, flags: Flags) !core.JSValue {
     var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(rt.memory.allocator);
-    try appendCanonicalFlags(rt.memory.allocator, &buffer, flags);
+    defer buffer.deinit(rt.nativeAllocator());
+    try appendCanonicalFlags(rt.nativeAllocator(), &buffer, flags);
     return createStringValue(rt, buffer.items);
 }
 
@@ -805,17 +805,17 @@ fn appendEscapedCodeUnit(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), unit: 
         const byte: u8 = @intCast(unit);
         if (is_first and unicode.isAsciiAlphanumericByte(byte)) return appendHexEscape(rt, buffer, byte);
         if (syntaxEscapeChar(byte)) {
-            try buffer.append(rt.memory.allocator, '\\');
-            try buffer.append(rt.memory.allocator, byte);
+            try buffer.append(rt.nativeAllocator(), '\\');
+            try buffer.append(rt.nativeAllocator(), byte);
             return;
         }
         if (controlEscapeChar(byte)) |escaped| {
-            try buffer.append(rt.memory.allocator, '\\');
-            try buffer.append(rt.memory.allocator, escaped);
+            try buffer.append(rt.nativeAllocator(), '\\');
+            try buffer.append(rt.nativeAllocator(), escaped);
             return;
         }
         if (byte == ' ' or otherPunctuator(byte)) return appendHexEscape(rt, buffer, byte);
-        try buffer.append(rt.memory.allocator, byte);
+        try buffer.append(rt.nativeAllocator(), byte);
         return;
     }
 
@@ -823,23 +823,23 @@ fn appendEscapedCodeUnit(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), unit: 
         if (unit <= 0xff) return appendHexEscape(rt, buffer, @intCast(unit));
         return appendUnicodeEscape(rt, buffer, unit);
     }
-    try unicode.appendUtf8CodePoint(rt.memory.allocator, buffer, unit);
+    try unicode.appendUtf8CodePoint(rt.nativeAllocator(), buffer, unit);
 }
 
 fn appendHexEscape(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), byte: u8) !void {
-    try buffer.appendSlice(rt.memory.allocator, "\\x");
+    try buffer.appendSlice(rt.nativeAllocator(), "\\x");
     try appendHexByte(rt, buffer, byte);
 }
 
 fn appendUnicodeEscape(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), unit: u16) !void {
-    try buffer.appendSlice(rt.memory.allocator, "\\u");
+    try buffer.appendSlice(rt.nativeAllocator(), "\\u");
     try appendHexByte(rt, buffer, @intCast(unit >> 8));
     try appendHexByte(rt, buffer, @intCast(unit & 0xff));
 }
 
 fn appendHexByte(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), byte: u8) !void {
-    try buffer.append(rt.memory.allocator, unicode.asciiLowerHexDigitChar(byte >> 4));
-    try buffer.append(rt.memory.allocator, unicode.asciiLowerHexDigitChar(byte & 0x0f));
+    try buffer.append(rt.nativeAllocator(), unicode.asciiLowerHexDigitChar(byte >> 4));
+    try buffer.append(rt.nativeAllocator(), unicode.asciiLowerHexDigitChar(byte & 0x0f));
 }
 
 fn syntaxEscapeChar(byte: u8) bool {
@@ -880,7 +880,6 @@ fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: cor
     return core.value_string.appendValueString(rt, buffer, value, .{ .unsupported = .type_error });
 }
 
-
 // ----- merged from regexp_adapter.zig -----
 // Runtime-aware adapter over the allocation-only regular-expression library.
 //
@@ -900,7 +899,7 @@ pub fn compile(allocator: std.mem.Allocator, pattern: []const u8, flags: []const
 }
 
 pub fn compileWithRuntime(rt: *core.JSRuntime, pattern: []const u8, flags: []const u8) !Compiled {
-    return regexp_lib.compilePatternAndFlagsWithOptions(rt.memory.allocator, pattern, flags, .{ .host = runtimeHost(rt) });
+    return regexp_lib.compilePatternAndFlagsWithOptions(rt.nativeAllocator(), pattern, flags, .{ .host = runtimeHost(rt) });
 }
 
 pub const runtimeHost = core.regexp.libraryHost;
@@ -913,8 +912,8 @@ pub fn execCaptureSlotsOnResolvedStringFromIndex(
 ) ExecError!ExecResult {
     const options = execOptions(rt);
     return switch (string_data) {
-        .latin1 => |bytes| try regexp_bytecode.execCaptureSlotsSliceTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .latin1 = bytes }, start_index, options, capture),
-        .utf16 => |units| try regexp_bytecode.execCaptureSlotsSliceTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .utf16 = units }, start_index, options, capture),
+        .latin1 => |bytes| try regexp_bytecode.execCaptureSlotsSliceTrustedWithOptions(rt.nativeAllocator(), compiled.bytecode, .{ .latin1 = bytes }, start_index, options, capture),
+        .utf16 => |units| try regexp_bytecode.execCaptureSlotsSliceTrustedWithOptions(rt.nativeAllocator(), compiled.bytecode, .{ .utf16 = units }, start_index, options, capture),
     };
 }
 
@@ -931,8 +930,8 @@ pub fn testOnStringFromIndex(rt: *core.JSRuntime, compiled: Compiled, string_val
 
     const options = execOptions(rt);
     return switch (string_object.resolveData()) {
-        .latin1 => |bytes| try regexp_bytecode.testMatchTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .latin1 = bytes }, start_index, options),
-        .utf16 => |units| try regexp_bytecode.testMatchTrustedWithOptions(rt.memory.allocator, compiled.bytecode, .{ .utf16 = units }, start_index, options),
+        .latin1 => |bytes| try regexp_bytecode.testMatchTrustedWithOptions(rt.nativeAllocator(), compiled.bytecode, .{ .latin1 = bytes }, start_index, options),
+        .utf16 => |units| try regexp_bytecode.testMatchTrustedWithOptions(rt.nativeAllocator(), compiled.bytecode, .{ .utf16 = units }, start_index, options),
     };
 }
 
@@ -965,8 +964,8 @@ pub fn appendCanonicalFlags(allocator: std.mem.Allocator, buffer: *std.ArrayList
 
 pub fn flagsStringValueFromBytecode(rt: *core.JSRuntime, bytecode: []const u8) !core.JSValue {
     var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(rt.memory.allocator);
-    try appendCanonicalFlags(rt.memory.allocator, &buffer, flagsFromBytecode(bytecode));
+    defer buffer.deinit(rt.nativeAllocator());
+    try appendCanonicalFlags(rt.nativeAllocator(), &buffer, flagsFromBytecode(bytecode));
     return (try core.string.String.createAscii(rt, buffer.items)).value();
 }
 
@@ -997,7 +996,6 @@ test "JavaScript RegExp adapter preserves multiple named capture groups" {
         try std.testing.expectEqualStrings(name, compiled.groupName(capture_index).?);
     }
 }
-
 
 // ----- merged from regexp_fastpath.zig -----
 // RegExp builtin integration helpers and VM-backed fast paths.
@@ -1390,10 +1388,10 @@ pub fn regExpCompile(
     };
 
     var source_bytes = std.ArrayList(u8).empty;
-    defer source_bytes.deinit(ctx.runtime.memory.allocator);
+    defer source_bytes.deinit(ctx.runtime.nativeAllocator());
     try value_ops.appendValueString(ctx.runtime, &source_bytes, source_value);
     var flag_bytes = std.ArrayList(u8).empty;
-    defer flag_bytes.deinit(ctx.runtime.memory.allocator);
+    defer flag_bytes.deinit(ctx.runtime.nativeAllocator());
     try value_ops.appendValueString(ctx.runtime, &flag_bytes, flags_value);
     var compiled = compileWithRuntime(ctx.runtime, source_bytes.items, flag_bytes.items) catch |err| switch (err) {
         error.InvalidPattern, error.Unsupported => return error.SyntaxError,
@@ -1403,7 +1401,7 @@ pub fn regExpCompile(
         },
         else => |other| return other,
     };
-    defer compiled.deinit(ctx.runtime.memory.allocator);
+    defer compiled.deinit(ctx.runtime.nativeAllocator());
 
     try regexp_object.setRegexpCompiledBytecode(ctx.runtime, compiled.bytecode);
     try regexp_object.setRegexpSource(ctx.runtime, source_value);
@@ -1468,7 +1466,7 @@ pub fn appendNamedCaptureSubstitution(
     const name_start = index.* + 2;
     const name_end = std.mem.indexOfScalarPos(u16, replacement, name_start, '>') orelse return false;
     var name = std.ArrayList(u8).empty;
-    defer name.deinit(ctx.runtime.memory.allocator);
+    defer name.deinit(ctx.runtime.nativeAllocator());
     try appendUtf16UnitsAsUtf8(ctx.runtime, &name, replacement[name_start..name_end]);
     const atom = try ctx.runtime.internAtom(name.items);
     // TGC S3 §4 class B: the group name is held across a property get that
@@ -1738,11 +1736,11 @@ pub fn regExpExecCompiledResult(
     const alloc_count = compiled.allocCount();
     var inline_capture_slots: [small_exec_slots]usize = undefined;
     var heap_capture_slots: []usize = &.{};
-    defer if (heap_capture_slots.len != 0) rt.memory.allocator.free(heap_capture_slots);
+    defer if (heap_capture_slots.len != 0) rt.nativeAllocator().free(heap_capture_slots);
     const capture_slots = if (alloc_count <= inline_capture_slots.len)
         inline_capture_slots[0..alloc_count]
     else capture: {
-        heap_capture_slots = try rt.memory.allocator.alloc(usize, alloc_count);
+        heap_capture_slots = try rt.nativeAllocator().alloc(usize, alloc_count);
         break :capture heap_capture_slots;
     };
     const result = execCaptureSlotsOnResolvedStringFromIndex(rt, compiled, string_data, start_index, capture_slots) catch |err| switch (err) {
@@ -1845,7 +1843,7 @@ pub fn appendDecodedRegExpGroupName(rt: *core.JSRuntime, out: *std.ArrayList(u8)
                 continue;
             }
         }
-        try out.append(rt.memory.allocator, name[index]);
+        try out.append(rt.nativeAllocator(), name[index]);
         index += 1;
     }
 }

@@ -68,7 +68,7 @@ pub fn rejectedWithPrototype(realm: *core.RealmContext, reason: core.JSValue, pr
 }
 
 test "fulfilledWithPrototype roots direct function bytecode result while constructing promise" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const realm = try core.RealmContext.create(rt, .{});
     defer realm.destroy();
@@ -117,7 +117,7 @@ test "fulfilledWithPrototype roots direct function bytecode result while constru
     const stored = promise.promiseResult() orelse return error.TypeError;
     try std.testing.expect(stored.same(result_value));
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 

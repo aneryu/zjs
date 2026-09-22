@@ -1,0 +1,16 @@
+{
+  "utc": "2026-09-22T16:21:32.951665+00:00",
+  "platform": "Linux-6.17.0-1014-nvidia-aarch64-with-glibc2.39",
+  "libc": [
+    "glibc",
+    "2.39"
+  ],
+  "zig": "0.16.0",
+  "head": "945b8a6bb0e8eccd8192e92e3aa22002e251238e",
+  "source_tree_sha256": "4a9f91a35b5712787fb1b569422418b7b20016536c9fd3fdff22fcbc2cb420be",
+  "source_hash_recipe": "sorted src/**/*.zig + build/**/*.zig + build.zig + tools/runtime/allocator_bench.zig; relative path NUL bytes NUL per file",
+  "binary_sha256": "903c0432ed42c5fbf6a18fa3c7457133af779b12fe1560222c313de14679751c",
+  "configuration": "ReleaseFast, layout=short, post-A9 direct native allocator, unchanged GC backing",
+  "sampling": "RSS after each eval and immediately after destruction; sampled peak, not kernel high-water or settled idle",
+  "protocol": "4 repetitions, alternating c/smp order; recreate 3000, persistent 8000, parallel 4 x 1500; serial processes after build/gates complete"
+}

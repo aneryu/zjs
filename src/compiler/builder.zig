@@ -20,6 +20,7 @@
 //! day one. Label `ref_count` is relocation/short-form bookkeeping; exact
 //! liveness is computed later from the LabelId block CFG.
 
+const mem_ops = @import("../core/memory.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const labels = @import("labels.zig");
@@ -69,7 +70,7 @@ pub const Error = error{
 /// entries.
 pub inline fn reserve(
     comptime T: type,
-    mem: *core.memory.MemoryAccount,
+    allocator: std.mem.Allocator,
     slice: *[]T,
     capacity: *usize,
     used: u32,
@@ -80,54 +81,32 @@ pub inline fn reserve(
         return error.OutOfMemory;
     if (required <= capacity.*) return;
 
-    const elem_size = @sizeOf(T);
-    var bytes: []u8 = if (capacity.* == 0)
-        &.{}
-    else
-        @as([*]u8, @ptrCast(slice.ptr))[0 .. std.math.mul(usize, capacity.*, elem_size) catch return error.OutOfMemory];
-    try reserveSlowBytes(
-        mem,
-        &bytes,
-        capacity,
-        used,
-        required,
-        min_cap,
-        elem_size,
-        comptime std.mem.Alignment.of(T),
-    );
-    slice.* = @as([*]T, @ptrCast(@alignCast(bytes.ptr)))[0..capacity.*];
+    try reserveSlow(T, allocator, slice, capacity, used, required, min_cap);
 }
 
 /// QuickJS keeps the DynBuf capacity check in its inline `dbuf_put*` helpers
-/// and enters an outlined allocator only when the backing must grow.  Keep the
-/// same call shape here: ordinary emission pays a compare, while the uncommon
-/// allocation/copy/free path is one type-erased walk (alloc via the already-
-/// linked `allocSlowErased`, not `allocAlignedBytes(trigger=true)`).
-noinline fn reserveSlowBytes(
-    mem: *core.memory.MemoryAccount,
-    slice_bytes: *[]u8,
+/// and enters an outlined allocator only when the backing must grow. Ordinary
+/// emission pays a compare; the uncommon path allocates, copies, and frees
+/// through the runtime native allocator.
+noinline fn reserveSlow(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    slice: *[]T,
     capacity: *usize,
     used: u32,
     required: usize,
     min_cap: usize,
-    elem_size: usize,
-    alignment: std.mem.Alignment,
 ) Error!void {
     std.debug.assert(required > capacity.*);
 
     const doubled = std.math.mul(usize, capacity.*, 2) catch std.math.maxInt(usize);
     const new_capacity = @max(@max(required, doubled), min_cap);
-    const new_backing = mem.allocElements(new_capacity, elem_size, alignment) catch
-        return error.OutOfMemory;
-    const used_bytes = std.math.mul(usize, @as(usize, used), elem_size) catch
-        return error.OutOfMemory;
-    if (used_bytes != 0) @memcpy(new_backing[0..used_bytes], slice_bytes.*[0..used_bytes]);
-
-    const old_backing = slice_bytes.*;
-    const old_capacity = capacity.*;
-    slice_bytes.* = new_backing;
+    const new_items = allocator.alloc(T, new_capacity) catch return error.OutOfMemory;
+    const used_count: usize = used;
+    if (used_count != 0) @memcpy(new_items[0..used_count], slice.ptr[0..used_count]);
+    if (capacity.* != 0) allocator.free(slice.ptr[0..capacity.*]);
+    slice.* = new_items;
     capacity.* = new_capacity;
-    if (old_capacity != 0) mem.freeAlignedBytes(old_backing, alignment);
 }
 
 pub const Snapshot = struct {
@@ -140,7 +119,8 @@ pub const Snapshot = struct {
 };
 
 pub const Builder = struct {
-    memory: *core.memory.MemoryAccount,
+    /// Runtime native allocator. Not the parser scratch arena and not a GC cell.
+    memory: std.mem.Allocator,
     atoms: *core.atom.AtomTable,
 
     /// Compact temporary bytecode.
@@ -169,18 +149,18 @@ pub const Builder = struct {
     /// null once a control-flow merge invalidated it.
     last_opcode_pos: ?u32 = null,
 
-    pub fn init(memory: *core.memory.MemoryAccount, atoms: *core.atom.AtomTable) Builder {
+    pub fn init(memory: std.mem.Allocator, atoms: *core.atom.AtomTable) Builder {
         return .{ .memory = memory, .atoms = atoms };
     }
 
     /// Item-wise release of the owned atom prefix, then every backing freed
     /// by full capacity. Idempotent.
     pub fn deinit(self: *Builder) void {
-        if (self.code_capacity != 0) self.memory.free(u8, self.code);
-        if (self.atom_capacity != 0) self.memory.free(core.atom.Atom, self.atom_operands);
-        if (self.label_capacity != 0) self.memory.free(labels.LabelSlot, self.label_slots);
-        if (self.reloc_capacity != 0) self.memory.free(labels.RelocEntry, self.relocs);
-        if (self.source_capacity != 0) self.memory.free(SourceSlot, self.source_slots);
+        if (self.code_capacity != 0) self.memory.free(self.code);
+        if (self.atom_capacity != 0) self.memory.free(self.atom_operands);
+        if (self.label_capacity != 0) self.memory.free(self.label_slots);
+        if (self.reloc_capacity != 0) self.memory.free(self.relocs);
+        if (self.source_capacity != 0) self.memory.free(self.source_slots);
 
         self.code = &.{};
         self.code_capacity = 0;
@@ -873,27 +853,27 @@ pub const Builder = struct {
         if (code_count != 0) {
             seg.code = self.memory.alloc(u8, code_count) catch return error.OutOfMemory;
         }
-        errdefer if (seg.code.len != 0) self.memory.free(u8, seg.code);
+        errdefer if (seg.code.len != 0) self.memory.free(seg.code);
 
         if (atom_count != 0) {
             seg.atoms = self.memory.alloc(core.atom.Atom, atom_count) catch return error.OutOfMemory;
         }
-        errdefer if (seg.atoms.len != 0) self.memory.free(core.atom.Atom, seg.atoms);
+        errdefer if (seg.atoms.len != 0) self.memory.free(seg.atoms);
 
         if (reloc_count != 0) {
             seg.relocs = self.memory.alloc(labels.RelocEntry, reloc_count) catch return error.OutOfMemory;
         }
-        errdefer if (seg.relocs.len != 0) self.memory.free(labels.RelocEntry, seg.relocs);
+        errdefer if (seg.relocs.len != 0) self.memory.free(seg.relocs);
 
         if (bind_count != 0) {
             seg.binds = self.memory.alloc(DetachedSegment.Bind, bind_count) catch return error.OutOfMemory;
         }
-        errdefer if (seg.binds.len != 0) self.memory.free(DetachedSegment.Bind, seg.binds);
+        errdefer if (seg.binds.len != 0) self.memory.free(seg.binds);
 
         if (source_count != 0) {
             seg.sources = self.memory.alloc(SourceSlot, source_count) catch return error.OutOfMemory;
         }
-        errdefer if (seg.sources.len != 0) self.memory.free(SourceSlot, seg.sources);
+        errdefer if (seg.sources.len != 0) self.memory.free(seg.sources);
 
         @memcpy(seg.code, self.code[mark.code_len..self.code_len]);
         @memcpy(seg.atoms, self.atom_operands[mark.atom_len..self.atom_len]);
@@ -1071,11 +1051,11 @@ pub const Builder = struct {
     }
 
     fn freeSegmentBackings(self: *Builder, seg: *DetachedSegment) void {
-        if (seg.code.len != 0) self.memory.free(u8, seg.code);
-        if (seg.atoms.len != 0) self.memory.free(core.atom.Atom, seg.atoms);
-        if (seg.relocs.len != 0) self.memory.free(labels.RelocEntry, seg.relocs);
-        if (seg.binds.len != 0) self.memory.free(DetachedSegment.Bind, seg.binds);
-        if (seg.sources.len != 0) self.memory.free(SourceSlot, seg.sources);
+        if (seg.code.len != 0) self.memory.free(seg.code);
+        if (seg.atoms.len != 0) self.memory.free(seg.atoms);
+        if (seg.relocs.len != 0) self.memory.free(seg.relocs);
+        if (seg.binds.len != 0) self.memory.free(seg.binds);
+        if (seg.sources.len != 0) self.memory.free(seg.sources);
         seg.* = .{};
     }
 
@@ -1132,11 +1112,12 @@ fn expectRelocChain(
 }
 
 test "compiler.builder: jump emission, bind, reloc chains" {
-    var acct = core.memory.MemoryAccount.init(std.testing.allocator);
-    var table = core.atom.AtomTable.init(&acct);
+    const acct = try mem_ops.createTestRuntime(std.testing.allocator);
+    defer acct.destroy();
+    var table = core.atom.AtomTable.init(acct);
     defer table.deinit();
 
-    var b = Builder.init(&acct, &table);
+    var b = Builder.init(acct.nativeAllocator(), &table);
     defer b.deinit();
 
     const label = try b.newLabel();
@@ -1168,11 +1149,12 @@ test "compiler.builder: jump emission, bind, reloc chains" {
 }
 
 test "compiler.builder: retargetLabelRefs merges a pending identity into a bound one" {
-    var acct = core.memory.MemoryAccount.init(std.testing.allocator);
-    var table = core.atom.AtomTable.init(&acct);
+    const acct = try mem_ops.createTestRuntime(std.testing.allocator);
+    defer acct.destroy();
+    var table = core.atom.AtomTable.init(acct);
     defer table.deinit();
 
-    var b = Builder.init(&acct, &table);
+    var b = Builder.init(acct.nativeAllocator(), &table);
     defer b.deinit();
 
     // The switch shape: two pending dispatch jumps, then a bound default body,
@@ -1230,13 +1212,14 @@ test "compiler.builder: retargetLabelRefs merges a pending identity into a bound
 }
 
 test "compiler.builder: s2g4 scope ref owns atom and chains aux relocation" {
-    var acct = core.memory.MemoryAccount.init(std.testing.allocator);
-    var table = core.atom.AtomTable.init(&acct);
+    const acct = try mem_ops.createTestRuntime(std.testing.allocator);
+    defer acct.destroy();
+    var table = core.atom.AtomTable.init(acct);
     defer table.deinit();
 
     const atom_id = try table.internString("qcp1_s2g4_scope_ref");
 
-    var b = Builder.init(&acct, &table);
+    var b = Builder.init(acct.nativeAllocator(), &table);
     defer b.deinit();
 
     const label = try b.newLabel();
@@ -1290,11 +1273,12 @@ test "compiler.builder: s2g4 scope ref owns atom and chains aux relocation" {
 }
 
 test "compiler.builder: compact immediate emission and rollback" {
-    var acct = core.memory.MemoryAccount.init(std.testing.allocator);
-    var table = core.atom.AtomTable.init(&acct);
+    const acct = try mem_ops.createTestRuntime(std.testing.allocator);
+    defer acct.destroy();
+    var table = core.atom.AtomTable.init(acct);
     defer table.deinit();
 
-    var b = Builder.init(&acct, &table);
+    var b = Builder.init(acct.nativeAllocator(), &table);
     defer b.deinit();
 
     const empty = b.snapshot();
@@ -1325,13 +1309,14 @@ test "compiler.builder: compact immediate emission and rollback" {
 }
 
 test "compiler.builder: s2g4 compact atom immediates own refs" {
-    var acct = core.memory.MemoryAccount.init(std.testing.allocator);
-    var table = core.atom.AtomTable.init(&acct);
+    const acct = try mem_ops.createTestRuntime(std.testing.allocator);
+    defer acct.destroy();
+    var table = core.atom.AtomTable.init(acct);
     defer table.deinit();
 
     const atom_id = try table.internString("qcp1_s2g4_compact_atom");
 
-    var b = Builder.init(&acct, &table);
+    var b = Builder.init(acct.nativeAllocator(), &table);
     defer b.deinit();
 
     const empty = b.snapshot();
@@ -1367,13 +1352,14 @@ test "compiler.builder: s2g4 compact atom immediates own refs" {
 }
 
 test "compiler.builder: s2g4 take last atom operand" {
-    var acct = core.memory.MemoryAccount.init(std.testing.allocator);
-    var table = core.atom.AtomTable.init(&acct);
+    const acct = try mem_ops.createTestRuntime(std.testing.allocator);
+    defer acct.destroy();
+    var table = core.atom.AtomTable.init(acct);
     defer table.deinit();
 
     const atom_id = try table.internString("qcp1_s2g4_truncate_atom");
 
-    var b = Builder.init(&acct, &table);
+    var b = Builder.init(acct.nativeAllocator(), &table);
     defer b.deinit();
 
     try b.addSourceMarker(1, 1);
@@ -1396,13 +1382,14 @@ test "compiler.builder: s2g4 take last atom operand" {
 }
 
 test "compiler.builder: lvalue atom take and opcode rewind are one transaction" {
-    var acct = core.memory.MemoryAccount.init(std.testing.allocator);
-    var table = core.atom.AtomTable.init(&acct);
+    const acct = try mem_ops.createTestRuntime(std.testing.allocator);
+    defer acct.destroy();
+    var table = core.atom.AtomTable.init(acct);
     defer table.deinit();
 
     const atom_id = try table.internString("lvalue_transaction_atom");
 
-    var b = Builder.init(&acct, &table);
+    var b = Builder.init(acct.nativeAllocator(), &table);
     defer b.deinit();
 
     try b.emitOp(0x20);
@@ -1428,15 +1415,16 @@ test "compiler.builder: lvalue atom take and opcode rewind are one transaction" 
 }
 
 test "compiler.builder: s2g4 detach and splice preserves global labels" {
-    var acct = core.memory.MemoryAccount.init(std.testing.allocator);
-    var table = core.atom.AtomTable.init(&acct);
+    const acct = try mem_ops.createTestRuntime(std.testing.allocator);
+    defer acct.destroy();
+    var table = core.atom.AtomTable.init(acct);
     defer table.deinit();
 
     const pre_atom = try table.internString("qcp1_s2g4_pre_atom");
     const segment_atom = try table.internString("qcp1_s2g4_segment_atom");
     const scope_atom = try table.internString("qcp1_s2g4_scope_atom");
 
-    var b = Builder.init(&acct, &table);
+    var b = Builder.init(acct.nativeAllocator(), &table);
     defer b.deinit();
 
     const label_a = try b.newLabel();
@@ -1543,11 +1531,12 @@ test "compiler.builder: s2g4 detach and splice preserves global labels" {
 }
 
 test "compiler.builder: s2g4 empty segment splice invalidates last opcode" {
-    var acct = core.memory.MemoryAccount.init(std.testing.allocator);
-    var table = core.atom.AtomTable.init(&acct);
+    const acct = try mem_ops.createTestRuntime(std.testing.allocator);
+    defer acct.destroy();
+    var table = core.atom.AtomTable.init(acct);
     defer table.deinit();
 
-    var b = Builder.init(&acct, &table);
+    var b = Builder.init(acct.nativeAllocator(), &table);
     defer b.deinit();
 
     try b.emitOp(0xf0);
@@ -1577,13 +1566,14 @@ test "compiler.builder: s2g4 empty segment splice invalidates last opcode" {
 }
 
 fn s2g4OomScript(allocator: std.mem.Allocator) !void {
-    var acct = core.memory.MemoryAccount.init(allocator);
-    var table = core.atom.AtomTable.init(&acct);
+    const acct = try mem_ops.createTestRuntime(allocator);
+    defer acct.destroy();
+    var table = core.atom.AtomTable.init(acct);
     defer table.deinit();
 
     const atom_id = try table.internString("qcp1_s2g4_oom_atom");
 
-    var b = Builder.init(&acct, &table);
+    var b = Builder.init(acct.nativeAllocator(), &table);
     defer b.deinit();
 
     const label_c = try b.newLabel();
@@ -1649,11 +1639,12 @@ test "compiler.builder: s2g4 allocation failure sweep balances detached atoms" {
 }
 
 test "compiler.builder: snapshot rollback restores chains, atoms, markers" {
-    var acct = core.memory.MemoryAccount.init(std.testing.allocator);
-    var table = core.atom.AtomTable.init(&acct);
+    const acct = try mem_ops.createTestRuntime(std.testing.allocator);
+    defer acct.destroy();
+    var table = core.atom.AtomTable.init(acct);
     defer table.deinit();
 
-    var b = Builder.init(&acct, &table);
+    var b = Builder.init(acct.nativeAllocator(), &table);
     defer b.deinit();
 
     const l0 = try b.newLabel();
@@ -1691,14 +1682,15 @@ test "compiler.builder: snapshot rollback restores chains, atoms, markers" {
 }
 
 test "compiler.builder: inferred-name patches keep code and atom ownership in lockstep" {
-    var acct = core.memory.MemoryAccount.init(std.testing.allocator);
-    var table = core.atom.AtomTable.init(&acct);
+    const acct = try mem_ops.createTestRuntime(std.testing.allocator);
+    defer acct.destroy();
+    var table = core.atom.AtomTable.init(acct);
     defer table.deinit();
 
     const placeholder = try table.internString("builder-name-placeholder");
     const inferred = try table.internString("builder-inferred-name");
 
-    var b = Builder.init(&acct, &table);
+    var b = Builder.init(acct.nativeAllocator(), &table);
     defer b.deinit();
 
     try b.emitAtomOpOwned(0x40, placeholder);

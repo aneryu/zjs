@@ -11,7 +11,6 @@
 
 const std = @import("std");
 
-
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const method_ids = core.host_function.builtin_method_ids;
@@ -196,7 +195,7 @@ fn testAsyncFromSyncIsCallable(value: core.JSValue) bool {
 }
 
 test "createAsyncFromSyncIterator roots direct function bytecode next method while creating wrapper" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const ctx = try core.JSContext.create(rt, .{});
@@ -238,7 +237,7 @@ test "createAsyncFromSyncIterator roots direct function bytecode next method whi
     const stored = wrapper.iteratorNext() orelse return error.TypeError;
     try std.testing.expect(stored.same(next_method));
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -1095,7 +1094,7 @@ fn testArrayIteratorGetValueProperty(
 }
 
 test "arrayIteratorValue roots entry value while creating pair array" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const ctx = try core.JSContext.create(rt, .{});
@@ -1121,7 +1120,7 @@ test "arrayIteratorValue roots entry value while creating pair array" {
         try std.testing.expectEqual(@as(?core.Atom, symbol_atom), stored.asSymbolAtom());
     }
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -1359,7 +1358,7 @@ fn testIteratorConcatGetIteratorMethod(
 }
 
 test "iteratorConcatCall roots direct function bytecode iterator method while creating helper" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const ctx = try core.JSContext.create(rt, .{});
@@ -1405,11 +1404,9 @@ test "iteratorConcatCall roots direct function bytecode iterator method while cr
         try std.testing.expect(stored_method.same(iterator_method));
     }
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
-
-
 
 pub const IteratorZipRecord = struct {
     iterator: core.JSValue,
@@ -1835,7 +1832,7 @@ pub fn iteratorZipStoreIndex(rt: *core.JSRuntime, object: *core.Object, index: u
 }
 
 test "iteratorZipStoreIndex roots direct function bytecode value while defining property" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
@@ -1861,12 +1858,12 @@ test "iteratorZipStoreIndex roots direct function bytecode value while defining 
     }
 
     _ = object.deleteProperty(rt, core.Atom.taggedInt(0));
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
 test "iteratorZipStoreIndex roots direct symbol value while defining property" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
@@ -1886,7 +1883,7 @@ test "iteratorZipStoreIndex roots direct symbol value while defining property" {
     }
 
     _ = object.deleteProperty(rt, core.Atom.taggedInt(0));
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -2001,8 +1998,6 @@ const IteratorPredicateKind = enum {
     for_each,
     some,
 };
-
-
 
 pub fn iteratorCloseWithCompletionAndPropagate(
     ctx: *core.JSContext,
@@ -2421,7 +2416,7 @@ fn iteratorCreateHelper(
 }
 
 test "iteratorCreateHelper roots direct function bytecode callback while creating helper" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const ctx = try core.JSContext.create(rt, .{});
@@ -2468,7 +2463,7 @@ test "iteratorCreateHelper roots direct function bytecode callback while creatin
     const stored = helper.iteratorCallback() orelse return error.TypeError;
     try std.testing.expect(stored.same(callback));
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 
@@ -3246,7 +3241,7 @@ pub fn closeIteratorForFromEntriesAbrupt(
 }
 
 test "createIteratorResult roots direct function bytecode value while creating result" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-closure-iterator-result-bytecode-symbol");
@@ -3268,10 +3263,9 @@ test "createIteratorResult roots direct function bytecode value while creating r
         try std.testing.expect(stored.same(result_value));
     }
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
-
 
 // ----- merged from iterator_slots.zig -----
 // Typed views over the three small integer slots of an iterator payload
@@ -3366,7 +3360,6 @@ pub fn regExpStringIteratorFlags(iterator: *const Object) RegExpStringIteratorFl
 pub fn setRegExpStringIteratorFlags(iterator: *Object, flags: RegExpStringIteratorFlags) void {
     iterator.iteratorKindSlot().* = @bitCast(flags);
 }
-
 
 // ----- merged from iterator_builtin_ops.zig -----
 // Iterator builtin declaration table and native-record dispatch seam.
@@ -3493,7 +3486,6 @@ test "intrinsic iterator next methods have dedicated native records" {
         try testing.expect(native.generic_magic == &iteratorCallNative);
     }
 }
-
 
 // ----- merged from forof_ops.zig -----
 // for-in/for-of iterator records, pending-error iterator close paths and VM iterator helpers.

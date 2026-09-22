@@ -102,6 +102,24 @@ pub fn forceLlvmBackendOnDebug(compile: *std.Build.Step.Compile) void {
 /// `$262` host for `run-test262` and test compiles that need TestEngine
 /// harness globals. Depends on `engine`; the engine never imports this
 /// file. Each engine instance needs its own host module so types match.
+/// Provider for `@import("engine_hooks")`. `provider` names this engine
+/// module as `zjs`, so the hooks close over this module's core and exec.
+pub fn attachEngineHooks(
+    b: *std.Build,
+    engine: *std.Build.Module,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.OptimizeMode,
+) void {
+    const provider = b.createModule(.{
+        .root_source_file = b.path("src/engine_hooks.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "zjs", .module = engine }},
+    });
+    engine.addImport("engine_hooks", provider);
+}
+
 pub fn addTest262Host(ctx: Ctx, engine: *std.Build.Module) *std.Build.Module {
     return ctx.b.createModule(.{
         .root_source_file = ctx.b.path("src/cli/run_test262_host.zig"),

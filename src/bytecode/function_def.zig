@@ -10,7 +10,6 @@ const bytecode = @import("../bytecode.zig");
 const builtin = @import("builtin");
 const atom = @import("../core/atom.zig");
 const bigint_mod = @import("../core/bigint.zig");
-const memory = @import("../core/memory.zig");
 const runtime = @import("../core/runtime.zig");
 const JSValue = @import("../core/value.zig").JSValue;
 const compiler = @import("../compiler/root.zig");
@@ -88,7 +87,7 @@ pub const ScopeProofTestCounters = if (builtin.is_test) struct {
 /// 8-element floor) reduces total cost to amortised O(1) per item.
 inline fn growSliceBy(
     comptime T: type,
-    mem: *memory.MemoryAccount,
+    allocator: std.mem.Allocator,
     slice: *[]T,
     capacity: *usize,
     n: usize,
@@ -99,54 +98,23 @@ inline fn growSliceBy(
         slice.* = slice.ptr[0..new_used];
         return slice.ptr[used..new_used];
     }
-
-    const elem_size = @sizeOf(T);
-    const old_ptr: [*]u8 = if (capacity.* == 0) undefined else @ptrCast(slice.ptr);
-    const new_ptr = try growSliceBySlowBytes(
-        mem,
-        old_ptr,
-        capacity,
-        used,
-        new_used,
-        elem_size,
-        comptime std.mem.Alignment.of(T),
-    );
-    slice.* = @as([*]T, @ptrCast(@alignCast(new_ptr)))[0..new_used];
-    return slice.*[used..new_used];
-}
-
-/// QuickJS keeps `js_resize_array` inline and enters its no-inline
-/// `js_realloc_array` only when the requested length exceeds capacity.
-/// One type-erased walk: alloc via `allocElements` / `allocSlowErased`,
-/// not `allocAlignedBytes(trigger=true)` (knife 20 STOP).
-noinline fn growSliceBySlowBytes(
-    mem: *memory.MemoryAccount,
-    old_ptr: [*]u8,
-    capacity: *usize,
-    used: usize,
-    new_used: usize,
-    elem_size: usize,
-    alignment: std.mem.Alignment,
-) ![*]u8 {
-    std.debug.assert(new_used > capacity.*);
     var new_cap: usize = if (capacity.* == 0) 8 else capacity.* * 2;
     if (new_cap < new_used) new_cap = new_used;
-    const new_buf = try mem.allocElements(new_cap, elem_size, alignment);
-    const used_bytes = std.math.mul(usize, used, elem_size) catch return error.OutOfMemory;
-    if (used_bytes != 0) @memcpy(new_buf[0..used_bytes], old_ptr[0..used_bytes]);
-    if (capacity.* != 0) {
-        const old_bytes = std.math.mul(usize, capacity.*, elem_size) catch return error.OutOfMemory;
-        mem.freeAlignedBytes(old_ptr[0..old_bytes], alignment);
-    }
+    const new_buf = try allocator.alloc(T, new_cap);
+    if (used != 0) @memcpy(new_buf[0..used], slice.ptr[0..used]);
+    var old_buf: []T = &.{};
+    if (capacity.* != 0) old_buf = slice.ptr[0..capacity.*];
+    slice.* = new_buf[0..new_used];
     capacity.* = new_cap;
-    return new_buf.ptr;
+    if (old_buf.len != 0) allocator.free(old_buf);
+    return slice.ptr[used..new_used];
 }
 
 /// Free the full backing buffer of a growable slice and reset both the
 /// visible slice and its capacity.
 fn freeGrowableSlice(
     comptime T: type,
-    mem: *memory.MemoryAccount,
+    allocator: std.mem.Allocator,
     slice: *[]T,
     capacity: *usize,
 ) void {
@@ -154,11 +122,11 @@ fn freeGrowableSlice(
     if (capacity.* != 0) old_buf = slice.ptr[0..capacity.*];
     slice.* = &.{};
     capacity.* = 0;
-    if (old_buf.len != 0) mem.free(T, old_buf);
+    if (old_buf.len != 0) allocator.free(old_buf);
 }
 
 fn freeGrowableAtomSlice(
-    mem: *memory.MemoryAccount,
+    allocator: std.mem.Allocator,
     slice: *[]atom.Atom,
     capacity: *usize,
 ) void {
@@ -167,15 +135,15 @@ fn freeGrowableAtomSlice(
     slice.* = &.{};
     capacity.* = 0;
     if (old_capacity != 0) {
-        mem.free(atom.Atom, items.ptr[0..old_capacity]);
+        allocator.free(items.ptr[0..old_capacity]);
     } else if (items.len != 0) {
-        mem.free(atom.Atom, items);
+        allocator.free(items);
     }
 }
 
 fn freeGrowableNamedSlice(
     comptime T: type,
-    mem: *memory.MemoryAccount,
+    allocator: std.mem.Allocator,
     slice: *[]T,
     capacity: *usize,
 ) void {
@@ -184,15 +152,19 @@ fn freeGrowableNamedSlice(
     slice.* = &.{};
     capacity.* = 0;
     if (old_capacity != 0) {
-        mem.free(T, items.ptr[0..old_capacity]);
+        allocator.free(items.ptr[0..old_capacity]);
     } else if (items.len != 0) {
-        mem.free(T, items);
+        allocator.free(items);
     }
 }
 
 /// Mirrors `JSFunctionDef`.
 pub const FunctionDefImpl = struct {
-    memory: *memory.MemoryAccount,
+    /// Ordinary buffers. Same account as `artifacts`, probed on alloc.
+    allocator: std.mem.Allocator,
+    /// Facade that owns `function_var_index`. It outlives the parser arena
+    /// and does not fire the per-allocation probe.
+    artifacts: std.mem.Allocator,
     atoms: *atom.AtomTable,
     parent: ?*FunctionDefImpl = null,
     discard_next: ?*FunctionDefImpl = null,
@@ -340,9 +312,10 @@ pub const FunctionDefImpl = struct {
     child_list: []*FunctionDefImpl = &.{},
     child_list_capacity: usize = 0,
 
-    pub fn init(account: *memory.MemoryAccount, atoms: *atom.AtomTable, name: atom.Atom) FunctionDefImpl {
+    pub fn init(allocator: std.mem.Allocator, artifacts: std.mem.Allocator, atoms: *atom.AtomTable, name: atom.Atom) FunctionDefImpl {
         return .{
-            .memory = account,
+            .allocator = allocator,
+            .artifacts = artifacts,
             .atoms = atoms,
             .func_name = name,
             .filename = name,
@@ -352,13 +325,13 @@ pub const FunctionDefImpl = struct {
 
     pub fn replaceSourceText(self: *FunctionDefImpl, source: []const u8) !void {
         const allocation_len = std.math.add(usize, source.len, 1) catch return error.OutOfMemory;
-        const allocation = try self.memory.alloc(u8, allocation_len);
+        const allocation = try self.allocator.alloc(u8, allocation_len);
         @memcpy(allocation[0..source.len], source);
         allocation[source.len] = 0;
         const owned: [:0]const u8 = allocation[0..source.len :0];
         const old = self.source_text;
         self.source_text = owned;
-        if (old) |existing| self.memory.free(u8, @constCast(existing.ptr[0 .. existing.len + 1]));
+        if (old) |existing| self.allocator.free(@constCast(existing.ptr[0 .. existing.len + 1]));
     }
 
     pub fn deinitInitFailure(self: *FunctionDefImpl) void {
@@ -372,9 +345,9 @@ pub const FunctionDefImpl = struct {
         if (self.builder) |v2b| {
             self.builder = null;
             v2b.deinit();
-            self.memory.destroy(compiler.Builder, v2b);
+            self.allocator.destroy(v2b);
         }
-        freeGrowableSlice(VarScope, self.memory, &self.scopes, &self.scopes_capacity);
+        freeGrowableSlice(VarScope, self.allocator, &self.scopes, &self.scopes_capacity);
         self.scope_count = 0;
     }
 
@@ -384,7 +357,7 @@ pub const FunctionDefImpl = struct {
     /// of the newly added scope (== new `scope_level`).
     pub fn appendScope(self: *FunctionDefImpl, parent: i32) !i32 {
         self.invalidateScopeLinkCache();
-        const tail = try growSliceBy(VarScope, self.memory, &self.scopes, &self.scopes_capacity, 1);
+        const tail = try growSliceBy(VarScope, self.allocator, &self.scopes, &self.scopes_capacity, 1);
         tail[0] = .{ .parent = parent, .first = self.scope_first };
         self.scope_count += 1;
         const idx: i32 = @intCast(self.scopes.len - 1);
@@ -557,7 +530,7 @@ pub const FunctionDefImpl = struct {
         for (globals) |*gv| {
             gv.var_name = atom.null_atom;
         }
-        if (capacity != 0) self.memory.free(GlobalVar, globals.ptr[0..capacity]);
+        if (capacity != 0) self.allocator.free(globals.ptr[0..capacity]);
     }
 
     /// Mirror qjs add_func_var: create the named
@@ -717,7 +690,7 @@ pub const FunctionDefImpl = struct {
     /// Returns the index of the new var.
     pub fn appendVar(self: *FunctionDefImpl, var_def: VarDef) !i32 {
         self.invalidateScopeLinkCache();
-        const tail = try growSliceBy(VarDef, self.memory, &self.vars, &self.vars_capacity, 1);
+        const tail = try growSliceBy(VarDef, self.allocator, &self.vars, &self.vars_capacity, 1);
         tail[0] = var_def;
         tail[0].var_name = var_def.var_name;
         self.var_count += 1;
@@ -726,7 +699,7 @@ pub const FunctionDefImpl = struct {
     }
 
     pub fn appendGlobalVar(self: *FunctionDefImpl, global_var: GlobalVar) !void {
-        const tail = try growSliceBy(GlobalVar, self.memory, &self.global_vars, &self.global_vars_capacity, 1);
+        const tail = try growSliceBy(GlobalVar, self.allocator, &self.global_vars, &self.global_vars_capacity, 1);
         tail[0] = global_var;
         tail[0].var_name = global_var.var_name;
         self.global_var_count = @intCast(self.global_vars.len);
@@ -736,7 +709,7 @@ pub const FunctionDefImpl = struct {
     /// QuickJS function metadata; parser lowering resolves matching
     /// identifier references to `get_arg*` opcodes.
     pub fn appendArg(self: *FunctionDefImpl, var_def: VarDef) !i32 {
-        const tail = try growSliceBy(VarDef, self.memory, &self.args, &self.args_capacity, 1);
+        const tail = try growSliceBy(VarDef, self.allocator, &self.args, &self.args_capacity, 1);
         tail[0] = var_def;
         tail[0].var_name = var_def.var_name;
         self.arg_count = @intCast(self.args.len);
@@ -749,7 +722,7 @@ pub const FunctionDefImpl = struct {
     /// `js_new_function_def`. The parent takes
     /// ownership of the child pointer.
     pub fn addChild(self: *FunctionDefImpl, child: *FunctionDefImpl) !void {
-        const tail = try growSliceBy(*FunctionDefImpl, self.memory, &self.child_list, &self.child_list_capacity, 1);
+        const tail = try growSliceBy(*FunctionDefImpl, self.allocator, &self.child_list, &self.child_list_capacity, 1);
         child.parent = self;
         child.discard_next = null;
         tail[0] = child;
@@ -790,7 +763,7 @@ pub const FunctionDefImpl = struct {
     /// Append a closure variable entry. Used for top-level module/eval
     /// bindings and, later, captured parent-scope variables.
     pub fn addClosureVar(self: *FunctionDefImpl, init_value: ClosureVar.Init) !i32 {
-        const tail = try growSliceBy(ClosureVar, self.memory, &self.closure_var, &self.closure_var_capacity, 1);
+        const tail = try growSliceBy(ClosureVar, self.allocator, &self.closure_var, &self.closure_var_capacity, 1);
         tail[0] = ClosureVar.init(init_value);
         tail[0].var_name = init_value.var_name;
         self.closure_var_count = @intCast(self.closure_var.len);
@@ -858,10 +831,10 @@ pub const FunctionDefImpl = struct {
     }
 
     fn catchUpFunctionVarIndex(self: *FunctionDefImpl) !void {
-        // The account's facade, not the operation allocator: FunctionDefs
+        // The artifact facade, not the native allocator: FunctionDefs
         // outlive the parser's arena redirect and must free where they
         // allocated.
-        const allocator = self.memory.accountedAllocator();
+        const allocator = self.artifacts;
         try self.function_var_index.ensureUnusedCapacity(allocator, @intCast(self.vars.len - self.function_var_indexed_len));
         for (self.vars[self.function_var_indexed_len..], self.function_var_indexed_len..) |vd, i| {
             // Later rows overwrite earlier ones: newest wins, as in the scan.
@@ -892,7 +865,7 @@ pub const FunctionDefImpl = struct {
     }
 
     pub fn appendCpool(self: *FunctionDefImpl, value: JSValue) !u32 {
-        const tail = try growSliceBy(JSValue, self.memory, &self.cpool, &self.cpool_capacity, 1);
+        const tail = try growSliceBy(JSValue, self.allocator, &self.cpool, &self.cpool_capacity, 1);
         tail[0] = value;
         self.cpool_count = @intCast(self.cpool.len);
         return @intCast(self.cpool.len - 1);
@@ -944,19 +917,19 @@ pub const FunctionDefImpl = struct {
         if (self.builder) |v2b| {
             self.builder = null;
             v2b.deinit();
-            self.memory.destroy(compiler.Builder, v2b);
+            self.allocator.destroy(v2b);
         }
 
-        freeGrowableNamedSlice(VarDef, self.memory, &self.vars, &self.vars_capacity);
-        if (self.vars_htab.len != 0) self.memory.free(u32, self.vars_htab);
-        self.function_var_index.deinit(self.memory.accountedAllocator());
+        freeGrowableNamedSlice(VarDef, self.allocator, &self.vars, &self.vars_capacity);
+        if (self.vars_htab.len != 0) self.allocator.free(self.vars_htab);
+        self.function_var_index.deinit(self.artifacts);
         self.function_var_indexed_len = 0;
 
-        freeGrowableNamedSlice(VarDef, self.memory, &self.args, &self.args_capacity);
+        freeGrowableNamedSlice(VarDef, self.allocator, &self.args, &self.args_capacity);
 
-        freeGrowableSlice(VarScope, self.memory, &self.scopes, &self.scopes_capacity);
+        freeGrowableSlice(VarScope, self.allocator, &self.scopes, &self.scopes_capacity);
 
-        freeGrowableNamedSlice(GlobalVar, self.memory, &self.global_vars, &self.global_vars_capacity);
+        freeGrowableNamedSlice(GlobalVar, self.allocator, &self.global_vars, &self.global_vars_capacity);
 
         const old_cpool = self.cpool;
         const old_cpool_capacity = self.cpool_capacity;
@@ -968,11 +941,11 @@ pub const FunctionDefImpl = struct {
             slot.* = JSValue.undefinedValue();
             freeOwnedValue(value, rt);
         }
-        if (old_cpool_capacity != 0) self.memory.free(JSValue, old_cpool.ptr[0..old_cpool_capacity]);
+        if (old_cpool_capacity != 0) self.allocator.free(old_cpool.ptr[0..old_cpool_capacity]);
 
-        freeGrowableNamedSlice(ClosureVar, self.memory, &self.closure_var, &self.closure_var_capacity);
+        freeGrowableNamedSlice(ClosureVar, self.allocator, &self.closure_var, &self.closure_var_capacity);
 
-        if (self.source_text) |source| self.memory.free(u8, @constCast(source.ptr[0 .. source.len + 1]));
+        if (self.source_text) |source| self.allocator.free(@constCast(source.ptr[0 .. source.len + 1]));
 
         const old_child_list = self.child_list;
         const old_child_list_capacity = self.child_list_capacity;
@@ -980,22 +953,22 @@ pub const FunctionDefImpl = struct {
         self.child_list_capacity = 0;
         for (old_child_list) |child| {
             child.deinit(rt);
-            self.memory.destroy(FunctionDefImpl, child);
+            self.allocator.destroy(child);
         }
 
         self.vars_htab = &.{};
         self.discard_next = null;
         self.source_text = null;
-        if (old_child_list_capacity != 0) self.memory.free(*FunctionDefImpl, old_child_list.ptr[0..old_child_list_capacity]);
+        if (old_child_list_capacity != 0) self.allocator.free(old_child_list.ptr[0..old_child_list_capacity]);
     }
 };
 
 pub const FunctionDef = FunctionDefImpl;
 
 test "findFunctionVar returns the newest scope-0 row through the lazy index" {
-    const rt = try runtime.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try runtime.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
-    var fd = FunctionDefImpl.init(&rt.memory, &rt.atoms, try rt.internAtom("var-index"));
+    var fd = FunctionDefImpl.init(rt.nativeAllocator(), rt.nativeAllocator(), &rt.atoms, try rt.internAtom("var-index"));
     defer fd.deinit(rt);
     _ = try fd.appendScope(-1);
     const target = try rt.internAtom("target");
@@ -1018,10 +991,10 @@ test "findFunctionVar returns the newest scope-0 row through the lazy index" {
 }
 
 test "scope proof cache invalidates variable scope and late arguments mutations" {
-    const rt = try runtime.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try runtime.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const name = try rt.internAtom("scope-cache");
-    var fd = FunctionDefImpl.init(&rt.memory, &rt.atoms, name);
+    var fd = FunctionDefImpl.init(rt.nativeAllocator(), rt.nativeAllocator(), &rt.atoms, name);
     defer fd.deinit(rt);
     _ = try fd.appendScope(-1);
     _ = try fd.appendScope(-1);

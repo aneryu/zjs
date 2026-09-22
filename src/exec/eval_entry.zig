@@ -33,7 +33,7 @@ pub fn evalScriptSource(ctx: *core.JSContext, source_text: []const u8, options: 
 pub fn evalScriptValue(ctx: *core.JSContext, source_value: core.JSValue, options: core.context.ScriptEvalOptions) !core.JSValue {
     if (!source_value.isString()) return error.TypeError;
     var source = std.ArrayList(u8).empty;
-    defer source.deinit(ctx.runtime.memory.allocator);
+    defer source.deinit(ctx.runtime.nativeAllocator());
     try string_ops.appendSourceStringUtf8(ctx.runtime, &source, source_value);
     return evalScriptSource(ctx, source.items, options);
 }
@@ -202,8 +202,6 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     // interpreter — makes the guard correct even when the runtime was
     // constructed on a different thread's stack (test262 worker threads).
     if (ctx.runtime.hot.call_depth == 0) rt.updateNativeStackTop();
-    const outermost = ctx.runtime.hot.call_depth == 0;
-    defer if (outermost) rt.clearWeakRefKeptAlive();
     // R1-b: the compile and diagnostic phase runs in ITS OWN native frames.
     //
     // R3 ranked this function's frame first in the whole engine (158,240
@@ -250,7 +248,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     } else blk: {
         const root_function = function orelse return error.InvalidBytecode;
         const vm_start = platform_clock.monotonicNanos();
-        var stack = stack_mod.Stack.init(&rt.memory, ctx.stackLimit());
+        var stack = stack_mod.Stack.init(rt, ctx.stackLimit());
         defer stack.deinit(rt);
         try stack.reserveAdditional(root_function.stack_size);
         const value = if (root_function_object) |root_object| v: {
@@ -341,9 +339,11 @@ noinline fn drainAndFinish(
     completion_roots.activate(rt);
     defer completion_roots.deactivate(rt);
 
-    const global_object = try zjs_vm.contextGlobal(ctx);
     const jobs_start = platform_clock.monotonicNanos();
-    try zjs_vm.drainPendingPromiseJobs(ctx, options.output, global_object);
+    const previous_output = rt.microtasks.output;
+    rt.microtasks.output = options.output;
+    defer rt.microtasks.output = previous_output;
+    try rt.runAutomaticMicrotasks();
     if (options.timing) |timing| timing.promise_jobs_ns += platform_clock.elapsedNanosSince(jobs_start);
 
     if (options.mode == .script and
@@ -478,7 +478,6 @@ fn parserMode(mode: core.context.EvalMode) parser.Mode {
 
 // Eval compile wrappers (moved from the dissolved exec/eval.zig).
 
-
 // ----- merged from eval_ops.zig -----
 // Direct/indirect eval execution, compiler seed construction and indexed cell setup.
 const frame_mod = @import("frame.zig");
@@ -512,7 +511,7 @@ fn appendEvalClosureSeed(
     // qjs add_closure_variables copies every visible scoped binding, argument,
     // unscoped local, and inherited closure row in order. Same-name bindings
     // are distinct identities; lookup-first-match supplies shadowing later.
-    try seeds.append(rt.memory.allocator, .{
+    try seeds.append(rt.nativeAllocator(), .{
         .var_name = atom_id,
         .closure_type = closure_type,
         .var_idx = var_idx,
@@ -545,7 +544,7 @@ fn createDirectEvalClosureSeed(
     const frame = caller_frame orelse return .{};
 
     var seeds = std.ArrayList(parser.EvalClosureSeed).empty;
-    errdefer seeds.deinit(rt.memory.allocator);
+    errdefer seeds.deinit(rt.nativeAllocator());
 
     const local_count = @min(function.varDefs().len, frame.locals.len);
     const locals = function.varDefs()[0..local_count];
@@ -604,12 +603,12 @@ fn createDirectEvalClosureSeed(
     }
 
     if (seeds.items.len == 0) {
-        seeds.deinit(rt.memory.allocator);
+        seeds.deinit(rt.nativeAllocator());
         return .{ .is_arg_scope = is_arg_scope };
     }
-    const owned = try rt.memory.alloc(parser.EvalClosureSeed, seeds.items.len);
+    const owned = try rt.nativeAllocator().alloc(parser.EvalClosureSeed, seeds.items.len);
     @memcpy(owned, seeds.items);
-    seeds.deinit(rt.memory.allocator);
+    seeds.deinit(rt.nativeAllocator());
     return .{ .values = owned, .is_arg_scope = is_arg_scope };
 }
 
@@ -749,8 +748,8 @@ pub fn execDirectEval(
     }
 
     var args: []core.JSValue = &.{};
-    if (argc != 0) args = try ctx.runtime.memory.alloc(core.JSValue, argc);
-    defer if (args.len != 0) ctx.runtime.memory.free(core.JSValue, args);
+    if (argc != 0) args = try ctx.runtime.nativeAllocator().alloc(core.JSValue, argc);
+    defer if (args.len != 0) ctx.runtime.nativeAllocator().free(args);
 
     var remaining: usize = argc;
     while (remaining > 0) {
@@ -856,7 +855,7 @@ pub fn directEval(
     if (args.len == 0) return core.JSValue.undefinedValue();
     if (!args[0].isString()) return args[0];
     var source = std.ArrayList(u8).empty;
-    defer source.deinit(ctx.runtime.memory.allocator);
+    defer source.deinit(ctx.runtime.nativeAllocator());
     try appendSourceStringUtf8(ctx.runtime, &source, args[0]);
     const caller_strict = if (caller_function) |outer_function| outer_function.isStrictMode() else false;
     const caller_entry = if (caller_function) |outer_function|
@@ -875,7 +874,7 @@ pub fn directEval(
     const eval_allows_super_property = caller_entry.super_allowed;
     const eval_arguments_allowed = caller_entry.arguments_allowed;
     const eval_seed = try createDirectEvalClosureSeed(ctx.runtime, caller_function, caller_frame, eval_scope_head);
-    defer if (eval_seed.values.len != 0) ctx.runtime.memory.free(parser.EvalClosureSeed, eval_seed.values);
+    defer if (eval_seed.values.len != 0) ctx.runtime.nativeAllocator().free(eval_seed.values);
     const eval_script_or_module = if (caller_function) |outer_function|
         outer_function.scriptOrModule()
     else
@@ -933,7 +932,7 @@ pub fn directEval(
     const eval_function_object = objectFromValue(eval_function_value) orelse return error.InvalidBytecode;
     const function_value = eval_function_object.functionBytecode() orelse return error.InvalidBytecode;
     const function = functionBytecodeFromValue(function_value) orelse return error.InvalidBytecode;
-    var nested_stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.runtime.stackSize());
+    var nested_stack = stack_mod.Stack.init(ctx.runtime, ctx.runtime.stackSize());
     defer nested_stack.deinit(ctx.runtime);
     const result = try runWithCallEnv(.{
         .ctx = ctx,

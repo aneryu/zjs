@@ -514,7 +514,7 @@ pub fn mathSumPrecise(
     const iterator_value = try iterator_ops.iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
 
     var finite_values = std.ArrayList(f64).empty;
-    defer finite_values.deinit(ctx.runtime.memory.allocator);
+    defer finite_values.deinit(ctx.runtime.nativeAllocator());
     var saw_nan = false;
     var saw_positive_inf = false;
     var saw_negative_inf = false;
@@ -541,7 +541,7 @@ pub fn mathSumPrecise(
                 saw_positive_zero = true;
             }
         } else {
-            try finite_values.append(ctx.runtime.memory.allocator, number);
+            try finite_values.append(ctx.runtime.nativeAllocator(), number);
         }
     }
 
@@ -552,7 +552,7 @@ pub fn mathSumPrecise(
         return if (saw_positive_zero) core.JSValue.int32(0) else core.JSValue.float64(-0.0);
     }
 
-    const rounded = try exactF64Sum(ctx.runtime.memory.allocator, finite_values.items);
+    const rounded = try exactF64Sum(ctx.runtime.nativeAllocator(), finite_values.items);
     if (rounded == 0 and !saw_positive_zero and saw_negative_zero) return core.JSValue.float64(-0.0);
     return value_ops.numberToValue(rounded);
 }

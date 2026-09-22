@@ -137,9 +137,9 @@ pub fn sharedTestEngine() *TestEngine {
                 shared_engine_baseline_shape_props.?[idx].hash_next = core.shape.no_property_index;
             }
         }
-        _ = eng.runtime.runObjectCycleRemoval();
-        shared_engine_baseline_allocation_count = eng.runtime.memory.allocation_count;
-        shared_engine_baseline_allocated_bytes = eng.runtime.memory.allocated_bytes;
+        _ = eng.runtime.collectForTest();
+        shared_engine_baseline_allocation_count = eng.runtime.diagnostics.allocations.allocation_count;
+        shared_engine_baseline_allocated_bytes = eng.runtime.diagnostics.allocations.allocated_bytes;
         shared_engine_baseline_module_count = eng.context.modules.count;
         registerSharedEngineProcessTeardown();
     }
@@ -197,8 +197,8 @@ pub fn endSharedTest() void {
     const eng = if (shared_engine_storage) |*e| e else return;
     resetSharedEngineAfterTest(eng);
 
-    const allocation_count = eng.runtime.memory.allocation_count;
-    const allocated_bytes = eng.runtime.memory.allocated_bytes;
+    const allocation_count = eng.runtime.diagnostics.allocations.allocation_count;
+    const allocated_bytes = eng.runtime.diagnostics.allocations.allocated_bytes;
     const module_count = eng.context.modules.count;
     const count_delta = @as(i128, @intCast(allocation_count)) - @as(i128, @intCast(shared_engine_baseline_allocation_count));
     const bytes_delta = @as(i128, @intCast(allocated_bytes)) - @as(i128, @intCast(shared_engine_baseline_allocated_bytes));
@@ -288,13 +288,17 @@ fn resetSharedEngineAfterTest(eng: *TestEngine) void {
         // would otherwise run the cycle collector against that half-applied
         // state and trace the wrong union arm. Making the restore atomic
         // w.r.t. GC keeps the slot/flag pair consistent throughout.
-        const saved_trigger_fn = eng.runtime.memory.trigger_gc_fn;
-        const saved_trigger_ctx = eng.runtime.memory.trigger_gc_ctx;
-        eng.runtime.memory.trigger_gc_fn = null;
-        eng.runtime.memory.trigger_gc_ctx = null;
+        const budget = &eng.runtime.gc.heap_budget;
+        const saved_probe = budget.probe;
+        const saved_probe_ctx = budget.probe_ctx;
+        const saved_suspend = budget.suspend_alloc_notify;
+        budget.probe = null;
+        budget.probe_ctx = null;
+        budget.suspend_alloc_notify = true;
         defer {
-            eng.runtime.memory.trigger_gc_fn = saved_trigger_fn;
-            eng.runtime.memory.trigger_gc_ctx = saved_trigger_ctx;
+            budget.probe = saved_probe;
+            budget.probe_ctx = saved_probe_ctx;
+            budget.suspend_alloc_notify = saved_suspend;
         }
 
         // Property compaction may have shifted live baseline entries and shrunk
@@ -330,5 +334,5 @@ fn resetSharedEngineAfterTest(eng: *TestEngine) void {
             ) catch unreachable;
         }
     }
-    _ = eng.runtime.runObjectCycleRemoval();
+    _ = eng.runtime.collectForTest();
 }

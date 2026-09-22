@@ -101,7 +101,7 @@ const zjs = @import("zjs");
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
-    const rt = try zjs.Runtime.create(allocator, .{});
+    const rt = try zjs.Runtime.create(.{ .allocator = allocator });
     defer rt.destroy();
 
     const ctx = try zjs.Context.create(rt, .{});

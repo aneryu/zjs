@@ -31,7 +31,7 @@ src/exec/  eval_entry / call_site / object_ops / builtin_dispatch / zjs_vm
 一次最短嵌入：
 
 ```zig
-const rt = try zjs.Runtime.create(allocator, .{});
+const rt = try zjs.Runtime.create(.{ .allocator = allocator });
 defer rt.destroy();
 const ctx = try zjs.Context.create(rt, .{});
 defer ctx.destroy();

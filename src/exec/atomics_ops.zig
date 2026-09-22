@@ -672,13 +672,13 @@ pub fn atomicsUnlinkWaiter(waiter: *AtomicsWaiter) void {
 }
 
 test "foreign Atomics notify only publishes a no-allocation completion" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
 
     const key = AtomicsWaiterKey{ .offset_or_ptr = @intFromPtr(ctx) };
-    const waiter = try rt.memory.create(AtomicsWaiter);
+    const waiter = try rt.nativeAllocator().create(AtomicsWaiter);
     waiter.* = .{
         .key = key,
         .promise = core.JSValue.int32(73),
@@ -696,13 +696,13 @@ test "foreign Atomics notify only publishes a no-allocation completion" {
             self.woken = atomicsWakeWaiters(self.key, 1);
         }
     };
-    const memory_before = rt.memory.allocated_bytes;
+    const memory_before = rt.diagnostics.allocations.allocated_bytes;
     var attempt = Attempt{ .key = key };
     const thread = try std.Thread.spawn(.{}, Attempt.run, .{&attempt});
     thread.join();
 
     try std.testing.expectEqual(@as(usize, 1), attempt.woken);
-    try std.testing.expectEqual(memory_before, rt.memory.allocated_bytes);
+    try std.testing.expectEqual(memory_before, rt.diagnostics.allocations.allocated_bytes);
     try std.testing.expect(waiter.linked);
     try std.testing.expectEqual(AtomicsWaiterCompletion.notified, waiter.completion);
     try std.testing.expectEqual(@as(?i32, 73), waiter.promise.?.as(.int));
@@ -713,14 +713,14 @@ test "foreign Atomics notify only publishes a no-allocation completion" {
 }
 
 test "waitAsync finite deadline is driven by the owner host clock queue" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
     const promise = try core.Object.create(rt, core.class.ids.promise, null);
 
     const io = atomicsWaiterIo();
-    const waiter = try rt.memory.create(AtomicsWaiter);
+    const waiter = try rt.nativeAllocator().create(AtomicsWaiter);
     waiter.* = .{
         .key = .{ .offset_or_ptr = @intFromPtr(promise) },
         .promise = promise.value(),
@@ -746,7 +746,7 @@ test "waitAsync finite deadline is driven by the owner host clock queue" {
 
 test "waitAsync owner settlement OOM relinks the frozen completion outside the waiter mutex" {
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    const rt = try core.JSRuntime.create(failing_allocator.allocator(), .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = failing_allocator.allocator() });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -756,7 +756,7 @@ test "waitAsync owner settlement OOM relinks the frozen completion outside the w
     const promise = try core.Object.create(rt, core.class.ids.promise, null);
 
     const key = AtomicsWaiterKey{ .offset_or_ptr = @intFromPtr(promise) };
-    const waiter = try rt.memory.create(AtomicsWaiter);
+    const waiter = try rt.nativeAllocator().create(AtomicsWaiter);
     waiter.* = .{
         .key = key,
         .completion = .notified,
@@ -778,14 +778,14 @@ test "waitAsync owner settlement OOM relinks the frozen completion outside the w
         }
     };
     var probe = Probe{};
-    const saved_trigger = rt.memory.trigger_gc_fn;
-    const saved_trigger_context = rt.memory.trigger_gc_ctx;
+    const saved_trigger = rt.gc.heap_budget.probe;
+    const saved_trigger_context = rt.gc.heap_budget.probe_ctx;
     defer {
-        rt.memory.trigger_gc_fn = saved_trigger;
-        rt.memory.trigger_gc_ctx = saved_trigger_context;
+        rt.gc.heap_budget.probe = saved_trigger;
+        rt.gc.heap_budget.probe_ctx = saved_trigger_context;
     }
-    rt.memory.trigger_gc_fn = Probe.trigger;
-    rt.memory.trigger_gc_ctx = &probe;
+    rt.gc.heap_budget.probe = Probe.trigger;
+    rt.gc.heap_budget.probe_ctx = &probe;
     // Fill the first 4-job window (320 bytes with 8-byte JSValue) so
     // settlement growth is 8 jobs / 640 bytes and misses the small-object
     // slab. A warm 320-class pop never reaches the backing allocator, so
@@ -794,8 +794,8 @@ test "waitAsync owner settlement OOM relinks the frozen completion outside the w
     while (filler < 4) : (filler += 1) {
         try rt.job_queue.enqueuePromise(ctx, core.JSValue.int32(@intCast(filler)));
     }
-    // Fail in the backing allocator, after MemoryAccount has invoked the GC
-    // trigger. A hard MemoryAccount limit is rejected before that trigger and
+    // Fail in the backing allocator, after Runtime allocation helpers has invoked the GC
+    // trigger. A hard Runtime allocation helpers limit is rejected before that trigger and
     // therefore cannot prove that the allocation site is outside the mutex.
     failing_allocator.fail_index = failing_allocator.alloc_index;
 
@@ -807,8 +807,8 @@ test "waitAsync owner settlement OOM relinks the frozen completion outside the w
     try std.testing.expect(promise.promiseResult() == null);
 
     failing_allocator.fail_index = std.math.maxInt(usize);
-    rt.memory.trigger_gc_fn = saved_trigger;
-    rt.memory.trigger_gc_ctx = saved_trigger_context;
+    rt.gc.heap_budget.probe = saved_trigger;
+    rt.gc.heap_budget.probe_ctx = saved_trigger_context;
     try processExpiredAtomicsWaiters(ctx);
     while (rt.job_queue.jobs.len > 1) {
         var filler_job = rt.job_queue.takeFirst().?;
@@ -1128,7 +1128,7 @@ pub fn atomicsDestroyAsyncWaiter(waiter: *AtomicsWaiter) void {
     rt.assertOwnerThread();
     atomicsReleaseWaiterKey(&waiter.key);
     waiter.realm.deinit();
-    rt.memory.destroy(AtomicsWaiter, waiter);
+    rt.nativeAllocator().destroy(waiter);
 }
 
 pub fn atomicsDestroyAsyncWaiterOpaque(raw_waiter: *anyopaque) void {
@@ -1231,7 +1231,7 @@ pub fn atomicsWaitAsync(
     else
         null;
     const key = try atomicsWaiterKey(view, bytes);
-    const waiter = try ctx.runtime.memory.create(AtomicsWaiter);
+    const waiter = try ctx.runtime.nativeAllocator().create(AtomicsWaiter);
     atomicsRetainWaiterKey(key);
     waiter.* = .{
         .key = key,
@@ -1283,10 +1283,10 @@ fn traceWaitAsyncRoots(rt_opaque: *anyopaque, visitor: *core.runtime.RootVisitor
     if (count == 0) return;
 
     const extra: []core.JSValue = if (count > storage.len)
-        try rt.memory.alloc(core.JSValue, count)
+        try rt.nativeAllocator().alloc(core.JSValue, count)
     else
         &.{};
-    defer if (extra.len != 0) rt.memory.free(core.JSValue, extra);
+    defer if (extra.len != 0) rt.nativeAllocator().free(extra);
     const buf = if (extra.len != 0) extra else storage[0..count];
 
     atomics_ops.atomics_waiter_mutex.lockUncancelable(io);
@@ -1325,7 +1325,7 @@ pub fn atomicsWaitAsyncResult(ctx: *core.JSContext, is_async: bool, value: core.
 }
 
 test "atomicsWaitAsyncResult roots direct function bytecode value while creating result object" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -1349,7 +1349,7 @@ test "atomicsWaitAsyncResult roots direct function bytecode value while creating
         try std.testing.expect(stored.same(result_payload));
     }
 
-    _ = rt.runObjectCycleRemoval();
+    _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
 }
 

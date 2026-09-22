@@ -108,14 +108,14 @@ fn compareBigIntToNonBigInt(rt: *core.JSRuntime, bigint_value: core.JSValue, oth
     }
     if (numberValue(other)) |number| return try compareBigIntToNumber(rt, bigint_value, number);
     if (other.as(.boolean)) |bool_value| {
-        var rhs = try bignum.BigInt.fromIntAlloc(rt.memory.allocator, if (bool_value) 1 else 0);
+        var rhs = try bignum.BigInt.fromIntAlloc(rt.nativeAllocator(), if (bool_value) 1 else 0);
         defer rhs.deinit();
         var lhs = try cloneBigIntValue(rt, bigint_value);
         defer lhs.deinit();
         return lhs.compare(rhs);
     }
     if (other.is(.null_value)) {
-        const zero = bignum.BigInt{ .allocator = rt.memory.allocator };
+        const zero = bignum.BigInt{ .allocator = rt.nativeAllocator() };
         var lhs = try cloneBigIntValue(rt, bigint_value);
         defer lhs.deinit();
         return lhs.compare(zero);
@@ -126,13 +126,13 @@ fn compareBigIntToNonBigInt(rt: *core.JSRuntime, bigint_value: core.JSValue, oth
 
 pub fn parseStringToBigInt(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
     var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(rt.memory.allocator);
+    defer buffer.deinit(rt.nativeAllocator());
     try appendRawString(rt, &buffer, value);
     // qjs JS_StringToBigInt skips the full JS whitespace set
     // via skip_spaces — the same trimmer ToNumber uses.
     const trimmed = core.value_format.trimJsWhitespace(buffer.items);
-    if (trimmed.len == 0) return bignum.BigInt{ .allocator = rt.memory.allocator };
-    return bignum.parseAutoAlloc(rt.memory.allocator, trimmed);
+    if (trimmed.len == 0) return bignum.BigInt{ .allocator = rt.nativeAllocator() };
+    return bignum.parseAutoAlloc(rt.nativeAllocator(), trimmed);
 }
 
 fn compareBigIntToNumber(rt: *core.JSRuntime, bigint_value: core.JSValue, number: f64) !?std.math.Order {
@@ -140,7 +140,7 @@ fn compareBigIntToNumber(rt: *core.JSRuntime, bigint_value: core.JSValue, number
     if (std.math.isPositiveInf(number)) return .lt;
     if (std.math.isNegativeInf(number)) return .gt;
 
-    var rhs = try truncatedFiniteNumberToBigInt(rt.memory.allocator, number);
+    var rhs = try truncatedFiniteNumberToBigInt(rt.nativeAllocator(), number);
     defer rhs.deinit();
     var lhs = try cloneBigIntValue(rt, bigint_value);
     defer lhs.deinit();
@@ -181,7 +181,7 @@ fn truncatedFiniteNumberToBigInt(allocator: std.mem.Allocator, number: f64) !big
 
 pub fn integerNumberToBigIntValue(rt: *core.JSRuntime, number: f64) !core.JSValue {
     if (!std.math.isFinite(number) or @trunc(number) != number) return error.RangeError;
-    var bigint = try truncatedFiniteNumberToBigInt(rt.memory.allocator, number);
+    var bigint = try truncatedFiniteNumberToBigInt(rt.nativeAllocator(), number);
     defer bigint.deinit();
     return createBigIntValue(rt, bigint);
 }
@@ -253,21 +253,21 @@ pub fn unary(rt: *core.JSRuntime, op: u8, value: core.JSValue) !core.JSValue {
         switch (op) {
             bytecode.opcode.op.neg => out.negative = !out.negative and !out.isZero(),
             bytecode.opcode.op.dec, bytecode.opcode.op.post_dec => {
-                var one = try bignum.BigInt.fromIntAlloc(rt.memory.allocator, 1);
+                var one = try bignum.BigInt.fromIntAlloc(rt.nativeAllocator(), 1);
                 defer one.deinit();
-                var next = try bignum.subAlloc(rt.memory.allocator, out, one);
+                var next = try bignum.subAlloc(rt.nativeAllocator(), out, one);
                 defer next.deinit();
                 return createBigIntValue(rt, next);
             },
             bytecode.opcode.op.inc, bytecode.opcode.op.post_inc => {
-                var one = try bignum.BigInt.fromIntAlloc(rt.memory.allocator, 1);
+                var one = try bignum.BigInt.fromIntAlloc(rt.nativeAllocator(), 1);
                 defer one.deinit();
-                var next = try bignum.addAlloc(rt.memory.allocator, out, one);
+                var next = try bignum.addAlloc(rt.nativeAllocator(), out, one);
                 defer next.deinit();
                 return createBigIntValue(rt, next);
             },
             bytecode.opcode.op.not => {
-                var next = try out.bitNot(rt.memory.allocator);
+                var next = try out.bitNot(rt.nativeAllocator());
                 defer next.deinit();
                 return createBigIntValue(rt, next);
             },
@@ -305,7 +305,7 @@ pub fn unary(rt: *core.JSRuntime, op: u8, value: core.JSValue) !core.JSValue {
 pub fn toStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (try primitiveToStringValueFast(rt, value)) |fast| return fast;
     var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(rt.memory.allocator);
+    defer buffer.deinit(rt.nativeAllocator());
     try appendValueString(rt, &buffer, value);
     return createStringValue(rt, buffer.items);
 }
@@ -373,7 +373,7 @@ pub fn toNumberValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
             .utf16 => {},
         }
         var bytes = std.ArrayList(u8).empty;
-        defer bytes.deinit(rt.memory.allocator);
+        defer bytes.deinit(rt.nativeAllocator());
         try appendRawString(rt, &bytes, value);
         return numberToValue(parseJsNumber(bytes.items));
     }
@@ -399,12 +399,12 @@ pub fn asN(rt: *core.JSRuntime, bits_value: core.JSValue, bigint_value: core.JSV
         return createBigIntValue(rt, input);
     }
 
-    var reduced = try input.modPowerOfTwo(rt.memory.allocator, bits);
+    var reduced = try input.modPowerOfTwo(rt.nativeAllocator(), bits);
     defer reduced.deinit();
     if (!unsigned and reduced.testBit(bits - 1)) {
-        var modulus = try bignum.pow2(rt.memory.allocator, bits);
+        var modulus = try bignum.pow2(rt.nativeAllocator(), bits);
         defer modulus.deinit();
-        var signed = try bignum.subAlloc(rt.memory.allocator, reduced, modulus);
+        var signed = try bignum.subAlloc(rt.nativeAllocator(), reduced, modulus);
         defer signed.deinit();
         return createBigIntValue(rt, signed);
     }
@@ -445,7 +445,7 @@ fn createAsciiStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue 
 }
 
 test "createStringValue leftover noinline shares empty and ascii mint" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const empty = try createStringValue(rt, "");
@@ -516,7 +516,7 @@ pub fn toIntegerOrInfinity(rt: *core.JSRuntime, value: core.JSValue) !f64 {
     if (value.is(.undefined_value)) return std.math.nan(f64);
 
     var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(rt.memory.allocator);
+    defer buffer.deinit(rt.nativeAllocator());
     try appendValueString(rt, &buffer, value);
     return parseJsNumber(buffer.items);
 }
@@ -534,16 +534,16 @@ pub fn toIndexUsize(rt: *core.JSRuntime, value: core.JSValue) !usize {
 pub fn toBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
     if (value.isBigInt()) return cloneBigIntValue(rt, value);
     if (value.isNumber()) return error.TypeError;
-    if (value.as(.boolean)) |bool_value| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, if (bool_value) 1 else 0);
+    if (value.as(.boolean)) |bool_value| return bignum.BigInt.fromIntAlloc(rt.nativeAllocator(), if (bool_value) 1 else 0);
 
     var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(rt.memory.allocator);
+    defer buffer.deinit(rt.nativeAllocator());
     if (value.isString() or value.is(.object)) {
         try appendValueString(rt, &buffer, value);
         // qjs JS_StringToBigInt + skip_spaces.
         const trimmed = core.value_format.trimJsWhitespace(buffer.items);
-        if (trimmed.len == 0) return bignum.BigInt.fromIntAlloc(rt.memory.allocator, 0);
-        return bignum.parseAutoAlloc(rt.memory.allocator, trimmed) catch |err| switch (err) {
+        if (trimmed.len == 0) return bignum.BigInt.fromIntAlloc(rt.nativeAllocator(), 0);
+        return bignum.parseAutoAlloc(rt.nativeAllocator(), trimmed) catch |err| switch (err) {
             // qjs js_atobigint throws its RangeError through js_atof rather
             // than folding it into the bad-literal SyntaxError.
             error.BigIntTooLarge => error.BigIntTooLarge,
@@ -561,11 +561,11 @@ inline fn heapBigInt(value: core.JSValue) ?*core.bigint.BigInt {
 }
 
 pub fn bigIntFromValueBorrowed(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
-    if (value.as(.short_big_int)) |big_int| return bignum.BigInt.fromIntAlloc(rt.memory.allocator, big_int);
+    if (value.as(.short_big_int)) |big_int| return bignum.BigInt.fromIntAlloc(rt.nativeAllocator(), big_int);
     if (value.isBigInt() and value.refHeader() != null) {
         const header = value.refHeader().?;
         const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
-        return big.borrowedValue(rt.memory.allocator);
+        return big.borrowedValue(rt.nativeAllocator());
     }
     return error.TypeError;
 }
@@ -595,7 +595,7 @@ fn proxyTargetIsFunction(value: core.JSValue) bool {
 }
 
 test "function predicate recognizes every bytecode function class" {
-    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
 
     const class_ids = [_]core.ClassId{
@@ -690,7 +690,7 @@ fn binaryBigInt(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !
         owned.deinit();
     };
 
-    const allocator = rt.memory.allocator;
+    const allocator = rt.nativeAllocator();
     const out = switch (op) {
         bytecode.opcode.op.mul => try bignum.mulAlloc(allocator, lhs, rhs),
         // Propagate error.DivisionByZero / error.NegativeExponent unchanged so
@@ -725,7 +725,7 @@ fn addPositiveShortToBigInt(rt: *core.JSRuntime, value: core.JSValue, addend: bi
     const big: *core.bigint.BigInt = @alignCast(@fieldParentPtr("header", header));
     if (big.negative()) return null;
 
-    var out = try big.borrowedValue(rt.memory.allocator).cloneWithAllocator(rt.memory.allocator);
+    var out = try big.borrowedValue(rt.nativeAllocator()).cloneWithAllocator(rt.nativeAllocator());
     errdefer out.deinit();
     try out.addPositiveSmallInPlace(addend);
     return try createBigIntOwned(rt, out);
@@ -812,7 +812,7 @@ fn stringAdd(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core.JSValu
     }
     if (a.isString() and b.isString()) return stringAddStringsOwned(rt, a, b);
     var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(rt.memory.allocator);
+    defer buffer.deinit(rt.nativeAllocator());
     try appendValueString(rt, &buffer, a);
     try appendValueString(rt, &buffer, b);
     return createStringValue(rt, buffer.items);
@@ -1014,8 +1014,8 @@ fn concatFlatStringBodiesOwned(
         .latin1 => {},
     }
     // Mixed widths fall back to the slower ArrayList path.
-    var units = try std.ArrayList(u16).initCapacity(rt.memory.allocator, total_len);
-    defer units.deinit(rt.memory.allocator);
+    var units = try std.ArrayList(u16).initCapacity(rt.nativeAllocator(), total_len);
+    defer units.deinit(rt.nativeAllocator());
     try appendStringUtf16Units(rt, &units, a_string);
     try appendStringUtf16Units(rt, &units, b_string);
     return (try core.string.String.createUtf16(rt, units.items)).value();
@@ -1046,9 +1046,9 @@ fn stringObject(value: core.JSValue) ?*core.string.String {
 fn appendStringUtf16Units(rt: *core.JSRuntime, out: *std.ArrayList(u16), string: *const core.string.String) !void {
     switch (string.resolveData()) {
         .latin1 => |bytes| {
-            for (bytes) |byte| try out.append(rt.memory.allocator, byte);
+            for (bytes) |byte| try out.append(rt.nativeAllocator(), byte);
         },
-        .utf16 => |units| try out.appendSlice(rt.memory.allocator, units),
+        .utf16 => |units| try out.appendSlice(rt.nativeAllocator(), units),
     }
 }
 
@@ -1167,9 +1167,9 @@ pub fn valuesStrictEqual(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) 
     if (a.isString() and b.isString()) {
         if (a.same(b)) return true;
         var a_bytes = std.ArrayList(u8).empty;
-        defer a_bytes.deinit(rt.memory.allocator);
+        defer a_bytes.deinit(rt.nativeAllocator());
         var b_bytes = std.ArrayList(u8).empty;
-        defer b_bytes.deinit(rt.memory.allocator);
+        defer b_bytes.deinit(rt.nativeAllocator());
         try appendRawString(rt, &a_bytes, a);
         try appendRawString(rt, &b_bytes, b);
         return std.mem.eql(u8, a_bytes.items, b_bytes.items);
@@ -1180,14 +1180,13 @@ pub fn valuesStrictEqual(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) 
 /// Published under this name for exec callers; the implementation is
 /// `core.value_format.cloneBigIntValue`.
 pub fn cloneBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
-    return core.value_format.cloneBigIntValue(rt.memory.allocator, value);
+    return core.value_format.cloneBigIntValue(rt.nativeAllocator(), value);
 }
 
 /// This file's policy for the shared bare-runtime ToString owner.
 pub fn appendValueString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) AppendStringError!void {
     return core.value_string.appendValueString(rt, buffer, value, .{ .symbol = .describe });
 }
-
 
 // ----- merged from coercion_ops.zig -----
 // Primitive coercion: ToPrimitive/ToNumber/ToLength/ToUint32 helpers and wrapper extraction.
@@ -1435,7 +1434,6 @@ pub fn toNumberForDateMethod(
     }
     return toNumberValue(ctx.runtime, value);
 }
-
 
 // ----- merged from primitive_ops.zig -----
 // Native record tables and dispatch for primitive wrappers and Symbol helpers.

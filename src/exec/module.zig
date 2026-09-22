@@ -115,7 +115,7 @@ fn pendingDefinitionFromArtifact(
     var parsed = artifact.record;
     defer parsed.deinit();
 
-    var pending = core.module.PendingDefinition.init(&runtime.memory, &runtime.atoms);
+    var pending = core.module.PendingDefinition.init(runtime, &runtime.atoms);
     pending.adoptFuncObjectValueNoFail(core.JSValue.functionBytecode(&artifact.function_bytecode.header));
     errdefer pending.deinit();
 
@@ -682,7 +682,7 @@ pub fn runModuleDeclarationInstantiation(
     const function = try moduleFunctionBytecode(record);
     try object.sealModuleCaptures();
     const global = try @import("zjs_vm.zig").contextGlobal(ctx);
-    var stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.stackLimit());
+    var stack = stack_mod.Stack.init(ctx.runtime, ctx.stackLimit());
     defer stack.deinit(ctx.runtime);
     try stack.reserveAdditional(function.stack_size);
     _ = try @import("zjs_vm.zig").runWithCallEnv(.{
@@ -708,7 +708,7 @@ pub fn runModuleEvaluationStep(
     const function = try moduleFunctionBytecode(record);
     try object.sealModuleCaptures();
     const global = try @import("zjs_vm.zig").contextGlobal(ctx);
-    var stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.stackLimit());
+    var stack = stack_mod.Stack.init(ctx.runtime, ctx.stackLimit());
     defer stack.deinit(ctx.runtime);
     // A resumed TLA continuation already owns its parked stack backing.
     // runWithArgsState installs (and grows, if needed) that backing directly;
@@ -763,8 +763,8 @@ fn resolvedRequestAtomForParsed(
     const kind = syntheticKindForRequestIndex(runtime, parsed, request_index) orelse return resolved;
     if (kind == .none) return resolved;
     const resolved_name = runtime.atoms.name(resolved) orelse return error.InvalidAtom;
-    const tagged_name = try syntheticModuleRegistryName(runtime.memory.allocator, resolved_name, kind);
-    defer runtime.memory.allocator.free(tagged_name);
+    const tagged_name = try syntheticModuleRegistryName(runtime.nativeAllocator(), resolved_name, kind);
+    defer runtime.nativeAllocator().free(tagged_name);
     return runtime.internAtom(tagged_name);
 }
 
@@ -817,9 +817,9 @@ fn initializeCanonicalModuleNamespace(
     object: *core.Object,
 ) !void {
     var exports = std.ArrayList(core.Atom).empty;
-    defer exports.deinit(ctx.runtime.memory.allocator);
+    defer exports.deinit(ctx.runtime.nativeAllocator());
     var visited = std.ArrayList(*core.module.ModuleRecord).empty;
-    defer visited.deinit(ctx.runtime.memory.allocator);
+    defer visited.deinit(ctx.runtime.nativeAllocator());
     try collectCanonicalModuleNamespaceExports(
         ctx,
         record,
@@ -889,7 +889,7 @@ fn collectCanonicalModuleNamespaceExports(
     for (visited.items) |seen| {
         if (seen == record) return;
     }
-    try visited.append(ctx.runtime.memory.allocator, record);
+    try visited.append(ctx.runtime.nativeAllocator(), record);
 
     for (record.exports) |entry| {
         if (!include_default and entry.export_name == atom_default) continue;
@@ -944,7 +944,7 @@ fn appendUniqueExport(ctx: *core.JSContext, exports: *std.ArrayList(core.Atom), 
     for (exports.items) |existing| {
         if (existing == atom_id) return;
     }
-    try exports.append(ctx.runtime.memory.allocator, atom_id);
+    try exports.append(ctx.runtime.nativeAllocator(), atom_id);
 }
 
 fn atomLessThan(rt: *core.JSRuntime, lhs: core.Atom, rhs: core.Atom) bool {
@@ -996,9 +996,9 @@ fn preloadFileModuleGraphInner(
         if (parsed.syntax_error) |err| {
             const global_object = try @import("zjs_vm.zig").contextGlobal(context);
             var msg_buf = std.ArrayList(u8).empty;
-            defer msg_buf.deinit(runtime.memory.allocator);
+            defer msg_buf.deinit(runtime.nativeAllocator());
             try msg_buf.print(
-                runtime.memory.allocator,
+                runtime.nativeAllocator(),
                 "SYNTAX ERROR in {s}:{d}:{d} - {s}",
                 .{ path, err.position.line, err.position.column, err.message },
             );
@@ -1092,8 +1092,8 @@ fn preloadFileModuleGraphInner(
 pub fn throwCouldNotLoadModule(ctx: *core.JSContext, filename: []const u8) !void {
     const global_object = try @import("zjs_vm.zig").contextGlobal(ctx);
     var msg_buf = std.ArrayList(u8).empty;
-    defer msg_buf.deinit(ctx.runtime.memory.allocator);
-    try msg_buf.print(ctx.runtime.memory.allocator, "could not load module filename '{s}'", .{filename});
+    defer msg_buf.deinit(ctx.runtime.nativeAllocator());
+    try msg_buf.print(ctx.runtime.nativeAllocator(), "could not load module filename '{s}'", .{filename});
     const error_val = try exception_ops.createNamedError(ctx, global_object, "ReferenceError", msg_buf.items);
     _ = ctx.throwValue(error_val);
 }
@@ -1185,7 +1185,7 @@ fn preloadSyntheticFileModuleTracked(
     }
 
     var pending = core.module.PendingDefinition.init(
-        &runtime.memory,
+        runtime,
         &runtime.atoms,
     );
     defer pending.deinit();
@@ -1322,16 +1322,16 @@ fn resolvedRequestAtom(runtime: *core.JSRuntime, request_atom: core.Atom, referr
     const specifier = runtime.atoms.name(request_atom) orelse return error.InvalidAtom;
     if (std.mem.startsWith(u8, specifier, "node:")) return request_atom;
     if (std.fs.path.isAbsolute(specifier)) {
-        const resolved = try std.fs.path.resolve(runtime.memory.allocator, &.{specifier});
-        defer runtime.memory.allocator.free(resolved);
+        const resolved = try std.fs.path.resolve(runtime.nativeAllocator(), &.{specifier});
+        defer runtime.nativeAllocator().free(resolved);
         return runtime.internAtom(resolved);
     }
     if (!(std.mem.startsWith(u8, specifier, "./") or std.mem.startsWith(u8, specifier, "../"))) {
         return request_atom;
     }
     const base = std.fs.path.dirname(referrer) orelse ".";
-    const resolved = try std.fs.path.resolve(runtime.memory.allocator, &.{ base, specifier });
-    defer runtime.memory.allocator.free(resolved);
+    const resolved = try std.fs.path.resolve(runtime.nativeAllocator(), &.{ base, specifier });
+    defer runtime.nativeAllocator().free(resolved);
     return runtime.internAtom(resolved);
 }
 
@@ -1350,29 +1350,28 @@ pub fn importMetaUrlValue(rt: *core.JSRuntime, record: *core.module.ModuleRecord
     // the on-disk path; the URL uses the file path portion.
     const file_path = syntheticModuleFilePath(name);
     if (builtin.os.tag == .windows) {
-        const url = try std.fmt.allocPrint(rt.memory.allocator, "file://{s}", .{file_path});
-        defer rt.memory.allocator.free(url);
+        const url = try std.fmt.allocPrint(rt.nativeAllocator(), "file://{s}", .{file_path});
+        defer rt.nativeAllocator().free(url);
         return value_ops.createStringValue(rt, url);
     }
 
     const io = std.Io.Threaded.global_single_threaded.io();
     var resolved_buf: [std.fs.max_path_bytes]u8 = undefined;
     if (std.Io.Dir.cwd().realPathFile(io, file_path, &resolved_buf)) |resolved_len| {
-        const url = try std.fmt.allocPrint(rt.memory.allocator, "file://{s}", .{resolved_buf[0..resolved_len]});
-        defer rt.memory.allocator.free(url);
+        const url = try std.fmt.allocPrint(rt.nativeAllocator(), "file://{s}", .{resolved_buf[0..resolved_len]});
+        defer rt.nativeAllocator().free(url);
         return value_ops.createStringValue(rt, url);
     } else |_| {}
     // realpath failure (e.g. "<eval>" pseudo-names): keep the pre-realpath
     // behavior — absolute names still get the file:// scheme, other names are
     // returned verbatim.
     if (std.mem.startsWith(u8, file_path, "/")) {
-        const url = try std.fmt.allocPrint(rt.memory.allocator, "file://{s}", .{file_path});
-        defer rt.memory.allocator.free(url);
+        const url = try std.fmt.allocPrint(rt.nativeAllocator(), "file://{s}", .{file_path});
+        defer rt.nativeAllocator().free(url);
         return value_ops.createStringValue(rt, url);
     }
     return value_ops.createStringValue(rt, name);
 }
-
 
 // ----- merged from module_graph.zig -----
 // Host-integrated module loading, dynamic import jobs, and graph evaluation.
@@ -1515,7 +1514,7 @@ fn importLoaderTypeFromAttributes(ctx: *core.JSContext, attributes: core.JSValue
     const type_value = object.getOwnDataPropertyValue(type_atom) orelse return .none;
     if (!type_value.isString()) return .none;
     var buf = std.ArrayList(u8).empty;
-    defer buf.deinit(ctx.runtime.memory.allocator);
+    defer buf.deinit(ctx.runtime.nativeAllocator());
     exec.value_ops.appendRawString(ctx.runtime, &buf, type_value) catch return .none;
     if (std.mem.eql(u8, buf.items, "json")) return .json;
     if (std.mem.eql(u8, buf.items, "text")) return .text;
@@ -1560,17 +1559,21 @@ pub const DynamicImportState = struct {
     /// one QuickJS-style FIFO. Script-mode dynamic imports use the state-owned
     /// lists because they do not have an enclosing static module evaluator.
     pub fn runJobs(self: *DynamicImportState, facade_context: *core.JSContext) !void {
+        try self.runtime.requireOwnerThread();
         std.debug.assert(facade_context.runtime == self.runtime);
-        drainModuleJobLoop(
+        const checkpoint = &self.runtime.microtasks;
+        if (checkpoint.reporting) return error.MicrotaskReentry;
+        if (checkpoint.running or checkpoint.scope_depth != 0) return;
+        checkpoint.running = true;
+        defer checkpoint.running = false;
+        try drainModuleJobLoop(
             self.runtime,
             facade_context,
             self.output,
             self.allocator,
             self.continuationList(),
-        ) catch |err| {
-            if (facade_context.hasException() or facade_context.hasUnhandledRejection()) return;
-            return err;
-        };
+        );
+        self.runtime.clearWeakRefKeptAlive();
     }
 
     /// Announce the scheduling lists to the tracer. Called from
@@ -1745,12 +1748,12 @@ fn moduleDependencyRejection(
     defer module_name_roots.deactivate(runtime);
     const record = context.modules.find(module_name) orelse return null;
     var visited = std.ArrayList(core.Atom).empty;
-    defer visited.deinit(runtime.memory.allocator);
+    defer visited.deinit(runtime.nativeAllocator());
     // TGC S3 §4 class B: `visited` is a native []Atom grown while walking.
     var visited_roots = core.runtime.rootAtomList(&visited.items);
     visited_roots.activate(runtime);
     defer visited_roots.deactivate(runtime);
-    try visited.append(runtime.memory.allocator, module_name);
+    try visited.append(runtime.nativeAllocator(), module_name);
     return recordDependencyRejection(context, record, &visited);
 }
 
@@ -1773,7 +1776,7 @@ fn recordDependencyRejection(
             }
         }
         if (already_visited) continue;
-        try visited.append(runtime.memory.allocator, request.module_name);
+        try visited.append(runtime.nativeAllocator(), request.module_name);
         if (try recordDependencyRejection(context, dependency, visited)) |reason| return reason;
     }
     return null;
@@ -2069,10 +2072,10 @@ fn dynamicImportJobRun(
     const attributes_value = payload.attributes;
 
     var basename_bytes = std.ArrayList(u8).empty;
-    defer basename_bytes.deinit(rt.memory.allocator);
+    defer basename_bytes.deinit(rt.nativeAllocator());
     try exec.value_ops.appendRawString(rt, &basename_bytes, basename_value);
     var specifier_bytes = std.ArrayList(u8).empty;
-    defer specifier_bytes.deinit(rt.memory.allocator);
+    defer specifier_bytes.deinit(rt.nativeAllocator());
     try exec.value_ops.appendRawString(rt, &specifier_bytes, specifier_value);
 
     // Thread the load-relevant `type` attribute to the file loader through the
@@ -2149,8 +2152,8 @@ fn dynamicImportRejectionValue(
         error.OperationUnsupported => return exec.exception_ops.createNamedError(ctx, global, "TypeError", "dynamic import is not supported"),
         error.ModuleNotFound, error.FileNotFound => {
             var msg_buf = std.ArrayList(u8).empty;
-            defer msg_buf.deinit(ctx.runtime.memory.allocator);
-            try msg_buf.print(ctx.runtime.memory.allocator, "could not load module filename '{s}'", .{specifier});
+            defer msg_buf.deinit(ctx.runtime.nativeAllocator());
+            try msg_buf.print(ctx.runtime.nativeAllocator(), "could not load module filename '{s}'", .{specifier});
             return exec.exception_ops.createNamedError(ctx, global, "ReferenceError", msg_buf.items);
         },
         else => {
@@ -2192,10 +2195,7 @@ pub fn installDynamicImport(state: *DynamicImportState) !DynamicImportScope {
 fn runJobs(runtime: *core.JSRuntime, context: *core.JSContext, output: ?*std.Io.Writer) !void {
     _ = runtime;
     const global_object = try @import("zjs_vm.zig").contextGlobal(context);
-    @import("zjs_vm.zig").drainPendingPromiseJobs(context, output, global_object) catch |err| {
-        if (context.hasException() or context.hasUnhandledRejection()) return;
-        return err;
-    };
+    try @import("zjs_vm.zig").drainPendingPromiseJobs(context, output, global_object);
 }
 
 pub fn evalFileModuleGraphWithOutput(
@@ -2585,7 +2585,7 @@ fn drainModuleContinuations(
     var kept_result: core.JSValue = core.JSValue.undefinedValue();
     var has_kept_result = false;
     while (continuations.items.len != 0) {
-        switch (try drainOneScheduledModuleWork(runtime, context, output, allocator, continuations)) {
+        switch (try drainOneScheduledModuleWork(runtime, output, allocator, continuations)) {
             .stalled => if (!try drainOneModuleHostEvent(context, output)) {
                 _ = try exec.exception_ops.throwModuleHostStall(
                     context,
@@ -2613,7 +2613,7 @@ fn drainModuleContinuationsForDependencies(
     filename: []const u8,
 ) !void {
     while (try hasActiveAsyncDependency(context, continuations, filename)) {
-        switch (try drainOneScheduledModuleWork(runtime, context, output, allocator, continuations)) {
+        switch (try drainOneScheduledModuleWork(runtime, output, allocator, continuations)) {
             .stalled => if (!try drainOneModuleHostEvent(context, output)) {
                 _ = try exec.exception_ops.throwModuleHostStall(
                     context,
@@ -2640,8 +2640,9 @@ fn drainModuleJobLoop(
     continuations: *std.ArrayList(ModuleContinuation),
 ) !void {
     while (true) {
+        try jobs_mod.checkTermination(runtime);
         if (continuations.items.len != 0) {
-            switch (try drainOneScheduledModuleWork(runtime, context, output, allocator, continuations)) {
+            switch (try drainOneScheduledModuleWork(runtime, output, allocator, continuations)) {
                 .stalled => {},
                 .progressed => continue,
                 .value => continue,
@@ -2649,6 +2650,7 @@ fn drainModuleJobLoop(
         }
 
         if (try drainOneModuleQueuedOrHostJob(runtime, context, output)) continue;
+        if (!runtime.microtasks.running) runtime.clearWeakRefKeptAlive();
         return;
     }
 }
@@ -2658,14 +2660,18 @@ fn drainOneModuleQueuedOrHostJob(
     context: *core.JSContext,
     output: ?*std.Io.Writer,
 ) !bool {
-    _ = runtime;
-    const global = try exec.zjs_vm.contextGlobal(context);
-    switch (try exec.promise_ops.drainOnePendingJob(context, output, global)) {
-        .empty => {},
-        .success => return true,
-        .exception => return error.JSException,
-    }
+    // This is a host/module scheduler boundary, not a microtask primitive.
+    // Publish expired Atomics completions before timers can keep rescheduling.
+    try exec.atomics_ops.processExpiredAtomicsWaiters(context);
+    if (try runOneModuleMicrotask(runtime, output) != .empty) return true;
     return drainOneModuleHostEvent(context, output);
+}
+
+fn runOneModuleMicrotask(runtime: *core.JSRuntime, output: ?*std.Io.Writer) !jobs_mod.RunOneStatus {
+    const previous_output = runtime.microtasks.output;
+    runtime.microtasks.output = output;
+    defer runtime.microtasks.output = previous_output;
+    return jobs_mod.runCheckpointStep(runtime);
 }
 
 fn drainOneModuleHostEvent(context: *core.JSContext, output: ?*std.Io.Writer) !bool {
@@ -2726,11 +2732,11 @@ fn nextReadyModuleContinuation(continuations: *const std.ArrayList(ModuleContinu
 
 fn drainOneScheduledModuleWork(
     runtime: *core.JSRuntime,
-    context: *core.JSContext,
     output: ?*std.Io.Writer,
     allocator: std.mem.Allocator,
     continuations: *std.ArrayList(ModuleContinuation),
 ) !ModuleDrainResult {
+    try jobs_mod.checkTermination(runtime);
     // TLA resumptions alternate with the unified sequence one item at a time,
     // exactly like QuickJS promise-reaction jobs.
     for (continuations.items) |*continuation| {
@@ -2746,12 +2752,7 @@ fn drainOneScheduledModuleWork(
         return .progressed;
     }
 
-    const global_object = try exec.zjs_vm.contextGlobal(context);
-    switch (try exec.promise_ops.drainOnePendingJob(context, output, global_object)) {
-        .empty => {},
-        .success => return .progressed,
-        .exception => return error.JSException,
-    }
+    if (try runOneModuleMicrotask(runtime, output) != .empty) return .progressed;
     return .stalled;
 }
 
@@ -2984,7 +2985,7 @@ fn hasActiveAsyncDependency(
     defer module_name_roots.deactivate(runtime);
     const record = context.modules.find(module_name) orelse return false;
     var visited = std.ArrayList(core.Atom).empty;
-    defer visited.deinit(runtime.memory.allocator);
+    defer visited.deinit(runtime.nativeAllocator());
     // TGC S3 §4 class B: `visited` is a native []Atom grown while walking.
     var visited_roots = core.runtime.rootAtomList(&visited.items);
     visited_roots.activate(runtime);
@@ -3003,7 +3004,7 @@ fn recordHasActiveAsyncDependency(
     for (visited.items) |seen| {
         if (seen == record.module_name) return false;
     }
-    try visited.append(runtime.memory.allocator, record.module_name);
+    try visited.append(runtime.nativeAllocator(), record.module_name);
     for (record.requests) |request| {
         const request_name = runtime.atoms.name(request.module_name) orelse continue;
         for (continuations.items) |continuation| {
@@ -3226,13 +3227,12 @@ fn throwCachedModuleEvalException(
     runtime: *core.JSRuntime,
     context: *core.JSContext,
     record: *core.module.ModuleRecord,
-) error{JSException}
-{
-_ = runtime;
-if (record.eval_exception) |exception| {
-_ = context.throwValue(exception);
-}
-return error.JSException;
+) error{JSException} {
+    _ = runtime;
+    if (record.eval_exception) |exception| {
+        _ = context.throwValue(exception);
+    }
+    return error.JSException;
 }
 pub fn throwModuleLinkError(
     runtime: *core.JSRuntime,
@@ -3243,19 +3243,19 @@ pub fn throwModuleLinkError(
 ) !void {
     const global_object = try exec.zjs_vm.contextGlobal(context);
     var msg_buf = std.ArrayList(u8).empty;
-    defer msg_buf.deinit(runtime.memory.allocator);
+    defer msg_buf.deinit(runtime.nativeAllocator());
     var formatted_diagnostic = false;
     if (diagnostic) |info| if (info.kind) |kind| {
         const export_name = runtime.atoms.name(info.export_name) orelse "";
         const in_module = runtime.atoms.name(info.module_name) orelse "";
         switch (kind) {
-            .missing_export => try msg_buf.print(runtime.memory.allocator, "Could not find export '{s}' in module '{s}'", .{ export_name, in_module }),
-            .ambiguous_export => try msg_buf.print(runtime.memory.allocator, "export '{s}' in module '{s}' is ambiguous", .{ export_name, in_module }),
+            .missing_export => try msg_buf.print(runtime.nativeAllocator(), "Could not find export '{s}' in module '{s}'", .{ export_name, in_module }),
+            .ambiguous_export => try msg_buf.print(runtime.nativeAllocator(), "export '{s}' in module '{s}' is ambiguous", .{ export_name, in_module }),
         }
         formatted_diagnostic = true;
     };
     if (!formatted_diagnostic) {
-        try msg_buf.print(runtime.memory.allocator, "could not link module '{s}': {s}", .{ filename, @errorName(err) });
+        try msg_buf.print(runtime.nativeAllocator(), "could not link module '{s}': {s}", .{ filename, @errorName(err) });
     }
     const error_val = try exception_ops.createNamedError(context, global_object, "SyntaxError", msg_buf.items);
     _ = context.throwValue(error_val);
@@ -3512,10 +3512,10 @@ fn preloadFileModuleGraphWithHostHooksInner(
     var parsed = try parser.compile(.{ .realm = context }, source_text, .{ .mode = .module, .filename = path });
     defer parsed.deinit();
     if (parsed.syntax_error) |err| {
-            const global_object = try exec.zjs_vm.contextGlobal(context);
+        const global_object = try exec.zjs_vm.contextGlobal(context);
         var msg_buf = std.ArrayList(u8).empty;
-        defer msg_buf.deinit(runtime.memory.allocator);
-        try msg_buf.print(runtime.memory.allocator, "SYNTAX ERROR in {s}:{d}:{d} - {s}", .{ path, err.position.line, err.position.column, err.message });
+        defer msg_buf.deinit(runtime.nativeAllocator());
+        try msg_buf.print(runtime.nativeAllocator(), "SYNTAX ERROR in {s}:{d}:{d} - {s}", .{ path, err.position.line, err.position.column, err.message });
         const error_val = try exception_ops.createNamedError(context, global_object, "SyntaxError", msg_buf.items);
         _ = context.throwValue(error_val);
         return error.SyntaxError;

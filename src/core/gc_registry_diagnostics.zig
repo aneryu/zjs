@@ -35,6 +35,7 @@ const CollectionError = gc.CollectionError;
 const CollectionResult = gc.CollectionResult;
 const PauseDistribution = gc.PauseDistribution;
 const Stats = gc.Stats;
+const DetailedStats = gc.DetailedStats;
 const pause_sample_capacity = gc.pause_sample_capacity;
 const heapByteSizeFromHeader = Registry.heapByteSizeFromHeader;
 const verifyCircularHeaderList = registry_lists.verifyCircularHeaderList;
@@ -95,6 +96,7 @@ pub const HeapSpaceSnapshot = struct {
 /// lifecycle slots are the accounting authority, and each header's real
 /// allocation size is classified against the current immutable policy.
 fn deriveHeapSpaceSnapshot(self: *const Registry, rt: *const JSRuntime) HeapSpaceSnapshot {
+    gc.noteHeapWalk();
     var derived: HeapSpaceSnapshot = .{};
     var iterator = self.heapAccountingIterator();
     while (iterator.next()) |header| {
@@ -111,54 +113,49 @@ fn deriveHeapSpaceSnapshot(self: *const Registry, rt: *const JSRuntime) HeapSpac
     return derived;
 }
 
-pub fn statsSnapshot(self: *const Registry, rt: *const JSRuntime) Stats {
-    const snapshot = self.*;
-    // Walk the Registry's accounting containers, not the by-value
-    // snapshot: nodes' links point at live sentinels, not copied headers.
+pub fn counterSnapshot(self: *const Registry, rt: *const JSRuntime) Stats {
+    return .{
+        .peak_allocated_bytes = if (@import("alloc_trace.zig").enabled) rt.diagnostics.allocations.peak_allocated_bytes + @sizeOf(JSRuntime) else 0,
+        .external_bytes = self.stats.external_bytes,
+        .external_untracked_bytes = self.stats.external_untracked_bytes,
+        .peak_external_bytes = self.stats.peak_external_bytes,
+        .external_alloc_count = self.stats.external_alloc_count,
+        .external_free_count = self.stats.external_free_count,
+        .external_token_count = self.external.count(),
+        .external_token_bytes = self.external.totalBytes(),
+        .external_invalid_release_count = self.stats.external_invalid_release_count,
+        .allocation_debt = self.stats.allocation_debt,
+        .collections = self.stats.collections,
+        .major_gc_count = self.stats.cycle_gc_count,
+        .major_gc_time_ns = self.stats.cycle_gc_time_ns,
+        .last_collection_time_ns = self.stats.last_collection_time_ns,
+        .major_phase = self.scheduler.major_phase,
+        .failed_collections = self.stats.failed_collections,
+        .last_failure = self.stats.last_failure,
+        .freed_objects = self.stats.freed_objects,
+        .pinned_cell_count = self.pins.count(),
+        .gc_request_count = self.stats.gc_request_count,
+        .pending_major = self.scheduler.major_request != null,
+        .pending_request_reason = if (self.scheduler.major_request) |request| request.reason else null,
+        .pending_request_urgency = if (self.scheduler.major_request) |request| request.urgency else null,
+        .last_request_reason = self.stats.last_request_reason,
+    };
+}
+
+pub fn statsSnapshot(self: *const Registry, rt: *const JSRuntime) DetailedStats {
     const heap = deriveHeapSpaceSnapshot(self, rt);
     return .{
-        .total_allocated_bytes = heap.heap_live_bytes,
-        // The account's real high-water, not live again. This field
-        // printed `live` for its whole history, which is why the §1.3
-        // peak/live rows had no instrument: peak == live == allocated on
-        // every panel ever captured. Whole-account rather than heap-only,
-        // which errs on the reporting-more side.
-        .peak_allocated_bytes = rt.memory.peak_allocated_bytes,
+        .counters = self.counterSnapshot(rt),
         .heap_live_bytes = heap.heap_live_bytes,
         .old_live_bytes = heap.old_live_bytes,
         .large_object_bytes = heap.large_object_bytes,
-        .old_allocated_bytes = heap.old_live_bytes,
-        .old_alloc_count = heap.old_count,
-        .large_allocated_bytes = heap.large_object_bytes,
-        .large_alloc_count = heap.large_count,
-        .external_bytes = snapshot.stats.external_bytes,
-        .external_untracked_bytes = snapshot.stats.external_untracked_bytes,
-        .peak_external_bytes = snapshot.stats.peak_external_bytes,
-        .external_alloc_count = snapshot.stats.external_alloc_count,
-        .external_free_count = snapshot.stats.external_free_count,
-        .external_token_count = snapshot.external.count(),
-        .external_token_bytes = snapshot.external.totalBytes(),
-        .external_invalid_release_count = snapshot.stats.external_invalid_release_count,
-        .allocation_debt = snapshot.stats.allocation_debt,
-        .collections = snapshot.stats.collections,
-        .major_gc_count = snapshot.stats.cycle_gc_count,
-        .major_gc_time_ns = snapshot.stats.cycle_gc_time_ns,
-        .last_collection_time_ns = snapshot.stats.last_collection_time_ns,
-        .major_phase = snapshot.scheduler.major_phase,
-        .failed_collections = snapshot.stats.failed_collections,
-        .last_failure = snapshot.stats.last_failure,
-        .freed_objects = snapshot.stats.freed_objects,
-        .pinned_cell_count = snapshot.pins.count(),
-        .gc_request_count = snapshot.stats.gc_request_count,
-        .pending_major = snapshot.scheduler.major_request != null,
-        .pending_request_reason = if (snapshot.scheduler.major_request) |request| request.reason else null,
-        .pending_request_urgency = if (snapshot.scheduler.major_request) |request| request.urgency else null,
-        .last_request_reason = snapshot.stats.last_request_reason,
+        .old_count = heap.old_count,
+        .large_count = heap.large_count,
     };
 }
 
 /// Register a freshly allocated header whose prefix and intrusive links are
-/// already initialized. Typed MemoryAccount allocations plus their owning
+/// already initialized. Typed Runtime allocation helpers allocations plus their owning
 /// constructors provide this invariant, avoiding duplicate hot-path stores.
 /// Cross-module representation audit for Object's direct property pointer
 /// and allocation-layout marker. This is deliberately a whole-heap audit,
@@ -658,10 +655,10 @@ pub fn verifyMajorRetirementCommit(self: *Registry) InvariantError!void {
 
 pub fn verifyHeapAccounting(self: *const Registry, rt: *JSRuntime) InvariantError!void {
     if (comptime carrier.audit_enabled) {
-        self.memory.gc_extent_identity.verify() catch return error.CarrierOldNewMismatch;
+        self.runtime.gc.cell_storage.extent_identity.verify() catch return error.CarrierOldNewMismatch;
     }
     if (comptime carrier.audit_enabled) {
-        self.memory.gc_extent_lifecycle.verify() catch return error.CarrierOldNewMismatch;
+        self.runtime.gc.cell_storage.extent_lifecycle.verify() catch return error.CarrierOldNewMismatch;
     }
     if (comptime carrier.audit_enabled) {
         self.block_heap.verifyGenerationAuthority() catch return error.CarrierOldNewMismatch;
@@ -765,7 +762,7 @@ pub fn verifyHeapAccounting(self: *const Registry, rt: *JSRuntime) InvariantErro
 
         // new extent authority -> independent raw
         if (comptime carrier.audit_enabled) {
-            var extent_it = self.memory.gc_extent_identity.records.valueIterator();
+            var extent_it = self.runtime.gc.cell_storage.extent_identity.records.valueIterator();
             while (extent_it.next()) |record| {
                 const raw = oracle.raw.get(record.base) orelse return error.CarrierRawOwnedMismatch;
                 if (raw.generation != record.generation) return error.CarrierGenerationMismatch;
@@ -775,7 +772,7 @@ pub fn verifyHeapAccounting(self: *const Registry, rt: *JSRuntime) InvariantErro
             }
         }
         if (comptime carrier.audit_enabled) {
-            var lifecycle_it = self.memory.gc_extent_lifecycle.records.iterator();
+            var lifecycle_it = self.runtime.gc.cell_storage.extent_lifecycle.records.iterator();
             while (lifecycle_it.next()) |entry| {
                 const raw = oracle.raw.get(entry.key_ptr.*) orelse return error.CarrierRawOwnedMismatch;
                 if (raw.published and raw.accounted_bytes != entry.value_ptr.accounted_bytes) {
@@ -810,6 +807,7 @@ pub fn verifyHeapAccounting(self: *const Registry, rt: *JSRuntime) InvariantErro
 /// The hot alloc/free paths keep no live-object counter (qjs
 /// add_gc_object/remove_gc_object are pure list splices).
 pub fn liveCount(self: *const Registry) usize {
+    gc.noteHeapWalk();
     var count: usize = 0;
     var iterator = self.objectIterator(.all);
     while (iterator.next()) |_| count += 1;
@@ -817,6 +815,7 @@ pub fn liveCount(self: *const Registry) usize {
 }
 
 pub fn liveCountKind(self: *const Registry, kind: GcKind) usize {
+    gc.noteHeapWalk();
     var count: usize = 0;
     var iterator = self.objectIterator(.all);
     while (iterator.next()) |header| {

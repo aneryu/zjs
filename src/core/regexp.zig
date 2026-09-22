@@ -21,13 +21,13 @@ const regexp_lib = @import("../libs/regexp.zig");
 const JSRuntime = @import("runtime.zig").JSRuntime;
 
 /// The runtime as the regexp library's host: its native-stack guard for the
-/// pattern compiler (qjs `lre_check_stack_overflow`) and, when an interrupt
-/// handler is installed, its interrupt poll as the executor's timeout check.
+/// pattern compiler and its interrupt poll as the executor's timeout check.
+/// The timeout check stays installed for cross-thread termination requests.
 pub fn libraryHost(rt: *JSRuntime) regexp_lib.Host {
     return .{
         .context = rt,
         .checkStackOverflow = checkRuntimeStackOverflow,
-        .checkTimeout = if (rt.hasInterruptHandler()) checkRuntimeTimeout else null,
+        .checkTimeout = checkRuntimeTimeout,
     };
 }
 

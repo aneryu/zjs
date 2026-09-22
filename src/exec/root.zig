@@ -85,14 +85,14 @@ pub const Vm = struct {
     pub fn init(ctx: *core.JSContext) Vm {
         return .{
             .ctx = ctx,
-            .stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.stackLimit()),
+            .stack = stack_mod.Stack.init(ctx.runtime, ctx.stackLimit()),
         };
     }
 
     pub fn initWithOutput(ctx: *core.JSContext, output: *std.Io.Writer) Vm {
         return .{
             .ctx = ctx,
-            .stack = stack_mod.Stack.init(&ctx.runtime.memory, ctx.stackLimit()),
+            .stack = stack_mod.Stack.init(ctx.runtime, ctx.stackLimit()),
             .output = output,
         };
     }
@@ -103,7 +103,7 @@ pub const Vm = struct {
         for (owned_globals) |*slot| {
             slot.value = core.JSValue.undefinedValue();
         }
-        if (owned_globals.len != 0) self.ctx.runtime.memory.free(globals_mod.Slot, owned_globals);
+        if (owned_globals.len != 0) self.ctx.runtime.nativeAllocator().free(owned_globals);
         self.global_object = null;
         self.stack.deinit(self.ctx.runtime);
     }

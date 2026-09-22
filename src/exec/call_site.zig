@@ -301,6 +301,32 @@ pub inline fn callOnceInto(
     caller_frame: ?*frame_mod.Frame,
     out: *JSValue,
 ) HostError!void {
+    const rt = ctx.runtime;
+    const outermost = rt.hot.call_depth == 0 and rt.hot.native_call_depth == 0 and rt.active_invocation == null;
+    try callOnceIntoInternal(ctx, output, global, this_value, callee, args, caller_function, caller_frame, out);
+    if (outermost) {
+        const slices = [_]core.runtime.ValueRootSlice{.{ .borrowed = @as([*]JSValue, @ptrCast(out))[0..1] }};
+        var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+        roots.activate(rt);
+        defer roots.deactivate(rt);
+        const previous_output = rt.microtasks.output;
+        rt.microtasks.output = output;
+        defer rt.microtasks.output = previous_output;
+        try rt.runAutomaticMicrotasks();
+    }
+}
+
+inline fn callOnceIntoInternal(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    this_value: JSValue,
+    callee: JSValue,
+    args: []const JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+    out: *JSValue,
+) HostError!void {
     try exception_ops.pollInterrupt(ctx, global);
     if (inline_calls.activeInvocation(ctx.runtime)) |active| {
         // Nested host -> JS from inside a running callback: the callee is
@@ -496,7 +522,6 @@ inline fn resolveRoute(
     return .{ .bytecode = route };
 }
 
-
 // ----- merged from host_invocation.zig -----
 // Resident host invocation (P4, native-boundary plan): the execution root
 // the embedder's `JSContext.callFunction` reuses across calls.
@@ -574,10 +599,10 @@ pub const HostInvocation = struct {
     one_shot_simple: bool = false,
 
     pub fn create(rt: *core.JSRuntime, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !*HostInvocation {
-        const self = try rt.memory.create(HostInvocation);
+        const self = try rt.nativeAllocator().create(HostInvocation);
         self.* = .{
             .idle_frame = .{ .function = &host_idle_function },
-            .idle_stack = stack_mod.Stack.init(&rt.memory, 0),
+            .idle_stack = stack_mod.Stack.init(rt, 0),
             .l0 = undefined,
             .machine = undefined,
             .root_view = undefined,
@@ -615,7 +640,7 @@ pub const HostInvocation = struct {
         self.one_shot_pin.deinit();
         self.machine.deinitStorage(rt);
         self.idle_stack.deinit(rt);
-        rt.memory.destroy(HostInvocation, self);
+        rt.nativeAllocator().destroy(self);
     }
 
     /// Runtime-owned singleton, created on first use.
