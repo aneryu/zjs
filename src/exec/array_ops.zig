@@ -670,7 +670,9 @@ pub fn typedArrayConstructorPrototypeVm(
     const prototype_value = try getValueProperty(ctx, output, global, constructor, core.atom.ids.prototype, caller_function, caller_frame);
     if (prototype_value.is(.object)) return .{ .value = prototype_value };
     const constructor_name = typedArrayNameFromKind(function_object.typedArrayKind()) orelse return object_ops.OwnedPrototype.fromObject(null);
-    const realm = function_object.nativeFunctionRealm() orelse return error.InvalidBuiltinRegistry;
+    // The intrinsic kind comes from the TypedArray constructor, but its
+    // fallback prototype belongs to newTarget's Realm (including proxies).
+    const realm = try call_runtime.functionRealmContext(ctx, constructor);
     const class_id = object_ops.constructorClassPrototypeId(constructor_name) orelse return object_ops.OwnedPrototype.fromObject(null);
     return object_ops.OwnedPrototype.fromObject(realm.classPrototypeObject(class_id) orelse return error.InvalidBuiltinRegistry);
 }
