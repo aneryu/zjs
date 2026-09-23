@@ -242,7 +242,7 @@
 
 - **签名**：`noinline fn allocClassPayload(rt: *JSRuntime, payload_kind: class.PayloadKind) !class.Payload`。
 - **作用**：分配需显式管理的class payload默认实例。
-- **实现**：iterator/collection/buffer/typed_array/weak_ref/finalization_registry/std_file/realm_record分别createRuntime并赋.{}。generator另分配默认GeneratorExecutionState并挂payload.execution，第二次分配失败用errdefer释放payload；function及tracer-owned/none种类unreachable。
+- **实现**：iterator/collection/buffer/typed_array/weak_ref/finalization_registry/realm_record分别createRuntime并赋.{}。generator另分配默认GeneratorExecutionState并挂payload.execution，第二次分配失败用errdefer释放payload；function及tracer-owned/none种类unreachable。
 - **所有权 / 错误 / 调用**：不是所有分支都只有一笔分配；默认状态不等于资源已打开或完全业务初始化。失败不返回payload，generator回滚只需释放当时默认空payload。
 
 ### `freeClassPayloadAllocation` (`src/core/object.zig:2047`)

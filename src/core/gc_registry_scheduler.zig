@@ -21,7 +21,6 @@ const Request = gc.Request;
 const RequestReason = gc.RequestReason;
 const RequestUrgency = gc.RequestUrgency;
 const SchedulerPoint = gc.SchedulerPoint;
-const PressureRequest = gc.PressureRequest;
 
 pub const Scheduler = struct {
     policy: Policy = .{},
@@ -38,22 +37,6 @@ pub const Scheduler = struct {
     /// `context_head == null` teardown invariant once the tracer rather than
     /// refcounting owns object lifetime.
     host_quiescent: bool = false,
-
-    pub fn processMemoryRequest(self: Scheduler, rss_bytes: usize, cgroup_limit_bytes: usize) ?PressureRequest {
-        if (self.policy.rss_hard_limit) |limit| {
-            if (rss_bytes >= limit) return .{ .reason = .rss_pressure, .urgency = .urgent };
-        }
-        if (self.policy.cgroup_hard_ratio_per_mille != 0 and cgroup_limit_bytes != 0 and gc.ratioPerMille(rss_bytes, cgroup_limit_bytes) >= self.policy.cgroup_hard_ratio_per_mille) {
-            return .{ .reason = .rss_pressure, .urgency = .urgent };
-        }
-        if (self.policy.rss_soft_limit) |limit| {
-            if (rss_bytes >= limit) return .{ .reason = .rss_pressure, .urgency = .soon };
-        }
-        if (self.policy.cgroup_soft_ratio_per_mille != 0 and cgroup_limit_bytes != 0 and gc.ratioPerMille(rss_bytes, cgroup_limit_bytes) >= self.policy.cgroup_soft_ratio_per_mille) {
-            return .{ .reason = .rss_pressure, .urgency = .soon };
-        }
-        return null;
-    }
 
     /// Latch a major request, or strengthen the one already latched.
     pub fn request(self: *Scheduler, reason: RequestReason, urgency: RequestUrgency) void {

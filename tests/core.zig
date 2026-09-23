@@ -1,13 +1,10 @@
 //! Integration tests for runtime lifecycle, GC, and core heap contracts.
 const mem_ops = @import("zjs").core.memory;
 const std = @import("std");
-const builtin = @import("builtin");
 const zjs = @import("zjs");
 const engine = zjs;
 const core = zjs.core;
 const helpers = @import("harness.zig");
-
-extern "c" fn tmpfile() ?*std.c.FILE;
 
 const ModuleAutoInitFixture = struct {
     owner: core.property.AutoInitModuleOwner = .{ .resolve = resolve },
@@ -2981,7 +2978,7 @@ test "production embedding can inspect arrays and indexed values" {
     try std.testing.expectError(error.TypeError, ctx.isArray(revoked));
 }
 
-test "ordinary runtime stats do not walk the heap or read process memory" {
+test "ordinary runtime stats do not walk the heap" {
     const rt = try zjs.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
     const ctx = try zjs.JSContext.create(rt, .{});
@@ -2989,11 +2986,9 @@ test "ordinary runtime stats do not walk the heap or read process memory" {
     const object = try ctx.eval("({})", .{});
     try std.testing.expect(object.is(.object));
     const walks_before = core.gc.heap_walks_for_test;
-    const reads_before = core.runtime.process_memory.process_memory_reads_for_test;
     const usage = rt.memoryUsage();
     const stats = rt.gcStats();
     try std.testing.expectEqual(walks_before, core.gc.heap_walks_for_test);
-    try std.testing.expectEqual(reads_before, core.runtime.process_memory.process_memory_reads_for_test);
     try std.testing.expect(usage.allocated_bytes > 0);
     try std.testing.expectEqual(usage.peak_allocated_bytes, stats.peak_allocated_bytes);
     try std.testing.expectEqual(@as(usize, 0), stats.external_bytes);
@@ -3002,12 +2997,6 @@ test "ordinary runtime stats do not walk the heap or read process memory" {
     try std.testing.expect(detailed.heap_live_bytes > 0);
     try std.testing.expectEqual(stats.external_bytes, detailed.counters.external_bytes);
     try std.testing.expectEqual(stats.peak_allocated_bytes, detailed.counters.peak_allocated_bytes);
-    if (builtin.os.tag == .linux) {
-        try std.testing.expect(core.runtime.process_memory.process_memory_reads_for_test > reads_before);
-        try std.testing.expect(detailed.rss_bytes > 0);
-    } else {
-        try std.testing.expectEqual(reads_before, core.runtime.process_memory.process_memory_reads_for_test);
-    }
 }
 
 fn countTraceMarker(haystack: []const u8, needle: []const u8) usize {

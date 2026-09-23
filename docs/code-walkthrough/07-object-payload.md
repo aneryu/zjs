@@ -774,27 +774,6 @@ iterator / Map-Set / FinalizationRegistry / ArrayBuffer / TypedArray / RegExp / 
 - **实现**：断言 FR class，以 ValueRootFrame 包住三个输入值；取得 target/token identity 后登记 borrowed holder（配 errdefer 撤销），确保 cells 容量，再扩有效长度、retain 两个非空 identity，并预留一个 cleanup job 槽。安装 cell 后对 held_value 做 owner 屏障返回。原先末尾还有一次重复的 registerBorrowedReferenceHolder（cell 已装好、屏障已打之后），既无 errdefer 覆盖也无新增效果，已删除。
 - **所有权 / 错误 / 调用**：错误按已到达的步骤归还 job 预留槽和 identity retain、恢复有效长度，并撤销本次新加的 holder。已扩大的容量及先前创建的 weak identity 不在这些 errdefer 中撤销。根帧列出的是三个输入值，不含 self；调用方负责 registry 的存活及参数语义验证。target/token 不作为 cell 的强边。retain/releaseWeakIdentity 对 object identity 无操作，仅 symbol atom 维护弱引用计数。
 
-### `Object.stdFileSlot` (`src/core/object.zig:3649`)
-
-- **签名**：`pub fn stdFileSlot(self: *Object) *?*std.c.FILE`。
-- **作用**：借用 payload 的 file 可变字段槽。
-- **实现**：stdFilePayload() 成功则返回字段地址，否则断言相应 kind 后 unreachable。
-- **所有权 / 错误 / 调用**：不创建 payload。直接写槽不会自动执行写屏障、释放旧资源或维护其他状态，调用方负责相关协议。
-
-### `Object.stdFileIsPopenSlot` (`src/core/object.zig:3655`)
-
-- **签名**：`pub fn stdFileIsPopenSlot(self: *Object) *bool`。
-- **作用**：借用 payload 的 is_popen 可变字段槽。
-- **实现**：stdFilePayload() 成功则返回字段地址，否则断言相应 kind 后 unreachable。
-- **所有权 / 错误 / 调用**：不创建 payload。直接写槽不会自动执行写屏障、释放旧资源或维护其他状态，调用方负责相关协议。
-
-### `Object.stdFileIsStdioSlot` (`src/core/object.zig:3661`)
-
-- **签名**：`pub fn stdFileIsStdioSlot(self: *Object) *bool`。
-- **作用**：借用 payload 的 is_stdio 可变字段槽。
-- **实现**：stdFilePayload() 成功则返回字段地址，否则断言相应 kind 后 unreachable。
-- **所有权 / 错误 / 调用**：不创建 payload。直接写槽不会自动执行写屏障、释放旧资源或维护其他状态，调用方负责相关协议。
-
 ### `Object.disposableStackDisposedSlot` (`src/core/object.zig:3667`)
 
 - **签名**：`pub fn disposableStackDisposedSlot(self: *Object) *bool`。
@@ -2209,20 +2188,6 @@ iterator / Map-Set / FinalizationRegistry / ArrayBuffer / TypedArray / RegExp / 
 - **作用**：查询 weak holder link 的 next 指针。
 - **实现**：weakReferenceHolderLinkConst 缺失返回 null，否则返回对应字段。
 - **所有权 / 错误 / 调用**：不验证邻居反向链或 registered 状态，不遍历整个链表。
-
-### `Object.stdFilePayload` (`src/core/object.zig:6479`)
-
-- **签名**：`fn stdFilePayload(self: *Object) ?*StdFilePayload`。
-- **作用**：按 kind 借用 StdFilePayload。
-- **实现**：kind 非 std_file 或 payloadArm 为空返回 null，否则转换指针。
-- **所有权 / 错误 / 调用**：不检查文件是否打开或关闭文件，也不创建 payload。
-
-### `Object.destroyStdFilePayload` (`src/core/object.zig:6485`)
-
-- **签名**：`fn destroyStdFilePayload(self: *Object, rt: *JSRuntime) void`。
-- **作用**：销毁 std_file payload 及分配。
-- **实现**：无 payload 返回；先清 arm 和 kind，再 payload.destroy()，最后 memory.destroy(StdFilePayload)。
-- **所有权 / 错误 / 调用**：此 helper 本身不 enqueue deferred close，payload.destroy() 也只把三个字段复位为默认值、并不关闭 FILE*；真正的关闭由析构路径更早的 enqueueDeferredStdFileClose 负责。不销毁 Object。
 
 ### `Object.disposableStackPayload` (`src/core/object.zig:6493`)
 

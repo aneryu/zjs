@@ -2313,7 +2313,6 @@ fn printClassName(s: *State, class_id: core.class.ClassId) Error!void {
         core.class.ids.dom_exception => "DOMException",
         core.class.ids.call_site => "CallSite",
         core.class.ids.raw_json => "RawJSON",
-        core.class.ids.std_file => "FILE",
         core.class.ids.disposable_stack => "DisposableStack",
         core.class.ids.async_disposable_stack => "AsyncDisposableStack",
         else => return s.puts("<null>"),

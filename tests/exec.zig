@@ -14,6 +14,7 @@ const object_ops = zjs.exec.object_ops;
 const array_ops = zjs.exec.array_ops;
 const frame_mod = zjs.exec.frame;
 const inline_calls = zjs.exec.inline_calls;
+const vm_call = zjs.exec.vm_opcodes;
 
 test "dense parameter arrays rest keeps contiguous storage and independent values" {
     const js = helpers.sharedTestEngine();
@@ -3030,6 +3031,73 @@ test "tail-frame reuse charges planned stack bytes and fully restores both budge
     try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
     try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
     try std.testing.expectEqual(baseline_tail_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+}
+
+test "exact-simple method admission respects aggregate stack byte budget" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    _ = try js.eval(
+        \\globalThis.__stackBudgetEntries = 0;
+        \\globalThis.__stackBudgetReceiver = {
+        \\  recurse(n) {
+        \\    let a=0,b=1,c=2,d=3,e=4,f=5,g=6,h=7;
+        \\    __stackBudgetEntries++;
+        \\    if (n === 0) return a+b+c+d+e+f+g+h;
+        \\    return this.recurse(n - 1) + 1;
+        \\  }
+        \\};
+    );
+
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const rt = js.runtime;
+    const receiver_name = try rt.internAtom("__stackBudgetReceiver");
+    const receiver = try global.getProperty(receiver_name);
+    const receiver_object = try property_ops.expectObject(receiver);
+    const method_name = try rt.internAtom("recurse");
+    const method = try receiver_object.getProperty(method_name);
+    const resolved = inline_calls.resolveInlineFunction(global, method) orelse
+        return error.InvalidFunctionBytecode;
+    try std.testing.expect(resolved.call_facts.execution.simple_inline_eligible);
+    try std.testing.expect(!resolved.fb.simpleInlineEmptyLeaf());
+
+    const planned_bytes = vm_call.bytecodeFrameAllocaSize(resolved.fb, 1, false);
+    try std.testing.expect(planned_bytes > 1);
+    const stack_budget = planned_bytes * 4 - 1;
+    const old_stack_size = rt.stackSize();
+    const old_native_stack_size = rt.nativeStackSize();
+    defer {
+        rt.setStackSize(old_stack_size);
+        rt.setNativeStackSize(old_native_stack_size);
+    }
+    rt.setStackSize(stack_budget);
+    rt.setNativeStackSize(0);
+
+    // The host entry plus two recursive frames fit. Those recursive pushes
+    // warm the Machine entry chunk and VM arena, so the next exact-simple
+    // probe crosses the aggregate byte budget while logical depth is still
+    // far below stack_budget. It must miss so the authoritative path can
+    // raise StackOverflow.
+    try std.testing.expectError(
+        error.StackOverflow,
+        engine.exec.call_runtime.callValueOrBytecodeRoot(
+            js.context,
+            null,
+            global,
+            receiver,
+            method,
+            &.{core.JSValue.int32(10)},
+            null,
+            null,
+        ),
+    );
+
+    const entries_name = try rt.internAtom("__stackBudgetEntries");
+    const entries = try global.getProperty(entries_name);
+    try std.testing.expectEqual(@as(?i32, 3), entries.as(.int));
+    try std.testing.expectEqual(@as(usize, 0), rt.hot.call_depth);
+    try std.testing.expectEqual(@as(usize, 0), rt.hot.native_call_depth);
+    try std.testing.expectEqual(@as(usize, 0), rt.hot.active_bytecode_stack_bytes);
 }
 
 test "raw tail call opcodes share the bounded tail-chain stack contract" {

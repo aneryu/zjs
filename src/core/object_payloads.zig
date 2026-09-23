@@ -753,27 +753,6 @@ pub const FinalizationRegistryPayload = struct {
     }
 };
 
-pub const StdFilePayload = struct {
-    file: ?*std.c.FILE = null,
-    is_popen: bool = false,
-    is_stdio: bool = false,
-
-    pub fn destroy(self: *StdFilePayload) void {
-        self.* = .{};
-    }
-
-    pub const gc_edges: gc_visit.Edges = .{};
-
-    comptime {
-        gc_visit.assertClassified(@This());
-    }
-
-    pub fn traceChildEdges(self: *const StdFilePayload, visitor: anytype) !void {
-        try gc_visit.traceDeclared(self, visitor);
-        // FILE* host handle; no cycle-GC child edges.
-    }
-};
-
 pub const DisposableResourceKind = enum(u8) {
     use,
     adopt,

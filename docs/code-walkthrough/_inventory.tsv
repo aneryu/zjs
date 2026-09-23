@@ -1342,7 +1342,6 @@ src/core/gc.zig	156	pub	inline	mCutInjection
 src/core/gc.zig	171	priv		read
 src/core/gc.zig	180	priv		enabled
 src/core/gc.zig	187	priv		readStressFromEnv
-src/core/gc.zig	419	pub	inline	needsProcessMemorySnapshot
 src/core/gc.zig	432	pub		release
 src/core/gc.zig	442	pub		deinit
 src/core/gc.zig	492	pub	inline	kindIsBlockCellKind
@@ -1373,7 +1372,6 @@ src/core/gc.zig	1783	pub		reportExternalFreeUntracked
 src/core/gc.zig	1791	priv		releaseExternalToken
 src/core/gc.zig	1810	pub		externalMemoryRequestReason
 src/core/gc.zig	1821	pub		externalMemoryRequestUrgency
-src/core/gc.zig	1828	pub		processMemoryRequest
 src/core/gc.zig	1834	pub		requestGC
 src/core/gc.zig	1840	pub		hasPendingMajorRequest
 src/core/gc.zig	1844	pub		resetAllocationDebt
@@ -1874,7 +1872,6 @@ src/core/gc_registry_pins.zig	90	pub		addConstructionRoot
 src/core/gc_registry_pins.zig	96	pub		removeConstructionRoot
 src/core/gc_registry_pins.zig	103	pub		firstConstructionRoot
 src/core/gc_registry_pins.zig	110	pub		isConstructionRoot
-src/core/gc_registry_scheduler.zig	42	pub		processMemoryRequest
 src/core/gc_registry_scheduler.zig	59	pub		request
 src/core/gc_registry_scheduler.zig	79	pub		hasPendingMajorRequest
 src/core/gc_registry_scheduler.zig	83	pub		pendingMajorRequest
@@ -2480,7 +2477,6 @@ src/core/object.zig	2585	pub		setCachedRealmValue
 src/core/object.zig	2604	pub		setRealmRegExpLegacySlot
 src/core/object.zig	2612	pub		cachedRealmValue
 src/core/object.zig	2617	pub		cachedThrowTypeErrorIntrinsic
-src/core/object.zig	2621	priv		enqueueDeferredStdFileClose
 src/core/object.zig	2639	priv		owesFinalizerWork
 src/core/object.zig	2663	priv		auditNeedsFinalizerBit
 src/core/object.zig	2699	pub		destroyFromHeader
@@ -2566,9 +2562,6 @@ src/core/object.zig	3439	pub		pendingFinalizationCellCountForTest
 src/core/object.zig	3449	pub		unregisterFinalizationRegistryCells
 src/core/object.zig	3477	pub		ensureFinalizationRegistryCellCapacity
 src/core/object.zig	3481	pub		appendFinalizationRegistryCell
-src/core/object.zig	3535	pub		stdFileSlot
-src/core/object.zig	3539	pub		stdFileIsPopenSlot
-src/core/object.zig	3543	pub		stdFileIsStdioSlot
 src/core/object.zig	3547	pub		disposableStackDisposedSlot
 src/core/object.zig	3551	pub		disposableStackDisposed
 src/core/object.zig	3556	pub		appendDisposableResource
@@ -2940,8 +2933,6 @@ src/core/object.zig	6267	pub		weakReferenceHolderLink
 src/core/object.zig	6274	pub		weakReferenceHolderLinkConst
 src/core/object.zig	6281	pub		weakReferenceHolderPrevious
 src/core/object.zig	6286	pub		weakReferenceHolderNext
-src/core/object.zig	6291	priv		stdFilePayload
-src/core/object.zig	6295	priv		destroyStdFilePayload
 src/core/object.zig	6303	priv		disposableStackPayload
 src/core/object.zig	6307	priv		disposableStackPayloadConst
 src/core/object.zig	6311	priv		globalPayload
@@ -3352,8 +3343,6 @@ src/core/regexp.zig	236	pub		isCharacterClassEscape
 src/core/regexp.zig	242	priv		characterClassEscapeUnitMatches
 src/core/regexp.zig	258	pub		consumeUnicodePropertyEscape
 src/core/runtime.zig	44	priv		run
-src/core/runtime.zig	52	pub		closeStdFileHandle
-src/core/runtime.zig	61	pub		enqueueDeferredStdFileClose
 src/core/runtime.zig	112	pub		restore
 src/core/runtime.zig	119	pub		deinit
 src/core/runtime.zig	146	pub		setDefaultStandardGlobalsInstaller
@@ -3565,14 +3554,7 @@ src/core/runtime.zig	3702	pub		allocationDebtBytes
 src/core/runtime.zig	3713	pub		gcPauseDistribution
 src/core/runtime.zig	3717	pub		gcStats
 src/core/runtime.zig	3732	pub		ownsObject
-src/core/runtime.zig	3750	priv	inline	requestGCForProcessMemoryPressure
-src/core/runtime.zig	3755	priv	noinline	requestGCForProcessMemoryPressureSlow
 src/core/runtime.zig	3763	priv		weakReferenceCount
-src/core/runtime.zig	3779	priv		currentRssBytes
-src/core/runtime.zig	3789	priv		cgroupLimitBytes
-src/core/runtime.zig	3801	priv		readLinuxFile
-src/core/runtime.zig	3811	priv		firstToken
-src/core/runtime.zig	3816	priv		parseUnsignedToken
 src/core/runtime.zig	3821	priv	inline	prospectiveAllocationTotal
 src/core/runtime.zig	3830	priv	inline	requestGCForAllocationTotal
 src/core/runtime.zig	3864	pub	inline	requestGCForAllocation

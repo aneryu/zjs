@@ -2197,13 +2197,17 @@ pub const Machine = struct {
             @as(usize, function.var_ref_count) * @sizeOf(*core.VarRef);
 
         const rt = self.ctx.runtime;
-        // qjs:17837 first — predicate only. Use the caller's frame address
-        // (the handler, ≅ JS_CallInternal) so this leaf does not need its
-        // own `@frameAddress()` / x29. Overflow still throws only on Slow.
-        if (rt.hot.call_depth >= rt.hot.stack_size) return null;
+        // qjs:17837 is a predicate-only check. Check logical depth and the
+        // aggregate VM-byte budget together; the physical native guard uses
+        // the caller's frame address so this leaf needs no own @frameAddress.
         const base = rt.hot.active_bytecode_stack_bytes;
         const accumulated = base +% planned_stack_bytes;
-        if (accumulated < base) return null;
+        if (vm_call.callBudgetWouldOverflow(
+            &rt.hot,
+            rt.hot.call_depth,
+            accumulated,
+            planned_stack_bytes,
+        )) return null;
         const sp = caller_fp -| planned_stack_bytes;
         if (sp < rt.hot.native_stack_limit) return null;
 

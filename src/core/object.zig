@@ -138,7 +138,6 @@ pub const ObjectDataPayload = object_payloads.ObjectDataPayload;
 pub const WeakRefPayload = object_payloads.WeakRefPayload;
 pub const VarRefPayload = object_payloads.VarRefPayload;
 pub const FinalizationRegistryPayload = object_payloads.FinalizationRegistryPayload;
-pub const StdFilePayload = object_payloads.StdFilePayload;
 pub const DisposableResourceKind = object_payloads.DisposableResourceKind;
 pub const DisposalHint = object_payloads.DisposalHint;
 pub const DisposableMethodKind = object_payloads.DisposableMethodKind;
@@ -198,11 +197,6 @@ pub fn destroyDetachedClassPayload(rt: *JSRuntime, class_id: class.ClassId, payl
             const typed: *FinalizationRegistryPayload = @ptrCast(@alignCast(ptr));
             typed.destroy(rt);
             mem_ops.destroy(rt, FinalizationRegistryPayload, typed);
-        },
-        .std_file => {
-            const typed: *StdFilePayload = @ptrCast(@alignCast(ptr));
-            typed.destroy();
-            mem_ops.destroy(rt, StdFilePayload, typed);
         },
         .realm_record => {
             const typed: *RealmRecordPayload = @ptrCast(@alignCast(ptr));
@@ -1852,7 +1846,6 @@ pub const Object = extern struct {
             .buffer,
             .typed_array,
             .finalization_registry,
-            .std_file,
             .realm_record,
             .weak_ref,
             => false,
@@ -2058,11 +2051,6 @@ pub const Object = extern struct {
                 payload.* = .{};
                 return @ptrCast(payload);
             },
-            .std_file => {
-                const payload = try rt.createRuntime(StdFilePayload);
-                payload.* = .{};
-                return @ptrCast(payload);
-            },
             .realm_record => {
                 const payload = try rt.createRuntime(RealmRecordPayload);
                 payload.* = .{};
@@ -2117,7 +2105,6 @@ pub const Object = extern struct {
             },
             .function => mem_ops.destroy(rt, FunctionPayload, @ptrCast(@alignCast(ptr))),
             .finalization_registry => mem_ops.destroy(rt, FinalizationRegistryPayload, @ptrCast(@alignCast(ptr))),
-            .std_file => mem_ops.destroy(rt, StdFilePayload, @ptrCast(@alignCast(ptr))),
             .disposable_stack => {},
             .realm_record => rt.destroyRuntime(RealmRecordPayload, @ptrCast(@alignCast(ptr))),
             .none, .ordinary, .promise_reaction_record, .global => {},
@@ -2645,15 +2632,6 @@ pub const Object = extern struct {
         return self.cachedRealmValue(rt, .throw_type_error_intrinsic);
     }
 
-    fn enqueueDeferredStdFileClose(self: *Object, rt: *JSRuntime) void {
-        const payload = self.stdFilePayload() orelse return;
-        const file = payload.file orelse return;
-        if (payload.is_stdio) return;
-        payload.file = null;
-
-        runtime_mod.enqueueDeferredStdFileClose(rt, file, payload.is_popen);
-    }
-
     // ===== destroy / teardown =====
 
     /// TGC S4-d spec 2.4/§6: does this object, RIGHT NOW, owe destructor work?
@@ -2782,15 +2760,14 @@ pub const Object = extern struct {
         // -> return`, so the ~every-object destroy keeps the test inline and
         // never pays the outlined call.
         if (self.flags.is_borrowed_reference_holder) rt.unregisterBorrowedReferenceHolder(self);
-        // qjs free_object keeps no borrowed-ref / std-file side tables, so the
-        // plain-object hot free path must not call into either scan. Hoist each
+        // qjs free_object keeps no borrowed-ref side table, so the plain-object
+        // hot free path must not call into that scan. Hoist its
         // helper's own entry guard to the call site: an object with no realm-
-        // global borrowed identity (is_global, false for ~every object) and no
-        // .std_file payload skips BOTH calls — the helpers keep their internal
-        // guards for the rare live-resource path. (borrowed guard already no-ops
+        // global borrowed identity (is_global, false for ~every object) skips
+        // the call — the helper keeps its internal guard for the rare live
+        // resource path. (borrowed guard already no-ops
         // for non-global; pure dispatch-shape change, zero behavioral risk.)
         if (self.isGlobal() and rt.borrowed_reference_holders.items.len != 0) clearBorrowedReferencesForDestroyedObject(rt, self);
-        if (self.flags.class_payload_kind == .std_file) self.enqueueDeferredStdFileClose(rt);
         // TGC S4-b: see the fast arm -- the storage cell is swept, not freed.
         self.setPropertyStorageEmptyForDestroy();
         rt.shapes.dropUnshared(self.shape_ref);
@@ -2837,7 +2814,6 @@ pub const Object = extern struct {
             .buffer => self.destroyBufferPayload(rt),
             .typed_array => self.destroyTypedArrayPayload(rt),
             .finalization_registry => self.destroyFinalizationRegistryPayload(rt),
-            .std_file => self.destroyStdFilePayload(rt),
             .realm_record => self.destroyRealmRecordPayload(rt),
             else => unreachable,
         };
@@ -3551,18 +3527,6 @@ pub const Object = extern struct {
         // after the first minor is an old-to-young store, and the sticky mark on
         // the registry stops the trace before `visitFinalizationCell` runs.
         rt.gc.generationalBarrier(self.gcHeader(), rooted_held_value.cycleMarkHeader());
-    }
-
-    pub fn stdFileSlot(self: *Object) *?*std.c.FILE {
-        return &payloadPresent(self.stdFilePayload()).file;
-    }
-
-    pub fn stdFileIsPopenSlot(self: *Object) *bool {
-        return &payloadPresent(self.stdFilePayload()).is_popen;
-    }
-
-    pub fn stdFileIsStdioSlot(self: *Object) *bool {
-        return &payloadPresent(self.stdFilePayload()).is_stdio;
     }
 
     pub fn disposableStackDisposedSlot(self: *Object) *bool {
@@ -6141,7 +6105,6 @@ pub const Object = extern struct {
             .collection => CollectionPayload,
             .finalization_registry => FinalizationRegistryPayload,
             .weak_ref => WeakRefPayload,
-            .std_file => StdFilePayload,
             .disposable_stack => DisposableStackPayload,
             .global => GlobalPayload,
             .buffer => BufferPayload,
@@ -6298,18 +6261,6 @@ pub const Object = extern struct {
     pub fn weakReferenceHolderNext(self: *const Object) ?*Object {
         const link = self.weakReferenceHolderLinkConst() orelse return null;
         return link.next;
-    }
-
-    fn stdFilePayload(self: *Object) ?*StdFilePayload {
-        return self.payloadOf(.std_file);
-    }
-
-    fn destroyStdFilePayload(self: *Object, rt: *JSRuntime) void {
-        const payload = self.stdFilePayload() orelse return;
-        self.payloadArm().* = null;
-        self.flags.class_payload_kind = .none;
-        payload.destroy();
-        mem_ops.destroy(rt, StdFilePayload, payload);
     }
 
     fn disposableStackPayload(self: *Object) ?*DisposableStackPayload {
@@ -6754,7 +6705,7 @@ pub const Object = extern struct {
                 Helper.backing(recorder, @intFromPtr(payload.entries.items.ptr), payload.entries.capacity, payload.entries.items.len, @sizeOf(CollectionEntry));
                 Helper.backing(recorder, @intFromPtr(payload.weak_entries.items.ptr), payload.weak_entries.capacity, payload.weak_entries.items.len, @sizeOf(WeakCollectionEntry));
             },
-            .buffer, .regexp, .weak_ref, .std_file => {}, // trace methods have no strong-edge loads
+            .buffer, .regexp, .weak_ref => {}, // trace methods have no strong-edge loads
             .typed_array => if (self.typedArrayPayloadConst()) |payload| {
                 Helper.allocation(recorder, .trace_payload, @intFromPtr(payload), @sizeOf(TypedArrayPayload), @sizeOf(TypedArrayPayload));
             },
@@ -7098,9 +7049,6 @@ pub const Object = extern struct {
             try payload.traceChildEdges(visitor);
         }
         if (self.weakRefPayload()) |payload| {
-            try payload.traceChildEdges(visitor);
-        }
-        if (self.stdFilePayload()) |payload| {
             try payload.traceChildEdges(visitor);
         }
         const Adaptor = ClassPayloadTraceAdaptor(@TypeOf(visitor));
@@ -11767,7 +11715,6 @@ test "leaf noncarrier payloads carry no borrowed realm compensation" {
     try std.testing.expect(!@hasField(BufferPayload, "realm_global_ptr"));
     try std.testing.expect(!@hasField(ArgumentsPayload, "realm_global_ptr"));
     try std.testing.expect(!@hasField(VarRefPayload, "realm_global_ptr"));
-    try std.testing.expect(!@hasField(StdFilePayload, "realm_global_ptr"));
     try std.testing.expectEqual(class.PayloadKind.none, class.standardPayloadKind(class.ids.module_ns));
     try std.testing.expect(!@hasField(PromisePayload, "realm_global_ptr"));
     try std.testing.expect(!@hasField(WeakRefPayload, "realm_global_ptr"));

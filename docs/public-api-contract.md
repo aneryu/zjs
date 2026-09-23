@@ -88,9 +88,8 @@ hidden:
   estimate object, shape, or module sizes from a count times a fixed width.
 - `zjs.GCStats` and `zjs.GCDetailedStats` are root exports.
   `Runtime.gcStats()` reads maintained counters only: it does not walk the
-  heap and it does not read process memory. `Runtime.gcDetailedStats()`
-  adds one heap census and a process sample. Heap live bytes, external
-  token bytes, and RSS stay separate. Ordinary `weak_ref_count` counts
+  heap. `Runtime.gcDetailedStats()` adds one heap census. Heap live bytes and
+  external token bytes stay separate. Ordinary `weak_ref_count` counts
   host weak-root slots; the detailed snapshot also counts
   weak-collection and FinalizationRegistry cells.
 - `zjs.JSRuntime` / `JSContext` / `JSValue` are aliases of `Runtime` /
@@ -133,7 +132,7 @@ injection; it is not a production native-memory limit or a second heap budget.
 `memoryUsage().heap_bytes` reports the maintained published-heap budget.
 `allocation_tracking_enabled` distinguishes available native/mixed allocation
 diagnostics from unavailable counters (zero in builds without instrumentation).
-Heap bytes, external pressure and process RSS are separate quantities. Cycle
+Heap bytes and external pressure are separate quantities. Cycle
 peak diagnostics now use the same heap-budget domain as the GC threshold.
 
 `Runtime` owns allocator-backed engine state, atom tables, GC state, public
@@ -144,7 +143,7 @@ census used by `--gc-mark-footprint`. That census stays off the GC registry
 so the registry's hot words keep their front-line placement.
 `Runtime.setMemoryLimit` / `memoryUsage().memory_limit` cap the JS heap
 budget (published non-nursery cells). They do not cap ordinary native
-allocations, external token bytes, or RSS. A charge that does not fit
+allocations or external token bytes. A charge that does not fit
 collects at most once, then rechecks the current limit (including changes made by reentrant cleanup) and fails if it still does not fit. Ordinary
 native allocation does not collect. `Runtime.gcThreshold` is the
 collector's growth bar for that same budget. The profiling

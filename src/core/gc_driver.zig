@@ -197,10 +197,6 @@ pub fn continuePoll(
         .safepoint => .safepoint,
         .urgent => .urgent,
     };
-    switch (scheduler_point) {
-        .allocation_slow_path, .idle, .urgent => self.requestGCForProcessMemoryPressure(),
-        .callback_boundary, .safepoint => {},
-    }
     const over_collection_threshold = over_threshold;
     const run_major = self.gc.scheduler.shouldRunMajorAt(scheduler_point, over_collection_threshold);
     if (!run_major) return .{};

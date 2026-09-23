@@ -68,9 +68,9 @@ Array 的 dense 值、count、capacity、可见 length 在 `ObjectStorage.array`
 
 `ClassId = u16`；`invalid_class_id=0`。id 进程全局；定义每 Runtime 独立。`MutationError = error{WrongRuntimeThread}`。
 
-`ids`：object=1 … global_object=68，`init_count=69`。与 `standard_classes` 表、`standardPayloadKind` 一起构成 ObjectStorage 分发矩阵。
+`ids`：object=1 … global_object=68，数值槽 65 保留给已删除的 stdio 类，`init_count=69`。与 `standard_classes` 表、`standardPayloadKind` 一起构成 ObjectStorage 分发矩阵。
 
-`PayloadKind`（u5）：none/ordinary/arguments/object_data/function/bound_function/var_ref/generator/promise/proxy/regexp/iterator/collection/buffer/typed_array/finalization_registry/std_file/disposable_stack/global/realm_record/weak_ref/promise_reaction_record。
+`PayloadKind`（u5）：none/ordinary/arguments/object_data/function/bound_function/var_ref/generator/promise/proxy/regexp/iterator/collection/buffer/typed_array/finalization_registry/disposable_stack/global/realm_record/weak_ref/promise_reaction_record。
 
 `Definition`：注册输入（名字、payload_kind、finalizer/mark、exotic、`native_type`…）。
 

@@ -11,15 +11,8 @@
 
 - **签名**：`pub fn destroyDetachedClassPayload(rt: *JSRuntime, class_id: class.ClassId, payload_kind: class.PayloadKind, payload: *class.Payload) void`。
 - **作用**：断开payload指针并清理需要显式析构的外部payload。
-- **实现**：payload为空返回，否则保存ptr并先置原槽null。tracer-owned或none分类直接返回；iterator先releaseIteratorCollectionCursor，再typed.destroy(rt)和memory.destroy；collection/finalization_registry/buffer/typed_array/weak_ref/generator同样destroy(rt)后memory.destroy；std_file调用destroy()后memory.destroy，realm_record调用destroy()后rt.destroyRuntime，function调用destroyNative(rt)后memory.destroy。
+- **实现**：payload为空返回，否则保存ptr并先置原槽null。tracer-owned或none分类直接返回；iterator先releaseIteratorCollectionCursor，再typed.destroy(rt)和memory.destroy；collection/finalization_registry/buffer/typed_array/weak_ref/generator同样destroy(rt)后memory.destroy；realm_record调用destroy()后rt.destroyRuntime，function调用destroyNative(rt)后memory.destroy。
 - **所有权 / 错误 / 调用**：tracer-owned分类只断开引用，不逐字段清空或手动释放cell；inline promise/regexp也在该提前返回分类。其它分支要求payload_kind/class_id与实际存储匹配，先置null防重入重复销毁；无可恢复错误返回，不意味着任意指针/kind组合安全。
-
-### `Object.enqueueDeferredStdFileClose` (`src/core/object.zig:2636`)
-
-- **签名**：`fn enqueueDeferredStdFileClose(self: *Object, rt: *JSRuntime) void`。
-- **作用**：将非stdio文件从payload移交延后关闭流程。
-- **实现**：无stdFilePayload、file为空或is_stdio时返回；其它先payload.file=null，再runtime.enqueueDeferredStdFileClose(rt,file,is_popen)。
-- **所有权 / 错误 / 调用**：本函数不直接执行close，先断开字段避免再次提交；是否排队或其它处理由runtime helper决定。
 
 ### `Object.owesFinalizerWork` (`src/core/object.zig:2654`)
 
@@ -46,7 +39,7 @@
 
 - **签名**：`noinline fn destroyFromHeaderSlow(rt: *JSRuntime, header: *gc.Header) void`。
 - **作用**：按资源、登记、原始存储顺序完成对象析构。
-- **实现**：先置finalizing，保存class与destructionPlan并计算accounted尺寸。注销weak holder和borrowed holder，global按需清借用引用，std_file提交延后关闭；清property存储、dropUnshared旧Shape并换成finalizingShape，刷新摘要。需要class payload finalizer时先执行它；再清iterator缓存，按剩余payload kind析构资源，移除weak identity，unregisterObjectWithBytes，freeObjectAllocation，最后releaseObjectDefinition。
+- **实现**：先置finalizing，保存class与destructionPlan并计算accounted尺寸。注销weak holder和borrowed holder，global按需清借用引用；清property存储、dropUnshared旧Shape并换成finalizingShape，刷新摘要。需要class payload finalizer时先执行它；再清iterator缓存，按剩余payload kind析构资源，移除weak identity，unregisterObjectWithBytes，freeObjectAllocation，最后releaseObjectDefinition。
 - **所有权 / 错误 / 调用**：不是只摘链或延后保留weak husk，原始存储本次释放。class callback观察到属性已清空、Shape为tombstone，但对象尚未完成GC撤账；helper未做重入早退。GC管理的property/array/payload cell不逐一手动free，资源载体另走显式析构；class定义保护直到对象存储释放后才归还。
 
 ### `Object.finalizeClassPayload` (`src/core/object.zig:2873`)
@@ -222,7 +215,7 @@
 - **签名**：`pub fn recordTraceStorageFootprint(self: *const Object, rt: *const JSRuntime, recorder: anytype) void`。
 - **作用**：向 recorder 报告对象追踪所用存储的分类、容量与模型触达范围。
 - **实现**：先按 ordinary/no-payload、bytecode、fast-array、exotic 分类；记录含 metadata 的 Object 与 Shape，exact summary 时 Shape touched 不含属性描述符 FAM。非空属性表按 capacity/count 记录并报告 inline candidate；dense arm 按 JSValue 容量/有效项计量。字节码函数记录 capture backing 和可选 aux 后返回；其他 kind 分派记录 payload 及指定 backing。
-- **所有权 / 错误 / 调用**：这是统计模型，不执行 mark，也不是实测内存读取或完整分配账本。全局 iterator-next 表只要非空便在每次调用报告，是否去重由 recorder 决定；零 live backing 被跳过。buffer/regexp/weak_ref/std_file 分支不另记 payload，不可据此断言无强边：RegExp 实际追踪 source/compiled_bytecode 字符串。builtin Promise 的 payload 已计入 body，故只另记 reactions。generator 总记录 execution 全分配，非 running_aliases 时再计未合并 stack/frame，避免把 combined backing 重计；async_queue 单独记录。
+- **所有权 / 错误 / 调用**：这是统计模型，不执行 mark，也不是实测内存读取或完整分配账本。全局 iterator-next 表只要非空便在每次调用报告，是否去重由 recorder 决定；零 live backing 被跳过。buffer/regexp/weak_ref 分支不另记 payload，不可据此断言无强边：RegExp 实际追踪 source/compiled_bytecode 字符串。builtin Promise 的 payload 已计入 body，故只另记 reactions。generator 总记录 execution 全分配，非 running_aliases 时再计未合并 stack/frame，避免把 combined backing 重计；async_queue 单独记录。
 
 ### `recordTraceStorageFootprint.Helper.allocation` (`src/core/object.zig:6861`)
 

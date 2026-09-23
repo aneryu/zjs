@@ -14,14 +14,14 @@ Z-GE Registry：发布、barrier、mark 访问器、分代、地址登记、exte
 文件级配置与类型补充（按当前实现）：
 
 - 调度常量：`minor_young_threshold=16384`、`minor_crossing_young_floor=1024`，判断的是不含owned storage的trigger census；stress分支另读完整population。`minor_hot_publish_superblock_budget=8`约束一次minor发布hot blocks所访问的superblock数，不是最多8个对象。`incremental_mark_budget_ns=1000000`是单次mark预算，非完整GC暂停的硬上限；`incremental_assist_interval_bytes=512*1024`用于分配助推节奏。`small_heap_major_headroom_bytes=16384*96=1572864`是小堆major分配余量下限。
-- `Policy`默认large阈值8 KiB、native cleanup每片8 jobs、external weight 8、major debt阈值64 MiB；external/RSS软硬限制均null，cgroup两项千分比均0。它保存阈值，具体调度与OS快照判断由对应函数使用；当前结构没有mode字段。
+- `Policy`默认large阈值8 KiB、native cleanup每片8 jobs、external weight 8、major debt阈值64 MiB；external软硬限制均null。它保存阈值，具体调度由对应函数使用；当前结构没有mode字段。
 - `Phase`为none/tracer_destroy/deinit；`MajorPhase`为idle/mark_roots/sweep。前者是Registry销毁阶段，后者是对外major阶段表示，不能当同一状态机。`SchedulerPoint`枚举allocation_slow_path/callback_boundary/idle/safepoint/urgent。
-- `RequestReason`含manual、allocation_threshold、allocation_debt、external_memory、rss_pressure、collection_failed；urgency仅soon/urgent。`Request`默认pending=false、reason=null、urgency=soon，`PressureRequest`要求明确reason及urgency；是否合并或替换请求由Scheduler实现。
+- `RequestReason`含manual、allocation_threshold、allocation_debt、external_memory、collection_failed；urgency仅soon/urgent。`Request`保存reason及urgency，是否合并或替换请求由Scheduler实现。
 - `ExternalTokenEntry`是id/bytes两个默认0字段；`ExternalMemoryToken`另持Registry指针。`PinEntry`持header与默认0的count；maxInt(usize)被用作construction sentinel，不能据旧注释保证普通pin的饱和加法永远到不了该值。pins模块负责登记与解释。
 - `RefKind`/`GcKind`是同一u4枚举，按顺序0..12为object、function_bytecode、var_ref、realm_context、module、shape、string、big_int、property_storage、array_storage、payload、rope、string_buffer；`gc_kind_count=13`。`AllocationCarrier`的两个分类和`representation_kind_catalog`描述允许的载体能力，具体cell/slab/extent路线仍由allocator决定。
 - identity、generation、lifecycle等类型和开关转出自gc_carrier；`ResolvedExact`与`ResolvedCurrentMember`目前都只有tracing指针分支，但其解析保证不同。`MarkStack`转出自gc_mark_queue；pins/lists/scheduler/heap/diagnostics等别名不另实现算法。
 - 诊断开关是进程模块全局：stress默认false、cadence默认64；minor/atom fatal、verify_minor、verify_major_all、arena_audit默认false，verify_minor_verbose默认roots_diag_enabled。`UnbarrieredStoreSite`有property overwrite、dense append、global lexical replace三个枚举及对应三项命中数组。环境变量解析由每次Registry.init触发，不是进程once初始化，未出现的值可保留此前设置。
-- `pause_sample_capacity=128`，不是旧注释所称可容纳约880轮的全部历史。`PauseDistribution`给出samples/p50/p95/p99/max；空样本由诊断API返回null。`GeStats`保存累计集合/失败/释放、外部账、请求、阈值分支和析构计数，以及128项major pause环；不应把累计pause_sample_count等同环中保留项数。`Stats`是诊断快照类型，汇总账本、heap/OS、major阶段、pin/weak/finalizer队列与request状态，字段默认0/false/null不代表快照已采集。
+- `pause_sample_capacity=128`，不是旧注释所称可容纳约880轮的全部历史。`PauseDistribution`给出samples/p50/p95/p99/max；空样本由诊断API返回null。`GeStats`保存累计集合/失败/释放、外部账、请求、阈值分支和析构计数，以及128项major pause环；不应把累计pause_sample_count等同环中保留项数。`Stats`是诊断快照类型，汇总账本、heap、major阶段、pin/weak/finalizer队列与request状态，字段默认0/false/null不代表快照已采集。
 - `HotWords`为extern struct；Registry的hot字段align(64)。编译期保证hot在offset0、phase在HotWords offset0、gate完整落于前64字节且Registry对齐至少64。此前RC热路径的历史性能注释不证明当前JSValue release读取phase；当前屏障通过gate使用此布局。
 - Registry组合MemoryAccount借用指针、live lists、block heap、generation/incremental/marking、地址表、可选nonblock Object authority与slab指针、pins、external、morgue和scheduler；尾部是stats/histogram。oracle仅对应审计开关启用，普通构建字段为void。内部保存self相关指针后要求Registry地址稳定；默认字段初始化不替代initLists与serveObjectCells等运行时接线。
 
@@ -45,13 +45,6 @@ Z-GE Registry：发布、barrier、mark 访问器、分代、地址登记、exte
 - **作用**：读取诊断环境变量并更新模块全局配置。
 - **实现**：存在MINOR_AUDIT/ARENA_AUDIT/VERIFY_MINOR变量时按非空且非0启用，fatal单独精确匹配；ATOM_AUDIT只取fatal。VERIFY_MINOR verbose为roots_diag_enabled或文本verbose。MAJOR_ALL仅roots_diag构建读取；测试突变变量仅test读取。STRESS缺失、空或0直接返回；其它文本先将stress_collect置true，再尝试解析i32，只有>1才写cadence。
 - **所有权 / 错误 / 调用**：不是幂等重置：缺失变量保留旧全局值，STRESS=0也不清已true的stress_collect；1、负数或解析失败不复位已有cadence。Registry.init调用，不是进程范围once锁；多runtime共享开关，不能写成每个runtime独立配置。
-
-### `Policy.needsProcessMemorySnapshot` (`src/core/gc.zig:391`)
-
-- **签名**：`pub inline fn needsProcessMemorySnapshot(self: Policy) bool`。
-- **作用**：判断策略是否需要OS级内存快照输入。
-- **实现**：rss_soft_limit或rss_hard_limit非null，或任一cgroup soft/hard ratio非0，则true。
-- **所有权 / 错误 / 调用**：不读取OS或检查是否超过限额；external soft/hard仅依赖内部计数，不触发此条件，也不按策略模式名称判断。
 
 ### `ExternalMemoryToken.release` (`src/core/gc.zig:404`)
 
@@ -274,13 +267,6 @@ MetadataSemanticState仅有registry_published和construction_block_object，选�
 - **作用**：按外部硬限额判断请求紧急程度。
 - **实现**：硬限额存在且external_bytes>=limit返回urgent，否则soon。
 - **所有权 / 错误 / 调用**：即使当前没有请求原因也会返回soon；只提供优先级，不判断是否应该请求，不因allocation_debt单独变urgent。
-
-### `Registry.processMemoryRequest` (`src/core/gc.zig:1804`)
-
-- **签名**：`pub fn processMemoryRequest(self: Registry, rss_bytes: usize, cgroup_limit_bytes: usize) ?PressureRequest`。
-- **作用**：把进程内存输入交给scheduler策略生成可选请求。
-- **实现**：返回scheduler.processMemoryRequest(rss_bytes,cgroup_limit_bytes)。
-- **所有权 / 错误 / 调用**：不自行读OS、更新输入或requestGC；策略优先级和零值处理由scheduler实现，返回null是无请求。
 
 ### `Registry.requestGC` (`src/core/gc.zig:1810`)
 
@@ -1573,16 +1559,9 @@ Ledger 不保存账户指针：数组由传入 MemoryAccount 分配，set 使用
 
 Scheduler 保存 major 收集策略与一个请求槽。policy 初始为 gc.Policy 默认值；major_phase 初始 idle，major_reason 初始 null，major_request 初始无请求。请求槽最多保留一个合并后的请求，不是 FIFO；活动周期状态与待处理请求相互独立。
 
-MajorPhase 包括 idle、mark_roots、sweep；SchedulerPoint 包括 allocation_slow_path、callback_boundary、idle、safepoint、urgent。Request 保存 pending、可空 reason 和 soon/urgent 紧急程度；压力计算返回不带 pending 字段的 PressureRequest。它们的定义在 gc.zig，本模块使用别名。此处不触碰堆或执行 collector，各方法也不自行验证 runtime 是否处于安全收集边界。
+MajorPhase 包括 idle、mark_roots、sweep；SchedulerPoint 包括 allocation_slow_path、callback_boundary、idle、safepoint、urgent。Request 保存 reason 和 soon/urgent 紧急程度。它们的定义在 gc.zig，本模块使用别名。此处不触碰堆或执行 collector，各方法也不自行验证 runtime 是否处于安全收集边界。
 
 host_quiescent 初始 false，由 runtime teardown 协议设置，声明宿主已释放句柄且没有 mutator frame，可采用精确根扫描。它不由本文件的方法自动推导。major_phase 与 Registry.hot.phase 也是不同状态，不能把本模块的阶段赋值当作实际暂停或析构已完成。
-
-### `Scheduler.processMemoryRequest` (`src/core/gc_registry_scheduler.zig:42`)
-
-- **签名**：`pub fn processMemoryRequest(self: Scheduler, rss_bytes: usize, cgroup_limit_bytes: usize) ?PressureRequest`。
-- **作用**：根据已采样 RSS 与 cgroup 限额计算内存压力请求。
-- **实现**：依次检查 rss_hard_limit、启用且非零 cgroup limit 的 hard 千分比、rss_soft_limit、cgroup soft 千分比；硬线命中返回 rss_pressure/urgent，软线返回 rss_pressure/soon，否则 null。
-- **所有权 / 错误 / 调用**：只读计算，不采样 OS、不锁存请求、不收集。比值使用 gc.ratioPerMille，结果最多 1000；ratio 配为 0 表示关闭，optional RSS limit 设 0 则可立即命中。
 
 ### `Scheduler.request` (`src/core/gc_registry_scheduler.zig:59`)
 

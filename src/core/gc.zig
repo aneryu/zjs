@@ -355,27 +355,6 @@ pub const Policy = struct {
     major_debt_threshold: usize = 64 * MB,
     external_soft_limit: ?usize = null,
     external_hard_limit: ?usize = null,
-    rss_soft_limit: ?usize = null,
-    rss_hard_limit: ?usize = null,
-    cgroup_soft_ratio_per_mille: usize = 0,
-    cgroup_hard_ratio_per_mille: usize = 0,
-
-    /// Whether any policy field actually consumes the OS-level memory
-    /// snapshot, i.e. whether `Registry.processMemoryRequest` can return
-    /// anything but null. Exactly the four fields that function reads, and
-    /// deliberately not `external_soft_limit` / `external_hard_limit`: those
-    /// are served by the registry's own external-byte counter and need no
-    /// `/proc` or cgroup read.
-    ///
-    /// Gating on the fields rather than on `mode` matters, because a caller may
-    /// set an RSS or cgroup limit while staying in `.balanced`; a mode test
-    /// would silently disable a pressure policy the embedder asked for.
-    pub inline fn needsProcessMemorySnapshot(self: Policy) bool {
-        return self.rss_soft_limit != null or
-            self.rss_hard_limit != null or
-            self.cgroup_soft_ratio_per_mille != 0 or
-            self.cgroup_hard_ratio_per_mille != 0;
-    }
 };
 
 pub const ExternalMemoryToken = struct {
@@ -578,7 +557,6 @@ pub const RequestReason = enum(u8) {
     allocation_threshold,
     allocation_debt,
     external_memory,
-    rss_pressure,
     collection_failed,
 };
 
@@ -591,11 +569,6 @@ pub const RequestUrgency = enum(u8) {
 pub const Request = struct {
     reason: RequestReason,
     urgency: RequestUrgency = .soon,
-};
-
-pub const PressureRequest = struct {
-    reason: RequestReason,
-    urgency: RequestUrgency,
 };
 
 pub const ExternalTokenEntry = struct {
@@ -1348,8 +1321,7 @@ pub const Stats = struct {
     last_request_reason: ?RequestReason = null,
 };
 
-/// Explicit heap census plus process sample. Ordinary `gcStats` does not
-/// fill these; a missing census is not reported as zero.
+/// Explicit heap census. Ordinary `gcStats` does not fill these.
 pub const DetailedStats = struct {
     counters: Stats = .{},
     /// Live traced bytes from one census. Not `allocated_bytes`, not RSS.
@@ -1358,8 +1330,6 @@ pub const DetailedStats = struct {
     large_object_bytes: usize = 0,
     old_count: usize = 0,
     large_count: usize = 0,
-    rss_bytes: usize = 0,
-    cgroup_limit_bytes: usize = 0,
 };
 
 pub var heap_walks_for_test: if (builtin.is_test) usize else void =
@@ -1831,10 +1801,6 @@ pub const Registry = struct {
             if (self.stats.external_bytes >= limit) return .urgent;
         }
         return .soon;
-    }
-
-    pub fn processMemoryRequest(self: Registry, rss_bytes: usize, cgroup_limit_bytes: usize) ?PressureRequest {
-        return self.scheduler.processMemoryRequest(rss_bytes, cgroup_limit_bytes);
     }
 
     /// Count the request, then latch it. The counting half is the statistics

@@ -2109,27 +2109,6 @@
 - **实现**：直接 `JSRuntime.create` 建裸 Runtime（不经 TestEngine）。断言 2 处 `std.testing.expect*`。约 2 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
 
-### `test "process memory snapshot is needed exactly when a policy field consumes it"` (`tests/core.zig:7037`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「process memory snapshot is needed exactly when a policy field consumes it」。
-- **实现**：断言 10 处 `std.testing.expect*`。约 10 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
-### `test "process memory gate preserves external accounting and still fires when consumed"` (`tests/core.zig:7091`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「process memory gate preserves external accounting and still fires when consumed」。
-- **实现**：断言 4 处 `std.testing.expect*`。约 4 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
-### `test "gc process memory pressure policy maps rss and cgroup usage to major requests"` (`tests/core.zig:7123`)
-
-- **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住 GC：process memory pressure policy maps rss and cgroup usage to major requests。
-- **实现**：断言 6 处 `std.testing.expect*`。约 6 个 Zig expect、0 个 JS `assert.*`。
-- **所有权 / 错误 / 调用**：测试持有 Runtime/Context 所有权，`defer destroy/deinit`；GC 对象靠 root frame 或精确扫描。
-
 ### `test "function bytecode registration is old-space accounted"` (`tests/core.zig:7149`)
 
 - **签名**：无参数测试块，返回 `!void`。

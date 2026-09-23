@@ -182,7 +182,7 @@ GC 与原生清理按依赖完成 → 释放类型/atom/辅助存储 → 用保�
 | performance_time_origin_ms | 保留 | Runtime 共享的宿主功能状态，不属于 profiler |
 | opcode_profile、gc_mark_footprint、trace_writer | 归诊断 | 保留已用诊断能力与热布局隔离，按需采样 |
 | memoryUsage/gcStats | 保留并改内部契约 | Runtime 汇总廉价快照，详细遍历显式调用；不保留虚假统一总账 |
-| RSS/cgroup 文件读取与解析 | 移出 Runtime | 内部系统采样模块，现有压力策略仍可调用 |
+| RSS/cgroup 采样与压力策略 | 移除 | 不属于实例 Runtime；宿主自行监控进程 |
 | reportExternalAlloc | 保留 | 宿主外部内存计账与压力通知，token 不替宿主释放缓冲区 |
 | reportExternal*Untracked | 移出 Runtime | 内部对象存储直接调用 GC 分类记账 |
 | forceMajorGC/forceGC | 合并同义入口 | 一个 forceGC；其他旧收集入口要迁移扫描/错误语义，不能机械别名 |
@@ -344,7 +344,6 @@ B1 应在 P1 后、L3 对公开入口定形前完成，避免先迁移全部调�
 | 详细尺寸 | `heapByteSizeFromHeader` | object/bytecode/shape/string/bigint 用各自 `accountedAllocationSize`；storage/payload 的 block 用尺寸类减前缀，extent 用 `extentUserBytes - prefix` | 诊断，不是每次限额 | 与发布时同一字节数 debit |
 | 外部 token | `gc_registry_heap.Tokens` | `external_bytes` 与 `external_weight * bytes` 的 debt | 否 | `release` 撤销计账，不 free 宿主缓冲 |
 | inline untracked | object/object_payloads 报告 | `external_untracked_bytes`，不加入 heap 用量 | 否 | 与报告成对撤销 |
-| RSS/cgroup | 进程采样 | 压力信号，不是实例 heap | 否 | 不释放 |
 
 A3 调查时，旧 `MemoryAccount.allocated_bytes` 同时含普通原生和已入账的 block 细胞，不含 nursery 细胞、外部 token 和 RSS。生产 heap 预算采用 block 细胞的 `accountedBodyBytesForRequest` 加已发布 extent/standalone 的 `heapByteSizeFromHeader`；外部 debt 保留现有权重，作为独立 GC 压力，不加入 heap 字节。不得把 `allocated_bytes`、nursery、untracked 或 RSS 再加一遍。未发布分配在 publish 前仍算 reserved，失败 rollback 立刻 debit，不把“活对象”当成已经归还。
 
@@ -523,11 +522,11 @@ A3 核对时生产计数器仍是 `allocated_bytes`；A5 已按上表替换为 `
 
 #### G3 — 外部压力与系统采样边界
 
-- [x] **已落地**：本组 `zig build check` 和最终 `zig build test` 通过。RSS/cgroup 读取移入 `src/platform_memory.zig`，不可用/无限额返回 null；现有统计和调度边界继续以 0 表示未知，未改为 heap 字节。禁用压力策略仍不采样。inline untracked 的分配/释放直接归 GC，Runtime 保留外部 token 接口。
+- [x] **已落地**：外部 token 与 inline untracked 账目由 GC 管理；进程 RSS/cgroup 采样不属于 Runtime。
 
 - 前置：G1、O1。文件：runtime.zig、gc_registry_scheduler.zig、object.zig、object_payloads.zig；拟新增系统内存采样模块。
-- 动作：Runtime 保留外部 token 报告，内部 Untracked 转发归 GC；移出 RSS/cgroup 读取，保持策略禁用时不采样。
-- 完成：RSS 不当作实例 heap，未知采样有明确表示；token 释放不替宿主释放缓冲区。
+- 动作：Runtime 保留外部 token 报告，内部 Untracked 转发归 GC；系统采样由宿主经可选回调提供，保持策略禁用时不采样。
+- 完成：token 释放不替宿主释放缓冲区。
 - 验证：token 成对释放/重复释放现有契约、压力请求、禁用不读取、采样不可用及多 Runtime；不新增后台采样线程。
 
 #### B1 — 验证并确定内部接线
@@ -600,8 +599,8 @@ A3 核对时生产计数器仍是 `allocated_bytes`；A5 已按上表替换为 `
 
 #### O1 — 统计与公开资源口径迁移
 
-- [x] **已落地**。`memoryUsage` 与 `gcStats` 只读已维护计数：heap_budget 字节、可选分配诊断字节和次数、动态 atom 名的真实字节、类注册数、外部 token、debt、收集计数、宿主弱根槽。这两条路径不遍历 GC 堆，也不读 `/proc` 或 cgroup。`gcDetailedStats` 用 `heapByteSizeFromHeader` 做一次普查，并单独采样 RSS 与 cgroup。heap 活字节、外部压力和 RSS 分列，不相加。object、shape、module 的数量乘固定尺寸已从 `MemoryUsage` 删除；`-d` 的类尺寸印成 `-`。`--gc-stats` 走详细普查，heap live 与 external 各一行。普通 `weak_ref_count` 只数宿主弱根槽；详细快照再计入对象上的 weak collection 与 FinalizationRegistry 单元。生产预算由 A5 放到 Registry.heap_budget，A9 后 memoryUsage.heap_bytes 直接读取它；原生计数用 allocation_tracking_enabled 明确可用性，不用全堆扫描伪装廉价统计。
-  验证：`ordinary runtime stats do not walk the heap or read process memory`（先 eval 出一个对象：普通查询不增加堆遍历和进程读，详细查询两者都增加，`heap_live_bytes > 0`，Linux 上 `rss_bytes > 0`）、large payload 的普查字节对账、CLI 内存表与 GC 面板。阶段验证已通过；最终验证见 §12。
+- [x] **已落地**。`memoryUsage` 与 `gcStats` 只读已维护计数：heap_budget 字节、可选分配诊断字节和次数、动态 atom 名的真实字节、类注册数、外部 token、debt、收集计数、宿主弱根槽。这两条路径不遍历 GC 堆。`gcDetailedStats` 用 `heapByteSizeFromHeader` 做一次普查。heap 活字节与外部压力分开报告。object、shape、module 的数量乘固定尺寸已从 `MemoryUsage` 删除；`-d` 的类尺寸印成 `-`。`--gc-stats` 走详细普查，heap live 与 external 各一行。普通 `weak_ref_count` 只数宿主弱根槽；详细快照再计入对象上的 weak collection 与 FinalizationRegistry 单元。生产预算由 A5 放到 Registry.heap_budget，A9 后 memoryUsage.heap_bytes 直接读取它；原生计数用 allocation_tracking_enabled 明确可用性，不用全堆扫描伪装廉价统计。
+  验证：`ordinary runtime stats do not walk the heap`（先 eval 出一个对象：普通查询不增加堆遍历，详细查询增加普查，`heap_live_bytes > 0`）、large payload 的普查字节对账、CLI 内存表与 GC 面板。阶段验证已通过；最终验证见 §12。
   最终验证见 §12。详细普查不是 A5 的生产预算。
 
 - 前置：A3；D4 已收敛（调查在 A3 内进行）。文件：runtime.zig、gc_registry_diagnostics.zig、root.zig、CLI stats、tests/public_api.zig。
@@ -819,7 +818,7 @@ QuickJS 的 Runtime 也同时拥有分配器、GC、atom、shape、类型、Cont
 | 任务 | Runtime job_list；JS_ExecutePendingJob 一次取一项，返回成功/异常状态 | FIFO，runMicrotasks 已实现完整 checkpoint 与 D3 | 保留队列，宿主处理普通异常后继续是 zjs 既定契约，不是 QuickJS 单步接口原样移植 |
 | 模块与宿主控制 | normalize/loader/check_attrs、interrupt、promise rejection tracker、can_block | dynamic import 回调、interrupt、can_block 等，部分通知仍是目标能力 | 共用 Runtime 配置有对应依据；宿主路径/I/O 和计时策略不归 Runtime |
 | 外部资源接入 | sab_funcs、user_opaque、strip_flags 等显式功能字段 | 没有全部一一对应的 Runtime 字段 | 不为字段对称增加功能；需分别检查实际 API/其他模块，不能据 Runtime 字段缺席断言整个引擎不支持 |
-| 统计 | JS_ComputeMemoryUsage 显式遍历 Context/堆等结构 | `memoryUsage`/`gcStats` 只读已维护计数；`gcDetailedStats` 才普查堆并采样 RSS/cgroup | O1 已落地。详细遍历保留给显式查询 |
+| 统计 | JS_ComputeMemoryUsage 显式遍历 Context/堆等结构 | `memoryUsage`/`gcStats` 只读已维护计数；`gcDetailedStats` 才普查堆 | O1 已落地。详细遍历保留给显式查询 |
 
 主要证据（链接指向本机参考树）：[JSRuntime 结构](../../quickjs-zjs-ref/quickjs.c#L319)、
 [JSMallocContext](../../quickjs-zjs-ref/quickjs.c#L303)、[创建](../../quickjs-zjs-ref/quickjs.c#L2067)、

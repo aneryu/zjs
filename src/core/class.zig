@@ -93,7 +93,8 @@ pub const ids = struct {
     pub const dom_exception: ClassId = 62;
     pub const call_site: ClassId = 63;
     pub const raw_json: ClassId = 64;
-    pub const std_file: ClassId = 65;
+    /// Reserved legacy slot. File handles belong to the embedding host.
+    pub const reserved_65: ClassId = 65;
     pub const disposable_stack: ClassId = 66;
     pub const async_disposable_stack: ClassId = 67;
     /// Internal identity for the realm's global object.  Realm state itself
@@ -122,7 +123,6 @@ pub const PayloadKind = enum(u5) {
     buffer,
     typed_array,
     finalization_registry,
-    std_file,
     disposable_stack,
     global,
     realm_record,
@@ -845,7 +845,6 @@ pub fn standardPayloadKind(id: ClassId) PayloadKind {
         ids.raw_json,
         => .ordinary,
         ids.global_object => .global,
-        ids.std_file => .std_file,
         ids.disposable_stack, ids.async_disposable_stack => .disposable_stack,
 
         ids.array => .none,

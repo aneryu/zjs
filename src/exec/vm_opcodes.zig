@@ -825,7 +825,6 @@ pub fn enterCallDepth(
 ) !CallDepthGuard {
     const rt = ctx.runtime;
     if (rt.hot.native_call_depth >= maxNativeJsCallDepth(ctx) or
-        rt.hot.call_depth >= maxLogicalJsCallDepth(ctx) or
         bytecodeStackBudgetWouldOverflow(rt, planned_stack_bytes))
     {
         // QuickJS JS_CallInternal stack guard -> JS_ThrowStackOverflow =
@@ -876,20 +875,34 @@ inline fn bytecodeStackBudgetWouldOverflow(
     rt: *const core.JSRuntime,
     planned_stack_bytes: usize,
 ) bool {
-    return admissionCeilingsReject(&rt.hot, rt.hot.active_bytecode_stack_bytes +% planned_stack_bytes, planned_stack_bytes);
+    return admissionCeilingsReject(
+        &rt.hot,
+        rt.hot.call_depth,
+        rt.hot.active_bytecode_stack_bytes +% planned_stack_bytes,
+        planned_stack_bytes,
+    );
 }
 
-/// The two byte-priced ceilings of a bytecode push, as one predicate over the
-/// already-formed sum: checked VM bytes and a separate physical native-stack
-/// guard. A wrapping sum cannot be admitted even with an unlimited native stack.
-inline fn admissionCeilingsReject(
+/// Logical call depth and planned VM-frame bytes are separate ceilings, even
+/// though both use `stack_size`. Detect byte-sum wrap before committing.
+pub inline fn callBudgetWouldOverflow(
     hot: *const core.JSRuntime.HotExecState,
+    depth: usize,
     accumulated: usize,
     planned_stack_bytes: usize,
 ) bool {
-    // VM bytes and native stack addresses are independent limits. Detect wrap
-    // before committing a charge; the native guard measures actual stack use.
-    return accumulated < planned_stack_bytes or accumulated > hot.stack_size or
+    return depth >= hot.stack_size or accumulated < planned_stack_bytes or
+        accumulated > hot.stack_size;
+}
+
+/// Add the actual native stack-address guard to the VM budget predicate.
+inline fn admissionCeilingsReject(
+    hot: *const core.JSRuntime.HotExecState,
+    depth: usize,
+    accumulated: usize,
+    planned_stack_bytes: usize,
+) bool {
+    return callBudgetWouldOverflow(hot, depth, accumulated, planned_stack_bytes) or
         @frameAddress() < hot.native_stack_limit;
 }
 
@@ -902,8 +915,7 @@ pub inline fn canEnterInlineCallDepthBytes(
     planned_stack_bytes: usize,
 ) bool {
     const rt = ctx.runtime;
-    return rt.hot.call_depth < maxLogicalJsCallDepth(ctx) and
-        !bytecodeStackBudgetWouldOverflow(rt, planned_stack_bytes);
+    return !bytecodeStackBudgetWouldOverflow(rt, planned_stack_bytes);
 }
 
 pub inline fn commitInlineCallDepthBytes(
@@ -937,8 +949,7 @@ pub inline fn tryCommitInlineCallDepthBytesRt(
     const depth = hot.call_depth;
     const bytes = hot.active_bytecode_stack_bytes;
     const accumulated = bytes +% planned_stack_bytes;
-    if (depth >= hot.stack_size or
-        admissionCeilingsReject(hot, accumulated, planned_stack_bytes)) return false;
+    if (admissionCeilingsReject(hot, depth, accumulated, planned_stack_bytes)) return false;
     hot.active_bytecode_stack_bytes = accumulated;
     hot.call_depth = depth + 1;
     return true;
@@ -999,9 +1010,7 @@ pub fn checkTailCallChainStackBudget(
     planned_stack_bytes: usize,
 ) !void {
     const rt = ctx.runtime;
-    if (rt.hot.call_depth >= maxLogicalJsCallDepth(ctx) or
-        bytecodeStackBudgetWouldOverflow(rt, planned_stack_bytes))
-    {
+    if (bytecodeStackBudgetWouldOverflow(rt, planned_stack_bytes)) {
         return inlineCallDepthOverflow(ctx, global);
     }
 }
@@ -1599,10 +1608,6 @@ pub noinline fn initCtorVm(vm: *Vm) HostError!void {
 
 fn maxNativeJsCallDepth(ctx: *const core.JSContext) usize {
     return @max(@as(usize, 16), ctx.stackLimit() / 16384);
-}
-
-fn maxLogicalJsCallDepth(ctx: *const core.JSContext) usize {
-    return ctx.stackLimit();
 }
 
 fn readInt(comptime T: type, bytes: []const u8) T {
@@ -4117,9 +4122,9 @@ test "VM byte admission is independent of native stack addresses" {
     var hot = core.JSRuntime.HotExecState{};
     hot.stack_size = 1024;
     hot.native_stack_limit = 0;
-    try std.testing.expect(!admissionCeilingsReject(&hot, 1024, 512));
-    try std.testing.expect(admissionCeilingsReject(&hot, 1025, 512));
-    try std.testing.expect(admissionCeilingsReject(&hot, 2, 512));
+    try std.testing.expect(!admissionCeilingsReject(&hot, 0, 1024, 512));
+    try std.testing.expect(admissionCeilingsReject(&hot, 0, 1025, 512));
+    try std.testing.expect(admissionCeilingsReject(&hot, 0, 2, 512));
     hot.native_stack_limit = std.math.maxInt(usize);
-    try std.testing.expect(admissionCeilingsReject(&hot, 512, 512));
+    try std.testing.expect(admissionCeilingsReject(&hot, 0, 512, 512));
 }

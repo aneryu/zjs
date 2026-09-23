@@ -284,7 +284,7 @@ plain-object destructor calls over 5.49M reclaimed objects and cells
 
 `needs_finalizer` is set at construction and is lifetime-sticky (D-S4-4). It
 covers the b/c classes only: external buffers, typed-array view chains,
-WeakRef / WeakMap / WeakSet / FinalizationRegistry, `std_file`, iterators
+WeakRef / WeakMap / WeakSet / FinalizationRegistry, iterators
 holding a live collection cursor, generators with open cells, dynamic and
 host/plugin payloads, and anything handed a weak identity. It lives in
 `BlockFlags` and in a **fourth per-block bitmap** (`Block.finalizerBits`,

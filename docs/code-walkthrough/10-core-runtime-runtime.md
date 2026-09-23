@@ -48,28 +48,7 @@ core 不得 import exec/parser/binding；标准全局安装、builtin 表、acti
 
 ---
 
-## 延迟 stdio 关闭与 loader 作用域
-
-### `DeferredStdFileClose.run` (`src/core/runtime.zig:44`)
-
-- **签名**：`fn run(ptr: *anyopaque) void`。
-- **作用**：关闭任务持有的FILE并释放任务结构。
-- **实现**：还原opaque job，保存runtime，调用closeStdFileHandle并忽略返回码，再memory.destroy。
-- **所有权 / 错误 / 调用**：FILE须仍有效且仅由此任务负责关闭；不传播关闭失败，也不在此检测GC阶段。
-
-### `closeStdFileHandle` (`src/core/runtime.zig:52`)
-
-- **签名**：`pub fn closeStdFileHandle(file: *std.c.FILE, is_popen: bool) c_int`。
-- **作用**：按文件来源调用pclose或fclose。
-- **实现**：is_popen为真用pclose，否则fclose；仅rc==-1时返回负errno，其余原样返回rc。
-- **所有权 / 错误 / 调用**：pclose成功结果仍是其原始返回状态，不在此解码退出码；无Zig错误返回，可能阻塞，不能重复关闭同一FILE。
-
-### `enqueueDeferredStdFileClose` (`src/core/runtime.zig:61`)
-
-- **签名**：`pub fn enqueueDeferredStdFileClose(rt: *JSRuntime, file: *std.c.FILE, is_popen: bool) void`。
-- **作用**：尝试排队关闭FILE，并在资源不足时同步关闭。
-- **实现**：createRuntime失败立即关闭；成功填job后enqueueDeferredNativeCleanup，入队失败则同步关闭并释放job。
-- **所有权 / 错误 / 调用**：所有关闭返回码都被忽略；不能保证finalizer期间绝不I/O，因为OOM回退会同步执行。成功交给队列后调用方不得再次关闭FILE，函数不返回错误。
+## 延迟原生清理与 loader 作用域
 
 ### `DynamicImportLoaderScope.restore` (`src/core/runtime.zig:112`)
 
@@ -1582,9 +1561,9 @@ core 不得 import exec/parser/binding；标准全局安装、builtin 表、acti
 ### `JSRuntime.gcStats` (`src/core/runtime.zig:3717`)
 
 - **签名**：`pub fn gcStats(self: *const JSRuntime) gc.Stats`。
-- **作用**：收集器计数 + 弱引用数 + finalization/deferred 队列 + RSS/cgroup。
-- **实现**：先取 statsSnapshot，再填弱引用计数；finalizer_queue_length 与 pending_finalization_job_count 都取 job_queue 中 finalization job 数。另填两类 deferred 队列长度与已执行计数，最后调用 currentRssBytes 和 cgroupLimitBytes。
-- **所有权 / 错误 / 调用**：该查询始终尝试进程采样，不受压力策略的 needsProcessMemorySnapshot 门控；Linux 上读取 proc/cgroup 文件，失败值为 0。队列长度不等于所有待终结对象数，也不包括已经取出正在执行的项。会遍历相关对象和表，无锁，不能视为常数成本或并发原子快照。
+- **作用**：收集器计数 + 弱引用数 + finalization/deferred 队列。
+- **实现**：先取 statsSnapshot，再填弱引用计数；finalizer_queue_length 与 pending_finalization_job_count 都取 job_queue 中 finalization job 数。另填两类 deferred 队列长度与已执行计数。
+- **所有权 / 错误 / 调用**：队列长度不等于所有待终结对象数，也不包括已经取出正在执行的项。会遍历相关对象和表，无锁，不能视为常数成本或并发原子快照。
 
 ### `JSRuntime.ownsObject` (`src/core/runtime.zig:3732`)
 
@@ -1593,61 +1572,12 @@ core 不得 import exec/parser/binding；标准全局安装、builtin 表、acti
 - **实现**：`gc.containsHeader`。
 - **所有权 / 错误 / 调用**：仅查询登记归属，不增加强根、不证明 JavaScript 可达性。要求传入有效对象指针，不是安全探测任意或已释放地址的接口。
 
-### `JSRuntime.requestGCForProcessMemoryPressure` (`src/core/runtime.zig:3750`)
-
-- **签名**：`inline fn requestGCForProcessMemoryPressure(self: *JSRuntime) void`。
-- **作用**：策略需要进程快照时才进入 RSS/cgroup 采样路径，并可能排队收集请求。
-- **实现**：`needsProcessMemorySnapshot` 假则返回，否则 outlined `requestGCForProcessMemoryPressureSlow`。
-- **所有权 / 错误 / 调用**：`reportExternalAlloc`、部分 poll 模式。
-
-### `JSRuntime.requestGCForProcessMemoryPressureSlow` (`src/core/runtime.zig:3755`)
-
-- **签名**：`noinline fn requestGCForProcessMemoryPressureSlow(self: *JSRuntime) void`。
-- **作用**：采样进程内存并将策略判定转为 GC 请求。
-- **实现**：获取 currentRssBytes 与 cgroupLimitBytes，传给 gc.processMemoryRequest；有返回值才调用 requestGC(reason, urgency)。Linux 上至多尝试打开三个路径，v2 限制成功解析后不再尝试 v1。
-- **所有权 / 错误 / 调用**：外层按策略门控，本函数内部不重复门控。只请求而不执行收集；文件读取或解析失败不会向调用方返回错误，RSS/限制以 0 表示未取得值。
-
 ### `JSRuntime.weakReferenceCount` (`src/core/runtime.zig:3763`)
 
 - **签名**：`fn weakReferenceCount(self: *const JSRuntime) usize`。
 - **作用**：弱持久槽 + 堆上弱集合条目 + FinalizationRegistry cells。
 - **实现**：只计 identity 非空的 weak_root_slots；再遍历 GC objectIterator(all) 中 object 类节点，饱和加上 weakCollectionEntries().len 和 finalizationRegistryCells().len。
 - **所有权 / 错误 / 调用**：gcStats 使用；这是一组槽和条目长度之和，不是不同弱目标的去重数，也不是重新验证每个目标存活后的数量。已清 identity 的持久弱槽不计，遍历成本随登记对象和槽数量增长。
-
-### `JSRuntime.currentRssBytes` (`src/core/runtime.zig:3779`)
-
-- **签名**：`fn currentRssBytes() usize`。
-- **作用**：读 `/proc/self/statm` 第二字段 × page。
-- **实现**：Linux 上以 128 字节缓冲读取 statm，跳过第一字段，将第二字段解析为 resident pages，再乘 std.heap.pageSize()；乘法溢出返回 usize 最大值。
-- **所有权 / 错误 / 调用**：非 Linux、读失败、字段不足或解析失败均返回 0。值是整个进程的 RSS，不是当前 Runtime 独占内存；0 不能区分不支持与采样失败。
-
-### `JSRuntime.cgroupLimitBytes` (`src/core/runtime.zig:3789`)
-
-- **签名**：`fn cgroupLimitBytes() usize`。
-- **作用**：cgroup v2 `memory.max` 或 v1 `memory.limit_in_bytes`。
-- **实现**：Linux 上先读固定 v2 路径并解析首 token；读不到或无法解析（包括 max）则尝试固定 v1 路径；任一路成功解析即返回，全部失败或非 Linux 返回 0。
-- **所有权 / 错误 / 调用**：不解析 /proc/self/cgroup 或递归查找实际子组路径，不综合祖先限制，也不转换 v1 的大数无限制哨兵。v2 为 max 不代表立刻返回 0，仍可能返回 v1 解析值。
-
-### `JSRuntime.readLinuxFile` (`src/core/runtime.zig:3801`)
-
-- **签名**：`fn readLinuxFile(path: []const u8, buf: []u8) ?[]const u8`。
-- **作用**：openat+read 小文件。
-- **实现**：Linux 上只读 openat，成功后 defer close；执行一次 read 并返回 buf[0..len]。open/read 失败或非 Linux 返回 null，关闭错误忽略。
-- **所有权 / 错误 / 调用**：返回借用调用方缓冲区的切片，无额外分配；不循环读完整文件，不检测截断，也不补零终止符。空文件可成功返回空切片。
-
-### `JSRuntime.firstToken` (`src/core/runtime.zig:3811`)
-
-- **签名**：`fn firstToken(contents: []const u8) []const u8`。
-- **作用**：空白分隔第一个 token。
-- **实现**：按空格、tab、CR、LF 分隔，返回首个非空 token，无 token 返回空字符串。
-- **所有权 / 错误 / 调用**：返回借用输入的切片，不分配；不将任意 Unicode 空白视为分隔符。
-
-### `JSRuntime.parseUnsignedToken` (`src/core/runtime.zig:3816`)
-
-- **签名**：`fn parseUnsignedToken(token: []const u8) ?usize`。
-- **作用**：解析无符号；空或 `"max"` → null。
-- **实现**：精确匹配空串或小写 max 时返回 null，否则调用 parseAsciiInt(usize, token, 10)，将非法格式或溢出错误转为 null。
-- **所有权 / 错误 / 调用**：不自行分词、去空白或识别单位；合法的数值 0 返回可选值 0，与 null 不同。RSS/cgroup 调用方决定失败回退。
 
 ### `JSRuntime.prospectiveAllocationTotal` (`src/core/runtime.zig:3821`)
 

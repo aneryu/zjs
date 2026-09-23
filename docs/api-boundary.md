@@ -146,9 +146,8 @@ The QuickJS-shaped `std`/`os` host-function records and their installers have
 been deleted (recoverable from git history). The internal `HostFunction`
 enum is reserved for engine-internal callables; host-provided functions are
 `NativeEntry`s created through `Context.defineFunction`, never members of that enum.
-`src/core/` still carries the `std_file` class payload plumbing
-(`class.ids.std_file`, `StdFilePayload`); nothing instantiates it from the
-engine anymore.
+Class slot 65 remains reserved for the removed legacy stdio class. File
+handles and close policy belong to the embedding host.
 
 ## Non-Goals
 

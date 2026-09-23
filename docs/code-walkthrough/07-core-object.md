@@ -153,7 +153,7 @@ Debug / ReleaseSafe 构建 `trailing_property_bytes==48`（带安全填充），
 ### payload 分类（TGC S4-c/d）
 
 - **a 类**：`.payload` cell，内容全是 GC 边，sweep 无析构。
-- **b 类**：FILE*、ArrayBuffer 外部存储、native FunctionPayload 等，要 finalizer。
+- **b 类**：ArrayBuffer 外部存储、native FunctionPayload 等，要 finalizer。
 - **c 类**：WeakRef/WeakMap/FR/collection cursor/generator 挂起帧，要 finalizer。
 
 `needs_finalizer` 位只上不下。普通 `{}` 死亡只清 alloc bitmap。

@@ -12,7 +12,6 @@ const mem_ops = @import("core/memory.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
-const platform_memory = @import("platform_memory.zig");
 const platform_clock = @import("platform_clock.zig");
 
 const memory = @import("core/memory.zig");
@@ -37,46 +36,6 @@ const property = @import("core/property.zig");
 const context_mod = @import("core/context.zig");
 const context_registry = @import("core/context_registry.zig");
 const errors = @import("core/errors.zig");
-
-extern "c" fn pclose(stream: *std.c.FILE) c_int;
-
-const DeferredStdFileClose = struct {
-    runtime: *JSRuntime,
-    file: *std.c.FILE,
-    is_popen: bool = false,
-
-    fn run(ptr: *anyopaque) void {
-        const job: *DeferredStdFileClose = @ptrCast(@alignCast(ptr));
-        const rt = job.runtime;
-        _ = closeStdFileHandle(job.file, job.is_popen);
-        mem_ops.destroy(rt, DeferredStdFileClose, job);
-    }
-};
-
-pub fn closeStdFileHandle(file: *std.c.FILE, is_popen: bool) c_int {
-    if (is_popen) {
-        const rc = pclose(file);
-        return if (rc == -1) -@as(c_int, @intCast(@intFromEnum(std.c.errno(-1)))) else rc;
-    }
-    const rc = std.c.fclose(file);
-    return if (rc == -1) -@as(c_int, @intCast(@intFromEnum(std.c.errno(-1)))) else rc;
-}
-
-pub fn enqueueDeferredStdFileClose(rt: *JSRuntime, file: *std.c.FILE, is_popen: bool) void {
-    const job = rt.createRuntime(DeferredStdFileClose) catch {
-        _ = closeStdFileHandle(file, is_popen);
-        return;
-    };
-    job.* = .{
-        .runtime = rt,
-        .file = file,
-        .is_popen = is_popen,
-    };
-    rt.enqueueDeferredNativeCleanup(DeferredStdFileClose.run, @ptrCast(job)) catch {
-        _ = closeStdFileHandle(file, is_popen);
-        mem_ops.destroy(rt, DeferredStdFileClose, job);
-    };
-}
 
 pub const default_stack_size = 1024 * 1024;
 pub const default_gc_threshold = 256 * 1024;
@@ -1051,8 +1010,6 @@ pub const RuntimeConstructionFailpoint = enum(u8) {
 
 var runtime_construction_failpoint: RuntimeConstructionFailpoint = .none;
 
-pub const process_memory = platform_memory;
-
 pub fn setRuntimeConstructionFailpointForTest(point: RuntimeConstructionFailpoint) void {
     if (comptime !builtin.is_test) return;
     runtime_construction_failpoint = point;
@@ -1082,59 +1039,29 @@ pub const Diagnostics = struct {
 pub const JSRuntime = struct {
     pub const Options = RuntimeOptions;
 
-    /// K4 hot-state cluster: the per-call/per-return execution scalars that
-    /// call admission (`canEnterInlineCallDepthBytes`), commit
-    /// (`commitInlineCallDepthBytes`), release (`leaveInlineCallDepthBytesRt`)
-    /// and the native recursion guard (`checkNativeStackOverflow`) touch on
-    /// every bytecode call. QuickJS keeps this state in the first cache lines
-    /// of its JSRuntime (`stack_size`/`stack_top`/`stack_limit`,
-    /// quickjs.c, plus `gc_phase`/`current_stack_frame` in the same
-    /// head, quickjs.c); zjs's auto struct layout had scattered these
-    /// fields across the 18-26KB tail of JSRuntime, so every call/return
-    /// walked 5-6 distant cache lines (M1 dossier K4). `extern struct`
-    /// guarantees declaration-order layout (auto layout scrambles same-
-    /// alignment buckets); `align(64)` on the field pins the cluster into the
-    /// highest-alignment bucket, i.e. the lowest offsets of JSRuntime. All
-    /// eight words fit one cache line (64 bytes).
+    /// Runtime-owned execution accounting and stack guards shared by all
+    /// Contexts in this Runtime. The fields cover distinct limits: logical
+    /// depth, planned VM-frame bytes, and native stack address.
     pub const HotExecState = extern struct {
-        /// QuickJS runtime execution state. These fields describe the
-        /// currently executing stack, not a Realm, and are shared by every
-        /// context belonging to this runtime.
-        /// Field ORDER is load-bearing on the bytecode-push admission
-        /// (`vm_call.tryCommitInlineCallDepthBytesRt`, one per crossing): the
-        /// two ceiling pairs it reads are laid out adjacently so each pair is
-        /// one `ldp` -- (call_depth, stack_size) for the logical depth ceiling
-        /// and (active_bytecode_stack_bytes, native_stack_limit) for the byte
-        /// ceiling. Keep a moved field paired with the value it is compared
-        /// against.
         call_depth: usize = 0,
-        /// Logical stack budget (`rt->stack_size` analogue); the data source
-        /// for both call-depth ceilings (`maxLogicalJsCallDepth` /
-        /// `maxNativeJsCallDepth`).
+        /// Logical depth ceiling and byte ceiling for accumulated VM frames.
         stack_size: usize = default_stack_size,
-        /// Planned QuickJS bytecode-frame bytes for every active bytecode
-        /// call, including tail-call callers whose physical zjs Entry storage
-        /// has been reused. This Runtime owner survives nested Machines and
-        /// Realm switches. It remains separate from Realm interrupt cadence
-        /// and native call depth.
+        /// Planned frame bytes for active bytecode calls, including tail-call
+        /// callers whose physical Entry storage has been reused.
         active_bytecode_stack_bytes: usize = 0,
-        /// Native (machine C-stack) recursion guard, mirroring QuickJS
-        /// `rt->stack_top`/`rt->stack_limit`.
-        /// Captured via `@frameAddress()` at the outermost eval entry
-        /// (`updateNativeStackTop`, the JS_UpdateStackTop analogue — refreshed
-        /// per thread because worker threads run on a different C stack than
-        /// where the runtime was constructed). Zero limit means "no limit
-        /// yet". `native_stack_limit` is the lower address bound
-        /// (`native_stack_top - native_stack_size`); a native frame pointer
-        /// below it is an overflow. See `checkNativeStackOverflow`.
+        /// Native C-stack recursion guard. `updateNativeStackTop` captures
+        /// the base at an outermost JS entry; zero limit means no limit is
+        /// active, either because it is disabled or has not yet been set.
+        /// Otherwise this is the lower bound (`native_stack_top -
+        /// native_stack_size`); a frame pointer below it is an overflow.
+        /// See `checkNativeStackOverflow`.
         native_stack_limit: usize = 0,
         native_call_depth: usize = 0,
         native_stack_top: usize = 0,
         native_stack_size: usize = default_native_stack_size,
         /// Head of the stack-local observable backtrace chain. Native calls
-        /// and synchronous native fences both replace this pointer on entry
-        /// and restore it on return, so use the eighth and final word of the
-        /// first runtime cache line instead of the cold registry tail.
+        /// and synchronous native fences replace it on entry and restore it
+        /// on return.
         current_backtrace_frame: ?*context_mod.ActiveBacktraceFrame = null,
     };
 
@@ -1143,7 +1070,7 @@ pub const JSRuntime = struct {
     /// invocation. Core deliberately keeps this opaque: synchronous native
     /// callbacks recover the concrete Machine through exec without creating
     /// a core -> exec import cycle. Routing reads it on every eligible native
-    /// callback, so keep it adjacent to the hot execution cache line.
+    /// callback; this pointer is separate from the stack-accounting state.
     active_invocation: ?*anyopaque = null,
     /// Exec-owned resident execution root for embedder -> JS calls
     /// (`exec/call_site.zig`), created on first use and retired
@@ -1286,11 +1213,8 @@ pub const JSRuntime = struct {
     backtrace_capacity: usize = 0,
     active_native_call: ?*const anyopaque = null,
     vm_stack_arena_policy: VmStackWindowPolicy = VmStackWindowPolicy.arenaForLimit(default_stack_size),
-    /// Per-runtime VM value-stack arena for bytecode call frames. Pinned
-    /// `align(64)` alongside `hot` so its scalar head (chunk_count/active/
-    /// used[active], touched by every call's carve and every return's
-    /// restore) stays in the runtime's front cache lines instead of the
-    /// auto-layout 24-26KB tail (M1 dossier K4).
+    /// Per-runtime VM value-stack arena for bytecode call frames. Its chunk
+    /// metadata and the stack-accounting state in `hot` have separate owners.
     vm_stack: VmStackArena align(64) = .{},
     termination_requested: std.atomic.Value(bool) = .init(false),
     interrupt_handler: ?InterruptHandler = null,
@@ -2593,7 +2517,6 @@ pub const JSRuntime = struct {
         if (self.gc.externalMemoryRequestReason()) |reason| {
             self.gc.requestGC(reason, self.gc.externalMemoryRequestUrgency());
         }
-        self.requestGCForProcessMemoryPressure();
         return token;
     }
 
@@ -2630,53 +2553,23 @@ pub const JSRuntime = struct {
         stats.deferred_class_payload_finalizer_run_count = self.deferred_class_payload_finalizer_run_count;
     }
 
-    /// Maintained counters only. Does not walk the heap or read RSS/cgroup.
+    /// Maintained counters only. Does not walk the heap.
     pub fn gcStats(self: *const JSRuntime) gc.Stats {
         var stats = self.gc.counterSnapshot(self);
         self.fillGcCounters(&stats);
         return stats;
     }
 
-    /// One heap census plus a process sample. Heap bytes stay separate from
-    /// external debt and from RSS.
+    /// One heap census. Heap bytes stay separate from external debt.
     pub fn gcDetailedStats(self: *const JSRuntime) gc.DetailedStats {
         var detailed = self.gc.statsSnapshot(self);
         self.fillGcCounters(&detailed.counters);
         detailed.counters.weak_ref_count += self.weakObjectEntryCount();
-        detailed.rss_bytes = (platform_memory.currentRssBytes() orelse 0);
-        detailed.cgroup_limit_bytes = (platform_memory.cgroupLimitBytes() orelse 0);
         return detailed;
     }
 
     pub fn ownsObject(self: *const JSRuntime, object: *const Object) bool {
         return self.gc.containsHeader(object.gcHeaderConst());
-    }
-
-    /// Sampling process memory costs three `openat` plus a `read` and a `close`
-    /// per call -- `/proc/self/statm`, then the cgroup v2 and v1 limit files,
-    /// the latter two normally returning ENOENT. Under a policy that sets none
-    /// of the four fields `processMemoryRequest` reads, every gate in it is
-    /// disabled and it can only return null, so the whole snapshot is
-    /// discarded. Skip it in that case.
-    ///
-    /// The gate is expanded at the call site and the sampling body kept out of
-    /// line, so a runtime with no pressure policy does not even pay a call
-    /// boundary to discover it has nothing to do. Nothing else moves: the
-    /// external-byte accounting, the allocation debt and the internal
-    /// threshold triggers in `reportExternalAlloc` all run first and unchanged,
-    /// and any policy that does consume the snapshot reaches the identical
-    /// slow path.
-    pub inline fn requestGCForProcessMemoryPressure(self: *JSRuntime) void {
-        if (!self.gc.scheduler.policy.needsProcessMemorySnapshot()) return;
-        self.requestGCForProcessMemoryPressureSlow();
-    }
-
-    noinline fn requestGCForProcessMemoryPressureSlow(self: *JSRuntime) void {
-        const rss_bytes = (platform_memory.currentRssBytes() orelse 0);
-        const cgroup_limit_bytes = (platform_memory.cgroupLimitBytes() orelse 0);
-        if (self.gc.processMemoryRequest(rss_bytes, cgroup_limit_bytes)) |request| {
-            self.gc.requestGC(request.reason, request.urgency);
-        }
     }
 
     fn weakRootSlotCount(self: *const JSRuntime) usize {

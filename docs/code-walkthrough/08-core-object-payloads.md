@@ -27,7 +27,6 @@
 | `ArgumentsPayload` / `ObjectDataPayload` | 前者的 var_refs 实际为 []JSValue 的 GC slice；后者为可选 data 值，不能与 Object 的 dense mapped arguments 指针表混淆。 |
 | `WeakRefPayload` / `VarRefPayload` | 前者是可空弱 identity 与 holder link；后者是可选 value 与 const/function_name/deletable 标志，并不是独立 VarRef cell。 |
 | `FinalizationRegistryPayload` | callback、普通分配 cells/容量、RealmRef 与 holder link；registry 自身的 realm 决定 cleanup job 起始 realm。 |
-| `StdFilePayload` | FILE 指针、is_popen/is_stdio；本类型 destroy 只清字段，不 fclose/pclose。 |
 | `DisposableResourceKind` / `DisposalHint` / `DisposableMethodKind` | 分别为 use/adopt/defer_、sync/async、direct/async_from_sync，均 enum(u8)。 |
 | `DisposableResource` / `DisposableStackPayload` | 资源项含 value/method 与上述三种判别，默认 undefined、defer_/sync/direct；stack 含 GC slice/容量、disposed 和三个异步 dispose 值槽。其 destroy 不调用方法。 |
 | `GlobalPayload` / `RealmRecordPayload` | 分别仅保存 uninitialized_vars 对象边与 RealmRef；RealmRef 为追踪指针，deinit 不同步销毁 realm。 |
@@ -482,20 +481,6 @@ ArrayBuiltinMarker 与 TypedArrayBuiltinMarker 是 property.zig 类型别名。�
 - **作用**：访问注册表 realm、cleanup callback 和 registration cell。
 - **实现**：先把 realm.ptr 地址传 callVisitRealm（即使当前为空），再访问非空 callback，最后逐个 callVisitFinalizationCell。
 - **所有权 / 错误 / 调用**：不在本函数强标 target/token；held_value 是否追踪由 cell visitor 结合状态决定。回调可更新实际字段，错误立即传播。
-
-### `StdFilePayload.destroy` (`src/core/object_payloads.zig:899`)
-
-- **签名**：`pub fn destroy(self: *StdFilePayload) void`。
-- **作用**：重置 file 指针与两个标志。
-- **实现**：self.*=.{}。
-- **所有权 / 错误 / 调用**：没有 fclose/pclose 调用；不能把此方法描述为关闭文件。宿主资源关闭须由具体 finalizer/显式关闭路径承担。
-
-### `StdFilePayload.traceChildEdges` (`src/core/object_payloads.zig:903`)
-
-- **签名**：`pub fn traceChildEdges(self: *const StdFilePayload, visitor: anytype) !void`。
-- **作用**：为不含 GC 强边的 FILE 状态提供空访问接口。
-- **实现**：忽略 self 和 visitor。
-- **所有权 / 错误 / 调用**：FILE 指针不是 JS 值边；不验证或关闭文件。
 
 ### `DisposableStackPayload.destroy` (`src/core/object_payloads.zig:942`)
 
