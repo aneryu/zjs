@@ -11,13 +11,13 @@
 //! back into `Registry`'s declaration namespace, so every existing
 //! `rt.gc.verifyX()` call site is unchanged.
 
+const native_alloc = @import("../runtime_alloc.zig");
 const std = @import("std");
 const JSRuntime = @import("../runtime.zig").JSRuntime;
 
 const gc = @import("gc.zig");
 const carrier = @import("gc_carrier.zig");
 const gc_space = @import("gc_space.zig");
-const memory = @import("memory.zig");
 const object = @import("object.zig");
 const shape = @import("shape.zig");
 const string = @import("string.zig");
@@ -115,7 +115,7 @@ fn deriveHeapSpaceSnapshot(self: *const Registry, rt: *const JSRuntime) HeapSpac
 
 pub fn counterSnapshot(self: *const Registry, rt: *const JSRuntime) Stats {
     return .{
-        .peak_allocated_bytes = if (@import("alloc_trace.zig").enabled) rt.diagnostics.allocations.peak_allocated_bytes + @sizeOf(JSRuntime) else 0,
+        .peak_allocated_bytes = if (native_alloc.diagnostic_accounting_enabled) rt.diagnostics.allocations.peak_allocated_bytes + @sizeOf(JSRuntime) + @sizeOf(Registry) + @sizeOf(@import("atom.zig").AtomTable) + @sizeOf(class.Table) + @sizeOf(shape.Registry) else 0,
         .external_bytes = self.stats.external_bytes,
         .external_untracked_bytes = self.stats.external_untracked_bytes,
         .peak_external_bytes = self.stats.peak_external_bytes,
@@ -655,10 +655,10 @@ pub fn verifyMajorRetirementCommit(self: *Registry) InvariantError!void {
 
 pub fn verifyHeapAccounting(self: *const Registry, rt: *JSRuntime) InvariantError!void {
     if (comptime carrier.audit_enabled) {
-        self.runtime.gc.cell_storage.extent_identity.verify() catch return error.CarrierOldNewMismatch;
+        self.cell_storage.extent_identity.verify() catch return error.CarrierOldNewMismatch;
     }
     if (comptime carrier.audit_enabled) {
-        self.runtime.gc.cell_storage.extent_lifecycle.verify() catch return error.CarrierOldNewMismatch;
+        self.cell_storage.extent_lifecycle.verify() catch return error.CarrierOldNewMismatch;
     }
     if (comptime carrier.audit_enabled) {
         self.block_heap.verifyGenerationAuthority() catch return error.CarrierOldNewMismatch;
@@ -762,7 +762,7 @@ pub fn verifyHeapAccounting(self: *const Registry, rt: *JSRuntime) InvariantErro
 
         // new extent authority -> independent raw
         if (comptime carrier.audit_enabled) {
-            var extent_it = self.runtime.gc.cell_storage.extent_identity.records.valueIterator();
+            var extent_it = self.cell_storage.extent_identity.records.valueIterator();
             while (extent_it.next()) |record| {
                 const raw = oracle.raw.get(record.base) orelse return error.CarrierRawOwnedMismatch;
                 if (raw.generation != record.generation) return error.CarrierGenerationMismatch;
@@ -772,7 +772,7 @@ pub fn verifyHeapAccounting(self: *const Registry, rt: *JSRuntime) InvariantErro
             }
         }
         if (comptime carrier.audit_enabled) {
-            var lifecycle_it = self.runtime.gc.cell_storage.extent_lifecycle.records.iterator();
+            var lifecycle_it = self.cell_storage.extent_lifecycle.records.iterator();
             while (lifecycle_it.next()) |entry| {
                 const raw = oracle.raw.get(entry.key_ptr.*) orelse return error.CarrierRawOwnedMismatch;
                 if (raw.published and raw.accounted_bytes != entry.value_ptr.accounted_bytes) {

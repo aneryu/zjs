@@ -18,7 +18,7 @@ fn sample(result: *Result) void {
 fn run(work: Work) !void {
     const cycles = if (work.recreate) work.rounds else 1;
     for (0..cycles) |_| {
-        const rt = try zjs.Runtime.create(.{ .allocator = work.allocator });
+        const rt = try zjs.Runtime.create(work.allocator, .{});
         defer rt.destroy();
         const ctx = try zjs.Context.create(rt, .{});
         defer ctx.destroy();

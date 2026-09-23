@@ -662,7 +662,7 @@ pub fn constructPrimitiveWrapperWithPrototype(
 }
 
 test "constructPrimitiveWrapperWithPrototype roots direct symbol while creating wrapper" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-construct-primitive-wrapper-symbol");
@@ -737,7 +737,7 @@ pub fn aggregateErrorConstructWithPrototype(
 }
 
 test "aggregateErrorConstructWithPrototype preserves direct symbol errors and cause" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -822,7 +822,7 @@ pub fn suppressedErrorConstructWithPrototype(
 }
 
 test "suppressedErrorConstructWithPrototype roots direct symbol args while creating error" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -927,7 +927,7 @@ pub fn errorConstructWithPrototype(
 }
 
 test "errorConstructWithPrototype preserves direct symbol cause" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -1676,7 +1676,7 @@ pub fn objectRealmGlobal(object: *core.Object) ?*core.Object {
 }
 
 pub fn propertyIndexFromLengthKey(rt: *core.JSRuntime, atom_id: core.Atom) ?usize {
-    if (core.array.arrayIndexFromAtom(&rt.atoms, atom_id)) |index| return index;
+    if (core.array.arrayIndexFromAtom(rt.atoms, atom_id)) |index| return index;
     if (rt.atoms.kind(atom_id) != .string) return null;
     const name = rt.atoms.name(atom_id) orelse return null;
     if (name.len == 0) return null;
@@ -1809,7 +1809,7 @@ pub fn destructuringObjectRest(
 }
 
 test "destructuringObjectRest roots direct symbol values while creating rest object" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -1927,9 +1927,11 @@ pub fn importMetaObject(
     // JS_NewObjectProto(ctx, JS_NULL), quickjs.c); without the flag,
     // ToPrimitive fell through to %Object.prototype%.toString and
     // import(import.meta) stringified instead of rejecting with TypeError.
-    const url = try importMetaUrlValue(ctx.runtime, record);
-    try defineValueProperty(ctx.runtime, object, core.atom.ids.url, url);
-    try defineValueProperty(ctx.runtime, object, core.atom.ids.main, core.JSValue.boolean(record.import_meta_main));
+    if (ctx.module_source_loader != null) {
+        const url = try importMetaUrlValue(ctx, record);
+        try defineValueProperty(ctx.runtime, object, core.atom.ids.url, url);
+        try defineValueProperty(ctx.runtime, object, core.atom.ids.main, core.JSValue.boolean(record.import_meta_main));
+    }
     const value = object.value();
     record.import_meta = value;
     // The record is created when the module is loaded; `import.meta` is built
@@ -2797,7 +2799,7 @@ pub fn primitiveObjectForAccess(rt: *core.JSRuntime, global: *core.Object, primi
 }
 
 test "primitiveObjectForAccess roots direct symbol while creating wrapper" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     const global = try core.Object.create(rt, core.class.ids.object, null);
     const symbol_constructor = try core.Object.create(rt, core.class.ids.object, null);
     const symbol_prototype = try core.Object.create(rt, core.class.ids.object, null);
@@ -2917,7 +2919,7 @@ pub fn setValuePropertyWithThrow(
         return core.JSValue.undefinedValue();
     }
     if (object.isArray()) {
-        if (core.array.arrayIndexFromAtom(&ctx.runtime.atoms, atom_id)) |index| {
+        if (core.array.arrayIndexFromAtom(ctx.runtime.atoms, atom_id)) |index| {
             if (try object.appendDenseArrayIndex(ctx.runtime, index, atom_id, value)) return core.JSValue.undefinedValue();
         }
     }
@@ -3367,7 +3369,7 @@ pub fn descriptorObjectFromDescriptor(rt: *core.JSRuntime, global: *core.Object,
 }
 
 test "descriptorObjectFromDescriptor roots direct function bytecode value while creating descriptor object" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
@@ -4310,7 +4312,7 @@ fn readInt(comptime T: type, bytes: []const u8) T {
 }
 
 test "private brand atom is released with home object" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const home = try core.Object.create(rt, core.class.ids.object, null);
@@ -4326,7 +4328,7 @@ test "private brand atom is released with home object" {
 }
 
 test "private brand creation does not allocate atom for non-extensible home object" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const home = try core.Object.create(rt, core.class.ids.object, null);
@@ -4769,7 +4771,7 @@ pub fn constructProxyInstance(
 }
 
 test "constructProxyInstance allocates a proxy whose [[Prototype]] is null" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -5410,7 +5412,7 @@ pub fn literal(rt: *core.JSRuntime, names: []const core.Atom, values: []const co
 }
 
 test "object literal roots direct function bytecode values while creating object" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const key = try rt.internAtom("value");
@@ -6060,7 +6062,7 @@ pub fn appendObjectGroupByValue(
 }
 
 test "Object.groupBy new group define failure releases group once" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();

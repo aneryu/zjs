@@ -8,13 +8,11 @@
 //! realm-core state used by parser/compiler/exec orchestration; it must not
 //! import exec or binding.
 
-const mem_ops = @import("memory.zig");
 const std = @import("std");
 
 const atom = @import("atom.zig");
 const gc = @import("gc.zig");
 const gc_visit = @import("gc_visit.zig");
-const memory = @import("memory.zig");
 const module_auto_init = @import("module_auto_init.zig");
 const value_mod = @import("value.zig");
 const VarRef = @import("var_ref.zig").VarRef;
@@ -208,12 +206,12 @@ pub const PendingDefinition = struct {
             }
         }
 
-        if (requests.len != 0) mem_ops.free(self.runtime, RequestEntry, requests);
-        if (imports.len != 0) mem_ops.free(self.runtime, ImportEntry, imports);
-        if (exports.len != 0) mem_ops.free(self.runtime, ExportEntry, exports);
-        if (indirect_exports.len != 0) mem_ops.free(self.runtime, IndirectExportEntry, indirect_exports);
-        if (star_exports.len != 0) mem_ops.free(self.runtime, StarExportEntry, star_exports);
-        if (import_attributes.len != 0) mem_ops.free(self.runtime, ImportAttributeEntry, import_attributes);
+        if (requests.len != 0) self.runtime.freeNative(RequestEntry, requests);
+        if (imports.len != 0) self.runtime.freeNative(ImportEntry, imports);
+        if (exports.len != 0) self.runtime.freeNative(ExportEntry, exports);
+        if (indirect_exports.len != 0) self.runtime.freeNative(IndirectExportEntry, indirect_exports);
+        if (star_exports.len != 0) self.runtime.freeNative(StarExportEntry, star_exports);
+        if (import_attributes.len != 0) self.runtime.freeNative(ImportAttributeEntry, import_attributes);
     }
 
     pub fn addRequest(self: *PendingDefinition, module_name: atom.Atom) !u32 {
@@ -477,12 +475,12 @@ pub const ModuleRecord = struct {
                 std.debug.assert(VarRef.fromValue(cell) != null);
             }
         }
-        if (requests.len != 0) mem_ops.free(self.runtime, RequestEntry, requests);
-        if (imports.len != 0) mem_ops.free(self.runtime, ImportEntry, imports);
-        if (exports.len != 0) mem_ops.free(self.runtime, ExportEntry, exports);
-        if (indirect_exports.len != 0) mem_ops.free(self.runtime, IndirectExportEntry, indirect_exports);
-        if (star_exports.len != 0) mem_ops.free(self.runtime, StarExportEntry, star_exports);
-        if (import_attributes.len != 0) mem_ops.free(self.runtime, ImportAttributeEntry, import_attributes);
+        if (requests.len != 0) self.runtime.freeNative(RequestEntry, requests);
+        if (imports.len != 0) self.runtime.freeNative(ImportEntry, imports);
+        if (exports.len != 0) self.runtime.freeNative(ExportEntry, exports);
+        if (indirect_exports.len != 0) self.runtime.freeNative(IndirectExportEntry, indirect_exports);
+        if (star_exports.len != 0) self.runtime.freeNative(StarExportEntry, star_exports);
+        if (import_attributes.len != 0) self.runtime.freeNative(ImportAttributeEntry, import_attributes);
     }
 
     /// `rt` is unused: the destroy-by-kind dispatch (`gc.zig`,
@@ -498,7 +496,7 @@ pub const ModuleRecord = struct {
         self.clearForDestroy();
 
         // TGC S4-e spec 2.5: no Pass-B deferral.
-        mem_ops.destroy(self.runtime, ModuleRecord, self);
+        self.runtime.gc.destroyCell(ModuleRecord, self);
     }
 
     pub inline fn traceChildEdgesFallible(self: *ModuleRecord, rt: anytype, visitor: anytype) !void {
@@ -795,7 +793,7 @@ pub const Registry = struct {
             return .{ .existing = record };
         }
 
-        const record = try mem_ops.create(self.runtime, ModuleRecord);
+        const record = try self.runtime.gc.createCell(ModuleRecord);
         record.prepare(self.runtime, self.atoms, name);
         record.replaceDefinitionNoFail(pending);
         // Bulk install of a whole pending definition -- exports, the function
@@ -928,8 +926,7 @@ inline fn append(account: *@import("../runtime.zig").JSRuntime, comptime T: type
     const old = slice.*;
     const new_count = std.math.add(usize, old.len, 1) catch return error.OutOfMemory;
     const old_ptr: [*]u8 = if (old.len == 0) undefined else @ptrCast(old.ptr);
-    const new_buf = try mem_ops.reallocElements(
-        account,
+    const new_buf = try account.reallocNativeElements(
         old_ptr,
         old.len,
         new_count,

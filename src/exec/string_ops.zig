@@ -3255,7 +3255,7 @@ pub fn defineStringWrapperIndexProperty(rt: *core.JSRuntime, object: *core.Objec
 }
 
 pub fn getStringIndexValue(rt: *core.JSRuntime, value: core.JSValue, atom_id: core.Atom) !?core.JSValue {
-    const index = core.array.arrayIndexFromAtom(&rt.atoms, atom_id) orelse return null;
+    const index = core.array.arrayIndexFromAtom(rt.atoms, atom_id) orelse return null;
     if (!value.isString()) return null;
     if (index >= core.string.stringValueLenUnchecked(value)) return core.JSValue.undefinedValue();
     const unit = core.string.stringValueCodeUnitAtUnchecked(value, index);
@@ -3451,7 +3451,7 @@ test "standard and annexB string method-id tables preserve load-bearing ids" {
 }
 
 test "default object tag distinguishes bytecode function classes" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const class_ids = [_]core.ClassId{
@@ -3484,7 +3484,7 @@ pub fn objectIsArrayForToString(object: *core.Object) !bool {
 pub fn stringObjectHasIndexProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) bool {
     if (object.class_id != core.class.ids.string) return false;
     const string_data = object.objectData() orelse return false;
-    const index = core.array.arrayIndexFromAtom(&rt.atoms, atom_id) orelse return false;
+    const index = core.array.arrayIndexFromAtom(rt.atoms, atom_id) orelse return false;
     const string_value = string_data.asStringBody() orelse return false;
     return index < string_value.len();
 }
@@ -4146,7 +4146,7 @@ test "String index reads are prim_self method_leaf entries with their legacy bod
         try std.testing.expectEqual(decl.managed == null, entry.flags.needs_env);
     }
     // The leaf targets own the index rule: negative = fallback.
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const str = try core.string.String.createLatin1(rt, "abc");
     try std.testing.expectEqual(@as(i32, 'b'), stringCharCodeAtLeaf(str, 1));
@@ -5806,7 +5806,7 @@ fn iteratorResult(rt: *core.JSRuntime, global: ?*core.Object, value: core.JSValu
 }
 
 test "string iteratorResult roots direct function bytecode value while creating result" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-string-iterator-result-bytecode-symbol");
@@ -5832,7 +5832,7 @@ test "string iteratorResult roots direct function bytecode value while creating 
 }
 
 test "string wrapper iterator split and match helpers keep values under GC" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();

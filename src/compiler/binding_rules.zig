@@ -544,13 +544,13 @@ fn lowerScopeVarOpForClosure(ctx: *const JSContext, atom_id: atom.Atom, ref_idx:
 }
 
 test "resolved closure identity owns lexical opcode selection" {
-    const rt = try runtime.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try runtime.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("resolved-closure-opcode-selection");
     const binding = try rt.internAtom("same-name-closure");
 
-    var fd = function_def_mod.FunctionDef.init(rt.nativeAllocator(), rt.nativeAllocator(), &rt.atoms, name);
+    var fd = function_def_mod.FunctionDef.init(rt.nativeAllocator(), rt.nativeAllocator(), rt.atoms, name);
     defer fd.deinit(rt);
     _ = try fd.addClosureVar(.{
         .closure_type = .local,
@@ -569,7 +569,7 @@ test "resolved closure identity owns lexical opcode selection" {
         .var_name = binding,
     });
 
-    var bc = bytecode_function.Bytecode.init(rt.nativeAllocator(), rt.nativeAllocator(), &rt.atoms, name);
+    var bc = bytecode_function.Bytecode.init(rt.nativeAllocator(), rt.nativeAllocator(), rt.atoms, name);
     defer bc.deinit();
     const ctx = JSContext.initWithFunctionDef(&bc, &fd);
     try std.testing.expectEqual(

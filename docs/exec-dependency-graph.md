@@ -21,7 +21,7 @@ Direct `@import("exec/….zig")` is limited to a few compile tests.
 | --- | --- | --- |
 | `src/js_context.zig` | `eval_entry`, `zjs_vm`, `call_site`, `call_runtime`, `standard_globals`, `object_ops`, `exception_ops`, `coercion_ops`, `string_ops` | Public `Context`: eval, property get, `callFunction`, drain |
 | `src/native.zig` | `builtin_dispatch` | Host `defineFunction` thunks use the same native-call view as builtins |
-| `src/event_loop.zig` | `zjs_vm`, `call_runtime`, `atomics_ops`, `object_ops`, `promise_ops` | Timers/fd callbacks, microtasks, Atomics waiter wake |
+| `src/host/event_loop.zig` | `zjs_vm`, `call_runtime`, `atomics_ops`, `object_ops`, `promise_ops` | Timers/fd callbacks, microtasks, Atomics waiter wake |
 | `src/root.zig` | `exceptions`, `opcodeName`, `small_inline` | Public error aliases; opcode-profile name provider |
 | CLI (`zjs`, `run-test262`) | `module` / `module_graph`, `atomics_ops`, `call_runtime`, `buffer_ops` | File modules, agents, harness helpers |
 | In-tree tests | many `exec.*` aliases | Direct domain probes; keep `root.zig` compatibility names |
@@ -275,7 +275,7 @@ not extra runtime layers.
 | Change | File |
 | --- | --- |
 | New opcode hot/cold handler | `tailcall_dispatch.zig` / `_colds.zig`, body in `vm_opcodes.zig` or `vm_property.zig` |
-| New `[[Call]]` / `[[Construct]]` route | `call_runtime.zig` unique terminal. `call.zig` / `construct.zig` keep remaining owners (host globals, Bound create, `objectConstructorValue`, TypedArray copy primitive); do not add a second generic classifier |
+| New `[[Call]]` / `[[Construct]]` route | `call_runtime.zig` unique terminal. `call.zig` / `construct.zig` keep remaining owners (engine globals, Bound create, `objectConstructorValue`, TypedArray copy primitive); do not add a second generic classifier |
 | New standard method | `internal_entries` in the domain `*_ops.zig`, row in `internal_builtins.zig`, install in `standard_globals.zig` |
 | New throw helper | `exception_ops.zig` (`throw<Kind>Message` / `throw<Reason><Kind>`) |
 | New host→JS entry | `call_site.zig` (do not add a second CallSite) |

@@ -171,7 +171,7 @@ fn buildNamedErrorObject(rt: *core.JSRuntime, ctor_value: core.JSValue, name: []
 }
 
 test "buildNamedErrorObject roots direct symbol constructor while creating error object" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-error-constructor-symbol");

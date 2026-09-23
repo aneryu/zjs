@@ -146,7 +146,7 @@ fn printOperandsFromLayout(
 }
 
 test "dyn_env_probe flags byte disassembles as kind[,with]" {
-    const rt = try runtime.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try runtime.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("probe-dump");
@@ -159,7 +159,7 @@ test "dyn_env_probe flags byte disassembles as kind[,with]" {
 
     var buf: [512]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buf);
-    try dumpArtifact(&writer, &rt.atoms, name, 0, 0, 1, &code, 0, .{});
+    try dumpArtifact(&writer, rt.atoms, name, 0, 0, 1, &code, 0, .{});
     const text = writer.buffered();
     // The special case used to sit on the unreachable `.sub_opcode` arm,
     // so the flags byte printed as a bare number.

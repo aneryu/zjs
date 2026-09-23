@@ -11,7 +11,6 @@
 //! finalizer has already run). Class ids are Runtime-local; callers retain
 //! the binding and must not use it after its owner is destroyed.
 
-const mem_ops = @import("memory.zig");
 const std = @import("std");
 const class = @import("class.zig");
 const object_mod = @import("object.zig");
@@ -46,8 +45,8 @@ pub const NativeType = struct {
 /// `name` must outlive the runtime (comptime string in practice).
 pub fn registerType(rt: *JSRuntime, name: []const u8, finalize: ?FinalizeFn) !*const NativeType {
     try rt.requireOwnerThread();
-    const native_type = try mem_ops.create(rt, NativeType);
-    errdefer mem_ops.destroy(rt, NativeType, native_type);
+    const native_type = try rt.createNative(NativeType);
+    errdefer rt.destroyNative(NativeType, native_type);
     native_type.* = .{
         .class_id = class.invalid_class_id,
         .name = name,
@@ -68,7 +67,7 @@ pub fn registerType(rt: *JSRuntime, name: []const u8, finalize: ?FinalizeFn) !*c
 
 fn destroyType(data: *anyopaque) void {
     const native_type: *NativeType = @ptrCast(@alignCast(data));
-    mem_ops.destroy(native_type.owner, NativeType, native_type);
+    native_type.owner.destroyNative(NativeType, native_type);
 }
 
 /// Class payload finalizer (sweep / teardown, runtime thread): hand a live

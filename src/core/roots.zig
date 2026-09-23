@@ -3,18 +3,18 @@
 //!
 //! `JSRuntime` embeds one `RootSet` and is the only tracer that aggregates
 //! strong roots. Weak slots are identity records, not value roots. Stack
-//! `ValueRootFrame`s stay on the runtime. `bindInline` points the provider
-//! slice at the inline array inside the runtime's final address.
+//! `ValueRootFrame`s stay on the runtime. Inline provider views are derived
+//! on access, so an empty RootSet needs no address binding.
 
-const mem_ops = @import("memory.zig");
 const std = @import("std");
 const gc = @import("gc.zig");
+const gc_roots = @import("gc_roots.zig");
 const object_mod = @import("object.zig");
 const runtime_mod = @import("../runtime.zig");
 const JSRuntime = runtime_mod.JSRuntime;
 const JSValue = @import("value.zig").JSValue;
-const RootVisitor = runtime_mod.RootVisitor;
-const RootTraceError = runtime_mod.RootTraceError;
+const RootVisitor = gc_roots.RootVisitor;
+const RootTraceError = gc_roots.RootTraceError;
 
 const provider_inline_capacity = 1;
 
@@ -35,12 +35,11 @@ pub const WeakRootSlot = struct {
     callback_context: ?*anyopaque = null,
 };
 
-/// Host handles and declared root providers. Initialized in place: the
-/// provider slice must point at `root_providers_inline` on the runtime that
-/// owns this set, not at a copy.
+/// Host handles and declared root providers. Inline storage contains no
+/// self-pointer; the default value is immediately usable.
 pub const RootSet = struct {
-    root_providers: []RootProvider = &.{},
-    root_providers_capacity: usize = 0,
+    root_providers_heap: ?[]RootProvider = null,
+    root_providers_len: usize = 0,
     root_providers_inline: [provider_inline_capacity]RootProvider = undefined,
     /// Native owning buffers must be released before Runtime teardown.
     value_root_buffers: usize = 0,
@@ -48,29 +47,28 @@ pub const RootSet = struct {
     persistent_root_slots: std.ArrayListUnmanaged(*RootSlot) = .empty,
     weak_root_slots: std.ArrayListUnmanaged(*WeakRootSlot) = .empty,
 
-    pub fn bindInline(self: *RootSet) void {
-        self.root_providers_inline = undefined;
-        self.root_providers = self.root_providers_inline[0..0];
-        self.root_providers_capacity = self.root_providers_inline.len;
-        self.value_root_buffers = 0;
-        self.local_root_slots = .empty;
-        self.persistent_root_slots = .empty;
-        self.weak_root_slots = .empty;
-    }
-
     pub fn usingInline(self: *const RootSet) bool {
-        return self.root_providers.ptr == self.root_providers_inline[0..].ptr;
+        return self.root_providers_heap == null;
     }
 
-    /// Heap buffer to free, or an empty slice when the providers still sit
-    /// in the inline array. Clears the set's provider fields either way.
+    pub fn providerCapacity(self: *const RootSet) usize {
+        return if (self.root_providers_heap) |heap| heap.len else provider_inline_capacity;
+    }
+
+    pub fn providers(self: *const RootSet) []const RootProvider {
+        const storage: []const RootProvider = self.root_providers_heap orelse &self.root_providers_inline;
+        return storage[0..self.root_providers_len];
+    }
+
+    fn providerStorage(self: *RootSet) []RootProvider {
+        return self.root_providers_heap orelse &self.root_providers_inline;
+    }
+
+    /// Transfer heap storage to the caller and restore the default empty set.
     pub fn takeHeapProviderStorage(self: *RootSet) []RootProvider {
-        const heap: []RootProvider = if (self.root_providers_capacity != 0 and !self.usingInline())
-            self.root_providers.ptr[0..self.root_providers_capacity]
-        else
-            self.root_providers[0..0];
-        self.root_providers = &.{};
-        self.root_providers_capacity = 0;
+        const heap: []RootProvider = self.root_providers_heap orelse &.{};
+        self.root_providers_heap = null;
+        self.root_providers_len = 0;
         return heap;
     }
 
@@ -81,7 +79,7 @@ pub const RootSet = struct {
     }
 
     pub fn register(self: *RootSet, rt: *JSRuntime, provider: RootProvider) !void {
-        for (self.root_providers) |registered| {
+        for (self.providers()) |registered| {
             if (registered.context == provider.context and registered.trace == provider.trace) return;
         }
         try self.append(rt, provider);
@@ -89,57 +87,41 @@ pub const RootSet = struct {
 
     pub fn unregister(self: *RootSet, rt: *JSRuntime, provider: RootProvider) void {
         var found: ?usize = null;
-        for (self.root_providers, 0..) |registered, index| {
+        for (self.providers(), 0..) |registered, index| {
             if (registered.context == provider.context and registered.trace == provider.trace) {
                 found = index;
                 break;
             }
         }
         const index = found orelse return;
-        if (index + 1 < self.root_providers.len) {
-            std.mem.copyForwards(RootProvider, self.root_providers[index .. self.root_providers.len - 1], self.root_providers[index + 1 ..]);
+        const storage = self.providerStorage();
+        if (index + 1 < self.root_providers_len) {
+            std.mem.copyForwards(RootProvider, storage[index .. self.root_providers_len - 1], storage[index + 1 .. self.root_providers_len]);
         }
-        self.root_providers = self.root_providers[0 .. self.root_providers.len - 1];
-        if (self.root_providers.len == 0 and self.root_providers_capacity != 0) {
-            if (self.usingInline()) {
-                self.root_providers = self.root_providers_inline[0..0];
-                self.root_providers_capacity = self.root_providers_inline.len;
-                return;
-            }
-            const old_providers = self.root_providers.ptr[0..self.root_providers_capacity];
-            self.root_providers = self.root_providers_inline[0..0];
-            self.root_providers_capacity = self.root_providers_inline.len;
-            mem_ops.free(rt, RootProvider, old_providers);
+        self.root_providers_len -= 1;
+        if (self.root_providers_len == 0) {
+            const heap = self.takeHeapProviderStorage();
+            if (heap.len != 0) rt.freeNative(RootProvider, heap);
         }
     }
 
     fn append(self: *RootSet, rt: *JSRuntime, provider: RootProvider) !void {
-        while (self.root_providers.len == self.root_providers_capacity) {
-            const next_capacity = if (self.root_providers_capacity == 0)
-                provider_inline_capacity
-            else
-                std.math.mul(usize, self.root_providers_capacity, 2) catch return error.OutOfMemory;
-            const next = try mem_ops.alloc(rt, RootProvider, next_capacity);
-            // Allocation can reenter registration through a collection/probe.
-            // Re-read the live table before copying: a nested call may already
-            // have grown it, or filled more entries than this candidate holds.
-            if (self.root_providers.len < self.root_providers_capacity or
-                self.root_providers.len >= next_capacity)
-            {
-                mem_ops.free(rt, RootProvider, next);
+        while (self.root_providers_len == self.providerCapacity()) {
+            const next_capacity = std.math.mul(usize, self.providerCapacity(), 2) catch return error.OutOfMemory;
+            const next = try rt.allocNative(RootProvider, next_capacity);
+            // Allocation can reenter registration. Re-read the live storage
+            // before copying or committing a candidate buffer.
+            if (self.root_providers_len < self.providerCapacity() or self.root_providers_len >= next_capacity) {
+                rt.freeNative(RootProvider, next);
                 continue;
             }
-            @memcpy(next[0..self.root_providers.len], self.root_providers);
-            const old_capacity = self.root_providers_capacity;
-            const old_using_inline = self.usingInline();
-            const old = if (!old_using_inline and old_capacity != 0) self.root_providers.ptr[0..old_capacity] else self.root_providers[0..0];
-            self.root_providers = next[0..self.root_providers.len];
-            self.root_providers_capacity = next_capacity;
-            if (old.len != 0) mem_ops.free(rt, RootProvider, old);
+            @memcpy(next[0..self.root_providers_len], self.providers());
+            const old = self.root_providers_heap;
+            self.root_providers_heap = next;
+            if (old) |heap| rt.freeNative(RootProvider, heap);
         }
-        const len = self.root_providers.len;
-        self.root_providers = self.root_providers.ptr[0 .. len + 1];
-        self.root_providers[len] = provider;
+        self.providerStorage()[self.root_providers_len] = provider;
+        self.root_providers_len += 1;
     }
 
     pub fn traceHandleSlots(self: *const RootSet, visitor: *RootVisitor) RootTraceError!void {
@@ -152,7 +134,7 @@ pub const RootSet = struct {
     }
 
     pub fn traceProviders(self: *const RootSet, visitor: *RootVisitor) RootTraceError!void {
-        for (self.root_providers) |provider| {
+        for (self.providers()) |provider| {
             try provider.trace(provider.context, visitor);
         }
     }
@@ -177,8 +159,8 @@ pub const RootSet = struct {
         budget.suspend_alloc_notify = true;
         defer budget.suspend_alloc_notify = saved_suspend;
 
-        const slot = try mem_ops.create(rt, WeakRootSlot);
-        errdefer mem_ops.destroy(rt, WeakRootSlot, slot);
+        const slot = try rt.createNative(WeakRootSlot);
+        errdefer rt.destroyNative(WeakRootSlot, slot);
         slot.* = .{
             .identity = identity,
             .callback = callback,
@@ -194,8 +176,8 @@ pub const RootSet = struct {
         budget.suspend_alloc_notify = true;
         defer budget.suspend_alloc_notify = saved_suspend;
 
-        const slot = try mem_ops.create(rt, RootSlot);
-        errdefer mem_ops.destroy(rt, RootSlot, slot);
+        const slot = try rt.createNative(RootSlot);
+        errdefer rt.destroyNative(RootSlot, slot);
         slot.* = .{ .value = JSValue.undefinedValue() };
         try slots.append(rt.nativeAllocator(), slot);
         slot.value = value;
@@ -206,7 +188,7 @@ pub const RootSet = struct {
         self.removeWeak(rt, slot);
         rt.clearWeakRootSlot(slot, false);
         slot.* = .{};
-        mem_ops.destroy(rt, WeakRootSlot, slot);
+        rt.destroyNative(WeakRootSlot, slot);
     }
 
     fn removeWeak(self: *RootSet, rt: *JSRuntime, slot: *WeakRootSlot) void {
@@ -226,7 +208,7 @@ pub const RootSet = struct {
         self.removePersistent(rt, slot);
         const value = slot.value;
         slot.value = JSValue.undefinedValue();
-        mem_ops.destroy(rt, RootSlot, slot);
+        rt.destroyNative(RootSlot, slot);
         return value;
     }
 
@@ -264,7 +246,7 @@ pub const RootSet = struct {
             index -= 1;
             const slot = self.local_root_slots.items[index];
             slot.value = JSValue.undefinedValue();
-            mem_ops.destroy(rt, RootSlot, slot);
+            rt.destroyNative(RootSlot, slot);
         }
         self.local_root_slots.shrinkRetainingCapacity(start);
         if (self.local_root_slots.items.len == 0) self.local_root_slots.clearAndFree(rt.nativeAllocator());
@@ -484,8 +466,8 @@ pub const ValueRootBuffer = struct {
         frame.activate(rt);
         defer frame.deactivate(rt);
 
-        const bytes = try mem_ops.allocElements(rt, total_bytes, 1, block_alignment);
-        errdefer mem_ops.freeAlignedBytes(rt, bytes, block_alignment);
+        const bytes = try rt.allocNativeElements(total_bytes, 1, block_alignment);
+        errdefer rt.freeNativeAlignedBytes(bytes, block_alignment);
         const block: *Block = @ptrCast(@alignCast(bytes.ptr));
         block.* = .{ .runtime = rt, .len = source.len };
         const copied_values = block.slots();
@@ -515,6 +497,6 @@ pub const ValueRootBuffer = struct {
         const bytes: [*]u8 = @ptrCast(block);
         const total_bytes = slots_offset + block.len * @sizeOf(JSValue);
         self.block = null;
-        mem_ops.freeAlignedBytes(rt, bytes[0..total_bytes], block_alignment);
+        rt.freeNativeAlignedBytes(bytes[0..total_bytes], block_alignment);
     }
 };

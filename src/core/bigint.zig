@@ -7,11 +7,10 @@
 //! its limb tail around quickjs.c. Core and higher layers may import
 //! this module; it depends only on core/libs, never exec/runtime/binding.
 
-const mem_ops = @import("memory.zig");
+const gc_alloc = @import("gc_alloc.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const gc = @import("gc.zig");
-const memory = @import("memory.zig");
 const libs = @import("../libs/root.zig");
 const JSRuntime = @import("../runtime.zig").JSRuntime;
 const JSValue = @import("value.zig").JSValue;
@@ -153,8 +152,8 @@ pub const BigInt = struct {
     /// `createFromOwned` without the GC publication: the wrapper is on no
     /// list and the tracer neither marks nor sweeps it until `register`.
     pub fn createFromOwnedReserved(rt: *JSRuntime, value: libs.bigint.BigInt) !*BigInt {
-        const self = try mem_ops.create(rt, BigInt);
-        errdefer mem_ops.destroy(rt, BigInt, self);
+        const self = try rt.gc.createCell(BigInt);
+        errdefer rt.gc.destroyCell(BigInt, self);
 
         const accounted_allocator = rt.nativeAllocator();
         var owned = value;
@@ -200,7 +199,7 @@ pub const BigInt = struct {
     pub fn createInlineUninitialized(rt: *JSRuntime, capacity: usize) !*BigInt {
         if (capacity > libs.bigint.max_limbs) return error.BigIntTooLarge;
         const fam_bytes = capacity * @sizeOf(Limb);
-        const self = try mem_ops.createWithFam(rt, BigInt, fam_bytes);
+        const self = try rt.gc.createWithFam(BigInt, fam_bytes);
         self.* = .{
             .header = .{},
             .limbs_ptr = if (capacity == 0) null else @ptrCast(@alignCast(inlineBase(self))),
@@ -237,7 +236,7 @@ pub const BigInt = struct {
     /// Bytes this wrapper (plus inline limbs) is registered with. External
     /// limbs are charged separately through the native allocator.
     pub fn accountedAllocationSize(self: *const BigInt) usize {
-        return mem_ops.gcSlabAccountedPayload(self) orelse
+        return gc_alloc.gcSlabAccountedPayload(self) orelse
             (@sizeOf(BigInt) + if (self.flags.inline_storage) self.famBytes() else 0);
     }
 
@@ -406,7 +405,7 @@ pub const BigInt = struct {
     /// Reserved cell for a parser that may not have stored a runtime. The
     /// native allocator's context is the account that owns the cell.
     pub fn createExternalReserved(runtime: *JSRuntime) !*BigInt {
-        return mem_ops.create(runtime, BigInt);
+        return runtime.gc.createCell(BigInt);
     }
 
     pub fn destroyExternalReserved(self: *BigInt, runtime: *JSRuntime) void {
@@ -417,11 +416,11 @@ pub const BigInt = struct {
         if (self.flags.inline_storage) {
             // Capacity, not len: an inline result normalized down from
             // `lhs.len + rhs.len` would otherwise be released at the wrong size.
-            mem_ops.destroyWithFam(account, BigInt, self, self.famBytes());
+            account.gc.destroyWithFam(BigInt, self, self.famBytes());
             return;
         }
         if (self.capacity != 0) self.allocator.free(self.limbs_ptr.?[0..self.capacity]);
-        mem_ops.destroy(account, BigInt, self);
+        account.gc.destroyCell(BigInt, self);
     }
 };
 
@@ -518,7 +517,7 @@ fn makeLockstepOperand(
 }
 
 test "heap BigInt value uses reserved QuickJS tag" {
-    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const big = try BigInt.create(rt, @as(i128, 1) << 90);
@@ -529,7 +528,7 @@ test "heap BigInt value uses reserved QuickJS tag" {
 }
 
 test "heap BigInt limbs participate in runtime memory limit and accounting" {
-    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var source = try libs.bigint.pow2(std.testing.allocator, 512 * 1024);
@@ -556,7 +555,7 @@ test "heap BigInt limbs participate in runtime memory limit and accounting" {
 }
 
 test "heap BigInt external storage reads through the storage accessors" {
-    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const baseline = rt.diagnostics.allocations.allocated_bytes;
 
@@ -591,11 +590,11 @@ test "heap BigInt external storage reads through the storage accessors" {
 
 test "heap BigInt inline storage destroys by capacity across the slab boundary" {
     const bigint = libs.bigint;
-    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const baseline = rt.diagnostics.allocations.allocated_bytes;
 
-    const slab = memory.SmallObjectSlab;
+    const slab = gc_alloc.SmallObjectSlab;
     const wrapper = @sizeOf(BigInt);
     const limb_bytes = @sizeOf(bigint.Limb);
     const max_slab_payload = slab.max_size - slab.block_header_bytes;
@@ -675,10 +674,10 @@ test "heap BigInt inline storage destroys by capacity across the slab boundary" 
 
 test "inline FAM multiplication matches the external kernel limb for limb" {
     const bigint = libs.bigint;
-    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const baseline = rt.diagnostics.allocations.allocated_bytes;
-    const slab = memory.SmallObjectSlab;
+    const slab = gc_alloc.SmallObjectSlab;
     const max_slab_payload = slab.max_size - slab.block_header_bytes;
     const last_slab_capacity =
         (max_slab_payload - @sizeOf(BigInt)) / @sizeOf(bigint.Limb);
@@ -739,7 +738,7 @@ test "inline FAM multiplication matches the external kernel limb for limb" {
 
 test "heap multiplication costs one allocation and one block" {
     const bigint = libs.bigint;
-    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     // 2x2 limbs: the shape the JS-level benchmark uses.
@@ -759,12 +758,12 @@ test "heap multiplication costs one allocation and one block" {
 
     const payload = @sizeOf(BigInt) + 4 * @sizeOf(bigint.Limb);
     try std.testing.expectEqual(
-        bytes_before + mem_ops.accountedSizeForRequest(payload, .@"8"),
+        bytes_before + gc_alloc.accountedSizeForRequest(payload, .@"8"),
         rt.diagnostics.allocations.allocated_bytes,
     );
     // The fused wrapper+limbs payload remains slab-backed in both the RC and
     // compact trace representations.
-    try std.testing.expect(memory.SmallObjectSlab.canUse(payload, .@"8"));
+    try std.testing.expect(gc_alloc.SmallObjectSlab.canUse(payload, .@"8"));
 
     product.releaseForTest(rt);
     try std.testing.expectEqual(count_before, rt.diagnostics.allocations.allocation_count);
@@ -773,10 +772,10 @@ test "heap multiplication costs one allocation and one block" {
 
 test "heap multiplication crosses the slab boundary into standalone blocks" {
     const bigint = libs.bigint;
-    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const slab = memory.SmallObjectSlab;
+    const slab = gc_alloc.SmallObjectSlab;
     const max_slab_payload = slab.max_size - slab.block_header_bytes;
     const last_slab_capacity =
         (max_slab_payload - @sizeOf(BigInt)) / @sizeOf(bigint.Limb);
@@ -820,7 +819,7 @@ test "heap multiplication crosses the slab boundary into standalone blocks" {
 
 test "heap multiplication reports its single allocation failure cleanly" {
     const bigint = libs.bigint;
-    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const lhs_limbs = try std.testing.allocator.alloc(bigint.Limb, 16);
@@ -864,7 +863,7 @@ test "heap multiplication reports its single allocation failure cleanly" {
 
 test "heap multiplication rejects an oversize product before allocating" {
     const bigint = libs.bigint;
-    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     // max_limbs is the js_bigint_new cap. Two operands
@@ -895,7 +894,7 @@ test "repeated heap multiplication retains nothing as the count grows" {
     // in the second.
     var previous_peak: ?usize = null;
     for ([_]usize{ 0, 1, 10, 1000 }) |n| {
-        const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
+        const rt = try JSRuntime.create(std.testing.allocator, .{});
         defer rt.destroy();
         const lhs = try makeLockstepOperand(rt, &operand_limbs, false, false);
         defer lhs.releaseForTest(rt);

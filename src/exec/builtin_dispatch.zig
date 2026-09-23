@@ -1,5 +1,5 @@
 //! Typed bridge between exec's native-record dispatch sites and the
-//! runtime's standard native record table (`rt.internal_builtins`).
+//! runtime's standard native record table (`internal_builtins.table`).
 //!
 //! QuickJS source map: the JSCFunctionListEntry dispatch inside
 //! JS_CallInternal. The record holds a cproto-tagged function pointer; realm,

@@ -5313,7 +5313,7 @@ pub const Store = struct {
     }
 };
 test "no-suspend async overflow allocation failure leaves published roots intact" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     var store = Store{};
     defer store.deinit(rt);

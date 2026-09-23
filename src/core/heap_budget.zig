@@ -15,8 +15,8 @@ pub const Budget = struct {
     cycle_peak_output: ?*usize = null,
     limit: ?usize = null,
     gc_threshold: usize = 0,
-    /// One production callee: `JSRuntime.retryHeapLimitOnce`. A second
-    /// admission while it runs fails instead of collecting again.
+    /// One production callee: `JSRuntime.retryHeapLimitOnce`. A nested
+    /// admission that does not fit fails instead of collecting again.
     retry: ?*const fn (*anyopaque) void = null,
     retry_ctx: ?*anyopaque = null,
     retrying: bool = false,
@@ -51,15 +51,16 @@ pub const Budget = struct {
         self.bytes -|= n;
     }
 
-    /// Check only. Native caps and `NoTrigger` heap allocations use this so
-    /// they cannot collect.
+    /// Check a prospective heap charge without collecting or reserving bytes.
+    /// Used by `NoTrigger` GC allocations; native diagnostic caps are separate.
     pub fn checkOnly(self: *const Budget, extra: usize) !void {
         const limit = self.limit orelse return;
         if (!fits(self.bytes, extra, limit)) return error.OutOfMemory;
     }
 
-    /// One protected retry, then `error.OutOfMemory` if the charge still
-    /// does not fit. `retrying` is the reentrancy guard and the exit.
+    /// Check admission with at most one protected retry, then error.OutOfMemory
+    /// if the charge still does not fit. Does not reserve or charge bytes.
+    /// `retrying` prevents another collection during a nested admission.
     pub fn admit(self: *Budget, extra: usize) !void {
         const limit = self.limit orelse return;
         if (fits(self.bytes, extra, limit)) return;

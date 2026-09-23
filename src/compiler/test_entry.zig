@@ -57,10 +57,10 @@ pub fn parseAndCompileV2TestProgram(
 ) !Program {
     const name_atom = try rt.atoms.internString(name);
 
-    var lexer = parser.Lexer.init(testing_allocator, &rt.atoms, source);
+    var lexer = parser.Lexer.init(testing_allocator, rt.atoms, source);
     errdefer lexer.deinit();
 
-    var state = try Parser.ParseState.initFromRuntime(&lexer, rt, &rt.atoms, name_atom);
+    var state = try Parser.ParseState.initFromRuntime(&lexer, rt, rt.atoms, name_atom);
     errdefer state.deinit(rt);
     state.runtime = rt;
     switch (options.root) {

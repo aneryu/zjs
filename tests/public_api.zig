@@ -3,7 +3,7 @@ const std = @import("std");
 const zjs = @import("zjs");
 
 test "defineScriptArgs materializes empty array on first read" {
-    const rt = try zjs.Runtime.create(.{ .allocator = std.testing.allocator });
+    const rt = try zjs.Runtime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try zjs.Context.create(rt, .{});
     defer ctx.destroy();
@@ -27,7 +27,7 @@ test "defineScriptArgs materializes empty array on first read" {
 }
 
 test "defineScriptArgs installs string items" {
-    const rt = try zjs.Runtime.create(.{ .allocator = std.testing.allocator });
+    const rt = try zjs.Runtime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try zjs.Context.create(rt, .{});
     defer ctx.destroy();
@@ -44,7 +44,7 @@ test "defineScriptArgs installs string items" {
 }
 
 test "Context.toString performs ECMAScript ToString instead of tag assertion" {
-    const rt = try zjs.Runtime.create(.{ .allocator = std.testing.allocator });
+    const rt = try zjs.Runtime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try zjs.Context.create(rt, .{});
     defer ctx.destroy();
@@ -56,9 +56,13 @@ test "Context.toString performs ECMAScript ToString instead of tag assertion" {
     try std.testing.expectEqualStrings("semantic-string", converted.asString().?.units().latin1);
 }
 
-test "Runtime create has one options entry and supports the default allocator" {
-    const rt = try zjs.Runtime.create(.{});
+test "Runtime create requires an explicit host allocator" {
+    try std.testing.expect(!@hasField(zjs.Runtime.Options, "allocator"));
+    const allocator = std.testing.allocator;
+    const rt = try zjs.Runtime.create(allocator, .{});
     defer rt.destroy();
+    try std.testing.expectEqual(allocator.ptr, rt.allocator.ptr);
+    try std.testing.expectEqual(allocator.vtable, rt.allocator.vtable);
     const ctx = try zjs.Context.create(rt, .{});
     defer ctx.destroy();
     try std.testing.expectEqual(@as(?i32, 42), (try ctx.eval("21 * 2", .{})).as(.int));

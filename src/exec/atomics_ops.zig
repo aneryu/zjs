@@ -672,7 +672,7 @@ pub fn atomicsUnlinkWaiter(waiter: *AtomicsWaiter) void {
 }
 
 test "foreign Atomics notify only publishes a no-allocation completion" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -713,7 +713,7 @@ test "foreign Atomics notify only publishes a no-allocation completion" {
 }
 
 test "waitAsync finite deadline is driven by the owner host clock queue" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -746,7 +746,7 @@ test "waitAsync finite deadline is driven by the owner host clock queue" {
 
 test "waitAsync owner settlement OOM relinks the frozen completion outside the waiter mutex" {
     var failing_allocator = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    const rt = try core.JSRuntime.create(.{ .allocator = failing_allocator.allocator() });
+    const rt = try core.JSRuntime.create(failing_allocator.allocator(), .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -1325,7 +1325,7 @@ pub fn atomicsWaitAsyncResult(ctx: *core.JSContext, is_async: bool, value: core.
 }
 
 test "atomicsWaitAsyncResult roots direct function bytecode value while creating result object" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();

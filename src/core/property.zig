@@ -171,7 +171,6 @@ fn valueFromAccessorHeader(header: ?*gc.Header) JSValue {
 
 pub const AutoInitKind = enum(u8) {
     native_function,
-    console,
     math_namespace,
     json_namespace,
     reflect_namespace,
@@ -292,6 +291,8 @@ comptime {
 pub const AutoInit = struct {
     name: []const u8,
     length: i32,
+    /// Static host factory, called under the normal materialization transaction.
+    materialize_host: ?*const fn (*gc.Header) @import("errors.zig").RuntimeError!JSValue = null,
     kind: AutoInitKind = .native_function,
     // Kind-specific payload reused by host function autoinit.
     host_function_kind: i32 = 0,
@@ -315,6 +316,7 @@ pub const AutoInit = struct {
         return std.mem.eql(u8, self.name, other.name) and
             self.length == other.length and
             self.kind == other.kind and
+            self.materialize_host == other.materialize_host and
             self.host_function_kind == other.host_function_kind and
             self.native_entry == other.native_entry and
             self.host_function_prototype == other.host_function_prototype and

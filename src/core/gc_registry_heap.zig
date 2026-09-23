@@ -17,7 +17,6 @@
 
 const std = @import("std");
 const gc = @import("gc.zig");
-const memory = @import("memory.zig");
 
 const ExternalTokenEntry = gc.ExternalTokenEntry;
 const Header = gc.Header;

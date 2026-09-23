@@ -240,16 +240,16 @@ pub const JSContext = struct {
         return self.core.preservesUncaughtException();
     }
 
-    pub fn setHostEventLoop(self: *JSContext, host_loop: core.context.HostEventLoop) void {
-        self.core.setHostEventLoop(host_loop);
+    pub fn setHostScheduler(self: *JSContext, host_loop: core.context.HostScheduler) void {
+        self.core.setHostScheduler(host_loop);
     }
 
-    pub fn clearHostEventLoop(self: *JSContext, ptr: *anyopaque) void {
-        self.core.clearHostEventLoop(ptr);
+    pub fn clearHostScheduler(self: *JSContext, ptr: *anyopaque) void {
+        self.core.clearHostScheduler(ptr);
     }
 
-    pub fn hostEventLoop(self: *JSContext) ?core.context.HostEventLoop {
-        return self.core.hostEventLoop();
+    pub fn hostScheduler(self: *JSContext) ?core.context.HostScheduler {
+        return self.core.hostScheduler();
     }
 
     // --- Execution / VM / Builtins Helpers (Moved from core/context.zig) ---

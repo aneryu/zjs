@@ -515,7 +515,7 @@ pub fn symbolFor(
 pub fn symbolKeyFor(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
     const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const atom_id = value.asSymbolAtom() orelse return error.TypeError;
-    const key = core.symbol.registryKey(&rt.atoms, atom_id) orelse return core.JSValue.undefinedValue();
+    const key = core.symbol.registryKey(rt.atoms, atom_id) orelse return core.JSValue.undefinedValue();
     return value_ops.createStringValue(rt, key);
 }
 

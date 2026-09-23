@@ -7,10 +7,8 @@
 //! exec/binding register and consume classes through it, while it must not
 //! import either higher layer.
 
-const mem_ops = @import("memory.zig");
 const std = @import("std");
 const atom = @import("atom.zig");
-const memory = @import("memory.zig");
 const builtin = @import("builtin");
 
 comptime {
@@ -327,7 +325,9 @@ pub const Table = struct {
     };
 
     atoms: *atom.AtomTable,
-    owner: *@import("../runtime.zig").JSRuntime,
+    storage_allocator: std.mem.Allocator,
+    allocator: std.mem.Allocator,
+    owner_thread_id: std.Thread.Id,
     next_dynamic_id: u32 = ids.init_count,
     records: []Record = &.{},
     records_inline: [ids.init_count]Record = @splat(.{}),
@@ -343,10 +343,16 @@ pub const Table = struct {
     /// record view.
     standard_plans: [ids.init_count]DefinitionPlan = undefined,
 
-    pub fn init(self: *Table, owner: *@import("../runtime.zig").JSRuntime) !void {
+    /// Create the owned class table, including standard definitions, without
+    /// reading Runtime storage. Borrows atoms and storage_allocator; caller
+    /// releases with destroy. Dynamic definitions receive their owner explicitly.
+    pub fn create(allocator: std.mem.Allocator, storage_allocator: std.mem.Allocator, atoms: *atom.AtomTable) !*Table {
+        const self = try allocator.create(Table);
         self.* = .{
-            .atoms = &owner.atoms,
-            .owner = owner,
+            .allocator = allocator,
+            .storage_allocator = storage_allocator,
+            .owner_thread_id = std.Thread.getCurrentId(),
+            .atoms = atoms,
             .records_inline = undefined,
             .standard_plans = undefined,
         };
@@ -355,19 +361,27 @@ pub const Table = struct {
         self.registration_states = self.registration_states_inline[0..ids.init_count];
         fillDefaultRecords(self.records);
         @memset(self.registration_states, .{});
-        errdefer self.deinit();
+        errdefer self.destroy();
         try self.registerStandardClasses();
+        return self;
+    }
+
+    pub fn destroy(self: *Table) void {
+        const allocator = self.allocator;
+        self.deinit();
+        allocator.destroy(self);
     }
 
     /// Reserve before any allocation or callback. Failed ids remain consumed.
-    pub fn registerDefinition(self: *Table, definition: Definition) !Binding {
+    pub fn registerDefinition(self: *Table, rt: *@import("../runtime.zig").JSRuntime, definition: Definition) !Binding {
         try self.requireOwnerThread();
+        if (rt.classes != self) return error.WrongRuntime;
         if (self.next_dynamic_id > std.math.maxInt(ClassId)) return error.ClassIdExhausted;
         const id: ClassId = @intCast(self.next_dynamic_id);
         self.next_dynamic_id += 1;
-        try self.owner.ensureContextClassPrototypeCapacity(id);
+        try rt.ensureContextClassPrototypeCapacity(id);
         try self.register(id, definition);
-        return .{ .owner = self.owner, .id = id };
+        return .{ .owner = rt, .id = id };
     }
 
     fn registerStandardClasses(self: *Table) !void {
@@ -388,7 +402,7 @@ pub const Table = struct {
     }
 
     pub fn isOwnerThread(self: *const Table) bool {
-        return self.owner.isOwnerThread();
+        return self.owner_thread_id == std.Thread.getCurrentId();
     }
 
     pub fn requireOwnerThread(self: *const Table) MutationError!void {
@@ -412,7 +426,7 @@ pub const Table = struct {
     }
 
     pub fn deinit(self: *Table) void {
-        // `init` rolls its own records back before the caller observes
+        // `create` rolls its own records back before the caller observes
         // the error. A second deinit from a later errdefer must not free them
         // again. An untouched table is not empty; only a completed deinit is.
         if (self.records.len == 0 and self.registration_states.len == 0) return;
@@ -432,12 +446,12 @@ pub const Table = struct {
         if (using_inline) {
             fillDefaultRecords(records);
         } else if (records.len != 0) {
-            mem_ops.free(self.owner, Record, records);
+            self.storage_allocator.free(records);
         }
         if (using_inline_states) {
             @memset(registration_states, .{});
         } else if (registration_states.len != 0) {
-            mem_ops.free(self.owner, RegistrationState, registration_states);
+            self.storage_allocator.free(registration_states);
         }
     }
 
@@ -706,15 +720,15 @@ pub const Table = struct {
         var new_len = if (self.records.len == 0) @as(usize, ids.init_count) else self.records.len + self.records.len / 2;
         if (new_len < needed) new_len = needed;
 
-        const next = try mem_ops.alloc(self.owner, Record, new_len);
-        errdefer mem_ops.free(self.owner, Record, next);
-        const next_states = try mem_ops.alloc(self.owner, RegistrationState, new_len);
-        errdefer mem_ops.free(self.owner, RegistrationState, next_states);
+        const next = try self.storage_allocator.alloc(Record, new_len);
+        errdefer self.storage_allocator.free(next);
+        const next_states = try self.storage_allocator.alloc(RegistrationState, new_len);
+        errdefer self.storage_allocator.free(next_states);
         // Allocation callbacks may have completed a nested registration.
         // Its larger published table wins; never overwrite it with this stale capacity.
         if (self.records.len >= needed) {
-            mem_ops.free(self.owner, RegistrationState, next_states);
-            mem_ops.free(self.owner, Record, next);
+            self.storage_allocator.free(next_states);
+            self.storage_allocator.free(next);
             return;
         }
         fillDefaultRecords(next);
@@ -730,12 +744,12 @@ pub const Table = struct {
         if (old_using_inline) {
             fillDefaultRecords(old_records);
         } else if (old_records.len != 0) {
-            mem_ops.free(self.owner, Record, old_records);
+            self.storage_allocator.free(old_records);
         }
         if (old_states_using_inline) {
             @memset(old_states, .{});
         } else if (old_states.len != 0) {
-            mem_ops.free(self.owner, RegistrationState, old_states);
+            self.storage_allocator.free(old_states);
         }
     }
 

@@ -2168,7 +2168,7 @@ const ResolveTestHarness = struct {
     fd: bytecode.function_def.FunctionDef,
 
     fn init(harness: *ResolveTestHarness, allocator: std.mem.Allocator) !void {
-        harness.rt = try core.JSRuntime.create(.{ .allocator = allocator });
+        harness.rt = try core.JSRuntime.create(allocator, .{});
         errdefer harness.rt.destroy();
 
         harness.name_atom = try harness.rt.atoms.internString("qcp1-s3-pass-a");
@@ -2176,7 +2176,7 @@ const ResolveTestHarness = struct {
         harness.function = bytecode.Bytecode.init(
             harness.rt.nativeAllocator(),
             harness.rt.nativeAllocator(),
-            &harness.rt.atoms,
+            harness.rt.atoms,
             harness.name_atom,
         );
         errdefer harness.function.deinit();
@@ -2184,13 +2184,13 @@ const ResolveTestHarness = struct {
         harness.fd = bytecode.function_def.FunctionDef.init(
             harness.rt.nativeAllocator(),
             harness.rt.nativeAllocator(),
-            &harness.rt.atoms,
+            harness.rt.atoms,
             harness.name_atom,
         );
         errdefer harness.fd.deinit(harness.rt);
 
         const input_builder = try harness.rt.nativeAllocator().create(builder.Builder);
-        input_builder.* = builder.Builder.init(harness.rt.nativeAllocator(), &harness.rt.atoms);
+        input_builder.* = builder.Builder.init(harness.rt.nativeAllocator(), harness.rt.atoms);
         harness.fd.builder = input_builder;
     }
 

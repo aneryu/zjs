@@ -12,7 +12,6 @@ pub const simple_token = src.simple_token;
 pub const bytecode = src.bytecode;
 pub const exec = src.exec;
 pub const libs = src.libs;
-pub const runtime = src.runtime;
 pub const compiler = src.compiler;
 pub const test262_host = @import("test262_host");
 
@@ -20,7 +19,6 @@ pub const Runtime = src.Runtime;
 pub const Context = src.Context;
 pub const Value = src.Value;
 pub const Call = src.Call;
-pub const EventLoop = src.EventLoop;
 
 pub const GCStats = src.GCStats;
 pub const GCDetailedStats = src.GCDetailedStats;
@@ -63,11 +61,13 @@ pub const printSmallInlineProbe = src.printSmallInlineProbe;
 
 test {
     _ = src;
+    _ = @import("zjs_host");
     if (@import("build_options").zjs_unified_test_suite) {
         // File-imports from the test root are what Zig 0.16 collects.
         // Integration suites live under tests/; package unit suites are
         // also pulled here so `--test-filter` can see them.
         _ = @import("tests/engine.zig");
+        _ = @import("tests/host.zig");
         _ = @import("src/compiler/tests.zig");
         _ = @import("src/parser/tests.zig");
         _ = @import("src/bytecode/tests.zig");

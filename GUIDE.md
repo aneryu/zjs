@@ -86,7 +86,7 @@ QuickJS comparisons inform diagnosis and performance, not implementation form.
     enum tags like `Atomics.compareExchange`) keep the JavaScript spelling.
   - Struct fields that store function pointers follow the function rule
     (`camelCase`), so a vtable field and its wrapper function share one name
-    (e.g. `HostEventLoop.VTable.traceRoots`).
+    (e.g. `HostScheduler.traceRoots`).
 - Ownership suffixes (`*Owned` / `*Borrowed`) are annotations for
   counter-intuitive cases only; most functions follow the A.2 ownership
   rules without a suffix, so the **absence** of a suffix carries no

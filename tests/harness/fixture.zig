@@ -121,7 +121,7 @@ pub fn createTailOpcodeFixture(
 pub const vm_helpers = struct {
     pub fn parseAndRunWithTopLevelChildren(rt: *core.JSRuntime, ctx: *core.JSContext, src: []const u8) !core.JSValue {
         const name = try rt.internAtom("test");
-        var lex = QjsLexer.init(std.testing.allocator, &rt.atoms, src);
+        var lex = QjsLexer.init(std.testing.allocator, rt.atoms, src);
         var state = try ParseState.initWithRuntime(rt, &lex, name);
         defer state.deinit(rt);
         try parser_core.parseExpr(&state);
@@ -144,7 +144,7 @@ pub const vm_helpers = struct {
 
     pub fn parseStmtAndRunWithTopLevelChildren(rt: *core.JSRuntime, ctx: *core.JSContext, src: []const u8) !core.JSValue {
         const name = try rt.internAtom("test");
-        var lex = QjsLexer.init(std.testing.allocator, &rt.atoms, src);
+        var lex = QjsLexer.init(std.testing.allocator, rt.atoms, src);
         var state = try ParseState.initWithRuntime(rt, &lex, name);
         defer state.deinit(rt);
         state.top_level_lexical_as_global_ref = true;

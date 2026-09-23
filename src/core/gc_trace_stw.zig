@@ -8,7 +8,6 @@
 //! live. A collection failure returns to the caller; the runtime aborts the
 //! cycle and retries from fresh marks.
 
-const mem_ops = @import("memory.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -16,6 +15,7 @@ const atom_mod = @import("atom.zig");
 const conservative = @import("gc_conservative.zig");
 const context_mod = @import("context.zig");
 const gc = @import("gc.zig");
+const gc_roots = @import("gc_roots.zig");
 const gc_visit = @import("gc_visit.zig");
 const module_mod = @import("module.zig");
 const object_gc = @import("object_gc.zig");
@@ -187,182 +187,6 @@ pub const Report = struct {
     /// conservative candidate into it could not have been resolved.
     skipped_sweep_incomplete_arenas: bool = false,
 };
-
-/// Static storage footprint of the final marked set.  This is intentionally a
-/// `--gc-stats` census rather than a counter in the marking hot path: the
-/// latter would perturb every edge visit and would still confuse successful
-/// mark claims with the final live population.
-///
-/// A component touch means one distinct allocation reached while expanding a
-/// marked header. Shared shapes therefore contribute once per object that
-/// reaches them. `allocated_bytes` records the allocation's full capacity;
-/// `touched_cache_lines` records the contiguous live span the trace walks
-/// (the base carrier conservatively uses its full span). These are structural
-/// cache-line opportunities, not hardware refill counts.
-pub const MarkStorageComponent = enum(u8) {
-    base,
-    shape,
-    property_slots,
-    dense_elements,
-    trace_payload,
-    payload_backing,
-};
-
-pub const mark_storage_component_count: usize = @typeInfo(MarkStorageComponent).@"enum".fields.len;
-
-pub const MarkTraceClass = enum(u8) {
-    ordinary_object,
-    fast_array,
-    bytecode_function,
-    exotic_object,
-    non_object,
-};
-
-pub const mark_trace_class_count: usize = @typeInfo(MarkTraceClass).@"enum".fields.len;
-
-pub const MarkStorageAggregate = struct {
-    allocation_touches: usize = 0,
-    allocated_bytes: usize = 0,
-    touched_cache_lines: usize = 0,
-};
-
-pub const MarkFootprint = struct {
-    pub const cache_line_bytes: usize = 64;
-    pub const inline_limits = [_]usize{ 1, 2, 4 };
-
-    major_censuses: usize = 0,
-    marked_headers: usize = 0,
-    block_headers: usize = 0,
-    by_kind: [gc.gc_kind_count]usize = @splat(0),
-    by_trace_class: [mark_trace_class_count]usize = @splat(0),
-    storage: [mark_storage_component_count]MarkStorageAggregate = @splat(.{}),
-    storage_by_trace_class: [mark_trace_class_count]MarkStorageAggregate = @splat(.{}),
-    // Eligibility is a terminal-Shape upper bound. The byte/line fields below
-    // are deliberately TRUE external storage only; direct tail objects remain
-    // eligible but are split into `inline_direct_objects`, while a tail owner
-    // that later grew a separate buffer is called out independently. Keeping
-    // these populations separate prevents a successful direct allocation from
-    // being mislabeled as an unrealized external opportunity.
-    inline_eligible_objects: [inline_limits.len]usize = @splat(0),
-    inline_property_bytes: [inline_limits.len]usize = @splat(0),
-    inline_property_cache_lines: [inline_limits.len]usize = @splat(0),
-    inline_direct_objects: [inline_limits.len]usize = @splat(0),
-    inline_tail_grown_external_objects: [inline_limits.len]usize = @splat(0),
-    inline_ordinary_eligible_objects: [inline_limits.len]usize = @splat(0),
-    inline_ordinary_property_bytes: [inline_limits.len]usize = @splat(0),
-    inline_ordinary_property_cache_lines: [inline_limits.len]usize = @splat(0),
-    inline_ordinary_direct_objects: [inline_limits.len]usize = @splat(0),
-    inline_ordinary_tail_grown_external_objects: [inline_limits.len]usize = @splat(0),
-    active_trace_class: MarkTraceClass = .non_object,
-
-    fn cacheLines(address: usize, bytes: usize) usize {
-        if (bytes == 0) return 0;
-        const last = address +| (bytes - 1);
-        return last / cache_line_bytes - address / cache_line_bytes + 1;
-    }
-
-    pub fn noteMarkedHeader(self: *MarkFootprint, header: *gc.Header) void {
-        const kind = header.metaConst().flags.kind;
-        self.marked_headers +|= 1;
-        // TGC S4-a: rope nodes became their own kind. The census keeps
-        // reporting one `string` population -- the two shapes are one family
-        // to every consumer of this panel, and folding here keeps the
-        // `--gc-stats` `string` line intact.
-        self.by_kind[
-            @intFromEnum(switch (kind) {
-                // TGC S2-i folds the tail buffer in as well: it is string bytes
-                // that used to sit inside the flat bodies this row already counted.
-                .rope, .string_buffer => gc.GcKind.string,
-                else => kind,
-            })
-        ] +|= 1;
-        if (gc.Registry.isBlockCellHeader(header)) self.block_headers +|= 1;
-    }
-
-    pub fn beginTraceClass(self: *MarkFootprint, class: MarkTraceClass) void {
-        self.by_trace_class[@intFromEnum(class)] +|= 1;
-        self.active_trace_class = class;
-    }
-
-    pub fn noteAllocation(
-        self: *MarkFootprint,
-        component: MarkStorageComponent,
-        allocation_bytes: usize,
-        touched_address: usize,
-        touched_bytes: usize,
-    ) void {
-        if (allocation_bytes == 0 or touched_bytes == 0) return;
-        const aggregate = &self.storage[@intFromEnum(component)];
-        aggregate.allocation_touches +|= 1;
-        aggregate.allocated_bytes +|= allocation_bytes;
-        aggregate.touched_cache_lines +|= cacheLines(touched_address, touched_bytes);
-        const class_aggregate = &self.storage_by_trace_class[@intFromEnum(self.active_trace_class)];
-        class_aggregate.allocation_touches +|= 1;
-        class_aggregate.allocated_bytes +|= allocation_bytes;
-        class_aggregate.touched_cache_lines +|= cacheLines(touched_address, touched_bytes);
-    }
-
-    pub fn noteInlinePropertyCandidate(
-        self: *MarkFootprint,
-        live_properties: usize,
-        allocation_bytes: usize,
-        allocation_address: usize,
-        touched_bytes: usize,
-        has_trailing_allocation: bool,
-        storage_is_inline: bool,
-    ) void {
-        if (live_properties == 0 or allocation_bytes == 0 or touched_bytes == 0) return;
-        std.debug.assert(!storage_is_inline or has_trailing_allocation);
-        for (inline_limits, 0..) |limit, index| {
-            if (live_properties > limit) continue;
-            self.inline_eligible_objects[index] +|= 1;
-            if (storage_is_inline) {
-                self.inline_direct_objects[index] +|= 1;
-            } else {
-                self.inline_property_bytes[index] +|= allocation_bytes;
-                self.inline_property_cache_lines[index] +|= cacheLines(allocation_address, touched_bytes);
-                if (has_trailing_allocation) self.inline_tail_grown_external_objects[index] +|= 1;
-            }
-            if (self.active_trace_class == .ordinary_object) {
-                self.inline_ordinary_eligible_objects[index] +|= 1;
-                if (storage_is_inline) {
-                    self.inline_ordinary_direct_objects[index] +|= 1;
-                } else {
-                    self.inline_ordinary_property_bytes[index] +|= allocation_bytes;
-                    self.inline_ordinary_property_cache_lines[index] +|= cacheLines(allocation_address, touched_bytes);
-                    if (has_trailing_allocation) self.inline_ordinary_tail_grown_external_objects[index] +|= 1;
-                }
-            }
-        }
-    }
-};
-
-test "mark footprint separates direct candidates from true external storage" {
-    var footprint: MarkFootprint = .{};
-    footprint.beginTraceClass(.ordinary_object);
-    footprint.noteInlinePropertyCandidate(2, 32, 0x1000, 32, true, true);
-
-    const two_slot_index = 1;
-    try std.testing.expectEqual(@as(usize, 1), footprint.inline_ordinary_eligible_objects[two_slot_index]);
-    try std.testing.expectEqual(@as(usize, 1), footprint.inline_ordinary_direct_objects[two_slot_index]);
-    try std.testing.expectEqual(@as(usize, 0), footprint.inline_ordinary_property_bytes[two_slot_index]);
-    try std.testing.expectEqual(@as(usize, 0), footprint.inline_ordinary_property_cache_lines[two_slot_index]);
-
-    footprint.noteInlinePropertyCandidate(2, 64, 0x2000, 32, true, false);
-    footprint.noteInlinePropertyCandidate(2, 32, 0x3000, 32, false, false);
-
-    try std.testing.expectEqual(@as(usize, 3), footprint.inline_ordinary_eligible_objects[two_slot_index]);
-    try std.testing.expectEqual(@as(usize, 1), footprint.inline_ordinary_direct_objects[two_slot_index]);
-    try std.testing.expectEqual(@as(usize, 1), footprint.inline_ordinary_tail_grown_external_objects[two_slot_index]);
-    try std.testing.expectEqual(
-        @as(usize, 1),
-        footprint.inline_ordinary_eligible_objects[two_slot_index] -
-            footprint.inline_ordinary_direct_objects[two_slot_index] -
-            footprint.inline_ordinary_tail_grown_external_objects[two_slot_index],
-    );
-    try std.testing.expectEqual(@as(usize, 96), footprint.inline_ordinary_property_bytes[two_slot_index]);
-    try std.testing.expectEqual(@as(usize, 2), footprint.inline_ordinary_property_cache_lines[two_slot_index]);
-}
 
 /// `ZJS_GC_VERIFY_MINOR=1`: what a FULL trace would keep, recomputed before
 /// each minor so the minor's condemned set can be checked against it.
@@ -543,40 +367,12 @@ fn verifyFullCondemnation(rt: *JSRuntime, reachable: *const FullReachable) Colle
 /// census ask for it around the body that needs it.
 pub var detailed_reports: bool = false;
 
-/// Run `recordFinalMarkFootprint` -- the marked-set/storage census, a whole
-/// heap walk with per-object property-storage accounting.
-///
-/// This is deliberately NOT `detailed_reports`. Deducting a census from the
-/// number a panel prints (`rt.gc.last_census_ns` below) makes the printed number
-/// honest; it does not give the mutator its time back. The marked-set census
-/// is by far the most expensive of the walks -- on splay it is 525k headers
-/// per major, and it lands inside the final-remark stop -- so bundling it into
-/// `--gc-stats` moved the thing the panel exists to measure: with the flag on,
-/// splay scored -9.8% and SplayLatency -23.7% against the SAME binary with it
-/// off. A latency benchmark measures the mutator's wall clock, not our
-/// bookkeeping, and no amount of subtraction reaches it.
-///
-/// So the census is its own opt-in (`--gc-mark-footprint`). `--gc-stats` keeps
-/// the cheap counters and the pause distribution, and is once again usable as
-/// a ruler for the pause work. The subtraction below is kept as well, for the
-/// runs that do ask for the census: the two mechanisms answer different
-/// questions and neither replaces the other.
-pub var mark_footprint_census: bool = false;
-
-/// Either census family is on, so the walks have to be timed to be deducted.
-/// `mark_footprint_census` is separately switchable, and timing it only when
-/// `detailed_reports` also happened to be set would leave the deduction silently
-/// zero for exactly the walk that dominates the cost.
-inline fn censusTimed() bool {
-    return detailed_reports or mark_footprint_census;
-}
-
 inline fn censusStart() u64 {
-    return if (censusTimed()) profile.nowNanos() else 0;
+    return if (detailed_reports) profile.nowNanos() else 0;
 }
 
 inline fn censusEnd(rt: *JSRuntime, started: u64) void {
-    if (!censusTimed()) return;
+    if (!detailed_reports) return;
     const now = profile.nowNanos();
     if (now > started) rt.gc.last_census_ns +|= now - started;
 }
@@ -622,7 +418,7 @@ fn verifyCollectorInvariants(
             gc.representation.block_cell_size_class,
             @as(u3, @intCast(@intFromEnum(gc.GcKind.object))),
             .{
-                .context = @ptrCast(&rt.gc),
+                .context = @ptrCast(rt.gc),
                 .classify = gc.Registry.blockCellPublicationAllowance,
             },
         ),
@@ -637,41 +433,6 @@ fn verifyCollectorInvariants(
     // non-block morgue, so an open destruction transaction is now auditable
     // instead of becoming a blind interval for lost owner links.
     requireInvariant(rt.gc.verifyHeapAccounting(rt), "HEAP ACCOUNTING", "heap accounting invariant violated");
-}
-
-/// Record one major's final marked set after root/edge/ephemeron closure and
-/// before weak processing or condemnation mutates the heap. This is the only
-/// denominator suitable for cross-workload "per marked object" pricing.
-/// Gated on `mark_footprint_census`, not on `detailed_reports`: this walk runs
-/// inside the final-remark stop and is the one census big enough to move the
-/// benchmark scores the panel is used to read (see `mark_footprint_census`).
-fn recordFinalMarkFootprint(rt: *JSRuntime) void {
-    if (!mark_footprint_census) return;
-    const started = censusStart();
-    defer censusEnd(rt, started);
-
-    const footprint = &rt.diagnostics.mark_footprint;
-    footprint.major_censuses +|= 1;
-    var marked = rt.gc.objectIterator(.all);
-    while (marked.next()) |header| {
-        if (!rt.gc.headerMarked(header)) continue;
-        footprint.noteMarkedHeader(header);
-
-        if (header.metaConst().flags.kind == .object) {
-            const object = Object.fromHeaderConst(header);
-            object.recordTraceStorageFootprint(rt, footprint);
-        } else {
-            footprint.beginTraceClass(.non_object);
-            const allocation_address = @intFromPtr(header) - gc.metadata_prefix_size;
-            const allocation_bytes = gc.metadata_prefix_size + gc.Registry.heapByteSizeFromHeader(rt, header);
-            footprint.noteAllocation(
-                .base,
-                allocation_bytes,
-                allocation_address,
-                allocation_bytes,
-            );
-        }
-    }
 }
 
 pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: gc.RootScan) CollectError!usize {
@@ -1047,20 +808,20 @@ fn auditNoEdgesIntoNursery(rt: *JSRuntime, at: gc.nursery_mod.Nursery.Boundary) 
     const RootAdaptor = struct {
         auditor: *Auditor,
 
-        fn value(context: *anyopaque, slot: *JSValue) runtime_mod.RootTraceError!void {
+        fn value(context: *anyopaque, slot: *JSValue) gc_roots.RootTraceError!void {
             const self: *@This() = @ptrCast(@alignCast(context));
             const header = slot.cycleMarkHeader() orelse return;
             self.auditor.check(@intFromPtr(header), "root value");
         }
 
-        fn object(context: *anyopaque, slot: *?*Object) runtime_mod.RootTraceError!void {
+        fn object(context: *anyopaque, slot: *?*Object) gc_roots.RootTraceError!void {
             const self: *@This() = @ptrCast(@alignCast(context));
             const obj = slot.* orelse return;
             self.auditor.check(@intFromPtr(obj.gcHeader()), "root object");
         }
     };
     var root_adaptor = RootAdaptor{ .auditor = &auditor };
-    var root_visitor = runtime_mod.RootVisitor{
+    var root_visitor = gc_roots.RootVisitor{
         .context = @ptrCast(&root_adaptor),
         .visit_value = RootAdaptor.value,
         .visit_object = RootAdaptor.object,
@@ -1609,7 +1370,7 @@ fn destroyCondemnedSlice(rt: *JSRuntime, budget_ns: u64, sweep_string_extents: b
                         bigint_mod.BigInt.destroyFromHeader(rt, h);
                     },
                     .shape => {
-                        if (!h.meta().flags.finalizing) rt.shapes.destroyFromHeader(h);
+                        if (!h.meta().flags.finalizing) rt.shapes.destroyFromHeader(rt, h);
                     },
                     else => unreachable,
                 }
@@ -1828,7 +1589,6 @@ const Collector = struct {
         }
 
         try self.ephemeronFixedPoint();
-        recordFinalMarkFootprint(self.rt);
         self.processWeak();
         if (self.rt.gc.nursery.enabled) finalizeNurseryCorpses(self.rt, self.nursery_boundary);
         // Sweeping requires that every live object be reachable from a
@@ -2133,32 +1893,32 @@ const Collector = struct {
         const Adaptor = struct {
             collector: *Collector,
 
-            fn visitValue(context: *anyopaque, slot: *JSValue) runtime_mod.RootTraceError!void {
+            fn visitValue(context: *anyopaque, slot: *JSValue) gc_roots.RootTraceError!void {
                 const adaptor: *@This() = @ptrCast(@alignCast(context));
                 adaptor.collector.visitValue(slot);
                 if (adaptor.collector.err) |err| return err;
             }
 
-            fn visitObject(context: *anyopaque, slot: *?*Object) runtime_mod.RootTraceError!void {
+            fn visitObject(context: *anyopaque, slot: *?*Object) gc_roots.RootTraceError!void {
                 const adaptor: *@This() = @ptrCast(@alignCast(context));
                 adaptor.collector.visitObject(slot);
                 if (adaptor.collector.err) |err| return err;
             }
 
-            fn visitHeader(context: *anyopaque, header: *const gc.Header) runtime_mod.RootTraceError!void {
+            fn visitHeader(context: *anyopaque, header: *const gc.Header) gc_roots.RootTraceError!void {
                 const adaptor: *@This() = @ptrCast(@alignCast(context));
                 adaptor.collector.shadeExact(@constCast(header));
                 if (adaptor.collector.err) |err| return err;
             }
 
-            fn visitAtom(context: *anyopaque, id: atom_mod.Atom) runtime_mod.RootTraceError!void {
+            fn visitAtom(context: *anyopaque, id: atom_mod.Atom) gc_roots.RootTraceError!void {
                 const adaptor: *@This() = @ptrCast(@alignCast(context));
                 adaptor.collector.visitAtom(id);
                 if (adaptor.collector.err) |err| return err;
             }
         };
         var adaptor = Adaptor{ .collector = self };
-        var visitor = runtime_mod.RootVisitor{
+        var visitor = gc_roots.RootVisitor{
             .context = @ptrCast(&adaptor),
             .visit_value = Adaptor.visitValue,
             .visit_object = Adaptor.visitObject,
@@ -2500,8 +2260,7 @@ const Collector = struct {
             // because `seedRoots` shades the whole pin ledger before anything
             // else; the pin test below is kept anyway, now that it costs a
             // probe per corpse rather than per cell.
-            mem_ops.debitBlockBytes(
-                self.rt,
+            self.rt.gc.debitBlockBytes(
                 self.rt.gc.block_heap.snapshotYoungDoomed(self.rt.gc.block_heap.mark_epoch).bitmap_bytes,
             );
             self.stampYoungBlockCorpses();
@@ -2567,8 +2326,7 @@ const Collector = struct {
                     condemnIntoBucket(self.rt, header);
                 }
             }
-            mem_ops.debitBlockBytes(
-                self.rt,
+            self.rt.gc.debitBlockBytes(
                 self.rt.gc.block_heap.snapshotYoungDoomed(self.rt.gc.block_heap.mark_epoch).bitmap_bytes,
             );
         }
@@ -2630,8 +2388,7 @@ const Collector = struct {
             }
             gc.Registry.detachBlockObjectCandidate(header);
         }
-        mem_ops.debitBlockBytes(
-            self.rt,
+        self.rt.gc.debitBlockBytes(
             self.rt.gc.block_heap.snapshotAllDoomed(self.rt.gc.block_heap.mark_epoch).bitmap_bytes,
         );
 

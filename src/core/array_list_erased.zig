@@ -6,7 +6,7 @@
 //! not GC `TraceHeader` lists. `u8` / `u64` append sites and `u8`
 //! `toOwnedSlice` sites stay on std (`u64` includes GC pause samples).
 
-const mem_ops = @import("memory.zig");
+const runtime_owner = @import("../runtime.zig");
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;
@@ -219,11 +219,11 @@ test "array_list_erased append matches Runtime allocation helpers allocator ledg
     const Sample = struct { a: u64, b: u64, c: u32 };
 
     for ([_]bool{ false, true }) |slab_enabled| {
-        const typed = try mem_ops.createTestRuntime(std.testing.allocator);
+        const typed = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
         defer typed.destroy();
         defer typed.gc.cell_storage.slab.deinit(std.testing.allocator);
         typed.gc.cell_storage.slab_enabled = slab_enabled;
-        const erased_account = try mem_ops.createTestRuntime(std.testing.allocator);
+        const erased_account = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
         defer erased_account.destroy();
         defer erased_account.gc.cell_storage.slab.deinit(std.testing.allocator);
         erased_account.gc.cell_storage.slab_enabled = slab_enabled;
@@ -293,11 +293,11 @@ test "array_list_erased toOwnedSlice matches Runtime allocation helpers allocato
     const Sample = struct { a: u64, b: u64, c: u32 };
 
     for ([_]bool{ false, true }) |slab_enabled| {
-        const typed = try mem_ops.createTestRuntime(std.testing.allocator);
+        const typed = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
         defer typed.destroy();
         defer typed.gc.cell_storage.slab.deinit(std.testing.allocator);
         typed.gc.cell_storage.slab_enabled = slab_enabled;
-        const erased_account = try mem_ops.createTestRuntime(std.testing.allocator);
+        const erased_account = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
         defer erased_account.destroy();
         defer erased_account.gc.cell_storage.slab.deinit(std.testing.allocator);
         erased_account.gc.cell_storage.slab_enabled = slab_enabled;

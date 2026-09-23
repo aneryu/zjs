@@ -1059,7 +1059,7 @@ pub inline fn existingPropertyKeyValueForFastPath(
 ) ?PropertyFastValue {
     const atom_id = existingPropertyKeyAtomForFastPath(key) orelse return null;
     if (key.isString()) {
-        if (core.array.arrayIndexFromAtom(&rt.atoms, atom_id)) |index| {
+        if (core.array.arrayIndexFromAtom(rt.atoms, atom_id)) |index| {
             if (index <= @as(u32, @intCast(std.math.maxInt(i32)))) {
                 const index_value = core.JSValue.int32(@intCast(index));
                 if (fastDenseArrayElementValue(receiver, index_value)) |value| return .{ .owned = value };
@@ -1154,7 +1154,7 @@ fn setArrayLengthForPutFieldFastPath(
         if (object.arrayElementStorageMode() != .dense) return false;
         for (object.shapeProps()) |prop| {
             if (core.property.Flags.fromBits(prop.flags).deleted) continue;
-            const index = core.array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) orelse continue;
+            const index = core.array.arrayIndexFromAtom(rt.atoms, prop.atom_id) orelse continue;
             if (index >= new_len) return false;
         }
         object.truncateArrayElements(rt, new_len);
@@ -2157,7 +2157,7 @@ pub fn validateGlobalVarDeclarations(
 }
 
 test "QuickJS global declaration validation does not materialize auto-init properties" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();

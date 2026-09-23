@@ -5,7 +5,6 @@
 const std = @import("std");
 const bytecode = @import("../bytecode.zig");
 const atom = @import("../core/atom.zig");
-const memory = @import("../core/memory.zig");
 const runtime = @import("../runtime.zig");
 const compiler = @import("../compiler/root.zig");
 const opcode_logical = @import("../opcode_logical.zig");

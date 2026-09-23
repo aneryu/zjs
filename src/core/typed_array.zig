@@ -30,7 +30,6 @@
 //! `exec/buffer_ops.zig` re-exports both. The record dispatch table is owned by
 //! `exec/buffer_ops.zig`.
 
-const mem_ops = @import("memory.zig");
 const std = @import("std");
 
 const atom = @import("atom.zig");
@@ -107,8 +106,8 @@ pub fn createArrayBufferWithPrototype(rt: *JSRuntime, byte_length: usize, max_by
     try validateArrayBufferLength(byte_length);
     if (max_byte_length) |max| try validateArrayBufferLength(max);
     if (!try obj.installInlineByteStorage(rt, byte_length)) {
-        const bytes = try mem_ops.alloc(rt, u8, byte_length);
-        errdefer mem_ops.free(rt, u8, bytes);
+        const bytes = try rt.allocNative(u8, byte_length);
+        errdefer rt.freeNative(u8, bytes);
         try obj.installByteStorage(rt, bytes);
     }
     @memset(obj.byteStorage(), 0);
@@ -294,8 +293,8 @@ pub fn arrayBufferResizeLength(rt: *JSRuntime, buffer_value: JSValue, new_length
     const max = buffer.arrayBufferMaxByteLength() orelse return error.TypeError;
     if (new_length > max) return error.RangeError;
     const old = buffer.byteStorage();
-    const next = try mem_ops.alloc(rt, u8, new_length);
-    errdefer mem_ops.free(rt, u8, next);
+    const next = try rt.allocNative(u8, new_length);
+    errdefer rt.freeNative(u8, next);
     const copy_len = @min(old.len, new_length);
     if (copy_len != 0) @memcpy(next[0..copy_len], old[0..copy_len]);
     if (new_length > copy_len) @memset(next[copy_len..], 0);

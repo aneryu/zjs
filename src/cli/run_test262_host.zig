@@ -10,7 +10,7 @@ const std = @import("std");
 const zjs = @import("zjs");
 
 const Object = zjs.core.Object;
-const runtime_layer = zjs.runtime;
+const runtime_layer = @import("zjs_host");
 
 pub fn assertSameValue(actual: zjs.JSValue, expected: zjs.JSValue) !zjs.JSValue {
     if (!actual.sameValue(expected)) return error.JSException;
@@ -306,7 +306,7 @@ fn test262AgentRun(agent: *Test262Agent) void {
     }
 
     const allocator = test262PageAllocator();
-    const rt = zjs.JSRuntime.create(.{ .allocator = allocator }) catch return;
+    const rt = zjs.JSRuntime.create(allocator, .{}) catch return;
     defer rt.destroy();
     rt.setCanBlock(true);
     rt.setInterruptHandler(test262AgentInterruptHandler, agent);
@@ -521,6 +521,8 @@ fn test262AgentMonotonicNow(
 }
 
 pub fn installTest262Globals(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, global: *Object) !void {
+    runtime_layer.file_modules.install(ctx.core);
+    try runtime_layer.globals.install(ctx.core, global);
     try defineGlobalExternalHostFunction(rt, ctx, global, "Test262Error", 1, wrapExternal(hostCallTest262Error), true);
     try defineGlobalExternalHostFunction(rt, ctx, global, "verifyProperty", 3, wrapExternal(hostCallVerifyProperty), false);
     try defineGlobalExternalHostFunction(rt, ctx, global, "verifyCallableProperty", 4, wrapExternal(hostCallVerifyCallableProperty), false);
@@ -808,8 +810,8 @@ fn hostCallSetTimeout(
     if (!ctx.isCallable(callback)) return try ctx.throwError("TypeError", "not a function", .{ .realm_global = active_global });
     var delay = try test262Int64Arg(ctx, args, 1);
     if (delay < 1) delay = 1;
-    const host_event_loop = ctx.hostEventLoop() orelse return error.TypeError;
-    const id = host_event_loop.nextTimerId();
+    const host_event_loop = runtime_layer.EventLoop.fromContext(ctx.core) orelse return ctx.throwError("TypeError", "host event loop is not installed", .{ .realm_global = active_global });
+    const id = host_event_loop.takeNextTimerId();
     try host_event_loop.enqueueTimer(ctx.core, id, callback, @intCast(delay), false);
     return int64ResultValue(id);
 }
@@ -949,6 +951,9 @@ fn test262CreateRealm(
     _ = args;
     const realm_value = try ctx.createRealm();
     const realm_global = try ctx.realmGlobalObject(realm_value);
+    const realm_context = ctx.runtimePtr().contextForGlobalIncludingConstructing(realm_global) orelse return error.InvalidBuiltinRegistry;
+    runtime_layer.file_modules.install(realm_context);
+    try runtime_layer.globals.install(realm_context, realm_global);
     const eval_func = try createExternalHostFunctionWithRealm(ctx.runtimePtr(), ctx, "evalScript", 1, wrapExternalWithFunc(test262EvalScript), false, realm_global);
     try ctx.defineDataProperty(realm_value, "evalScript", eval_func, .{});
     return realm_value;
@@ -1054,7 +1059,7 @@ fn test262AgentStringValue(ctx: *zjs.JSContext, value: zjs.JSValue) ![]u8 {
 }
 
 test "test262 globals do not retain local namespace object reference" {
-    const rt = try zjs.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -1074,7 +1079,7 @@ test "test262 globals do not retain local namespace object reference" {
 }
 
 test "test262 evalScript uses the installed function realm" {
-    const rt = try zjs.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -1093,7 +1098,7 @@ test "test262 evalScript uses the installed function realm" {
 }
 
 test "test262 agent string conversion follows JavaScript ToString" {
-    const rt = try zjs.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -1109,7 +1114,7 @@ test "test262 agent string conversion follows JavaScript ToString" {
 }
 
 test "test262 timer integer conversion follows JavaScript ToNumber" {
-    const rt = try zjs.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try zjs.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();

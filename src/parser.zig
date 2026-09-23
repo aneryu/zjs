@@ -1,4 +1,5 @@
 //! Owns parser diagnostics, token-to-bytecode lowering, and module syntax.
+const runtime_owner = @import("runtime.zig");
 pub const subsystem_name = "parser";
 pub const diagnostics = struct {
     const std = @import("std");
@@ -53,7 +54,6 @@ pub const token = @import("token.zig");
 
 pub const lexer = @import("lexer.zig");
 
-const mem_ops = @import("core/memory.zig");
 const parse_state = @import("parser/parse_state.zig");
 const declarations = @import("parser/declarations.zig");
 const closure = @import("parser/closure.zig");
@@ -352,7 +352,7 @@ pub const compile_entry = struct {
         while (index > 0) {
             index -= 1;
             const seed = seeds[index];
-            if (!isPrivateEvalClosureKind(seed.var_kind) or isPrivateSetterCompanion(&rt.atoms, seed)) continue;
+            if (!isPrivateEvalClosureKind(seed.var_kind) or isPrivateSetterCompanion(rt.atoms, seed)) continue;
 
             var already_restored = false;
             for (state.class_private_bound_names.items) |existing| {
@@ -390,7 +390,7 @@ pub const compile_entry = struct {
         // opened here (before the first intern) and closed only after the
         // artifact that carries its own tracer edges exists. Recording is
         // ambient (`AtomTable.compile_scope`), so no call site changes.
-        var atom_scope = atom.CompileAtomScope.init(&rt.atoms);
+        var atom_scope = atom.CompileAtomScope.init(rt.atoms, rt);
         defer atom_scope.deinit();
         try atom_scope.activate();
 
@@ -407,7 +407,7 @@ pub const compile_entry = struct {
             };
             result.syntax_error = try diagnostics_mod.SyntaxError.create(
                 rt.nativeAllocator(),
-                &rt.atoms,
+                rt.atoms,
                 filename_atom,
                 .{ .line = 1, .column = 1, .offset = 0 },
                 "JSX is not supported",
@@ -491,7 +491,7 @@ pub const compile_entry = struct {
     ) !*bytecode.FunctionBytecode {
         const frontend_start = if (compile_context.timing != null) platform_clock.monotonicNanos() else 0;
         const effective_strict = options.strict;
-        var lex = lexer_mod.Lexer.init(scratch, &rt.atoms, source);
+        var lex = lexer_mod.Lexer.init(scratch, rt.atoms, source);
         defer lex.deinit();
         lex.is_strict_mode = options.mode == .module or effective_strict;
         lex.is_module = options.mode == .module;
@@ -631,7 +631,7 @@ pub const compile_entry = struct {
     ) !void {
         result.syntax_error = try diagnostics_mod.SyntaxError.create(
             rt.nativeAllocator(),
-            &rt.atoms,
+            rt.atoms,
             filename_atom,
             pending.position,
             pending.message(),
@@ -675,7 +675,7 @@ pub const compile_entry = struct {
         ) catch "internal compiler error";
         result.syntax_error = try diagnostics_mod.SyntaxError.create(
             rt.nativeAllocator(),
-            &rt.atoms,
+            rt.atoms,
             filename_atom,
             .{ .line = 0, .column = 0, .offset = 0 },
             message,
@@ -691,7 +691,7 @@ pub const compile_entry = struct {
         source: []const u8,
         message: []const u8,
     ) !void {
-        var lex = lexer_mod.Lexer.init(scratch, &rt.atoms, source);
+        var lex = lexer_mod.Lexer.init(scratch, rt.atoms, source);
         var pos = diagnostics_mod.Position{ .line = 1, .column = 1, .offset = 0 };
         var previous_token_kind: ?token_mod.TokenKind = null;
         while (true) {
@@ -701,7 +701,7 @@ pub const compile_entry = struct {
                 else => {
                     result.syntax_error = try diagnostics_mod.SyntaxError.create(
                         rt.nativeAllocator(),
-                        &rt.atoms,
+                        rt.atoms,
                         filename_atom,
                         .{ .line = lex.mark_line, .column = lex.mark_col, .offset = lex.mark_pos },
                         parser_impl.State.decoratorDiagnosticMessage(source, err, lex.mark_pos) orelse @errorName(err),
@@ -718,7 +718,7 @@ pub const compile_entry = struct {
             previous_token_kind = tok.val;
             lex.freeToken(&tok);
         }
-        result.syntax_error = try diagnostics_mod.SyntaxError.create(rt.nativeAllocator(), &rt.atoms, filename_atom, pos, message);
+        result.syntax_error = try diagnostics_mod.SyntaxError.create(rt.nativeAllocator(), rt.atoms, filename_atom, pos, message);
         result.parse_path = .syntax_error_guard;
     }
 
@@ -871,7 +871,7 @@ test "pending diagnostic syntax error allocation propagates OOM" {
     const std = @import("std");
     const core = @import("core/root.zig");
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
-    const account = try mem_ops.createTestRuntime(failing.allocator());
+    const account = try runtime_owner.createAllocationTestRuntime(failing.allocator());
     defer account.destroy();
     var atoms = core.atom.AtomTable.init(account);
     defer atoms.deinit();
@@ -884,7 +884,7 @@ test "pending diagnostic syntax error allocation propagates OOM" {
         "expected ')', got '{'",
     ));
     try std.testing.expect(failing.has_induced_failure);
-    try std.testing.expect(!mem_ops.hasOutstandingAllocations(account));
+    try std.testing.expect(!account.hasOutstandingAllocations());
 }
 
 // Unified-suite tests only (`build_options.zjs_unified_test_suite`).

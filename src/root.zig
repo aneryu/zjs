@@ -1,6 +1,6 @@
 //! Engine module imported as `@import("zjs")`.
 //!
-//! Embedders use `Runtime`, `Context`, `Value`, `Call`, and `EventLoop`.
+//! Embedders use `Runtime`, `Context`, `Value`, and `Call`.
 //! The same module also re-exports engine layers for the CLI and in-tree
 //! tests. The test262 `$262` host lives in `src/cli/run_test262_host.zig`
 //! and is imported as `test262_host`, not from this module. Cookbook and
@@ -8,7 +8,6 @@
 //! second object model.
 const std = @import("std");
 const js_context = @import("js_context.zig");
-const event_loop = @import("event_loop.zig");
 
 pub const native = @import("native.zig");
 /// Monotonic/wall clocks. The CLI roots are their own modules and cannot
@@ -23,13 +22,11 @@ pub const simple_token = @import("simple_token.zig");
 pub const bytecode = @import("bytecode.zig");
 pub const exec = @import("exec/root.zig");
 pub const libs = @import("libs/root.zig");
-pub const runtime = event_loop;
 pub const compiler = @import("compiler/root.zig");
 pub const Runtime = core.JSRuntime;
 pub const Context = js_context.JSContext;
 pub const Value = core.JSValue;
 pub const Call = native.Call;
-pub const EventLoop = event_loop.EventLoop;
 
 pub const GCStats = core.GCStats;
 pub const GCDetailedStats = core.GCDetailedStats;
@@ -90,14 +87,12 @@ test {
 
     _ = js_context;
     _ = native;
-    _ = event_loop;
     _ = core;
     _ = parser;
     _ = simple_token;
     _ = bytecode;
     _ = exec;
     _ = libs;
-    _ = runtime;
 }
 
 test "root exposes the embedder names and engine layers" {
@@ -105,14 +100,11 @@ test "root exposes the embedder names and engine layers" {
     try std.testing.expect(@hasDecl(@This(), "Context"));
     try std.testing.expect(@hasDecl(@This(), "Value"));
     try std.testing.expect(@hasDecl(@This(), "Call"));
-    try std.testing.expect(@hasDecl(@This(), "EventLoop"));
+    try std.testing.expect(!@hasDecl(@This(), "EventLoop"));
     try std.testing.expect(@hasDecl(Context, "EvalMode"));
     try std.testing.expect(@hasDecl(Context, "EvalTiming"));
     try std.testing.expect(@hasDecl(Context, "FunctionOptions"));
     try std.testing.expect(@hasDecl(Context, "defineScriptArgs"));
-    try std.testing.expect(@hasDecl(EventLoop, "runUntilIdle"));
-    try std.testing.expect(@hasDecl(EventLoop, "Options"));
-    try std.testing.expect(@hasDecl(EventLoop, "RunResult"));
 
     try std.testing.expect(Runtime == JSRuntime);
     try std.testing.expect(Context == JSContext);
@@ -121,7 +113,7 @@ test "root exposes the embedder names and engine layers" {
     try std.testing.expect(@hasDecl(@This(), "core"));
     try std.testing.expect(@hasDecl(@This(), "exec"));
     try std.testing.expect(@hasDecl(@This(), "parser"));
-    try std.testing.expect(@hasDecl(@This(), "runtime"));
+    try std.testing.expect(!@hasDecl(@This(), "runtime"));
     try std.testing.expect(!@hasDecl(@This(), "test262_host"));
 
     try std.testing.expect(!@hasDecl(@This(), "testing"));

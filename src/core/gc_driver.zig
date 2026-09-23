@@ -5,7 +5,6 @@
 //! module owns the minor/major decision, the threshold write, and finishing
 //! an interrupted destruction. `gc_running` stays separate from `phase`.
 
-const mem_ops = @import("memory.zig");
 const std = @import("std");
 const gc = @import("gc.zig");
 const profile = @import("profile.zig");
@@ -99,7 +98,7 @@ pub fn continuePoll(
     if (offer_minor and !self.gc_running) {
         self.gc_running = true;
         defer self.gc_running = false;
-        mem_ops.samplePeakAtCollection(self);
+        self.sampleAllocationPeak();
         const started = profile.nowNanos();
         if (@import("gc_trace_stw.zig").collectMinor(self, roots, mode.rootScan()) catch null) |freed| {
             self.gc.stats.collections += 1;

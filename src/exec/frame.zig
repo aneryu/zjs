@@ -11,7 +11,6 @@ const builtin = @import("builtin");
 
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
-const memory = @import("../core/memory.zig");
 const runtime = @import("../runtime.zig");
 const JSRuntime = runtime.JSRuntime;
 const JSValue = @import("../core/value.zig").JSValue;
@@ -621,7 +620,7 @@ pub const Frame = struct {
 };
 
 test "Frame setLocal preserves inline locals while growing" {
-    var rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
+    var rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("frame-inline-local-growth-test");

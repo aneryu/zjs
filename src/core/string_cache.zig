@@ -27,16 +27,6 @@ pub const RecentAtom = struct {
     string: *string.String,
 };
 
-pub fn bind(rt: *JSRuntime) void {
-    rt.single_byte_strings = @splat(null);
-    rt.empty_string = null;
-    rt.recent_two_unit_string = null;
-    rt.recent_atom_strings = @splat(null);
-    rt.percent_hex_strings = @splat(null);
-    rt.small_int_strings = @splat(null);
-    rt.recent_atom_string_next = 0;
-}
-
 pub fn clear(rt: *JSRuntime) void {
     rt.recent_two_unit_string = null;
     for (&rt.recent_atom_strings) |*slot| slot.* = null;

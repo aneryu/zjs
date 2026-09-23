@@ -134,7 +134,7 @@ pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
         ctx.rollbackIntrinsicBootstrap();
         ctx.global = null;
     }
-    try call_mod.installHostGlobals(ctx, global_object);
+    try call_mod.installEngineGlobals(ctx, global_object);
     _ = try throwTypeErrorIntrinsicForGlobal(ctx.runtime, global_object);
     if (ctx.preallocated_oom_error == null) {
         // Preallocate the out-of-memory catch value while the heap still has
@@ -300,7 +300,7 @@ fn pinGlobalForInvocation(env: CallEnv) ?*core.Object {
     const rt = env.ctx.runtime;
     if (!rt.gc.nursery.enabled) return null;
     if (!core.gc.Registry.isNurseryHeader(env.global.gcHeader())) return null;
-    rt.gc.pins.pin(rt.gc.runtime, env.global.gcHeader()) catch return null;
+    rt.gc.pins.pin(rt, env.global.gcHeader()) catch return null;
     return env.global;
 }
 

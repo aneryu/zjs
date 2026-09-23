@@ -3,9 +3,10 @@
 //! This file re-exports core identities and embedding option types without
 //! adding ownership: lifetime contracts remain with their defining modules.
 //! It is the sanctioned import surface for exec/runtime/binding and the public
-//! facade. Core implementations must not depend back on parser, exec, the
-//! event loop, binding, builtins, or CLI. QuickJS has no matching translation
-//! unit; this is zjs's layer boundary.
+//! facade. Fixed execution operations cross the explicit engine_services.zig
+//! boundary; core and exec are not independently compiled backends. Host policy,
+//! event loops, binding, parser and CLI logic remain outside core. QuickJS has
+//! no matching translation unit; this is zjs's layer boundary.
 
 pub const subsystem_name = "core_runtime";
 
@@ -15,6 +16,7 @@ pub const value_format = @import("value_format.zig");
 pub const value_string = @import("value_string.zig");
 pub const number = @import("number.zig");
 pub const gc = @import("gc.zig");
+pub const gc_roots = @import("gc_roots.zig");
 pub const atom = @import("atom.zig");
 pub const string = @import("string.zig");
 pub const bigint = @import("bigint.zig");
@@ -50,7 +52,6 @@ pub const runtime = @import("../runtime.zig");
 pub const context = @import("context.zig");
 pub const exception = @import("exception.zig");
 pub const execution = @import("execution.zig");
-pub const memory = @import("memory.zig");
 pub const profile = @import("profile.zig");
 pub const gc_address_registry = @import("gc_address_registry.zig");
 /// Measured size-class table and publication histogram.

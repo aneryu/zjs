@@ -8,8 +8,7 @@
 //! and consumes runners. QuickJS analogue: the Runtime job list and
 //! `JS_EnqueueJob`/`JS_ExecutePendingJob` machinery.
 
-const mem_ops = @import("memory.zig");
-const memory = @import("memory.zig");
+const engine_services = @import("../engine_services.zig");
 const core = @import("root.zig");
 
 pub const MaxArgs = 5;
@@ -455,7 +454,7 @@ pub const Queue = struct {
         self.capacity = 0;
         self.head = 0;
         for (jobs) |*job| job.deinit();
-        if (capacity != 0) mem_ops.free(self.runtime, Job, block[0..capacity]);
+        if (capacity != 0) self.runtime.freeNative(Job, block[0..capacity]);
     }
 
     fn blockStart(self: *const Queue) [*]Job {
@@ -502,7 +501,7 @@ pub const Queue = struct {
         }
         var next_capacity = if (self.capacity == 0) @as(usize, 4) else self.capacity * 2;
         while (next_capacity - floor < min_capacity) : (next_capacity *= 2) {}
-        const next = try mem_ops.alloc(self.runtime, Job, next_capacity);
+        const next = try self.runtime.allocNative(Job, next_capacity);
         const old_jobs = self.jobs;
         const old_capacity = self.capacity;
         const old_block = self.blockStart();
@@ -510,7 +509,7 @@ pub const Queue = struct {
         self.jobs = next[floor..][0..old_jobs.len];
         self.head = floor;
         self.capacity = next_capacity;
-        if (old_capacity != 0) mem_ops.free(self.runtime, Job, old_block[0..old_capacity]);
+        if (old_capacity != 0) self.runtime.freeNative(Job, old_block[0..old_capacity]);
     }
 
     /// Reserve queue storage for a transaction whose payload ownership is
@@ -760,7 +759,7 @@ fn runGenericOneForTest(queue: *Queue) RunOneStatus {
 }
 
 test "Queue runOne reports three states and preserves FIFO after exception" {
-    const runtime = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const runtime = try core.JSRuntime.create(std.testing.allocator, .{});
     defer runtime.destroy();
     const context = try core.JSContext.create(runtime, .{});
     defer context.destroy();
@@ -790,7 +789,7 @@ test "Queue runOne reports three states and preserves FIFO after exception" {
 }
 
 test "Promise settlement continuation owns target and direct symbol completion" {
-    const runtime = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const runtime = try core.JSRuntime.create(std.testing.allocator, .{});
     defer runtime.destroy();
     const context = try core.JSContext.create(runtime, .{});
     defer context.destroy();
@@ -816,7 +815,7 @@ test "Promise settlement continuation owns target and direct symbol completion" 
 }
 
 test "Queue runOne keeps existing tail ahead of jobs enqueued by the active job" {
-    const runtime = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const runtime = try core.JSRuntime.create(std.testing.allocator, .{});
     defer runtime.destroy();
     const context = try core.JSContext.create(runtime, .{});
     defer context.destroy();
@@ -866,7 +865,7 @@ test "Queue runOne keeps existing tail ahead of jobs enqueued by the active job"
 }
 
 test "runtime takes typed Promise jobs without allocation" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -898,7 +897,7 @@ test "runtime takes typed Promise jobs without allocation" {
 }
 
 test "typed job reservations preserve capacity without claiming a FIFO position" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -1008,7 +1007,7 @@ pub fn runCheckpointStep(rt: *core.JSRuntime) core.errors.HostError!RunOneStatus
     state.running = true;
     defer state.running = was_running;
     try checkTermination(rt);
-    const status = rt.hooks.run_microtask(rt) catch |err| {
+    const status = engine_services.runMicrotask(rt) catch |err| {
         try checkTermination(rt);
         return err;
     };

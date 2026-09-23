@@ -45,8 +45,8 @@ pub const VarRef = struct {
     }
 
     pub fn createClosed(rt: anytype, initial_value: JSValue) !*VarRef {
-        const self = try rt.createRuntime(VarRef);
-        errdefer rt.destroyRuntime(VarRef, self);
+        const self = try rt.gc.createRuntimeCell(VarRef);
+        errdefer rt.gc.destroyCell(VarRef, self);
         self.* = .{
             .header = .{},
             .value = initial_value,
@@ -58,8 +58,8 @@ pub const VarRef = struct {
     }
 
     pub fn createOpen(rt: anytype, slot: *JSValue) !*VarRef {
-        const self = try rt.createRuntime(VarRef);
-        errdefer rt.destroyRuntime(VarRef, self);
+        const self = try rt.gc.createRuntimeCell(VarRef);
+        errdefer rt.gc.destroyCell(VarRef, self);
         self.* = .{
             .header = .{},
             .value = JSValue.undefinedValue(),
@@ -82,7 +82,7 @@ pub const VarRef = struct {
     /// Runtime teardown's phase 3 frees the cells it held back by hand.
     pub fn freeStruct(rt: anytype, header: *gc.Header) void {
         const self: *VarRef = @alignCast(@fieldParentPtr("header", header));
-        rt.destroyRuntime(VarRef, self);
+        rt.gc.destroyCell(VarRef, self);
     }
 
     /// Runtime teardown keeps VarRef structs alive until objects and bytecode

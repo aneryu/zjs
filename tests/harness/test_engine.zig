@@ -8,7 +8,7 @@ const std = @import("std");
 const zjs = @import("zjs");
 const core = zjs.core;
 const exec = zjs.exec;
-const event_loop = zjs.runtime;
+const event_loop = @import("zjs_host");
 const test262_host = @import("test262_host");
 
 const module_graph = exec.module_graph;
@@ -21,7 +21,8 @@ pub fn evalTypeScriptChecked(engine_instance: *TestEngine, source: []const u8, o
 }
 
 pub fn installHostGlobalsBare(ctx: *core.JSContext, global: *core.Object) !void {
-    try exec.call.installHostGlobals(ctx, global);
+    try exec.call.installEngineGlobals(ctx, global);
+    try event_loop.globals.install(ctx, global);
 }
 
 pub var job_counter: usize = 0;
@@ -94,7 +95,6 @@ fn getPropertyString(rt: *core.JSRuntime, obj: *core.Object, name: []const u8, a
 
 const EngineOptions = struct {
     allocator: std.mem.Allocator,
-    trace_writer: ?*std.Io.Writer = null,
     limits: Limits = .{},
 };
 
@@ -103,6 +103,7 @@ pub const TestEngine = struct {
     runtime: *core.JSRuntime,
     context: *core.JSContext,
     event_loop: *event_loop.EventLoop,
+    host_globals_installed: bool = false,
 
     pub const HostHooks = module_graph.HostHooks;
 
@@ -111,9 +112,7 @@ pub const TestEngine = struct {
     }
 
     pub fn initWithOptions(options: EngineOptions) !TestEngine {
-        const rt = try core.JSRuntime.create(.{
-            .allocator = options.allocator,
-            .trace_writer = options.trace_writer,
+        const rt = try core.JSRuntime.create(options.allocator, .{
             .memory_limit = options.limits.memory_bytes,
             .gc_threshold = options.limits.gc_threshold_bytes orelse core.runtime.default_gc_threshold,
             .stack_size = options.limits.stack_bytes orelse core.runtime.default_stack_size,
@@ -122,6 +121,7 @@ pub const TestEngine = struct {
         rt.setNativeStackSize(core.runtime.default_native_stack_size * 4);
         const ctx = try core.JSContext.create(rt, .{});
         errdefer ctx.destroy();
+        event_loop.file_modules.install(ctx);
         const loop = try options.allocator.create(event_loop.EventLoop);
         errdefer options.allocator.destroy(loop);
         loop.* = event_loop.EventLoop.initCore(ctx, .{});
@@ -158,10 +158,11 @@ pub const TestEngine = struct {
     }
 
     pub fn ensureTest262GlobalsInstalled(self: *TestEngine) !void {
-        if (self.context.global == null) {
+        if (!self.host_globals_installed) {
             const global_obj = try exec.zjs_vm.contextGlobal(self.context);
             var wrapper = zjs.borrowContext(self.context);
             try test262_host.installTest262Globals(self.runtime, &wrapper, global_obj);
+            self.host_globals_installed = true;
         }
     }
 

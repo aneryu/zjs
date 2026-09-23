@@ -1,6 +1,5 @@
 //! Out-of-line object payload representations and their ownership teardown.
 
-const mem_ops = @import("memory.zig");
 const atom = @import("atom.zig");
 const gc_visit = @import("gc_visit.zig");
 const class = @import("class.zig");
@@ -102,9 +101,9 @@ pub fn destroyValueSliceWithCapacity(rt: *JSRuntime, slot: *[]JSValue, capacity:
     slot.* = &.{};
     capacity.* = 0;
     if (old_capacity != 0) {
-        mem_ops.free(rt, JSValue, values.ptr[0..old_capacity]);
+        rt.freeNative(JSValue, values.ptr[0..old_capacity]);
     } else if (values.len != 0) {
-        mem_ops.free(rt, JSValue, values);
+        rt.freeNative(JSValue, values);
     }
 }
 
@@ -241,7 +240,7 @@ pub const IteratorPayload = struct {
     pub fn destroy(self: *IteratorPayload, rt: *JSRuntime) void {
         const atom_keys = self.atom_keys;
         self.atom_keys = &.{};
-        if (atom_keys.len != 0) mem_ops.free(rt, atom.Atom, atom_keys);
+        if (atom_keys.len != 0) rt.freeNative(atom.Atom, atom_keys);
     }
 
     pub const gc_edges: gc_visit.Edges = .{
@@ -300,7 +299,7 @@ pub const CollectionPayload = struct {
         const old_bucket_heads = self.bucket_heads;
         self.bucket_heads = &.{};
         self.active_count = 0;
-        if (old_bucket_heads.len != 0) mem_ops.free(rt, usize, old_bucket_heads);
+        if (old_bucket_heads.len != 0) rt.freeNative(usize, old_bucket_heads);
         for (self.weak_entries.items) |entry| rt.releaseWeakIdentity(entry.key_identity);
         self.weak_entries.deinit(rt.nativeAllocator());
     }
@@ -445,7 +444,7 @@ pub const BufferPayload = struct {
             self.inline_length = 0;
         } else {
             self.external_memory.release();
-            if (self.bytes.len != 0) mem_ops.free(rt, u8, self.bytes);
+            if (self.bytes.len != 0) rt.freeNative(u8, self.bytes);
         }
         self.bytes = &.{};
         self.shared_store = null;
@@ -1007,7 +1006,7 @@ pub const FunctionPayload = struct {
     fn destroyRare(self: *FunctionPayload, rt: *JSRuntime) void {
         if (self.rare) |rare| {
             self.rare = null;
-            mem_ops.destroy(rt, FunctionRarePayload, rare);
+            rt.destroyNative(FunctionRarePayload, rare);
         }
     }
 

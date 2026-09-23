@@ -1241,7 +1241,7 @@ pub fn typedArraySetCall(
 }
 
 test "typedArraySetCall roots typed array snapshot while reading source" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -4680,13 +4680,13 @@ pub fn createArrayDataOrTypedArrayElement(
     value: core.JSValue,
 ) !void {
     if (core.object.isTypedArrayObject(object)) {
-        const index = core.array.arrayIndexFromAtom(&rt.atoms, atom_id) orelse return error.TypeError;
+        const index = core.array.arrayIndexFromAtom(rt.atoms, atom_id) orelse return error.TypeError;
         const ok = try core.typed_array.typedArraySetIndex(rt, object, index, value);
         if (!ok) return error.TypeError;
         return;
     }
     if (rt.atoms.kind(atom_id) == .private and object.hasOwnProperty(atom_id)) return error.TypeError;
-    if (core.array.arrayIndexFromAtom(&rt.atoms, atom_id)) |index| {
+    if (core.array.arrayIndexFromAtom(rt.atoms, atom_id)) |index| {
         // CreateDataProperty defines a fresh own element and never walks the
         // prototype chain for an inherited indexed setter.
         if (try object.appendDenseArrayDefineIndex(rt, index, atom_id, value)) return;
@@ -6351,7 +6351,7 @@ pub fn createArrayFromArgs(rt: *core.JSRuntime, global: *core.Object, args: []co
 }
 
 test "createArrayFromArgs roots direct function bytecode args while creating array" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const global = try core.Object.create(rt, core.class.ids.object, null);
@@ -6644,7 +6644,7 @@ pub fn objectEntryArrayValue(
 }
 
 test "objectEntryArrayValue roots direct symbol value while creating entry array" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -6674,7 +6674,7 @@ test "objectEntryArrayValue roots direct symbol value while creating entry array
 }
 
 test "objectEnumerableOwnPropertiesCall roots direct symbol values while creating output array" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -7280,7 +7280,7 @@ pub fn prototypeMethodId(name: []const u8) ?u32 {
 /// resolves names/lengths through standard-global installation order and the
 /// `staticMethodId` /
 /// `prototypeMethodId` helpers above; this table is consumed by both the slow
-/// record-dispatch path and the VM hot paths (`rt.internal_builtins`).
+/// record-dispatch path and the VM hot paths (`internal_builtins.table`).
 pub const internal_entries = arrayEntries: {
     const Entry = core.host_function.InternalEntry;
     break :arrayEntries [_]Entry{
@@ -7816,7 +7816,7 @@ fn arrayIterator(realm: *core.RealmContext, receiver: core.JSValue, kind: ArrayI
 }
 
 test "realm-aware primitive array iterator reuses the final realm prototype" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const realm = try core.RealmContext.create(rt, .{});
     defer realm.destroy();
@@ -7875,7 +7875,7 @@ fn iteratorResult(rt: *core.JSRuntime, value: core.JSValue, done: bool) !core.JS
 }
 
 test "array iteratorResult roots direct function bytecode value while creating result" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-iterator-result-bytecode-symbol");
@@ -7901,7 +7901,7 @@ test "array iteratorResult roots direct function bytecode value while creating r
 }
 
 test "array splice roots direct function bytecode insert values while creating removed array" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const array = try core.Object.createArray(rt, null);
@@ -7945,7 +7945,7 @@ test "array splice roots direct function bytecode insert values while creating r
 }
 
 test "array constructWithPrototype roots direct function bytecode elements while creating array" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-array-construct-bytecode-symbol");
@@ -7972,7 +7972,7 @@ test "array constructWithPrototype roots direct function bytecode elements while
 }
 
 test "array concat roots direct function bytecode argument while creating output array" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const receiver = try core.Object.createArray(rt, null);

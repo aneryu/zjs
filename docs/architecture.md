@@ -15,16 +15,19 @@ identify entry points without requiring a full read of large modules.
 embedder / CLI / tests  →  src/root.zig  →  src/js_context.zig + src/native.zig  →  src/core/
 compile   →  src/parser.zig  →  src/compiler/  →  src/bytecode/
 execute   →  src/exec/  (VM, builtins, modules, promises)
-host      →  src/event_loop.zig
+host      →  src/host/  →  engine (separate internal build module)
 ```
 
 `src/core/` must not depend on CLI policy, test262 glue, plugin loaders, or
-the event loop.
+the event loop. Fixed execution services cross `src/engine_services.zig`:
+global/namespace materialization, standard-global installation, one microtask,
+and static builtin metadata. Context and jobs retain their transaction and
+checkpoint policies. This is an explicit source-level core/exec dependency;
+core is not an independently compiled backend. Runtime creation does not
+install hooks, and build modules do not import an engine-hooks provider.
 
 `src/` companions sit beside those layers:
 
-- `event_loop.zig`: host timers, fd/signal handlers, and job draining
-  (`zjs.EventLoop`).
 - `js_context.zig`: host `Context` facade (eval, calls, properties).
 - `native.zig`: host-function thunks used by `Context.defineFunction`.
 - `simple_token.zig`: parser token kinds for QuickJS `simple_next_token`
@@ -35,12 +38,12 @@ the event loop.
 Embedders import `zjs`. The host surface is `Runtime`, `Context`,
 `Value`, `Call`, `Context.defineFunction` (host functions),
 `Context.defineScriptArgs` (CLI `scriptArgs`), nested eval options on
-`Context`, and `EventLoop`. Handle types come from `Runtime` methods; byte
+`Context`. The bundled host is not exported by the engine. Handle types come from `Runtime` methods; byte
 stores from `Value.Bytes`. Contract: [public-api-contract.md](public-api-contract.md).
 Examples: [embedding-cookbook.md](embedding-cookbook.md).
 
 The same file is the CLI, test262, and in-tree test compile root. Embedders
-stay on `Runtime` / `Context` / `Value` / `Call` / `EventLoop`; in-tree hosts
+stay on `Runtime` / `Context` / `Value` / `Call`; in-tree hosts
 also use the layer re-exports (`core`, `exec`, `parser`).
 
 `src/js_context.zig` is the host `Context` facade (eval, calls, properties,
@@ -58,6 +61,8 @@ Values, atoms, strings, objects, shapes, properties, arrays, and GC.
 | `value.zig` | `JSValue` representation, tagging and coercion entry |
 | `object.zig` / `shape.zig` / `property.zig` | objects, shapes, properties |
 | `gc.zig` | registry, policy, external-memory accounting |
+| `gc_alloc.zig` | Registry-owned GC cell allocation/release, layouts, storage routing and carrier audit |
+| `../runtime_alloc.zig` | Runtime-owned native allocation and shared allocation diagnostics |
 | `gc_address_registry.zig` | Page-radix address → allocation map for conservative lookup (always on under the tracer) |
 | `gc_space.zig` | Measured size-class table and publication histogram; the block heap is production, so the sizes it classifies are block-cell sizes |
 | `gc_block_heap.zig` | Production block heap: 2 MiB superblocks, 64 KiB blocks, classed cells, extents, and the four per-block bitmaps (alloc / mark / doomed / `finalizerBits`) |
@@ -194,7 +199,7 @@ File and function naming conventions in `exec/`:
 | --- | --- |
 | `zjs_vm.zig` | interpreter loop |
 | `call_runtime.zig` / `call_site.zig` | unique `[[Call]]` / `[[Construct]]` terminals and CallSite |
-| `call.zig` | host globals, unique Bound create, Object data-plane leftovers, `evalGlobalScriptSource` |
+| `call.zig` | engine globals, unique Bound create, Object data-plane leftovers, `evalGlobalScriptSource` |
 | `construct.zig` | unique construct bodies (`objectConstructorValue`, `weakRefWithPrototype`, `constructDOMExceptionObject`, `constructTypedArrayTypedArrayInput`) |
 | `eval_entry.zig` | eval |
 | `module.zig` | modules |
@@ -221,14 +226,19 @@ nine `perf-*-profile` steps with exact opcode pins, and
 `tests/smoke_test.zig` asserts `--profile-opcodes` output. The default
 `zjs` binary still fail-closes `--profile-opcodes`.
 
-## Host event loop — `src/event_loop.zig`
+## Bundled host — `src/host/`
 
-The leftover `src/runtime/` directory is gone. Host policy that must stay
-out of core lives in this companion file: timers, fd/signal handlers, and
-job draining. `zjs.EventLoop` is the public type (`runUntilIdle`, `drain`).
+`zjs_host` is an internal module for the CLI, test262 runner, and their tests.
+It imports the consumer's engine module instance; the engine neither imports
+nor re-exports it. `event_loop.zig` owns timers, fd/signal handling and event
+driving; `file_module_loader.zig` owns filesystem source and URL policy;
+`globals.zig` and `output.zig` install host globals and format print/console
+output. Installation is explicit for each Realm. `HostScheduler` and
+`ModuleSourceLoader` are engine-side contracts, not concrete OS implementations.
 
-Atomics waiter cleanup, module file graphs, and ArrayBuffer detach live in
-`src/exec/`. The dynamic plugin loader and its `zjs.ffi` ABI were deleted
+Atomics waiter cleanup, module graph semantics, and ArrayBuffer detach remain
+in `src/exec/`. Further compatibility-extension extraction is recorded in
+[host boundary design](host-boundary-design.md). The dynamic plugin loader and its `zjs.ffi` ABI were deleted
 2026-09-06. Host functions register through `Context.defineFunction` /
 `createFunction`: each registration is one
 immutable `NativeEntry` (`src/core/native_entry.zig`) that the VM dispatches

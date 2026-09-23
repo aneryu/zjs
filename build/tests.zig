@@ -44,7 +44,6 @@ fn addEngineModule(ctx: build_config.Ctx, unified: bool) *std.Build.Module {
     else
         ctx.engine_inputs;
     mod.addOptions("build_options", build_config.addEngineOptions(ctx.b, inputs));
-    build_config.attachEngineHooks(ctx.b, mod, ctx.target, ctx.optimize);
     return mod;
 }
 
@@ -99,7 +98,9 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
 
     const unified_root = addEngineModule(ctx, true);
     unified_root.addImport("zjs", unified_root);
-    unified_root.addImport("test262_host", build_config.addTest262Host(ctx, unified_root));
+    const unified_host = build_config.addHost(ctx, unified_root);
+    unified_root.addImport("zjs_host", unified_host);
+    unified_root.addImport("test262_host", build_config.addTest262Host(ctx, unified_root, unified_host));
     const unified_tests = addZjsTest(
         ctx,
         "unified-tests",
@@ -116,6 +117,7 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
         .link_libc = true,
         .imports = &.{
             .{ .name = "zjs", .module = host_engine },
+            .{ .name = "zjs_host", .module = build_config.addHost(ctx, host_engine) },
         },
     });
     const cli_tests = addZjsTest(ctx, "cli-tests", cli_root, &.{});
@@ -191,8 +193,6 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     // contents generate one file, and one file may only be the root of one module.
     const embedding_options_mod = embedding_engine_options.createModule();
     embedding_zjs_mod.addImport("build_options", embedding_options_mod);
-    build_config.attachEngineHooks(b, embedding_zjs_mod, ctx.target, ctx.optimize);
-    embedding_zjs_mod.addImport("test262_host", build_config.addTest262Host(ctx, embedding_zjs_mod));
     const embedding_root = b.createModule(.{
         .root_source_file = b.path("tests/embedding_examples.zig"),
         .target = ctx.target,
@@ -227,8 +227,6 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     // option rather than `builtin.is_test` so `zig build test` does not
     // change the shipped heap.
     oom_engine_mod.addOptions("build_options", build_config.addEngineOptions(b, ctx.engine_inputs.withOomInjection(true)));
-    build_config.attachEngineHooks(b, oom_engine_mod, ctx.target, ctx.optimize);
-    oom_engine_mod.addImport("test262_host", build_config.addTest262Host(ctx, oom_engine_mod));
     const oom_tests = addZjsTest(ctx, "oom-tests", b.createModule(.{
         .root_source_file = b.path("tests/oom.zig"),
         .target = ctx.target,

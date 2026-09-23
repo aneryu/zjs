@@ -34,7 +34,6 @@ pub const Stats = struct {
     envelope_max_begin_bytes: usize = 0,
     envelope_max_peak_bytes: usize = 0,
     doomed_destroyed_objects: usize = 0,
-
 };
 
 pub fn ratioMillionthsCeil(numerator: usize, denominator: usize) usize {
@@ -49,8 +48,7 @@ pub const State = struct {
     /// `stats.last_cycle_stw_ns` at completion.
     cycle_stw_ns: u64 = 0,
     /// Settled live estimate after the last major, in account bytes; the
-    /// threshold for the next cycle is priced off it. Pacing input, hence its
-    /// place here rather than beside the marked-set census.
+    /// threshold for the next cycle is priced off it.
     last_settled_live_bytes: usize = 0,
     /// The next cycle consumes the S/T pair established by the preceding
     /// successful major's threshold reset. A manual threshold invalidates it.

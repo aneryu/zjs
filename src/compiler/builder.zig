@@ -20,7 +20,7 @@
 //! day one. Label `ref_count` is relocation/short-form bookkeeping; exact
 //! liveness is computed later from the LabelId block CFG.
 
-const mem_ops = @import("../core/memory.zig");
+const runtime_owner = @import("../runtime.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const labels = @import("labels.zig");
@@ -1112,7 +1112,7 @@ fn expectRelocChain(
 }
 
 test "compiler.builder: jump emission, bind, reloc chains" {
-    const acct = try mem_ops.createTestRuntime(std.testing.allocator);
+    const acct = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
     defer acct.destroy();
     var table = core.atom.AtomTable.init(acct);
     defer table.deinit();
@@ -1149,7 +1149,7 @@ test "compiler.builder: jump emission, bind, reloc chains" {
 }
 
 test "compiler.builder: retargetLabelRefs merges a pending identity into a bound one" {
-    const acct = try mem_ops.createTestRuntime(std.testing.allocator);
+    const acct = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
     defer acct.destroy();
     var table = core.atom.AtomTable.init(acct);
     defer table.deinit();
@@ -1212,7 +1212,7 @@ test "compiler.builder: retargetLabelRefs merges a pending identity into a bound
 }
 
 test "compiler.builder: s2g4 scope ref owns atom and chains aux relocation" {
-    const acct = try mem_ops.createTestRuntime(std.testing.allocator);
+    const acct = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
     defer acct.destroy();
     var table = core.atom.AtomTable.init(acct);
     defer table.deinit();
@@ -1273,7 +1273,7 @@ test "compiler.builder: s2g4 scope ref owns atom and chains aux relocation" {
 }
 
 test "compiler.builder: compact immediate emission and rollback" {
-    const acct = try mem_ops.createTestRuntime(std.testing.allocator);
+    const acct = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
     defer acct.destroy();
     var table = core.atom.AtomTable.init(acct);
     defer table.deinit();
@@ -1309,7 +1309,7 @@ test "compiler.builder: compact immediate emission and rollback" {
 }
 
 test "compiler.builder: s2g4 compact atom immediates own refs" {
-    const acct = try mem_ops.createTestRuntime(std.testing.allocator);
+    const acct = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
     defer acct.destroy();
     var table = core.atom.AtomTable.init(acct);
     defer table.deinit();
@@ -1352,7 +1352,7 @@ test "compiler.builder: s2g4 compact atom immediates own refs" {
 }
 
 test "compiler.builder: s2g4 take last atom operand" {
-    const acct = try mem_ops.createTestRuntime(std.testing.allocator);
+    const acct = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
     defer acct.destroy();
     var table = core.atom.AtomTable.init(acct);
     defer table.deinit();
@@ -1382,7 +1382,7 @@ test "compiler.builder: s2g4 take last atom operand" {
 }
 
 test "compiler.builder: lvalue atom take and opcode rewind are one transaction" {
-    const acct = try mem_ops.createTestRuntime(std.testing.allocator);
+    const acct = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
     defer acct.destroy();
     var table = core.atom.AtomTable.init(acct);
     defer table.deinit();
@@ -1415,7 +1415,7 @@ test "compiler.builder: lvalue atom take and opcode rewind are one transaction" 
 }
 
 test "compiler.builder: s2g4 detach and splice preserves global labels" {
-    const acct = try mem_ops.createTestRuntime(std.testing.allocator);
+    const acct = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
     defer acct.destroy();
     var table = core.atom.AtomTable.init(acct);
     defer table.deinit();
@@ -1531,7 +1531,7 @@ test "compiler.builder: s2g4 detach and splice preserves global labels" {
 }
 
 test "compiler.builder: s2g4 empty segment splice invalidates last opcode" {
-    const acct = try mem_ops.createTestRuntime(std.testing.allocator);
+    const acct = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
     defer acct.destroy();
     var table = core.atom.AtomTable.init(acct);
     defer table.deinit();
@@ -1566,7 +1566,7 @@ test "compiler.builder: s2g4 empty segment splice invalidates last opcode" {
 }
 
 fn s2g4OomScript(allocator: std.mem.Allocator) !void {
-    const acct = try mem_ops.createTestRuntime(allocator);
+    const acct = try runtime_owner.createAllocationTestRuntime(allocator);
     defer acct.destroy();
     var table = core.atom.AtomTable.init(acct);
     defer table.deinit();
@@ -1639,7 +1639,7 @@ test "compiler.builder: s2g4 allocation failure sweep balances detached atoms" {
 }
 
 test "compiler.builder: snapshot rollback restores chains, atoms, markers" {
-    const acct = try mem_ops.createTestRuntime(std.testing.allocator);
+    const acct = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
     defer acct.destroy();
     var table = core.atom.AtomTable.init(acct);
     defer table.deinit();
@@ -1682,7 +1682,7 @@ test "compiler.builder: snapshot rollback restores chains, atoms, markers" {
 }
 
 test "compiler.builder: inferred-name patches keep code and atom ownership in lockstep" {
-    const acct = try mem_ops.createTestRuntime(std.testing.allocator);
+    const acct = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
     defer acct.destroy();
     var table = core.atom.AtomTable.init(acct);
     defer table.deinit();

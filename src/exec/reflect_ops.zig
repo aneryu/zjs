@@ -357,7 +357,7 @@ pub fn methodId(name: []const u8) ?u32 {
 /// Standard-global bootstrap resolves names/lengths through its Reflect method
 /// list and `methodId`; `proxy_revocable` and the dynamically materialized
 /// `proxy_revoke` closure bind through `proxyRevocable` directly.
-/// This array is consumed by the record-dispatch path (`rt.internal_builtins`).
+/// This array is consumed by the record-dispatch path (`internal_builtins.table`).
 pub const internal_entries = reflectEntries: {
     const Entry = core.host_function.InternalEntry;
     break :reflectEntries [_]Entry{

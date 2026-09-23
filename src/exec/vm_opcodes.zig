@@ -1333,7 +1333,7 @@ inline fn fastNativeMethodCall(
     // LOOKUP, mirroring qjs `func = p->u.cfunc.c_function` (the dispatchable
     // handle lives on the object). SAFE memoization: `native_function_id` is
     // write-once at registration, and the resolved record is a comptime
-    // `pub const` in `rt.internal_builtins` (rodata) — program-lifetime stable,
+    // `pub const` in `internal_builtins.table` (rodata) — program-lifetime stable,
     // identical across runtimes, never dangles, so the memo can never go stale.
     // A MISS falls through to null exactly as the pre-memo decode/probe did.
     const rec = resolvedNativeMethodRecord(ctx, function_object) orelse return null;
@@ -2795,7 +2795,7 @@ pub noinline fn defineField(vm: *Vm) HostError!void {
         }
     }
     if (target.isArray()) {
-        if (core.array.arrayIndexFromAtom(&ctx.runtime.atoms, atom_id)) |index| {
+        if (core.array.arrayIndexFromAtom(ctx.runtime.atoms, atom_id)) |index| {
             if (try target.defineDenseArrayDataProperty(ctx.runtime, index, rooted_value)) return;
         }
     }
@@ -3726,7 +3726,7 @@ fn countLivePrivateAtomsNamed(rt: *core.JSRuntime, expected_name: []const u8) us
 }
 
 test "function object lookup recognizes every bytecode function class" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const class_ids = [_]core.ClassId{
@@ -3745,7 +3745,7 @@ test "function object lookup recognizes every bytecode function class" {
 }
 
 test "push private symbol creates a fresh runtime atom per execution" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -3799,7 +3799,7 @@ test "push private symbol creates a fresh runtime atom per execution" {
 }
 
 test "stack rearrange opcodes validate depth before mutating stack" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -3820,7 +3820,7 @@ test "stack rearrange opcodes validate depth before mutating stack" {
 }
 
 test "push private symbol stack failure does not retain transient private atom" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -3860,7 +3860,7 @@ test "push private symbol stack failure does not retain transient private atom" 
 }
 
 test "push private symbol releases fresh atom on allocation failure" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -4106,7 +4106,7 @@ pub noinline fn disposeStackVm(vm: *Vm, disposition: DisposalDisposition) HostEr
 }
 
 test "VM byte admission is independent of native stack addresses" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     rt.stack_size = 1024;
     rt.native_stack_limit = 0;

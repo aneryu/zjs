@@ -445,7 +445,7 @@ fn createAsciiStringValue(rt: *core.JSRuntime, bytes: []const u8) !core.JSValue 
 }
 
 test "createStringValue leftover noinline shares empty and ascii mint" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const empty = try createStringValue(rt, "");
@@ -595,7 +595,7 @@ fn proxyTargetIsFunction(value: core.JSValue) bool {
 }
 
 test "function predicate recognizes every bytecode function class" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const class_ids = [_]core.ClassId{

@@ -46,11 +46,12 @@ pub const NativeBuiltinDomain = enum(i32) {
 };
 
 /// Method ids for the `.host` native-builtin domain: host/web globals and
-/// engine-internal helpers that have no spec namespace of their own (HTML
-/// btoa/atob/queueMicrotask, the zjs `gc` helper, navigator accessors, host
-/// constructor stubs, the shared `[Symbol.species]` getter, and the V8-style
-/// CallSite methods).
+/// engine-internal helpers that have no spec namespace of their own
+/// (navigator accessors, constructor stubs, the shared `[Symbol.species]`
+/// getter, and the V8-style CallSite methods).
 pub const HostGlobalMethod = enum(u32) {
+    // Retired bundled-host ids. Preserve the numbering; their functions now
+    // use host-owned NativeEntry records and are not dispatched by these ids.
     btoa = 1,
     atob = 2,
     queue_microtask = 3,

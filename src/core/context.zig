@@ -5,10 +5,10 @@
 //! realm and must be read together; `RealmRef` is the retained cross-job/
 //! callback handle, while raw RealmContext pointers are borrowed. QuickJS source
 //! map: `JSContext` realm fields at quickjs.c. Core owns this type;
-//! exec/runtime/binding may consume it, but context must not import those
-//! higher layers.
+//! exec/runtime/binding may consume it. Fixed global construction is delegated
+//! through engine_services; Realm ownership and bootstrap rollback stay here.
 
-const mem_ops = @import("memory.zig");
+const engine_services = @import("../engine_services.zig");
 const std = @import("std");
 const platform_clock = @import("../platform_clock.zig");
 
@@ -251,83 +251,15 @@ pub const SharedArrayBufferRef = struct {
     }
 };
 
-pub const SignalDisposition = enum {
-    default,
-    ignore,
-};
-
-pub const HostEventLoop = struct {
+/// Optional host progress and root tracing. Concrete OS capabilities live in
+/// the embedder; the engine only asks it to make one unit of progress.
+pub const HostScheduler = struct {
     ptr: *anyopaque,
-    vtable: *const VTable,
-
-    pub const VTable = struct {
-        traceRoots: *const fn (*anyopaque, *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void,
-        setExitCode: *const fn (*anyopaque, u8) void,
-        exitCode: *const fn (*anyopaque) ?u8,
-        nextTimerId: *const fn (*anyopaque) i64,
-        enqueueTimer: *const fn (*anyopaque, *RealmContext, i64, JSValue, u64, bool) anyerror!void,
-        clearTimer: *const fn (*anyopaque, *RealmContext, i64) void,
-        runNextTimer: *const fn (*anyopaque, *RealmContext, ?*std.Io.Writer, *Object) anyerror!bool,
-        setRwHandler: *const fn (*anyopaque, *RealmContext, i32, bool, JSValue) anyerror!void,
-        clearRwHandler: *const fn (*anyopaque, *RealmContext, i32, bool) void,
-        runNextRwHandler: *const fn (*anyopaque, *RealmContext, ?*std.Io.Writer, *Object) anyerror!bool,
-        setSignalHandler: *const fn (*anyopaque, *RealmContext, u32, JSValue) anyerror!void,
-        clearSignalHandler: *const fn (*anyopaque, *RealmContext, u32, SignalDisposition) void,
-        runNextSignalHandler: *const fn (*anyopaque, *RealmContext, ?*std.Io.Writer, *Object) anyerror!bool,
-    };
-
-    pub fn traceRoots(self: HostEventLoop, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
-        try self.vtable.traceRoots(self.ptr, visitor);
-    }
-
-    pub fn setExitCode(self: HostEventLoop, code: u8) void {
-        self.vtable.setExitCode(self.ptr, code);
-    }
-
-    pub fn exitCode(self: HostEventLoop) ?u8 {
-        return self.vtable.exitCode(self.ptr);
-    }
-
-    pub fn nextTimerId(self: HostEventLoop) i64 {
-        return self.vtable.nextTimerId(self.ptr);
-    }
-
-    pub fn enqueueTimer(self: HostEventLoop, ctx: *RealmContext, id: i64, callback: JSValue, delay_ms: u64, repeats: bool) !void {
-        try self.vtable.enqueueTimer(self.ptr, ctx, id, callback, delay_ms, repeats);
-    }
-
-    pub fn clearTimer(self: HostEventLoop, ctx: *RealmContext, id: i64) void {
-        self.vtable.clearTimer(self.ptr, ctx, id);
-    }
-
-    pub fn runNextTimer(self: HostEventLoop, ctx: *RealmContext, output: ?*std.Io.Writer, global: *Object) !bool {
-        return self.vtable.runNextTimer(self.ptr, ctx, output, global);
-    }
-
-    pub fn setRwHandler(self: HostEventLoop, ctx: *RealmContext, fd: i32, write_handler: bool, callback: JSValue) !void {
-        try self.vtable.setRwHandler(self.ptr, ctx, fd, write_handler, callback);
-    }
-
-    pub fn clearRwHandler(self: HostEventLoop, ctx: *RealmContext, fd: i32, write_handler: bool) void {
-        self.vtable.clearRwHandler(self.ptr, ctx, fd, write_handler);
-    }
-
-    pub fn runNextRwHandler(self: HostEventLoop, ctx: *RealmContext, output: ?*std.Io.Writer, global: *Object) !bool {
-        return self.vtable.runNextRwHandler(self.ptr, ctx, output, global);
-    }
-
-    pub fn setSignalHandler(self: HostEventLoop, ctx: *RealmContext, sig: u32, callback: JSValue) !void {
-        try self.vtable.setSignalHandler(self.ptr, ctx, sig, callback);
-    }
-
-    pub fn clearSignalHandler(self: HostEventLoop, ctx: *RealmContext, sig: u32, disposition: SignalDisposition) void {
-        self.vtable.clearSignalHandler(self.ptr, ctx, sig, disposition);
-    }
-
-    pub fn runNextSignalHandler(self: HostEventLoop, ctx: *RealmContext, output: ?*std.Io.Writer, global: *Object) !bool {
-        return self.vtable.runNextSignalHandler(self.ptr, ctx, output, global);
-    }
+    traceRoots: *const fn (*anyopaque, *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void,
+    poll: *const fn (*anyopaque, *RealmContext, ?*std.Io.Writer, *Object) anyerror!bool,
 };
+
+pub const ModuleSourceLoader = @import("module_source.zig").Loader;
 
 const class_prototype_inline_capacity: usize = class.ids.init_count;
 
@@ -372,13 +304,13 @@ pub const RealmContext = struct {
 
     comptime {
         std.debug.assert(@offsetOf(@This(), "header") == 0);
-        std.debug.assert(@sizeOf(@This()) == 1328);
+        std.debug.assert(@sizeOf(@This()) == 1344);
         std.debug.assert(@alignOf(@This()) == 16);
-        std.debug.assert(@offsetOf(@This(), "runtime") == 832);
-        std.debug.assert(@offsetOf(@This(), "modules") == 784);
-        std.debug.assert(@offsetOf(@This(), "publication_state") == 1312);
-        std.debug.assert(@offsetOf(@This(), "global") == 200);
-        std.debug.assert(trace_list_previous_offset == 1320);
+        std.debug.assert(@offsetOf(@This(), "runtime") == 824);
+        std.debug.assert(@offsetOf(@This(), "modules") == 168);
+        std.debug.assert(@offsetOf(@This(), "publication_state") == 1328);
+        std.debug.assert(@offsetOf(@This(), "global") == 1280);
+        std.debug.assert(trace_list_previous_offset == 1336);
         std.debug.assert(trace_list_previous_offset + @sizeOf(?*gc.Header) == @sizeOf(@This()));
     }
 
@@ -449,9 +381,10 @@ pub const RealmContext = struct {
     /// Direct-eval syntax only evaluates as direct eval when the resolved
     /// callee is this object; otherwise OP_eval falls back to an ordinary call.
     eval_function: JSValue = JSValue.nullValue(),
-    host_event_loop: ?HostEventLoop = null,
+    host_scheduler: ?HostScheduler = null,
+    module_source_loader: ?*const ModuleSourceLoader = null,
 
-    pub const trace_list_previous_offset: usize = 1320;
+    pub const trace_list_previous_offset: usize = 1336;
 
     /// O(1) list predecessor stored in the compact layout's tail hole.
     pub inline fn traceListPreviousPtr(self: *RealmContext) *?*gc.Header {
@@ -485,9 +418,9 @@ pub const RealmContext = struct {
         const nursery_was_suspended = rt.gc.nursery.suspended;
         rt.gc.nursery.suspended = true;
         defer rt.gc.nursery.suspended = nursery_was_suspended;
-        const ctx = try rt.createRuntime(RealmContext);
+        const ctx = try rt.gc.createRuntimeCell(RealmContext);
         var initialized = false;
-        errdefer if (initialized) ctx.destroy() else rt.destroyRuntime(RealmContext, ctx);
+        errdefer if (initialized) ctx.destroy() else rt.gc.destroyCell(RealmContext, ctx);
         try ctx.initConstructing(rt, options);
         initialized = true;
         if (publish_immediately) try ctx.finishConstruction();
@@ -511,7 +444,7 @@ pub const RealmContext = struct {
             .header = .{},
             .runtime = rt,
             .track_unhandled_rejections = options.track_unhandled_rejections,
-            .modules = module.Registry.init(rt, &rt.atoms, &rt.gc),
+            .modules = module.Registry.init(rt, rt.atoms, rt.gc),
             .random_state = realmMathRandomSeed(options.math_random_seed),
             .class_prototypes_inline = undefined,
         };
@@ -521,8 +454,8 @@ pub const RealmContext = struct {
         if (initial_len <= self.class_prototypes_inline.len) {
             self.class_prototypes = self.class_prototypes_inline[0..initial_len];
         } else {
-            const prototypes = try mem_ops.alloc(rt, JSValue, initial_len);
-            errdefer mem_ops.free(rt, JSValue, prototypes);
+            const prototypes = try rt.allocNative(JSValue, initial_len);
+            errdefer rt.freeNative(JSValue, prototypes);
             @memset(prototypes, JSValue.nullValue());
             self.class_prototypes = prototypes;
         }
@@ -646,18 +579,18 @@ pub const RealmContext = struct {
         return self.preserve_uncaught_exception;
     }
 
-    pub fn setHostEventLoop(self: *RealmContext, host_event_loop: HostEventLoop) void {
-        self.host_event_loop = host_event_loop;
+    pub fn setHostScheduler(self: *RealmContext, host_scheduler: HostScheduler) void {
+        self.host_scheduler = host_scheduler;
     }
 
-    pub fn clearHostEventLoop(self: *RealmContext, ptr: *anyopaque) void {
-        if (self.host_event_loop) |host_event_loop| {
-            if (host_event_loop.ptr == ptr) self.host_event_loop = null;
+    pub fn clearHostScheduler(self: *RealmContext, ptr: *anyopaque) void {
+        if (self.host_scheduler) |host_scheduler| {
+            if (host_scheduler.ptr == ptr) self.host_scheduler = null;
         }
     }
 
-    pub fn hostEventLoop(self: *RealmContext) ?HostEventLoop {
-        return self.host_event_loop;
+    pub fn hostScheduler(self: *RealmContext) ?HostScheduler {
+        return self.host_scheduler;
     }
 
     fn usingInlineClassPrototypes(self: *const RealmContext) bool {
@@ -673,7 +606,7 @@ pub const RealmContext = struct {
             slot.* = JSValue.nullValue();
         }
         if (!using_inline and class_prototypes.len != 0) {
-            mem_ops.free(rt, JSValue, class_prototypes);
+            rt.freeNative(JSValue, class_prototypes);
         }
     }
 
@@ -684,8 +617,8 @@ pub const RealmContext = struct {
             var next_len = if (self.class_prototypes.len == 0) @as(usize, 1) else self.class_prototypes.len + self.class_prototypes.len / 2;
             while (next_len <= index) : (next_len += next_len / 2 + 1) {}
 
-            const next = try mem_ops.alloc(self.runtime, JSValue, next_len);
-            errdefer mem_ops.free(self.runtime, JSValue, next);
+            const next = try self.runtime.allocNative(JSValue, next_len);
+            errdefer self.runtime.freeNative(JSValue, next);
             @memcpy(next[0..self.class_prototypes.len], self.class_prototypes);
             @memset(next[self.class_prototypes.len..], JSValue.nullValue());
 
@@ -695,7 +628,7 @@ pub const RealmContext = struct {
             if (old_using_inline) {
                 @memset(old, JSValue.nullValue());
             } else if (old.len != 0) {
-                mem_ops.free(self.runtime, JSValue, old);
+                self.runtime.freeNative(JSValue, old);
             }
         }
         return &self.class_prototypes[index];
@@ -781,11 +714,11 @@ pub const RealmContext = struct {
             .{ .atom_id = comptime atom.predefinedId("groups", .string).?, .flags = property.Flags.data(.all).bits() },
         };
 
-        const array_shape = try self.runtime.shapes.createInitialShape(array_prototype, &.{});
-        const arguments_shape = try self.runtime.shapes.createInitialShape(object_prototype, &arguments_properties);
-        const mapped_arguments_shape = try self.runtime.shapes.createInitialShape(object_prototype, &mapped_arguments_properties);
-        const regexp_shape = try self.runtime.shapes.createInitialShape(regexp_prototype, &regexp_properties);
-        const regexp_result_shape = try self.runtime.shapes.createInitialShape(array_prototype, &regexp_result_properties);
+        const array_shape = try self.runtime.shapes.createInitialShape(self.runtime, array_prototype, &.{});
+        const arguments_shape = try self.runtime.shapes.createInitialShape(self.runtime, object_prototype, &arguments_properties);
+        const mapped_arguments_shape = try self.runtime.shapes.createInitialShape(self.runtime, object_prototype, &mapped_arguments_properties);
+        const regexp_shape = try self.runtime.shapes.createInitialShape(self.runtime, regexp_prototype, &regexp_properties);
+        const regexp_result_shape = try self.runtime.shapes.createInitialShape(self.runtime, array_prototype, &regexp_result_properties);
 
         self.array_shape = array_shape;
         self.arguments_shape = arguments_shape;
@@ -803,7 +736,7 @@ pub const RealmContext = struct {
         // uninitialised fields (gc-invariants.md "Write barriers"). During
         // construction the publication trace covers these edges.
         if (self.header.metaConst().alloc_info.heap_accounted) {
-            const gc_registry = &self.runtime.gc;
+            const gc_registry = self.runtime.gc;
             gc_registry.generationalBarrier(&self.header, &array_shape.header);
             gc_registry.generationalBarrier(&self.header, &arguments_shape.header);
             gc_registry.generationalBarrier(&self.header, &mapped_arguments_shape.header);
@@ -816,7 +749,7 @@ pub const RealmContext = struct {
         const owned = slot.* orelse return;
         slot.* = null;
         // Never adopted by an object: free now. Otherwise the sweep owns it.
-        self.runtime.shapes.dropUnshared(owned);
+        self.runtime.shapes.dropUnshared(self.runtime, owned);
     }
 
     fn clearIntrinsicBootstrapValues(self: *RealmContext) void {
@@ -870,7 +803,8 @@ pub const RealmContext = struct {
         // Drop Realm -> ModuleRecord base refs before releasing globals and
         // intrinsics: module records may themselves own values in this Realm.
         self.modules.deinit();
-        self.host_event_loop = null;
+        self.host_scheduler = null;
+        self.module_source_loader = null;
         self.clearUnhandledRejection();
         self.lexicals = null;
         self.global = null;
@@ -921,7 +855,7 @@ pub const RealmContext = struct {
         const self: *RealmContext = @alignCast(@fieldParentPtr("header", header));
         self.deinitResources();
         // TGC S4-e spec 2.5: no Pass-B deferral.
-        rt.destroyRuntime(RealmContext, self);
+        rt.gc.destroyCell(RealmContext, self);
     }
 
     pub fn createValueHandle(self: *RealmContext, value: JSValue) !runtime_mod.JSValueHandle {
@@ -977,8 +911,8 @@ pub const RealmContext = struct {
         }
         try visitor.optionalObject(&self.global);
         try visitor.optionalObject(&self.lexicals);
-        if (self.host_event_loop) |host_event_loop| {
-            try host_event_loop.traceRoots(visitor);
+        if (self.host_scheduler) |host_scheduler| {
+            try host_scheduler.traceRoots(host_scheduler.ptr, visitor);
         }
     }
 
@@ -1102,13 +1036,13 @@ pub const RealmContext = struct {
         if (index + 1 > self.unhandled_rejections_capacity) {
             var next_capacity = if (self.unhandled_rejections_capacity == 0) @as(usize, 4) else self.unhandled_rejections_capacity * 2;
             while (next_capacity < index + 1) : (next_capacity *= 2) {}
-            const next = try mem_ops.alloc(self.runtime, UnhandledRejectionEntry, next_capacity);
+            const next = try self.runtime.allocNative(UnhandledRejectionEntry, next_capacity);
             const old = self.unhandled_rejections;
             const old_capacity = self.unhandled_rejections_capacity;
             @memcpy(next[0..old.len], old);
             self.unhandled_rejections = next[0..old.len];
             self.unhandled_rejections_capacity = next_capacity;
-            if (old_capacity != 0) mem_ops.free(self.runtime, UnhandledRejectionEntry, old.ptr[0..old_capacity]);
+            if (old_capacity != 0) self.runtime.freeNative(UnhandledRejectionEntry, old.ptr[0..old_capacity]);
         }
         self.unhandled_rejections = self.unhandled_rejections.ptr[0 .. index + 1];
         self.unhandled_rejections[index] = .{
@@ -1158,7 +1092,7 @@ pub const RealmContext = struct {
         const capacity = self.unhandled_rejections_capacity;
         self.unhandled_rejections = &.{};
         self.unhandled_rejections_capacity = 0;
-        if (capacity != 0) mem_ops.free(rt, UnhandledRejectionEntry, entries.ptr[0..capacity]);
+        if (capacity != 0) rt.freeNative(UnhandledRejectionEntry, entries.ptr[0..capacity]);
     }
 
     pub fn classPrototypeSlotCount(self: RealmContext) usize {
@@ -1215,7 +1149,7 @@ pub const RealmContext = struct {
 
         const total = self.runtime.backtrace_frames.len + active_count;
         if (total == 0) return &.{};
-        const frames = try mem_ops.alloc(self.runtime, BacktraceFrame, total);
+        const frames = try self.runtime.allocNative(BacktraceFrame, total);
 
         for (self.runtime.backtrace_frames, 0..) |frame, idx| {
             frames[idx] = self.dupBacktraceFrame(frame);
@@ -1241,7 +1175,7 @@ pub const RealmContext = struct {
     }
 
     pub fn freeBacktraceFrameSnapshot(self: *RealmContext, frames: []BacktraceFrame) void {
-        if (frames.len != 0) mem_ops.free(self.runtime, BacktraceFrame, frames);
+        if (frames.len != 0) self.runtime.freeNative(BacktraceFrame, frames);
     }
 
     fn dupBacktraceFrame(self: *RealmContext, frame: BacktraceFrame) BacktraceFrame {
@@ -1340,15 +1274,12 @@ pub const RealmContext = struct {
         };
         global.promoteToGlobalObjectClass(rt);
         _ = global.ensureGlobalPayload(rt) catch |err| return @errorCast(err);
-        rt.hooks.install_standard_globals(self, global) catch |err| return @errorCast(err);
+        engine_services.installStandardGlobals(self, global) catch |err| return @errorCast(err);
     }
 
     pub fn globalObject(self: *RealmContext) !*Object {
         if (self.global) |existing| return existing;
-        if (self.runtime.materialize_context_global_cb) |cb| {
-            return cb(self);
-        }
-        return error.InvalidBuiltinRegistry;
+        return engine_services.materializeContextGlobal(self);
     }
 };
 

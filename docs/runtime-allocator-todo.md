@@ -1,6 +1,6 @@
-# Runtime 默认 allocator：决策与剩余实验
+# Runtime 宿主 allocator：决策与剩余实验
 
-Status: 2026-09-23，D1/F1 已完成：A9 前后均完成 c/smp 比较，默认 c_allocator 已落地；额外实验保留 TODO
+Status: 2026-09-23，创建 Runtime 必须显式传入宿主 allocator；历史 c/smp 比较保留，额外实验保留 TODO
 
 所属设计：[Runtime 内存职责与交付边界](runtime-target-design.md)。
 
@@ -20,8 +20,11 @@ Status: 2026-09-23，D1/F1 已完成：A9 前后均完成 c/smp 比较，默认 
 
 ## 决策边界
 
-A9 后复测支持选择 c_allocator 作为默认值，依据是本机长期及并发负载较低的销毁后 RSS；耗时区间重叠，不声称普遍速度优势。Runtime.create(.{}) 已采用此默认值，显式 allocator 仍可覆盖。
-已确定保留可选宿主 allocator、引擎提供默认值、Runtime 使用单一 create 入口。
+当前 `Runtime.create(host_allocator, .{})` 要求宿主显式选择 allocator，
+引擎不提供默认值，Runtime 保留单一 create 入口；GC 底层存储路径不因此改变。
+A9 后复测曾支持选择 c_allocator 作为默认值，依据是本机长期及并发负载较低的
+销毁后 RSS；耗时区间重叠，不声称普遍速度优势。该历史比较供宿主选择参考，
+不再决定 Runtime 的默认值。
 以当前验证政策为准；本轮测量依据用户继续完成剩余工作的授权执行。
 
 ## 本轮测量与明确剩余项
@@ -32,6 +35,6 @@ A9 后复测支持选择 c_allocator 作为默认值，依据是本机长期及�
 
 - [x] c/smp 的反复创建销毁、长期重复 eval、四 Runtime 并发场景。
 - [x] 记录耗时、采样 RSS 峰值、销毁后 RSS 与二进制/源码身份。
-- [x] A9 后复跑 24 个样本，记录最终源码/二进制身份；F1 已安装默认 allocator。
+- [x] A9 后复跑 24 个样本，记录当时源码/二进制身份；F1 曾安装默认 allocator，现已改为宿主必填。
 - [ ] 普通小分配直接分配与额外 slab 的独立 A/B；不作为恢复通用 slab 的理由。
 - [ ] 更长 idle 回落及其他平台的代表性负载，当前没有这些结论。

@@ -26,6 +26,43 @@ lowering. Type checking is outside scope; see [LIMITATIONS.md](LIMITATIONS.md).
 - Finish with the outcome, relevant validation results, and unresolved work.
   Distinguish passed, failed, interrupted, and unrun checks.
 
+## Zig Code Editing
+
+When modifying Zig code, prioritize correctness, minimal context usage, and
+small, auditable changes.
+
+### Tool priority
+
+1. Prefer ZLS for semantic navigation: find symbols, go to definition, find
+   references, inspect symbol/type information, and inspect diagnostics when
+   useful.
+2. Use text search (`rg` / `search`) when ZLS cannot resolve the symbol, when
+   searching strings, comments, build files, generated names, or non-Zig files,
+   or when semantic lookup is unnecessary.
+3. Read only the smallest relevant source ranges. Do not read entire files
+   unless required.
+4. Use `apply_patch` for modifications to existing files. Avoid whole-file
+   rewrites.
+5. After every meaningful Zig code change, validate with the mise-managed Zig
+   toolchain: run `zig fmt` on changed Zig files and relevant tests (`zig test`
+   where standalone, or the project's targeted test task). Run `zig build
+   check` during iteration and one final `zig build test`, with additional
+   builds when applicable, following the verification policy below.
+
+### ZLS usage
+
+Use ZLS primarily as a semantic read/navigation tool. Prefer:
+
+`ZLS symbol lookup → definition/references → ranged source read`
+
+over:
+
+`grep → large file read → manual symbol discovery`
+
+Do not assume ZLS is the final authority on whether code is correct. Zig
+compiler and test results are authoritative. Do not blindly apply large
+workspace edits.
+
 ## Verification
 
 Read [verification-policy](docs/verification-policy.md) before implementation.

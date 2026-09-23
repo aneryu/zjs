@@ -110,7 +110,7 @@ v2(2026-08-26)= FNABI ABI tuple 过渡 + layout_epoch 定义;v1
 
 每个 GC 分配前有 **8 字节 `Metadata` 前缀**(`gc.zig:Metadata`,
 `metadata_prefix_size == 8`,align 8;字节偏移由
-`gc_representation_constants.zig` 与 `memory.zig` 的裸字节写入共同钉住):
+`gc_representation_constants.zig` 与 `gc_alloc.zig` 的裸字节写入共同钉住):
 
 ```text
 offset 0  size_class : u16   块 cell = cell index;slab = allocator block idx;standalone = 编码堆字节数

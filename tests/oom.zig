@@ -22,7 +22,8 @@
 //! allocation index, so this is an instrumentation tier command (nightly), not part of
 //! `zig build test`.
 
-const mem_ops = @import("zjs").core.memory;
+const native_alloc = @import("zjs").core.runtime.native_allocation;
+const gc_alloc = @import("zjs").core.gc.allocation;
 const std = @import("std");
 const zjs = @import("zjs");
 
@@ -530,7 +531,7 @@ fn expectStringValue(value: core.JSValue, expected: []const u8) !void {
 /// `allocator`, OOM propagates out as `error.OutOfMemory`, and all paths
 /// (success or failure) release everything they allocated.
 fn runSnippet(allocator: std.mem.Allocator, snippet: Snippet) !void {
-    const rt = try core.JSRuntime.create(.{ .allocator = allocator });
+    const rt = try core.JSRuntime.create(allocator, .{});
     var rt_owned = true;
     errdefer if (rt_owned) rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
@@ -598,7 +599,7 @@ fn stickyFailureTailProbe(allocator: std.mem.Allocator) !void {
 /// execution. Uses a syntax-dense source so the sweep covers the parser
 /// allocation clusters and every root/child RealmRef publication rollback.
 fn runParseOnly(allocator: std.mem.Allocator, source: []const u8) !void {
-    const rt = try core.JSRuntime.create(.{ .allocator = allocator });
+    const rt = try core.JSRuntime.create(allocator, .{});
     var rt_owned = true;
     errdefer if (rt_owned) rt.destroy();
     const realm = try core.RealmContext.create(rt, .{});
@@ -700,7 +701,7 @@ fn loadGraphModule(
 /// ESM link lifecycle: two in-memory modules resolved through host hooks,
 /// exercising module records, link, instantiate, and evaluation order.
 fn runEsmGraphLink(allocator: std.mem.Allocator) !void {
-    const rt = try core.JSRuntime.create(.{ .allocator = allocator });
+    const rt = try core.JSRuntime.create(allocator, .{});
     var rt_owned = true;
     errdefer if (rt_owned) rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
@@ -907,7 +908,7 @@ fn runRecoveryAttempt(injector: *OneShotFailingAllocator, snippet: Snippet) !voi
     injector.armCellInjection();
     defer OneShotFailingAllocator.disarmCellInjection();
     attempt: {
-        const rt = core.JSRuntime.create(.{ .allocator = injector.allocator() }) catch |err| {
+        const rt = core.JSRuntime.create(injector.allocator(), .{}) catch |err| {
             // Injection landed inside runtime bootstrap: acceptable, the
             // constructor must fail cleanly (balance asserted below).
             if (err != error.OutOfMemory) return err;
@@ -1009,7 +1010,7 @@ fn expectIntrinsicBootstrapCleared(ctx: *core.JSContext) !void {
 }
 
 test "oom recovery canary: ordinary GLOBAL selector retries auto-init" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -1051,7 +1052,7 @@ fn runContextGlobalRetryAttempt(fail_index: usize) !bool {
     injector.armCellInjection();
     defer OneShotFailingAllocator.disarmCellInjection();
     {
-        const rt = try core.JSRuntime.create(.{ .allocator = injector.allocator() });
+        const rt = try core.JSRuntime.create(injector.allocator(), .{});
         defer rt.destroy();
         const ctx = try core.JSContext.create(rt, .{});
         defer ctx.destroy();
@@ -1110,7 +1111,7 @@ fn runBindingContextConstructionRetryAttempt(fail_index: usize) !bool {
     injector.armCellInjection();
     defer OneShotFailingAllocator.disarmCellInjection();
     {
-        const rt = try core.JSRuntime.create(.{ .allocator = injector.allocator() });
+        const rt = try core.JSRuntime.create(injector.allocator(), .{});
         defer rt.destroy();
 
         // Keep one published Realm in the Runtime so publication of the
@@ -1120,7 +1121,7 @@ fn runBindingContextConstructionRetryAttempt(fail_index: usize) !bool {
         defer anchor.destroy();
         try std.testing.expect(anchor.isLive());
         try std.testing.expectEqual(anchor, rt.firstContext().?);
-        try std.testing.expectEqual(@as(usize, 1), rt.roots.root_providers.len);
+        try std.testing.expectEqual(@as(usize, 1), rt.roots.providers().len);
         const native_count_before = rt.native_entries.items.len;
 
         injector.attempts = 0;
@@ -1143,7 +1144,7 @@ fn runBindingContextConstructionRetryAttempt(fail_index: usize) !bool {
                 try std.testing.expect(rt.constructing_context_tail == null);
                 try std.testing.expectEqual(anchor, rt.firstContext().?);
                 try std.testing.expect(anchor.runtime_next == null);
-                try std.testing.expectEqual(@as(usize, 1), rt.roots.root_providers.len);
+                try std.testing.expectEqual(@as(usize, 1), rt.roots.providers().len);
                 try std.testing.expectEqual(native_count_before, rt.native_entries.items.len);
 
                 created = try BindingContext.create(rt, .{});
@@ -1155,7 +1156,7 @@ fn runBindingContextConstructionRetryAttempt(fail_index: usize) !bool {
         try std.testing.expect(created.core.isLive());
         try std.testing.expect(rt.constructing_context_head == null);
         try std.testing.expect(rt.constructing_context_tail == null);
-        try std.testing.expectEqual(@as(usize, 2), rt.roots.root_providers.len);
+        try std.testing.expectEqual(@as(usize, 2), rt.roots.providers().len);
         // print/console share a static NativeEntry. Neither partial bootstrap
         // nor a retry may append any Runtime-owned native entries.
         try std.testing.expectEqual(native_count_before, rt.native_entries.items.len);
@@ -1174,7 +1175,7 @@ test "oom recovery canary: binding Realm construction rollback and retry" {
 }
 
 test "oom recovery canary: FunctionBytecode combined main FAM allocation" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name = try rt.internAtom("oom-function-bytecode-fixture");
@@ -1200,12 +1201,12 @@ test "oom recovery canary: FunctionBytecode combined main FAM allocation" {
         0,
     );
     // Above the slab ceiling, so the exact
-    // Runtime allocation helpers charge is the one main allocation plus its GC prefix
+    // GC allocation diagnostic charge is the main allocation plus its GC prefix
     // (standalone: request size, no extra MALLOC_OVERHEAD).
     try std.testing.expect(layout.mainPayloadBytes() > 512);
     try std.testing.expect(layout.total_size > 512);
     const request_bytes = layout.total_size + core.gc.metadata_prefix_size;
-    const accounted_bytes = mem_ops.accountedMallocSize(request_bytes, null);
+    const accounted_bytes = gc_alloc.accountedMallocSize(request_bytes, null);
 
     // Quiesce the heap before the baseline is read. Bootstrap and the atom
     // intern above leave collectable debris behind (40 bytes on this tree),
@@ -1396,7 +1397,7 @@ test "oom cell injection: the hook is reached and a refusal is honoured" {
         var never = CellOnlyInjector{ .fail_at = std.math.maxInt(usize) };
         never.arm();
         defer OneShotFailingAllocator.disarmCellInjection();
-        const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+        const rt = try core.JSRuntime.create(std.testing.allocator, .{});
         defer rt.destroy();
         const ctx = try core.JSContext.create(rt, .{});
         defer ctx.destroy();
@@ -1409,13 +1410,13 @@ test "oom cell injection: the hook is reached and a refusal is honoured" {
 
     // A refused cell is a real OOM at the block heap. Object allocation is
     // allowed to answer it by falling back to the compatibility slab (the
-    // graceful direction memory.zig documents) and string cells propagate it,
+    // graceful direction gc_alloc.zig documents) and string cells propagate it,
     // so the contract asserted here is the same one the recovery canary uses:
     // succeed, or surface it, and stay usable either way.
     var refuse_first = CellOnlyInjector{ .fail_at = 0 };
     refuse_first.arm();
     defer OneShotFailingAllocator.disarmCellInjection();
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -1473,7 +1474,7 @@ fn runLookaheadRestoreAttempt(injector: *OneShotFailingAllocator, fail_index: us
     // bootstrap and teardown stay outside the counted window.
     injector.armCellInjection();
     defer OneShotFailingAllocator.disarmCellInjection();
-    const rt = try core.JSRuntime.create(.{ .allocator = injector.allocator() });
+    const rt = try core.JSRuntime.create(injector.allocator(), .{});
     defer rt.destroy();
     const realm = try core.RealmContext.create(rt, .{});
     defer realm.destroy();
@@ -1540,9 +1541,9 @@ test "oom parser canary: export name lookahead restores the lexer position" {
 // ---------------------------------------------------------------------------
 
 test "oom coverage report" {
-    if (comptime !core.memory.oom_coverage_enabled) return;
+    if (comptime !native_alloc.oom_coverage_enabled) return;
     std.debug.print(
         "\n[oom-coverage] distinct allocation call sites hit: {d}\n",
-        .{core.memory.oomCoverageDistinctSiteCount()},
+        .{native_alloc.oomCoverageDistinctSiteCount()},
     );
 }

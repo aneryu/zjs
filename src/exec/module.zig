@@ -8,7 +8,6 @@
 //! resolver/linker/evaluator spans quickjs.c and quickjs.c.
 
 const std = @import("std");
-const builtin = @import("builtin");
 
 const bytecode = @import("../bytecode.zig");
 const builtin_dispatch = @import("builtin_dispatch.zig");
@@ -115,7 +114,7 @@ fn pendingDefinitionFromArtifact(
     var parsed = artifact.record;
     defer parsed.deinit();
 
-    var pending = core.module.PendingDefinition.init(runtime, &runtime.atoms);
+    var pending = core.module.PendingDefinition.init(runtime, runtime.atoms);
     pending.adoptFuncObjectValueNoFail(core.JSValue.functionBytecode(&artifact.function_bytecode.header));
     errdefer pending.deinit();
 
@@ -152,7 +151,7 @@ fn pendingDefinitionFromArtifact(
             names[request_index]
         else
             try resolvedRequestAtomForParsed(
-                runtime,
+                ctx,
                 &parsed,
                 request.module_name,
                 @intCast(request_index),
@@ -260,14 +259,14 @@ pub fn preloadMissingFileModuleGraphWithOrder(
     );
 }
 
-pub fn resolveModuleSpecifier(allocator: std.mem.Allocator, referrer_path: []const u8, specifier: []const u8) ![]const u8 {
-    if (std.mem.startsWith(u8, specifier, "node:")) return allocator.dupe(u8, specifier);
-    if (std.fs.path.isAbsolute(specifier)) return std.fs.path.resolve(allocator, &.{specifier});
-    if (!(std.mem.startsWith(u8, specifier, "./") or std.mem.startsWith(u8, specifier, "../"))) {
-        return error.ModuleNotFound;
-    }
-    const base = std.fs.path.dirname(referrer_path) orelse ".";
-    return std.fs.path.resolve(allocator, &.{ base, specifier });
+fn resolveModuleSource(context: *core.JSContext, allocator: std.mem.Allocator, referrer: ?[]const u8, specifier: []const u8, mode: core.context.ModuleSourceLoader.Resolution) ![]u8 {
+    const loader = context.module_source_loader orelse return error.ModuleNotFound;
+    return loader.resolve(loader.ptr, allocator, referrer, specifier, mode);
+}
+
+fn readModuleSource(context: *core.JSContext, io: std.Io, allocator: std.mem.Allocator, path: []const u8, limit: usize) std.Io.Dir.ReadFileAllocError![]u8 {
+    const loader = context.module_source_loader orelse return error.FileNotFound;
+    return loader.read(loader.ptr, io, allocator, path, limit);
 }
 
 /// Borrow the record's canonical module-function value. Linking performs the
@@ -748,19 +747,20 @@ fn requestName(record: bytecode.module.Record, request_index: u32) !bytecode.mod
 }
 
 fn resolvedRequestAtomForParsed(
-    runtime: *core.JSRuntime,
+    ctx: *core.JSContext,
     parsed: *const bytecode.module.Record,
     request_atom: core.Atom,
     request_index: u32,
     referrer_path: ?[]const u8,
 ) !core.Atom {
-    const resolved = try resolvedRequestAtom(runtime, request_atom, referrer_path);
+    const runtime = ctx.runtime;
+    const resolved = try resolvedRequestAtom(ctx, request_atom, referrer_path);
     // TGC S3 §4 class B: the resolved specifier is a bare id held across the
     // tagged-name formatting allocation below.
     var resolved_roots = core.runtime.rootAtoms(.{&resolved});
     resolved_roots.activate(runtime);
     defer resolved_roots.deactivate(runtime);
-    const kind = syntheticKindForRequestIndex(runtime, parsed, request_index) orelse return resolved;
+    const kind = syntheticKindForRequestIndex(ctx, parsed, request_index) orelse return resolved;
     if (kind == .none) return resolved;
     const resolved_name = runtime.atoms.name(resolved) orelse return error.InvalidAtom;
     const tagged_name = try syntheticModuleRegistryName(runtime.nativeAllocator(), resolved_name, kind);
@@ -1043,12 +1043,7 @@ fn preloadFileModuleGraphInner(
         if (existing_dependency == null or
             !existing_dependency.?.requestsResolved())
         {
-            const dependency_source = std.Io.Dir.cwd().readFileAlloc(
-                io,
-                dependency_name,
-                allocator,
-                .limited(max_source_size),
-            ) catch |err| switch (err) {
+            const dependency_source = readModuleSource(context, io, allocator, dependency_name, max_source_size) catch |err| switch (err) {
                 error.FileNotFound => {
                     try throwCouldNotLoadModule(context, dependency_name);
                     return error.JSException;
@@ -1105,27 +1100,21 @@ fn appendTrackedPath(allocator: std.mem.Allocator, paths: *std.ArrayList([]const
 }
 
 fn syntheticKindForRequestIndex(
-    runtime: *core.JSRuntime,
+    ctx: *core.JSContext,
     record: *const bytecode.module.Record,
     request_index: u32,
 ) ?core.module.SyntheticKind {
-    const type_atom = core.atom.ids.type_;
+    const loader = ctx.module_source_loader orelse return null;
+    if (request_index >= record.requests.len) return null;
+    const specifier = ctx.runtime.atoms.name(record.requests[request_index].module_name) orelse return null;
+    var attribute: ?[]const u8 = null;
     for (record.import_attributes) |entry| {
-        if (entry.request_index != request_index or entry.key != type_atom) continue;
-        const value = runtime.atoms.name(entry.value) orelse return null;
-        if (std.mem.eql(u8, value, "json")) return .json;
-        if (std.mem.eql(u8, value, "text")) return .text;
-        if (std.mem.eql(u8, value, "bytes")) return .bytes;
-    }
-    // No `type` attribute: a `.json` specifier still loads as a JSON module,
-    // mirroring qjs js_module_loader's extension check
-    // (`has_suffix(module_name, ".json") || res > 0`, quickjs-libc.c:704).
-    if (request_index < record.requests.len) {
-        if (runtime.atoms.name(record.requests[@intCast(request_index)].module_name)) |specifier| {
-            if (std.mem.endsWith(u8, specifier, ".json")) return .json;
+        if (entry.request_index == request_index and entry.key == core.atom.ids.type_) {
+            attribute = ctx.runtime.atoms.name(entry.value);
+            break;
         }
     }
-    return null;
+    return loader.syntheticKind(loader.ptr, specifier, attribute);
 }
 
 fn syntheticModuleKindName(kind: core.module.SyntheticKind) []const u8 {
@@ -1186,7 +1175,7 @@ fn preloadSyntheticFileModuleTracked(
 
     var pending = core.module.PendingDefinition.init(
         runtime,
-        &runtime.atoms,
+        runtime.atoms,
     );
     defer pending.deinit();
     pending.synthetic_kind = kind;
@@ -1317,60 +1306,24 @@ fn markImmutableArrayBuffer(rt: *core.JSRuntime, object: *core.Object) !void {
     try core.object.markArrayBufferImmutable(rt, object);
 }
 
-fn resolvedRequestAtom(runtime: *core.JSRuntime, request_atom: core.Atom, referrer_path: ?[]const u8) !core.Atom {
+fn resolvedRequestAtom(ctx: *core.JSContext, request_atom: core.Atom, referrer_path: ?[]const u8) !core.Atom {
     const referrer = referrer_path orelse return request_atom;
+    const loader = ctx.module_source_loader orelse return request_atom;
+    const runtime = ctx.runtime;
     const specifier = runtime.atoms.name(request_atom) orelse return error.InvalidAtom;
-    if (std.mem.startsWith(u8, specifier, "node:")) return request_atom;
-    if (std.fs.path.isAbsolute(specifier)) {
-        const resolved = try std.fs.path.resolve(runtime.nativeAllocator(), &.{specifier});
-        defer runtime.nativeAllocator().free(resolved);
-        return runtime.internAtom(resolved);
-    }
-    if (!(std.mem.startsWith(u8, specifier, "./") or std.mem.startsWith(u8, specifier, "../"))) {
-        return request_atom;
-    }
-    const base = std.fs.path.dirname(referrer) orelse ".";
-    const resolved = try std.fs.path.resolve(runtime.nativeAllocator(), &.{ base, specifier });
+    const resolved = try loader.resolve(loader.ptr, runtime.nativeAllocator(), referrer, specifier, .static_import);
     defer runtime.nativeAllocator().free(resolved);
     return runtime.internAtom(resolved);
 }
 
-// import.meta.url synthesis (moved from the VM call runtime).
-
-/// Mirrors qjs `js_module_set_import_meta` (quickjs-libc.c:548): a module
-/// name containing a scheme separator (`:`) is used verbatim. On POSIX,
-/// anything else becomes `file://` + realpath(name); QuickJS deliberately
-/// skips realpath on Windows and prefixes the module name directly.
-pub fn importMetaUrlValue(rt: *core.JSRuntime, record: *core.module.ModuleRecord) !core.JSValue {
+/// Metadata contents come from host policy; the engine owns object identity.
+pub fn importMetaUrlValue(ctx: *core.JSContext, record: *core.module.ModuleRecord) !core.JSValue {
+    const loader = ctx.module_source_loader orelse return core.JSValue.undefinedValue();
+    const rt = ctx.runtime;
     const name = rt.atoms.name(record.module_name) orelse "";
-    if (std.mem.indexOfScalar(u8, name, ':') != null) {
-        return value_ops.createStringValue(rt, name);
-    }
-    // Synthetic registry names carry a `#type=` suffix that is not part of
-    // the on-disk path; the URL uses the file path portion.
-    const file_path = syntheticModuleFilePath(name);
-    if (builtin.os.tag == .windows) {
-        const url = try std.fmt.allocPrint(rt.nativeAllocator(), "file://{s}", .{file_path});
-        defer rt.nativeAllocator().free(url);
-        return value_ops.createStringValue(rt, url);
-    }
-
-    const io = std.Io.Threaded.global_single_threaded.io();
-    var resolved_buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (std.Io.Dir.cwd().realPathFile(io, file_path, &resolved_buf)) |resolved_len| {
-        const url = try std.fmt.allocPrint(rt.nativeAllocator(), "file://{s}", .{resolved_buf[0..resolved_len]});
-        defer rt.nativeAllocator().free(url);
-        return value_ops.createStringValue(rt, url);
-    } else |_| {}
-    // realpath failure (e.g. "<eval>" pseudo-names): keep the pre-realpath
-    // behavior — absolute names still get the file:// scheme, other names are
-    // returned verbatim.
-    if (std.mem.startsWith(u8, file_path, "/")) {
-        const url = try std.fmt.allocPrint(rt.nativeAllocator(), "file://{s}", .{file_path});
-        defer rt.nativeAllocator().free(url);
-        return value_ops.createStringValue(rt, url);
-    }
-    return value_ops.createStringValue(rt, name);
+    const url = try loader.metadataUrl(loader.ptr, rt.nativeAllocator(), name);
+    defer rt.nativeAllocator().free(url);
+    return value_ops.createStringValue(rt, url);
 }
 
 // ----- merged from module_graph.zig -----
@@ -2232,7 +2185,7 @@ pub fn evalFileModuleGraphWithOutput(
     // covers it; this tightens it for the running thread (test262 workers run on
     // a different C stack than where the runtime was constructed).
     if (context.runtime.call_depth == 0) runtime.updateNativeStackTop();
-    const normalized_filename = try std.fs.path.resolve(allocator, &.{filename});
+    const normalized_filename = try resolveModuleSource(context, allocator, null, filename, .entry);
     defer allocator.free(normalized_filename);
 
     var module_postorder = std.ArrayList([]const u8).empty;
@@ -2412,7 +2365,7 @@ fn initializeSyntheticFileModules(
         if (record.synthetic_kind == .none) continue;
         const path = runtime.atoms.name(record.module_name) orelse return error.InvalidAtom;
         const source_path = exec.module.syntheticModuleFilePath(path);
-        const module_source = std.Io.Dir.cwd().readFileAlloc(io, source_path, allocator, .limited(max_source_size)) catch |err| switch (err) {
+        const module_source = readModuleSource(context, io, allocator, source_path, max_source_size) catch |err| switch (err) {
             error.FileNotFound => {
                 try exec.module.throwCouldNotLoadModule(context, source_path);
                 return error.JSException;
@@ -2691,9 +2644,7 @@ fn runOneModuleMicrotask(runtime: *core.JSRuntime, output: ?*std.Io.Writer) !job
 
 fn drainOneModuleHostEvent(context: *core.JSContext, output: ?*std.Io.Writer) !bool {
     const global = try exec.zjs_vm.contextGlobal(context);
-    if (try exec.call.runNextOsSignalHandler(context, output, global)) return true;
-    if (try exec.call_runtime.runNextOsRwHandler(context, output, global)) return true;
-    if (try exec.call_runtime.runNextOsTimer(context, output, global)) return true;
+    if (try exec.call_runtime.pollHostScheduler(context, output, global)) return true;
     return exec.atomics_ops.runNextAtomicsHostCompletion(context, false);
 }
 
@@ -3081,7 +3032,7 @@ fn evalDynamicImportModule(
     // An unresolvable specifier rejects the import() promise with the
     // loader's ReferenceError (mirrors js_module_loader quickjs-libc.c:699)
     // instead of aborting the evaluation with a host error.
-    const target_path_base = exec.module.resolveModuleSpecifier(allocator, referrer_path, specifier) catch |err| switch (err) {
+    const target_path_base = resolveModuleSource(context, allocator, referrer_path, specifier, .dynamic_import) catch |err| switch (err) {
         error.ModuleNotFound => {
             try exec.module.throwCouldNotLoadModule(context, specifier);
             return error.JSException;
@@ -3096,11 +3047,12 @@ fn evalDynamicImportModule(
     // unknown/absent types retain ordinary ESM loading. The registry name is
     // shared with attribute-tagged static imports so both forms resolve to
     // one module record.
-    const synthetic_kind: ?core.module.SyntheticKind = switch (import_type) {
-        .none => if (std.mem.endsWith(u8, target_path_base, ".json")) .json else null,
-        .json => .json,
-        .text => .text,
-    };
+    const source_loader = context.module_source_loader orelse return error.ModuleNotFound;
+    const synthetic_kind = source_loader.syntheticKind(source_loader.ptr, target_path_base, switch (import_type) {
+        .none => null,
+        .json => "json",
+        .text => "text",
+    });
     const is_synthetic = synthetic_kind != null;
     const target_path = if (synthetic_kind) |kind|
         try exec.module.syntheticModuleRegistryName(allocator, target_path_base, kind)
@@ -3121,7 +3073,7 @@ fn evalDynamicImportModule(
     }
     if (context.modules.find(module_name) == null) {
         if (!is_synthetic) {
-            const source = std.Io.Dir.cwd().readFileAlloc(io, target_path, allocator, .limited(max_source_size)) catch |err| switch (err) {
+            const source = readModuleSource(context, io, allocator, target_path, max_source_size) catch |err| switch (err) {
                 error.FileNotFound => {
                     try exec.module.throwCouldNotLoadModule(context, target_path);
                     return error.JSException;
@@ -3163,7 +3115,7 @@ fn evalDynamicImportModule(
     // retained export-cell authority as source modules.
     if (is_synthetic) {
         const source_path = exec.module.syntheticModuleFilePath(target_path);
-        const module_source = std.Io.Dir.cwd().readFileAlloc(io, source_path, allocator, .limited(max_source_size)) catch |err| switch (err) {
+        const module_source = readModuleSource(context, io, allocator, source_path, max_source_size) catch |err| switch (err) {
             error.FileNotFound => {
                 try exec.module.throwCouldNotLoadModule(context, target_path_base);
                 return error.JSException;

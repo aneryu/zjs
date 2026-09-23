@@ -4,10 +4,8 @@
 //! resident windows retain it, and generator suspension uses the explicit
 //! install/clear seam to transfer backing ownership without duplicating values.
 
-const mem_ops = @import("../core/memory.zig");
 const std = @import("std");
 
-const memory = @import("../core/memory.zig");
 const runtime = @import("../runtime.zig");
 const JSValue = @import("../core/value.zig").JSValue;
 
@@ -204,7 +202,7 @@ pub const Stack = struct {
         if (self.storage.ownership != .owned) return;
         const backing = self.backingValues();
         self.clearBacking();
-        mem_ops.free(self.runtime, JSValue, backing);
+        self.runtime.freeNative(JSValue, backing);
     }
 
     pub inline fn deinit(self: *Stack, _: anytype) void {
@@ -217,7 +215,7 @@ pub const Stack = struct {
         for (values) |*slot| {
             slot.* = JSValue.undefinedValue();
         }
-        if (stack_capacity != 0 and owns_backing) mem_ops.free(self.runtime, JSValue, backing);
+        if (stack_capacity != 0 and owns_backing) self.runtime.freeNative(JSValue, backing);
     }
 
     pub fn push(self: *Stack, value: JSValue) !void {
@@ -281,8 +279,8 @@ pub const Stack = struct {
         }
         if (next_capacity < needed) return error.StackOverflow;
 
-        const next = try mem_ops.alloc(self.runtime, JSValue, next_capacity);
-        errdefer mem_ops.free(self.runtime, JSValue, next);
+        const next = try self.runtime.allocNative(JSValue, next_capacity);
+        errdefer self.runtime.freeNative(JSValue, next);
         const old_values = self.liveValues();
         const old_backing = self.backingValues();
         const old_capacity = current_capacity;
@@ -292,6 +290,6 @@ pub const Stack = struct {
         self.top_ptr = next.ptr + old_values.len;
         self.capacity = next_capacity;
         self.storage.ownership = .owned;
-        if (old_capacity != 0 and owned_old_backing) mem_ops.free(self.runtime, JSValue, old_backing);
+        if (old_capacity != 0 and owned_old_backing) self.runtime.freeNative(JSValue, old_backing);
     }
 };

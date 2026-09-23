@@ -414,7 +414,7 @@ fn validateRuntimeIdentity(fd: *const function_def_mod.FunctionDef, rt: *runtime
     // Allocator context is not an owner identity: production uses the host
     // allocator directly, and multiple Runtimes may share that allocator.
     const allocator = rt.nativeAllocator();
-    if (fd.atoms != &rt.atoms or fd.allocator.ptr != allocator.ptr or
+    if (fd.atoms != rt.atoms or fd.allocator.ptr != allocator.ptr or
         fd.allocator.vtable != allocator.vtable) return error.InvalidBytecode;
 }
 
@@ -630,7 +630,7 @@ fn createFunctionBytecodeAfterChildren(
     if (disasm_enabled) {
         var disbuf: [65536]u8 = undefined;
         var diswriter = std.Io.Writer.fixed(&disbuf);
-        dump.dumpFunctionBytecode(&diswriter, fb, &rt.atoms, .{ .show_raw_bytes = true }) catch {};
+        dump.dumpFunctionBytecode(&diswriter, fb, rt.atoms, .{ .show_raw_bytes = true }) catch {};
         std.debug.print("{s}\n", .{diswriter.buffered()});
     }
     return slice;
@@ -786,19 +786,19 @@ fn installChildFunctionBytecodes(
 }
 
 test "scope proof cache is revoked on successful and failed finalization" {
-    const rt = try runtime.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try runtime.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const realm = try context.RealmContext.create(rt, .{});
     defer realm.destroy();
     const name = try rt.internAtom("scope-cache-cleanup");
     const Exit = enum { success, prepare_error, lowering_error };
     for ([_]Exit{ .success, .prepare_error, .lowering_error }) |exit_kind| {
-        var parent = function_def_mod.FunctionDef.init(rt.nativeAllocator(), rt.nativeAllocator(), &rt.atoms, name);
+        var parent = function_def_mod.FunctionDef.init(rt.nativeAllocator(), rt.nativeAllocator(), rt.atoms, name);
         defer parent.deinit(rt);
         _ = try parent.appendScope(-1);
         _ = try parent.addScopeVar(name, .normal, 0, .{});
         const input = try rt.nativeAllocator().create(compiler.Builder);
-        input.* = compiler.Builder.init(rt.nativeAllocator(), &rt.atoms);
+        input.* = compiler.Builder.init(rt.nativeAllocator(), rt.atoms);
         parent.builder = input;
         try input.emitOp(opcode.op.return_undef);
 
@@ -807,7 +807,7 @@ test "scope proof cache is revoked on successful and failed finalization" {
             const child = blk: {
                 const def = try rt.nativeAllocator().create(function_def_mod.FunctionDef);
                 errdefer rt.nativeAllocator().destroy(def);
-                def.* = function_def_mod.FunctionDef.init(rt.nativeAllocator(), rt.nativeAllocator(), &rt.atoms, name);
+                def.* = function_def_mod.FunctionDef.init(rt.nativeAllocator(), rt.nativeAllocator(), rt.atoms, name);
                 try parent.addChild(def);
                 break :blk def;
             };
@@ -815,7 +815,7 @@ test "scope proof cache is revoked on successful and failed finalization" {
             _ = try child.appendScope(-1);
             if (exit_kind != .prepare_error) {
                 const body = try rt.nativeAllocator().create(compiler.Builder);
-                body.* = compiler.Builder.init(rt.nativeAllocator(), &rt.atoms);
+                body.* = compiler.Builder.init(rt.nativeAllocator(), rt.atoms);
                 child.builder = body;
                 try body.emitAtomOpU16Owned(opcode.op.scope_get_var, name, 0);
                 try body.emitOp(opcode.op.drop);

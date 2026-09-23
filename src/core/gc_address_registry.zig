@@ -5,12 +5,12 @@
 //! standalone-prefix allocations neither geometry can reach. Candidates are
 //! never dereferenced as guessed headers.
 
+const gc_alloc = @import("gc_alloc.zig");
 const std = @import("std");
 
 const gc = @import("gc.zig");
-const memory = @import("memory.zig");
 
-const Slab = memory.SmallObjectSlab;
+const Slab = gc_alloc.SmallObjectSlab;
 const block_heap_mod = @import("gc_block_heap.zig");
 
 /// One page grid for the whole collector: the block heap keys its extent

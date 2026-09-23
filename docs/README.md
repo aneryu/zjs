@@ -38,7 +38,7 @@ needs. Historical measurements and plans are labeled separately from contracts.
 - [Changelog](../CHANGELOG.md): release history.
 - [Release checklist](release-checklist.md): API, lifecycle, and artifact checks.
 - [Performance investigation](../GUIDE.md#b8-performance-investigation): diagnostic evidence guidance; historical bench-v8 snapshots are available in Git history.
-- [Runtime allocator comparison](runtime-allocator-todo.md): default allocator decision and remaining experiments.
+- [Runtime allocator comparison](runtime-allocator-todo.md): explicit host allocator contract, historical comparison, and remaining experiments.
 - [Binary composition](binary-size.md): dated ReleaseFast size breakdown.
 - [Retrieval index](../llms.txt): compact project facts for retrieval tools.
 
@@ -47,6 +47,8 @@ archives are available in Git history, not required checkout inputs.
 
 ## Remaining investigations
 
+- [JSValue and GC boundary design](value-gc-boundary-design.md): proposed value, root, borrow, and slot contracts with ordered migration checks; not implemented.
+- [Host boundary design](host-boundary-design.md): proposed engine/host ownership, public API choice, and ordered migration checks.
 - [Nursery evaluation](runtime-nursery-todo.md): recorded correctness blockers and evaluation sequence; disabled by default.
 - [Runtime follow-ups](runtime-target-design.md#后续范围): retained capability boundaries and allocator experiments.
 

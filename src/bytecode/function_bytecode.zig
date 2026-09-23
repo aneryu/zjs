@@ -1,12 +1,10 @@
 const std = @import("std");
-const mem_ops = @import("../core/memory.zig");
+const bulk_memory = @import("../core/bulk_memory.zig");
 const bytecode = @import("../bytecode.zig");
 const builtin = @import("builtin");
 const atom = @import("../core/atom.zig");
-const bulk_memory = @import("../core/bulk_memory.zig");
 const context = @import("../core/context.zig");
 const gc = @import("../core/gc.zig");
-const memory = @import("../core/memory.zig");
 const runtime = @import("../runtime.zig");
 const JSValue = @import("../core/value.zig").JSValue;
 const compiler = @import("../compiler/root.zig");
@@ -1036,7 +1034,7 @@ pub const FunctionBytecodeImpl = extern struct {
         rt: *runtime.JSRuntime,
         layout_value: function_bytecode.FunctionLayout,
     ) !*FunctionBytecodeImpl {
-        const result = try mem_ops.createWithFam(rt, FunctionBytecodeImpl, layout_value.famBytes());
+        const result = try rt.gc.createWithFam(FunctionBytecodeImpl, layout_value.famBytes());
         const payload: [*]u8 = @ptrCast(result);
         bulk_memory.fillByte(payload[0..layout_value.mainPayloadBytes()], 0);
         assignBit(&result.flag_byte18, byte18_has_debug_mask, layout_value.has_debug);
@@ -1061,7 +1059,7 @@ pub const FunctionBytecodeImpl = extern struct {
     }
 
     pub fn destroyProductionShell(rt: *runtime.JSRuntime, fb: *FunctionBytecodeImpl, fam_bytes: usize) void {
-        mem_ops.destroyWithFam(rt, FunctionBytecodeImpl, fb, fam_bytes);
+        rt.gc.destroyWithFam(FunctionBytecodeImpl, fb, fam_bytes);
     }
 
     pub const FixtureOptions = struct {
@@ -1105,7 +1103,7 @@ pub const FunctionBytecodeImpl = extern struct {
         );
         const fb = try createRaw(rt, layout_value);
         var raw_owned = true;
-        errdefer if (raw_owned) mem_ops.destroyWithFam(rt, FunctionBytecodeImpl, fb, layout_value.famBytes());
+        errdefer if (raw_owned) rt.gc.destroyWithFam(FunctionBytecodeImpl, fb, layout_value.famBytes());
 
         const byte_code = layout_value.byteCodeSliceMut(fb);
         @memcpy(byte_code, options.byte_code);
@@ -1142,7 +1140,7 @@ pub const FunctionBytecodeImpl = extern struct {
     pub fn destroyUnpublishedFixture(self: *FunctionBytecodeImpl, rt: *runtime.JSRuntime) void {
         const layout_value = self.layout();
         self.deinitWithLayout(rt, layout_value);
-        mem_ops.destroyWithFam(rt, FunctionBytecodeImpl, self, layout_value.famBytes());
+        rt.gc.destroyWithFam(FunctionBytecodeImpl, self, layout_value.famBytes());
     }
 
     /// Final no-fail phase of a fixture transaction. All fallible values,
@@ -1271,14 +1269,14 @@ pub const FunctionBytecodeImpl = extern struct {
                 (dbg.pc2line_buf.?)[0..pc2line_len];
             dbg.pc2line_buf = null;
             dbg.pc2line_len = 0;
-            if (pc2line_buf.len != 0) mem_ops.free(mem, u8, pc2line_buf);
+            if (pc2line_buf.len != 0) mem.freeNative(u8, pc2line_buf);
             if (dbg.source_ptr) |src_ptr| {
                 std.debug.assert(dbg.source_len >= 0);
                 const logical_len: usize = @intCast(dbg.source_len);
                 const src = src_ptr[0 .. logical_len + 1];
                 dbg.source_ptr = null;
                 dbg.source_len = 0;
-                mem_ops.free(mem, u8, @constCast(src));
+                mem.freeNative(u8, @constCast(src));
             }
         }
 
@@ -1539,6 +1537,6 @@ pub fn destroyFromHeader(rt: anytype, header: *gc.Header) void {
     // holds every FunctionBytecode back until all object resource passes
     // have run (`Registry.deinit` phase 2), which is the ordering the
     // park used to express here.
-    mem_ops.destroyWithFam(rt, FunctionBytecodeImpl, self, layout_value.famBytes());
+    rt.gc.destroyWithFam(FunctionBytecodeImpl, self, layout_value.famBytes());
 }
 pub const FunctionBytecode = FunctionBytecodeImpl;

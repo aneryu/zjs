@@ -149,7 +149,7 @@ def main() -> None:
 
     extra = [
         (ROOT / "src/core/gc.zig", ROOT / "src/core/gc_stress_tests.zig"),
-        (ROOT / "src/core/memory.zig", ROOT / "src/core/oom_cap_tests.zig"),
+        (ROOT / "src/core/gc_alloc.zig", ROOT / "src/core/oom_cap_tests.zig"),
         (ROOT / "src/js_context.zig", ROOT / "src/js_context_tests.zig"),
         (ROOT / "src/bytecode.zig", ROOT / "src/bytecode_tests.zig"),
     ]

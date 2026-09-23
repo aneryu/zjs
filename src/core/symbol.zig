@@ -9,7 +9,6 @@ const std = @import("std");
 const gc = @import("gc.zig");
 const block_heap = @import("gc_block_heap.zig");
 const string = @import("string.zig");
-const memory = @import("memory.zig");
 
 /// A unique identity with an inline WTF-8 description. The collector owns the
 /// body; the atom table only indexes it. No String pointer aliases this body.
@@ -58,10 +57,10 @@ pub const Symbol = struct {
         const len = std.math.cast(u32, text.len) orelse return error.StringTooLong;
         const total = try std.math.add(usize, gc.string_prefix_size + @sizeOf(Symbol), text.len);
         rt.collectBeforeObjectAllocation(total);
-        const base = if (try memory.createStringCell(rt, gc.representation.symbol_kind_tag, total)) |cell|
+        const base = if (try rt.gc.createStringCell(gc.representation.symbol_kind_tag, total)) |cell|
             cell
         else
-            (try memory.createExtent(rt, gc.representation.symbol_kind_tag, total)).ptr;
+            (try rt.gc.createExtent(gc.representation.symbol_kind_tag, total)).ptr;
         const self: *Symbol = @ptrCast(@alignCast(base + gc.string_prefix_size));
         self.* = .{ .atom_id = id, .byte_len = len, .has_description = bytes != null };
         const payload: [*]u8 = @ptrCast(self);
@@ -89,10 +88,10 @@ pub const Symbol = struct {
             rt.atoms.onSymbolBodyDead(self.atom_id, self);
         if (gc.Registry.isBlockCellHeader(h)) {
             rt.gc.unpublishStringCell(h, self.accountedSize());
-            memory.destroyStringCell(rt, self, total);
+            rt.gc.destroyStringCell(self, total);
         } else {
             rt.gc.unpublishStringExtent(h, total - gc.string_prefix_size);
-            memory.destroyStringExtent(rt, self, total);
+            rt.gc.destroyStringExtent(self, total);
         }
     }
 };
@@ -123,7 +122,7 @@ pub fn canBeHeldWeakly(rt: *core.JSRuntime, value: core.JSValue) bool {
 }
 
 test "symbol inline description preserves absence Unicode and string boundaries" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const descriptions = [_]?[]const u8{ null, "", "x", "a\x00b", "é😀", "\xed\xa0\x80" };
     for (descriptions) |text| {
@@ -165,7 +164,7 @@ test "symbol inline description preserves absence Unicode and string boundaries"
 }
 
 test "symbol registered and predefined identities never enter string caches" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     var first = try rt.newSymbolValue("same");
     var roots = core.runtime.rootValues(.{&first});
@@ -177,7 +176,7 @@ test "symbol registered and predefined identities never enter string caches" {
     const again = try rt.globalSymbolValue("same");
     try std.testing.expectEqual(registered.asSymbolBody().?, again.asSymbolBody().?);
     try std.testing.expect(first.asSymbolBody().? != registered.asSymbolBody().?);
-    try std.testing.expectEqualStrings("same", registryKey(&rt.atoms, registered.asSymbolAtom().?).?);
+    try std.testing.expectEqualStrings("same", registryKey(rt.atoms, registered.asSymbolAtom().?).?);
     const predefined = try rt.symbolValue(atom.ids.Symbol_iterator);
     try std.testing.expect(rt.atoms.cachedString(atom.ids.Symbol_iterator) == null);
     try std.testing.expect(rt.atoms.cachedPushValue(atom.ids.Symbol_iterator) == null);

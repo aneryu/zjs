@@ -966,9 +966,9 @@ pub const FunctionDefImpl = struct {
 pub const FunctionDef = FunctionDefImpl;
 
 test "findFunctionVar returns the newest scope-0 row through the lazy index" {
-    const rt = try runtime.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try runtime.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    var fd = FunctionDefImpl.init(rt.nativeAllocator(), rt.nativeAllocator(), &rt.atoms, try rt.internAtom("var-index"));
+    var fd = FunctionDefImpl.init(rt.nativeAllocator(), rt.nativeAllocator(), rt.atoms, try rt.internAtom("var-index"));
     defer fd.deinit(rt);
     _ = try fd.appendScope(-1);
     const target = try rt.internAtom("target");
@@ -991,10 +991,10 @@ test "findFunctionVar returns the newest scope-0 row through the lazy index" {
 }
 
 test "scope proof cache invalidates variable scope and late arguments mutations" {
-    const rt = try runtime.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try runtime.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const name = try rt.internAtom("scope-cache");
-    var fd = FunctionDefImpl.init(rt.nativeAllocator(), rt.nativeAllocator(), &rt.atoms, name);
+    var fd = FunctionDefImpl.init(rt.nativeAllocator(), rt.nativeAllocator(), rt.atoms, name);
     defer fd.deinit(rt);
     _ = try fd.appendScope(-1);
     _ = try fd.appendScope(-1);

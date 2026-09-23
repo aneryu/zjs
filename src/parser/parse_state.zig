@@ -35,8 +35,6 @@ pub const simple_token = @import("../simple_token.zig");
 
 pub const unicode = @import("../libs/unicode.zig");
 
-pub const memory = @import("../core/memory.zig");
-
 pub const array_list_erased = @import("../core/array_list_erased.zig");
 
 pub const JSValue = @import("../core/value.zig").JSValue;
@@ -457,6 +455,8 @@ pub const State = struct {
     /// `takeModuleRecord` hands it to the module artifact after finalize.
     module_record: ?bytecode.module.Record = null,
     runtime: ?*core.JSRuntime = null,
+    /// Owner for unpublished constants, independent of atom-table tracing.
+    allocation_runtime: *core.JSRuntime,
     /// One-token lookahead. The lexer is the source of truth; we cache
     /// the most recently produced token here so the parser can `peek`.
     token: tok.Token,
@@ -617,6 +617,7 @@ pub const State = struct {
     /// declaration; `script_or_module` defaults to it.
     pub fn init(
         lex: *lexer_mod.Lexer,
+        allocation_runtime: *core.JSRuntime,
         native: std.mem.Allocator,
         artifacts: std.mem.Allocator,
         persistent: std.mem.Allocator,
@@ -626,6 +627,7 @@ pub const State = struct {
     ) Error!State {
         var state = State{
             .lex = lex,
+            .allocation_runtime = allocation_runtime,
             .allocator = native,
             .artifacts = artifacts,
             .persistent = persistent,
@@ -634,7 +636,7 @@ pub const State = struct {
             .root_name = name,
             .token = undefined,
             .function_def = function_def_mod.FunctionDef.init(native, artifacts, atoms, name),
-            .atom_scope = atom_module.CompileAtomScope.init(atoms),
+            .atom_scope = atom_module.CompileAtomScope.init(atoms, if (atoms.gc_registry != null) allocation_runtime else null),
         };
         errdefer state.function_def.deinitInitFailure();
         state.function_def.script_or_module = name;
@@ -671,11 +673,11 @@ pub const State = struct {
     /// entry point.
     pub fn initFromRuntime(lex: *lexer_mod.Lexer, rt: *core.JSRuntime, atoms: *atom_module.AtomTable, name: Atom) Error!State {
         const facade = rt.nativeAllocator();
-        return init(lex, rt.nativeAllocator(), facade, facade, facade, atoms, name);
+        return init(lex, rt, rt.nativeAllocator(), facade, facade, facade, atoms, name);
     }
 
     pub fn initWithRuntime(rt: *core.JSRuntime, lex: *lexer_mod.Lexer, name: Atom) Error!State {
-        var state = try initFromRuntime(lex, rt, &rt.atoms, name);
+        var state = try initFromRuntime(lex, rt, rt.atoms, name);
         state.runtime = rt;
         return state;
     }
@@ -2024,12 +2026,12 @@ pub const State = struct {
         // the owning FunctionBytecode is published
         // (`BigInt.registerReservedValue`), so a collection during the rest
         // of the parse can neither sweep nor need to trace it. The parser
-        // obtains the allocation owner explicitly from its atom table; no
+        // carries the allocation owner explicitly in its parse state; no
         // allocator context is interpreted as a Runtime.
-        const big = try core_bigint.BigInt.createExternalReserved(self.atoms.owner);
+        const big = try core_bigint.BigInt.createExternalReserved(self.allocation_runtime);
         big.initExternalFromOwned(parsed);
         parsed = .{ .allocator = self.persistent };
-        errdefer big.destroyExternalReserved(self.atoms.owner);
+        errdefer big.destroyExternalReserved(self.allocation_runtime);
         try Emitter.pushConst(self, big.valueRef());
     }
 

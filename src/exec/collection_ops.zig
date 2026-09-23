@@ -100,7 +100,7 @@ pub const fastPrototypeMethodIdForClass = collection_id_lookup.fastPrototypeMeth
 /// `new_collection` opcode); only the static `Map.groupBy` and the shared
 /// prototype methods route through the table. Standard-global bootstrap resolves
 /// names through its map/set/weak-collection prototype method lists; this table
-/// is consumed by the record-dispatch path (`rt.internal_builtins`).
+/// is consumed by the record-dispatch path (`internal_builtins.table`).
 pub const internal_entries = collectionEntries: {
     const RecordEntry = core.host_function.InternalEntry;
     break :collectionEntries [_]RecordEntry{
@@ -752,7 +752,7 @@ fn iteratorResult(rt: *core.JSRuntime, global: ?*core.Object, value: core.JSValu
 }
 
 test "collection iteratorResult roots direct function bytecode value while creating result" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-collection-iterator-result-bytecode-symbol");
@@ -779,7 +779,7 @@ test "collection iteratorResult roots direct function bytecode value while creat
 }
 
 test "Map groupBy roots direct symbol key while creating group array" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const map_value = try constructBare(rt, 1);
@@ -1244,7 +1244,7 @@ fn freeValueList(rt: *core.JSRuntime, values: []core.JSValue) void {
 }
 
 test "appendValue roots existing values and incoming value during growth" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const first_value = try rt.newSymbolValue("gc-collection-value-list-first");
@@ -1875,7 +1875,7 @@ fn setSnapshotKeys(rt: *core.JSRuntime, receiver: *core.Object) ![]core.JSValue 
 }
 
 test "set difference snapshot key root exposes dynamic key slice" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var keys = try rt.nativeAllocator().alloc(core.JSValue, 1);

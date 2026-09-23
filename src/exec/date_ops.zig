@@ -343,7 +343,7 @@ pub const PrototypeMethod = core.host_function.builtin_method_ids.date.Prototype
 /// route through it. `id` doubles as `magic`, so the record carries no extra
 /// selector. Property installation still resolves names through the registry's
 /// Date method tables (canonical name/length) and date.zig's id helpers; this
-/// table is consumed by the record-dispatch path (`rt.internal_builtins`).
+/// table is consumed by the record-dispatch path (`internal_builtins.table`).
 pub const internal_entries = dateEntries: {
     const Entry = core.host_function.InternalEntry;
     break :dateEntries [_]Entry{

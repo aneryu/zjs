@@ -7,12 +7,11 @@
 //! quickjs.c and atom-table operations nearby. This core module may be
 //! consumed by higher layers but never imports exec or binding.
 
-const mem_ops = @import("memory.zig");
+const runtime_owner = @import("../runtime.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
 const gc = @import("gc.zig");
-const memory = @import("memory.zig");
 const string = @import("string.zig");
 const Symbol = @import("symbol.zig").Symbol;
 const JSRuntime = @import("../runtime.zig").JSRuntime;
@@ -1204,11 +1203,11 @@ pub const AtomTable = struct {
         quarantined_head: EntryIndex = no_free_slot,
     } else struct {};
 
-    owner: *JSRuntime,
-    /// Owning runtime, set right after init. Needed to release cached
-    /// strings (`DynamicAtom.str`) when an atom dies. Tables created
-    /// without a runtime (parser-only tests) never cache strings.
-    runtime: ?*JSRuntime = null,
+    allocator: std.mem.Allocator,
+    storage_allocator: std.mem.Allocator,
+    native_allocator: std.mem.Allocator,
+    /// Borrowed collector for mark epochs; absent for temporary parser tables.
+    gc_registry: ?*gc.Registry = null,
     entries: []DynamicAtom = &.{},
     /// Geometric-growth capacity for `entries`. The visible slice length
     /// is the live count; the backing buffer extends to `entries_capacity`.
@@ -1246,11 +1245,6 @@ pub const AtomTable = struct {
     /// predefined symbol bodies, indexed by `id - 1`. Predefined ids are never
     /// recycled, so entries here are released only by `releaseCachedStrings`.
     predefined_bodies: [predefined_count]?*gc.Header = @splat(null),
-    /// TGC S3: back-pointer to the owning runtime, installed by `JSRuntime`
-    /// after its address is stable. Null for the standalone tables the
-    /// compiler/parser fixtures build, which have no collector at all; every
-    /// S3 seam degrades to a no-op in that case.
-    owner_runtime: ?*runtime_mod.JSRuntime = null,
     /// TGC S3 §2.2: innermost active `CompileAtomScope`. Non-null only while a
     /// compile is in flight; every intern/dup entry point notes into it so the
     /// front end's plain-`u32` atom fields have an interval root.
@@ -1336,8 +1330,7 @@ pub const AtomTable = struct {
 
     /// Allocator for `young_symbol_atoms`; mirrors `CompileAtomScope.init`.
     inline fn youngListAllocator(self: *AtomTable) std.mem.Allocator {
-        if (self.owner_runtime) |rt| return rt.nativeAllocator();
-        return self.owner.nativeAllocator();
+        return self.native_allocator;
     }
 
     /// TGC S3-c: called from the generational promotion points (the minor's
@@ -1347,31 +1340,62 @@ pub const AtomTable = struct {
         self.young_symbol_atoms.clearRetainingCapacity();
     }
 
-    pub fn init(account: *@import("../runtime.zig").JSRuntime) AtomTable {
-        return .{ .owner = account };
+    /// Temporary, value-owned table. It does not participate in GC tracing.
+    pub fn init(account: *JSRuntime) AtomTable {
+        return .{
+            .allocator = account.allocator,
+            .storage_allocator = account.probedNativeAllocator(),
+            .native_allocator = account.nativeAllocator(),
+        };
+    }
+
+    pub const Options = struct {
+        storage_allocator: std.mem.Allocator,
+        native_allocator: std.mem.Allocator,
+        gc_registry: ?*gc.Registry = null,
+    };
+
+    /// Create an owned table with explicit allocation and tracing services.
+    /// No Runtime is read or attached; caller releases it with destroy.
+    pub fn create(allocator: std.mem.Allocator, options: Options) !*AtomTable {
+        const self = try allocator.create(AtomTable);
+        self.* = .{
+            .allocator = allocator,
+            .storage_allocator = options.storage_allocator,
+            .native_allocator = options.native_allocator,
+            .gc_registry = options.gc_registry,
+        };
+        return self;
+    }
+
+    /// Only for tables returned by create; temporary value tables use deinit.
+    pub fn destroy(self: *AtomTable) void {
+        const allocator = self.allocator;
+        self.deinit();
+        allocator.destroy(self);
     }
 
     pub fn deinit(self: *AtomTable) void {
-        const account = self.owner;
-        self.young_symbol_atoms.deinit(self.youngListAllocator());
+        self.young_symbol_atoms.deinit(self.native_allocator);
         const entries = self.entries;
         const backing: []DynamicAtom = if (self.entries_capacity != 0) self.entries.ptr[0..self.entries_capacity] else self.entries[0..0];
         self.entries = &.{};
         self.entries_capacity = 0;
         const buckets = self.atom_hash;
         self.atom_hash = &.{};
-        if (buckets.len != 0) mem_ops.free(account, Atom, buckets);
+        self.storage_allocator.free(buckets);
         for (&self.predefined_bodies) |slot| std.debug.assert(slot == null);
         for (entries) |*entry| {
-            // Cached strings/symbol bodies must have been released through `free` or
-            // `releaseCachedStrings` while the runtime was still usable.
             std.debug.assert(entry.body == null);
-            const bytes = entry.bytes;
+            self.storage_allocator.free(entry.bytes);
             entry.bytes = &.{};
-            if (bytes.len != 0) mem_ops.free(account, u8, bytes);
         }
-        self.* = .{ .owner = account };
-        if (backing.len != 0) mem_ops.free(account, DynamicAtom, backing);
+        self.storage_allocator.free(backing);
+        self.* = .{
+            .allocator = self.allocator,
+            .storage_allocator = self.storage_allocator,
+            .native_allocator = self.native_allocator,
+        };
     }
 
     /// Drop cached atom strings and predefined symbol bodies before GC
@@ -1436,7 +1460,7 @@ pub const AtomTable = struct {
     /// qjs keeps `JS_ATOM_TYPE_SYMBOL` out of `atom_hash`.
     fn initAtomHash(self: *AtomTable) !void {
         std.debug.assert(self.atom_hash.len == 0);
-        const buckets = try mem_ops.alloc(self.owner, Atom, atom_hash_initial_size);
+        const buckets = try self.storage_allocator.alloc(Atom, atom_hash_initial_size);
         @memset(buckets, null_atom);
         self.atom_hash = buckets;
         self.atom_count_resize = atom_hash_initial_size * 2;
@@ -1461,7 +1485,7 @@ pub const AtomTable = struct {
     /// spelling is re-hashed and no atom moves.
     fn resizeAtomHash(self: *AtomTable, new_size: u32) !void {
         std.debug.assert(std.math.isPowerOfTwo(new_size));
-        const new_hash = try mem_ops.alloc(self.owner, Atom, new_size);
+        const new_hash = try self.storage_allocator.alloc(Atom, new_size);
         @memset(new_hash, null_atom);
         const new_mask = new_size - 1;
         for (self.atom_hash) |head| {
@@ -1477,7 +1501,7 @@ pub const AtomTable = struct {
         }
         const old = self.atom_hash;
         self.atom_hash = new_hash;
-        mem_ops.free(self.owner, Atom, old);
+        self.storage_allocator.free(old);
         self.atom_count_resize = new_size *| 2;
     }
 
@@ -1652,8 +1676,8 @@ pub const AtomTable = struct {
     /// becomes non-zero at the first major, so the `0` a table without a
     /// runtime (compiler/parser fixtures) reports can never match a stamp.
     inline fn traceEpoch(self: *const AtomTable) u64 {
-        const rt = self.owner_runtime orelse return 0;
-        return rt.gc.block_heap.mark_epoch;
+        const collector = self.gc_registry orelse return 0;
+        return collector.block_heap.mark_epoch;
     }
 
     /// §2.2, the table half of `Collector.visitAtom`: stamp `id` with this
@@ -1766,7 +1790,6 @@ pub const AtomTable = struct {
         entry.born_epoch = epoch;
         entry.host_pins = 0;
         entry.mark_epoch = 0;
-        _ = self.owner_runtime orelse return;
     }
 
     /// §2.2 compile scope: record `id` in the innermost active
@@ -2224,7 +2247,7 @@ pub const AtomTable = struct {
         // No allocation between publication and installation. The table now
         // borrows the inline description instead of owning a second copy.
         entry.body = body.header();
-        if (entry.bytes.len != 0) mem_ops.free(self.owner, u8, entry.bytes);
+        self.storage_allocator.free(entry.bytes);
         entry.bytes = &.{};
         entry.no_symbol_description = false;
         self.young_symbol_atoms.appendAssumeCapacity(atom_id);
@@ -2246,8 +2269,8 @@ pub const AtomTable = struct {
         std.debug.assert(!index_entry or atom_kind == .string or atom_kind == .global_symbol);
         std.debug.assert(!index_entry or self.atom_hash.len != 0);
 
-        const owned: []u8 = if (bytes.len == 0) &.{} else try mem_ops.alloc(self.owner, u8, bytes.len);
-        errdefer if (owned.len != 0) mem_ops.free(self.owner, u8, owned);
+        const owned: []u8 = if (bytes.len == 0) &.{} else try self.storage_allocator.alloc(u8, bytes.len);
+        errdefer if (owned.len != 0) self.storage_allocator.free(owned);
         if (bytes.len != 0) @memcpy(owned, bytes);
 
         // Reuse a dead slot when one is available. A slot only enters the
@@ -2317,14 +2340,14 @@ pub const AtomTable = struct {
         if (new_used > self.entries_capacity) {
             var new_cap: usize = if (self.entries_capacity == 0) 8 else self.entries_capacity * 2;
             if (new_cap < new_used) new_cap = new_used;
-            const new_buf = try mem_ops.alloc(self.owner, DynamicAtom, new_cap);
+            const new_buf = try self.storage_allocator.alloc(DynamicAtom, new_cap);
             const old_entries = self.entries;
             const old_capacity = self.entries_capacity;
             @memcpy(new_buf[0..old_entries.len], old_entries);
             self.entries = new_buf[0..old_entries.len];
             self.entries_capacity = new_cap;
             if (old_capacity != 0) {
-                mem_ops.free(self.owner, DynamicAtom, old_entries.ptr[0..old_capacity]);
+                self.storage_allocator.free(old_entries.ptr[0..old_capacity]);
             }
         }
         const idx: EntryIndex = @intCast(self.entries.len);
@@ -2360,7 +2383,7 @@ pub const AtomTable = struct {
         entry.unbindBody();
         const bytes = entry.bytes;
         entry.bytes = &.{};
-        if (bytes.len != 0) mem_ops.free(self.owner, u8, bytes);
+        if (bytes.len != 0) self.storage_allocator.free(bytes);
         entry.occupied = false;
         entry.weakref_count = 0;
         entry.no_symbol_description = false;
@@ -2493,12 +2516,12 @@ pub const CompileAtomScope = struct {
     /// final address -- the provider stores `&self`, so a scope that is still
     /// going to be moved (e.g. a `State` returned by value) must not register
     /// yet. Mirrors `ReplaceMatchRoots.activate` in exec/string_ops.zig.
-    pub fn init(table: *AtomTable) CompileAtomScope {
-        const rt = table.owner_runtime;
+    pub fn init(table: *AtomTable, rt: ?*JSRuntime) CompileAtomScope {
+        if (rt) |owner| std.debug.assert(owner.atoms == table);
         return .{
             .rt = rt,
             .table = table,
-            .allocator = if (rt) |r| r.nativeAllocator() else table.owner.nativeAllocator(),
+            .allocator = table.native_allocator,
         };
     }
 
@@ -2655,17 +2678,17 @@ pub fn atomListContains(list: []const Atom, needle: Atom) bool {
 }
 
 pub fn appendAtom(rt: *JSRuntime, list: *[]Atom, atom_id: Atom) !void {
-    const next = try mem_ops.alloc(rt, Atom, list.len + 1);
-    errdefer mem_ops.free(rt, Atom, next);
+    const next = try rt.allocNative(Atom, list.len + 1);
+    errdefer rt.freeNative(Atom, next);
     @memcpy(next[0..list.len], list.*);
     next[list.len] = atom_id;
     const old = list.*;
     list.* = next;
-    if (old.len != 0) mem_ops.free(rt, Atom, old);
+    if (old.len != 0) rt.freeNative(Atom, old);
 }
 
 pub fn freeAtomList(rt: *JSRuntime, list: []Atom) void {
-    if (list.len != 0) mem_ops.free(rt, Atom, list);
+    if (list.len != 0) rt.freeNative(Atom, list);
 }
 
 /// Alias for the call sites that still name the "owned" form. Atoms carry no
@@ -2673,7 +2696,7 @@ pub fn freeAtomList(rt: *JSRuntime, list: []Atom) void {
 /// and appending a borrowed one were already the same byte-for-byte routine.
 pub const appendOwnedAtom = appendAtom;
 test "atom replace handles self-assignment without releasing dynamic atom" {
-    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var slot = try rt.internAtom("dynamic-atom-self-replace");
@@ -2719,7 +2742,7 @@ test "predefined atoms preserve QuickJS order and kinds" {
 }
 
 test "atom table interns predefined dynamic and integer atoms" {
-    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     try std.testing.expectEqual(ids.length, try rt.internAtom("length"));
@@ -2745,7 +2768,7 @@ test "atom table interns predefined dynamic and integer atoms" {
 }
 
 test "symbol atoms are unique even with the same description" {
-    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const a = try rt.atoms.newSymbol("desc", .symbol);
@@ -2756,7 +2779,7 @@ test "symbol atoms are unique even with the same description" {
 }
 
 test "registered symbol index ignores unique symbols and private names" {
-    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const registry_name = "Symbol.for:registry-isolation";
@@ -2790,7 +2813,7 @@ test "registered symbol index ignores unique symbols and private names" {
 }
 
 test "registered value symbols keep a single registry ref" {
-    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const registry_name = "Symbol.for:registered-value-ref";
@@ -2803,7 +2826,7 @@ test "registered value symbols keep a single registry ref" {
 }
 
 test "atom table deinit balances live empty dynamic symbol bytes" {
-    const account = try mem_ops.createTestRuntime(std.testing.allocator);
+    const account = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
     defer account.destroy();
     var atoms = AtomTable.init(account);
 
@@ -2815,11 +2838,11 @@ test "atom table deinit balances live empty dynamic symbol bytes" {
     try std.testing.expectEqualStrings("", atoms.name(sym).?);
 
     atoms.deinit();
-    try std.testing.expect(!mem_ops.hasOutstandingAllocations(account));
+    try std.testing.expect(!account.hasOutstandingAllocations());
 }
 
 test "atom table retains its cached string until the atom dies" {
-    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const predefined = try rt.atoms.toStringValueForPush(rt, ids.name);

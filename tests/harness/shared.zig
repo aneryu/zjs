@@ -327,6 +327,7 @@ fn resetSharedEngineAfterTest(eng: *TestEngine) void {
 
         if (shared_engine_baseline_shape_props) |baseline_shape_props| {
             eng.runtime.shapes.restorePropertyLayout(
+                eng.runtime,
                 &global.shape_ref,
                 baseline_shape_props[0..shared_engine_baseline_shape_prop_count],
                 shared_engine_baseline_shape_hash,

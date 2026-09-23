@@ -1,7 +1,7 @@
 # Public API Contract
 
 This document is the active public Zig API authority for embedders. Keep it in
-sync with `src/root.zig`, `src/js_context.zig`, `src/native.zig`, and `src/event_loop.zig`. The
+sync with `src/root.zig`, `src/js_context.zig`, and `src/native.zig`. The
 name lists in `tests/embedding_examples.zig` are the executable check:
 adding or removing an embedder name must update those arrays in the same
 commit. They are not a freeze of the API, and they are not the removed
@@ -25,8 +25,6 @@ The public names are:
 - `zjs.Runtime`, `zjs.Context`, `zjs.Value` (core uses `JSRuntime` /
   `RealmContext` / `JSValue`; `JSContext` remains its compatibility alias);
 - `zjs.Call` for a host-function invocation;
-- `zjs.EventLoop` for the host event loop (`Options`, `RunResult`,
-  `runUntilIdle`);
 - option types nested on their owner: `Runtime.Options`, `Context.Options` /
   `EvalMode` / `EvalOptions` / `EvalTiming` / `FunctionOptions`.
 
@@ -47,9 +45,8 @@ Removed wrapper namespaces (no longer compiled or exported): `zjs.host`,
 `zjs.native.leaf` / `leafWithState` / `Class`, `zjs.host.NativeBinding`,
 `zjs.host.PropName` / `PropNameID`, and `src/binding/binding.zig`.
 `JSRuntime` / `JSContext` / `JSValue` are aliases of `Runtime` / `Context` /
-`Value` on the same module; `zjs.native` and `zjs.runtime` are the engine
-files used by the CLI. Embedders still write `Runtime`, `Context`, `Value`,
-`Call`, and `EventLoop`.
+`Value` on the same module. Embedders write `Runtime`, `Context`, `Value`,
+and `Call`. The bundled host is a separate internal `zjs_host` module.
 Value constructors live on `Value`; handles are the types returned by
 `Runtime` methods; byte stores are `Value.Bytes.Store`. The CLI and
 `run-test262` are the in-tree consumers. Repeated native → JS calls use
@@ -98,8 +95,8 @@ hidden:
   host weak-root slots; the detailed snapshot also counts
   weak-collection and FinalizationRegistry cells.
 - `zjs.JSRuntime` / `JSContext` / `JSValue` are aliases of `Runtime` /
-  `Context` / `Value`. `zjs.core`, `zjs.exec`, `zjs.parser`, `zjs.native`,
-  and `zjs.runtime` are in-tree layer re-exports.
+  `Context` / `Value`. `zjs.core`, `zjs.exec`, `zjs.parser`, and `zjs.native`
+  are in-tree layer re-exports.
 - `zjs.opcode_profile_build_enabled` reports whether the binary was built
   with per-opcode profiling. The CLI uses it to fail closed on
   `--profile-opcodes`.
@@ -120,11 +117,12 @@ public-contract update.
 
 ## Runtime And Context
 
-`Runtime.create(.{})` creates an owned, stable-address Runtime using
-`std.heap.c_allocator`. Supply `.allocator = your_allocator` in the same options
-object to override it; release with `destroy()`. Runtime has no public in-place
-initialization or copied ownership state. The libc default follows the local
-allocator comparison, not a claim of universal throughput superiority.
+`Runtime.create(your_allocator, .{})` creates an owned,
+stable-address Runtime. The allocator is a required first argument, separate
+from `Runtime.Options`; there is no default. Its backing state must remain
+valid until `destroy()` returns.
+Release the Runtime with `destroy()`. Runtime has no public in-place
+initialization or copied ownership state.
 
 The engine's call-budget, native-stack guard, and active-backtrace fields are
 internal `JSRuntime` state. They are direct fields; the former
@@ -142,7 +140,7 @@ GC cells use the GC-owned slab, nursery, block and extent routes; prefixed
 cells must be released through their matching engine helpers. Parser scratch
 belongs to its compile arena. No allocator context is reverse-cast to discover
 an owner: operand stacks and reserved BigInts name their Runtime explicitly.
-Debug/test instrumentation records allocation events and supports failure
+Debug/test instrumentation records allocation counters and supports failure
 injection; it is not a production native-memory limit or a second heap budget.
 
 `memoryUsage().heap_bytes` reports the maintained published-heap budget.
@@ -153,10 +151,18 @@ peak diagnostics now use the same heap-budget domain as the GC threshold.
 
 `Runtime` owns allocator-backed engine state, atom tables, GC state, public
 handle scopes, memory limits, interrupt hooks, opcode-profiling state, the
-native-entry arena (see Native Functions), and runtime cleanup.
-`Runtime.diagnostics` owns the allocation-trace sink and the mark-footprint
-census used by `--gc-mark-footprint`. That census stays off the GC registry
-so the registry's hot words keep their front-line placement.
+native-entry arena (see Native Functions), and runtime cleanup. The collector,
+atom table, class table, and shape registry are separate, address-stable
+allocations owned through Runtime pointers. They are created before Runtime
+assembly with explicit allocation and subsystem dependencies; only GC is
+activated against the completed Runtime. Class registration and shape-cell
+operations receive Runtime explicitly. RootSet derives inline storage views
+on access and needs no address binding. Class and atom tables remain alive
+through managed-heap finalization; the collector remains alive through native
+cleanup. Instrumented allocation totals include all five owner allocations.
+Temporary parser/compiler atom tables retain value-based `init/deinit`.
+`Runtime.diagnostics` owns allocation counters and the test-only allocation
+limit used for failure injection.
 `Runtime.setMemoryLimit` / `memoryUsage().memory_limit` cap the JS heap
 budget (published non-nursery cells). They do not cap ordinary native
 allocations or external token bytes. A charge that does not fit
@@ -192,8 +198,8 @@ the Runtime and preserves the tail. A handler receives a borrowed, precisely
 rooted value; success continues draining. Handler failure returns to the host
 and preserves the tail. Handler reentry returns `MicrotaskReentry`; ordinary
 nested checkpoints are no-ops. OOM and termination retain their error classes.
-`Context.runJobs` and `EventLoop.drain` propagate these failures. EventLoop
-alone dispatches timer, I/O, signal and Atomics host completions.
+`Context.runJobs` and the bundled host's `EventLoop.drain` propagate these
+failures. The host dispatches timer, I/O, signal and Atomics completions.
 
 `microtask_policy` defaults to `auto`: successful outermost execution returns
 run a checkpoint. `explicit` requires the host to call it. With `scoped`,
@@ -441,17 +447,25 @@ on every call.
 
 ## Event Loop
 
-`zjs.EventLoop` is the host event loop:
+Removed by the approved 2026-09-23 host split: `zjs.EventLoop` and the
+`zjs.runtime` alias. Embedders own their event sources, retain cross-call
+values through handles, invoke callbacks through `Context.callFunction`, and
+drive engine jobs through `Context.runJobs` / Runtime checkpoints.
 
-- `EventLoop.Options`, `EventLoop.RunResult`;
-- `EventLoop.init` / `install` / `drain` / `deinit` for a long-lived loop;
-- `EventLoop.runUntilIdle(ctx, .{})` for the one-shot helper.
+The bundled CLI and test262 runner explicitly import the internal
+`zjs_host.EventLoop`. The engine has no dependency on that module. A narrow
+internal `HostScheduler` contract lets synchronous evaluation request host
+progress without knowing about timers, descriptors, or signals.
 
-Module file graphs (`src/exec/module.zig`), Atomics waiter
-wake/cleanup (`src/exec/atomics_ops.zig`), and ArrayBuffer detach
-(`src/exec/buffer_ops.zig`) are not part of this type. It must not become an
-`Engine` facade. There is no in-tree dynamic plugin loader; host functions
-register through `Context.defineFunction`.
+The engine no longer installs `print`, `console`, `btoa`, `atob`,
+`queueMicrotask`, or `gc`. Bundled hosts install these explicitly; embedders
+register the functions they need through `Context.defineFunction`. This
+change does not remove Promise jobs or the engine's GC API. Remaining
+compatibility extensions are tracked in [host boundary design](host-boundary-design.md).
+
+File source acquisition and file URL policy live in `src/host/`; graph
+linking, TLA continuations, and import Promise settlement remain in
+`src/exec/module.zig`. A bare engine Context has no filesystem loader.
 
 ## Evidence
 

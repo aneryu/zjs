@@ -294,7 +294,7 @@ pub fn callNativeBuiltinRecordForVm(
         return try builtin_dispatch.callInternalRecordDirect(ctx, output, global, &.{}, function_object, this_value, record, args, caller_function, caller_frame);
     }
     // Host builtins are exec-owned integer records too, but unlike standard
-    // builtins they do not live in rt.internal_builtins. Dispatch them by id
+    // builtins they do not live in internal_builtins.table. Dispatch them by id
     // here instead of falling through to the legacy function-name cascade.
     if (native_ref.domain == .host) {
         const view = try builtin_dispatch.finalCallableRealmView(ctx, function_object);
@@ -813,7 +813,6 @@ const VmNativeCallableDispatch = union(enum) {
     bound_function,
     resolved_record: core.Object.NativeCallTarget,
     native_ref: core.function.NativeBuiltinRef,
-    host_function,
     internal: core.host_function.InternalCallableTag,
     name_dispatch,
 };
@@ -831,7 +830,6 @@ fn vmNativeCallableDispatch(function_object: *core.Object) VmNativeCallableDispa
             if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionId())) |native_ref| {
                 break :blk .{ .native_ref = native_ref };
             }
-            if (function_object.hostFunctionKind() != null) break :blk .host_function;
             const tag = function_object.internalCallableTag();
             if (tag != .none) break :blk .{ .internal = tag };
             break :blk .name_dispatch;
@@ -840,7 +838,6 @@ fn vmNativeCallableDispatch(function_object: *core.Object) VmNativeCallableDispa
             if (core.function.decodeNativeBuiltinId(function_object.nativeFunctionId())) |native_ref| {
                 break :blk .{ .native_ref = native_ref };
             }
-            if (function_object.hostFunctionKind() != null) break :blk .host_function;
             const tag = function_object.internalCallableTag();
             if (tag != .none) break :blk .{ .internal = tag };
             break :blk .name_dispatch;
@@ -964,9 +961,6 @@ noinline fn callNativeCallableObject(
                 return err;
             };
             if (native_result) |value| return value;
-        },
-        .host_function => {
-            if (try call_mod.callHostFunctionObjectForVm(ctx, output, global, function_object, this_value, args)) |value| return value;
         },
         .internal => |tag| {
             const view = try builtin_dispatch.finalCallableRealmView(ctx, function_object);
@@ -1413,7 +1407,7 @@ noinline fn callNativeCallableByName(
 }
 
 test "callValueOrBytecodeRoot roots inline args before bytecode frame allocation" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const ctx = try core.JSContext.create(rt, .{});
@@ -2454,7 +2448,7 @@ fn constructExternalHostFunction(
 }
 
 test "constructWeakRefWithPrototype roots direct symbol target while creating weak ref" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-qjs-weak-ref-symbol");
@@ -2479,7 +2473,7 @@ test "constructWeakRefWithPrototype roots direct symbol target while creating we
 }
 
 test "constructFinalizationRegistryWithPrototype roots function bytecode cleanup while creating registry" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -2508,7 +2502,7 @@ test "constructFinalizationRegistryWithPrototype roots function bytecode cleanup
 }
 
 test "finalizationRegistryAppendCell roots direct symbol fields while allocating cell" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const registry = try core.Object.create(rt, core.class.ids.finalization_registry, null);
@@ -3441,7 +3435,7 @@ pub fn freeArgs(rt: *core.JSRuntime, args: []core.JSValue) void {
 }
 
 test "argsFromArrayLike roots initialized prefix while reading source" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -4310,7 +4304,7 @@ pub fn wrapIteratorFromIterator(ctx: *core.JSContext, global: *core.Object, iter
 }
 
 test "wrapIteratorFromIterator roots direct function bytecode next method while creating wrapper" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const ctx = try core.JSContext.create(rt, .{});
@@ -4354,16 +4348,9 @@ pub fn pollGCSafePoint(ctx: *core.JSContext) !void {
     };
 }
 
-pub fn runNextOsTimer(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) HostError!bool {
-    if (ctx.hostEventLoop()) |host_event_loop| {
-        return host_event_loop.runNextTimer(ctx, output, global) catch |err| return @errorCast(err);
-    }
-    return false;
-}
-
-pub fn runNextOsRwHandler(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) HostError!bool {
-    if (ctx.hostEventLoop()) |host_event_loop| {
-        return host_event_loop.runNextRwHandler(ctx, output, global) catch |err| return @errorCast(err);
+pub fn pollHostScheduler(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) HostError!bool {
+    if (ctx.hostScheduler()) |scheduler| {
+        return scheduler.poll(scheduler.ptr, ctx, output, global) catch |err| return @errorCast(err);
     }
     return false;
 }
@@ -4373,7 +4360,7 @@ pub fn enqueuePendingMicrotask(ctx: *core.JSContext, callback: core.JSValue) !vo
 }
 
 test "iterator_ops.createIteratorResult roots direct function bytecode value while creating result" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -4475,7 +4462,7 @@ pub fn isConstructibleBytecodeFunctionObject(function_object: *const core.Object
 }
 
 test "four-class bytecode constructability follows class and function flags" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const ctx = try core.JSContext.create(rt, .{});
     defer ctx.destroy();
@@ -5067,7 +5054,7 @@ pub fn functionNameValueFromAtom(rt: *core.JSRuntime, atom_id: core.Atom, prefix
 
 pub fn mappedArgumentsValue(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) ?core.JSValue {
     if (object.class_id != core.class.ids.mapped_arguments) return null;
-    const index = core.array.arrayIndexFromAtom(&rt.atoms, atom_id) orelse return null;
+    const index = core.array.arrayIndexFromAtom(rt.atoms, atom_id) orelse return null;
     const refs = object.argumentsVarRefs();
     if (index >= refs.len) return null;
     const cell = refs[index] orelse return null;
@@ -5077,7 +5064,7 @@ pub fn mappedArgumentsValue(rt: *core.JSRuntime, object: *core.Object, atom_id: 
 
 pub fn setMappedArgumentsValue(ctx: *core.JSContext, object: *core.Object, atom_id: core.Atom, value: core.JSValue) !bool {
     if (object.class_id != core.class.ids.mapped_arguments) return false;
-    const index = core.array.arrayIndexFromAtom(&ctx.runtime.atoms, atom_id) orelse return false;
+    const index = core.array.arrayIndexFromAtom(ctx.runtime.atoms, atom_id) orelse return false;
     const refs = object.argumentsVarRefsMut();
     if (index >= refs.len) return false;
     const cell = refs[index] orelse return false;

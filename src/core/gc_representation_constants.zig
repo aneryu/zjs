@@ -1,6 +1,6 @@
 //! Byte-level constants shared by the allocator, GC prefix readers, block
 //! heap, and the representation snapshot.  This module deliberately imports
-//! nothing: `memory.zig` owns the allocator layer and must not acquire a
+//! nothing: `gc_alloc.zig` owns the allocator layer and must not acquire a
 //! dependency on `gc.zig` merely to agree on bytes written into the prefix.
 
 pub const metadata_size: usize = 8;
@@ -11,7 +11,7 @@ pub const metadata_lifetime_offset: usize = 4;
 pub const metadata_young_mask: u8 = 1 << 4;
 
 /// GC kind tags the allocator layer writes into the prefix by hand. Kept
-/// here with the allocator representation rather than making `memory.zig`
+/// here with the allocator representation rather than making `gc_alloc.zig`
 /// import the registry enum; `gc.zig` asserts that its public RefKind
 /// encoding still agrees.
 pub const object_kind_tag: u8 = 0;

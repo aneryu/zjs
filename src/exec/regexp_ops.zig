@@ -101,7 +101,7 @@ pub const legacyCaptureIndex = core.host_function.builtin_method_id_lookup.regex
 /// Property installation resolves names/lengths through the standard-global
 /// RegExp function list plus the `prototypeMethodId`/`accessorMethodId`/
 /// `LegacyAccessorMethod` id helpers above (like Date); this table is consumed
-/// by the record-dispatch path (`rt.internal_builtins`).
+/// by the record-dispatch path (`internal_builtins.table`).
 pub const internal_entries = regexpEntries: {
     const Entry = core.host_function.InternalEntry;
     break :regexpEntries [_]Entry{
@@ -593,7 +593,7 @@ fn constructCompiled(rt: *core.JSRuntime, realm_global: ?*core.Object, source: c
 }
 
 test "constructCompiled roots string source while creating regexp object" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const source = try core.string.String.createAscii(rt, "a");

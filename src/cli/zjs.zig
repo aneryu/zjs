@@ -1,9 +1,10 @@
 //! CLI boundary for script/module evaluation, host loading, job draining, and exception/rejection reporting.
 //! Source buffers live through evaluation; `--leak-check` selects explicit event-loop, context, and runtime teardown.
-const mem_ops = @import("zjs").core.memory;
+const runtime_owner = @import("zjs").core.runtime;
 const std = @import("std");
 const cli_process = @import("cli_process.zig");
 const zjs = @import("zjs");
+const host = @import("zjs_host");
 const sort_erased = zjs.sort_erased;
 
 const eval_filename = "<eval>";
@@ -19,7 +20,6 @@ pub const RuntimeOptions = struct {
     stack_size: ?usize = null,
     can_block: bool = false,
     dump_memory: bool = false,
-    trace_memory: bool = false,
     profile_opcodes: bool = false,
     gc_stats: bool = false,
     gc_gate_settle: bool = false,
@@ -32,7 +32,6 @@ pub const RuntimeOptions = struct {
     /// Collector-side census switches the stats panels read; applied to the
     /// engine by `applyRuntimeOptions`, never during argument parsing.
     gc_detailed_reports: bool = false,
-    gc_mark_footprint: bool = false,
     include_paths: [max_include_paths][]const u8 = @splat(""),
     include_count: usize = 0,
 
@@ -81,12 +80,9 @@ const Option = struct {
 const option_table = [_]Option{
     .{ .long = "can-block", .set = &.{.can_block} },
     .{ .long = "dump", .short = 'd', .set = &.{.dump_memory} },
-    .{ .long = "trace", .short = 'T', .set = &.{.trace_memory} },
     // The panel's census costs whole-heap walks per major, so the
     // collector only performs them when someone is going to read
-    // them. The marked-set/storage census is NOT among them: it is
-    // the one walk large enough to move the scores this panel is
-    // used to judge, so it has its own flag below.
+    // them.
     .{ .long = "gc-stats", .set = &.{ .gc_stats, .gc_detailed_reports } },
     // Gate-only contract: retain the natural endpoint, then complete
     // any irreversible destruction transaction before publishing the
@@ -94,14 +90,8 @@ const option_table = [_]Option{
     // callers cannot accidentally request a silent settlement.
     .{ .long = "gc-gate-settle", .set = &.{ .gc_stats, .gc_gate_settle, .gc_detailed_reports } },
     // TGC S4-f (2). A pure exit-time walk of the block table: nothing
-    // on a collector or allocator path consults it, so unlike
-    // `--gc-mark-footprint` it does not move the numbers it prints.
+    // on a collector or allocator path consults it.
     .{ .long = "gc-block-census", .set = &.{ .gc_stats, .gc_block_census, .gc_detailed_reports } },
-    // Opt in to the marked-set/storage census and print the panel that
-    // reads it. Measured cost on splay: Splay -9.8%, SplayLatency
-    // -23.7% against the same binary. That is a study tool, not a
-    // ruler -- do not take pause or score numbers from a run with it.
-    .{ .long = "gc-mark-footprint", .set = &.{ .gc_stats, .gc_detailed_reports, .gc_mark_footprint } },
     .{ .long = "profile-opcodes", .set = &.{.profile_opcodes} },
     .{ .long = "bytecode-fingerprint", .set = &.{.bytecode_fingerprint} },
     .{ .long = "bytecode-fingerprint-verbose", .set = &.{ .bytecode_fingerprint, .bytecode_fingerprint_verbose } },
@@ -234,7 +224,7 @@ fn parseLimitKBytes(text: []const u8) !usize {
 }
 
 fn printUsage(io: std.Io) !void {
-    try cli_process.printError(io, "usage: zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-mark-footprint] [--gc-block-census] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [-T] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-mark-footprint] [--gc-block-census] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m|-s] <file.js>\n");
+    try cli_process.printError(io, "usage: zjs [-d] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-block-census] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] -e <script>\n       zjs [-d] [--profile-opcodes] [--gc-stats] [--gc-gate-settle] [--gc-block-census] [--leak-check] [--memory-limit n] [--stack-size n] [-I file] [-m|-s] <file.js>\n");
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -264,9 +254,7 @@ fn execute(init: std.process.Init, command: *Command) !void {
     var opcode_profile: zjs.OpcodeProfile = undefined;
     initOpcodeProfile(&opcode_profile);
 
-    const rt = zjs.Runtime.create(.{
-        .allocator = allocator,
-        .trace_writer = if (runtime_options.trace_memory) stdout else null,
+    const rt = zjs.Runtime.create(allocator, .{
         .memory_limit = runtime_options.memory_limit,
         .gc_threshold = zjs.default_gc_threshold,
         .stack_size = runtime_options.stack_size orelse zjs.default_stack_size,
@@ -280,13 +268,15 @@ fn execute(init: std.process.Init, command: *Command) !void {
         std.process.exit(1);
     };
     errdefer ctx.destroy();
-    var event_loop = zjs.EventLoop.init(ctx, .{ .output = stdout });
+    var event_loop = host.EventLoop.init(ctx, .{ .output = stdout });
     // `install` publishes `*EventLoop` to the context. Do that only after the
     // loop lives in this frame; a by-value move of an already-installed
     // loop would leave the host vtable pointing at a dead stack slot.
     event_loop.install();
     errdefer event_loop.deinit();
 
+    host.file_modules.install(ctx.core);
+    try host.globals.install(ctx.core, try zjs.globalObjectPtr(ctx));
     try configureRuntime(rt, ctx, script_args, runtime_options, &opcode_profile, io);
     // Install the file-loader dynamic import for every mode, mirroring qjs
     // installing js_module_loader unconditionally (qjs.c JS_SetModuleLoaderFunc):
@@ -411,7 +401,6 @@ fn configureRuntime(
 
 fn applyRuntimeOptions(rt: *zjs.Runtime, ctx: *zjs.Context, runtime_options: RuntimeOptions) void {
     zjs.core.gc_trace_stw.detailed_reports = runtime_options.gc_detailed_reports;
-    zjs.core.gc_trace_stw.mark_footprint_census = runtime_options.gc_mark_footprint;
     // `detailed_reports` is one input of the barrier gate; a flip against a
     // live Registry must republish it (gc.refreshBarrierGate contract).
     rt.gc.refreshBarrierGate();
@@ -426,7 +415,7 @@ fn applyRuntimeOptions(rt: *zjs.Runtime, ctx: *zjs.Context, runtime_options: Run
 fn failEvaluation(
     ctx: *zjs.Context,
     rt: *zjs.Runtime,
-    event_loop: *zjs.EventLoop,
+    event_loop: *host.EventLoop,
     output: *std.Io.Writer,
     io: std.Io,
     err: anyerror,
@@ -437,7 +426,7 @@ fn failEvaluation(
     std.process.exit(1);
 }
 
-fn exitIfRequested(event_loop: *zjs.EventLoop, output: *std.Io.Writer, err: anyerror) !void {
+fn exitIfRequested(event_loop: *host.EventLoop, output: *std.Io.Writer, err: anyerror) !void {
     if (err != error.ProcessExit) return;
     const code = event_loop.exitCode() orelse return;
     try output.flush();
@@ -739,16 +728,15 @@ fn dumpGcPanels(writer: *std.Io.Writer, runtime: *zjs.Runtime, runtime_options: 
         try dumpGcDoomedState(writer, "endpoint", runtime);
         zjs.core.runtime.settlePendingDestructionForGateStats(runtime);
     }
-    try dumpGcStats(writer, runtime.gcDetailedStats(), &runtime.gc);
+    try dumpGcStats(writer, runtime.gcDetailedStats(), runtime.gc);
     try dumpAtomAuditStats(writer, runtime);
     try dumpGcPauses(writer, runtime.gcPauseDistribution());
-    try dumpGcSpaceStats(writer, &runtime.gc);
-    try dumpGcBlockHeapStats(writer, &runtime.gc);
+    try dumpGcSpaceStats(writer, runtime.gc);
+    try dumpGcBlockHeapStats(writer, runtime.gc);
     if (runtime_options.gc_block_census) {
-        try dumpGcBlockCensus(writer, &runtime.gc);
+        try dumpGcBlockCensus(writer, runtime.gc);
     }
-    try dumpGcMarkFootprint(writer, runtime);
-    try dumpGcGenerationStats(writer, &runtime.gc);
+    try dumpGcGenerationStats(writer, runtime.gc);
     try dumpGcDoomedState(
         writer,
         if (runtime_options.gc_gate_settle) "settled" else "endpoint",
@@ -1034,91 +1022,6 @@ fn dumpGcBlockHeapStats(writer: *std.Io.Writer, registry: *const zjs.core.gc.Reg
     }, "\n");
 }
 
-fn dumpGcMarkFootprint(writer: *std.Io.Writer, rt: *const zjs.core.JSRuntime) !void {
-    const fp = rt.diagnostics.mark_footprint;
-    // An all-zero panel reads like "nothing was marked", which is a wrong
-    // answer rather than a missing one. Say which it is.
-    if (!zjs.core.gc_trace_stw.mark_footprint_census) {
-        try writer.writeAll(
-            "gc: marked-set census not run (pass --gc-mark-footprint; it costs a whole-heap walk inside every final remark)\n",
-        );
-        return;
-    }
-    try writeCounterLine(writer, &.{
-        .{ "gc: marked-set census majors ", fp.major_censuses },
-        .{ ", headers ", fp.marked_headers },
-        .{ ", block headers ", fp.block_headers },
-    }, "\n");
-    // `string` folds the rope kind in (`MarkFootprint.noteMarkedHeader`):
-    // the two are one family to every consumer of this panel.
-    try writeCounterLine(writer, &.{
-        .{ "gc: marked-set kinds object ", fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.object)] },
-        .{ ", function-bytecode ", fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.function_bytecode)] },
-        .{ ", var-ref ", fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.var_ref)] },
-        .{ ", realm-context ", fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.realm_context)] },
-        .{ ", module ", fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.module)] },
-        .{ ", shape ", fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.shape)] },
-        .{ ", big-int ", fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.big_int)] },
-        .{ ", string ", fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.string)] },
-        .{ ", storage ", fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.property_storage)] +
-            fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.array_storage)] +
-            fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.payload)] },
-    }, "\n");
-    try writeCounterLine(writer, &.{
-        .{ "gc: marked-set trace classes ordinary-object ", fp.by_trace_class[@intFromEnum(zjs.core.gc_trace_stw.MarkTraceClass.ordinary_object)] },
-        .{ ", fast-array ", fp.by_trace_class[@intFromEnum(zjs.core.gc_trace_stw.MarkTraceClass.fast_array)] },
-        .{ ", bytecode-function ", fp.by_trace_class[@intFromEnum(zjs.core.gc_trace_stw.MarkTraceClass.bytecode_function)] },
-        .{ ", exotic-object ", fp.by_trace_class[@intFromEnum(zjs.core.gc_trace_stw.MarkTraceClass.exotic_object)] },
-        .{ ", non-object ", fp.by_trace_class[@intFromEnum(zjs.core.gc_trace_stw.MarkTraceClass.non_object)] },
-    }, "\n");
-    for (std.meta.tags(zjs.core.gc_trace_stw.MarkStorageComponent)) |component| {
-        const aggregate = fp.storage[@intFromEnum(component)];
-        try writer.writeAll("gc: mark storage ");
-        try writer.writeAll(@tagName(component));
-        try writeCounterLine(writer, &.{
-            .{ " allocation-touches ", aggregate.allocation_touches },
-            .{ ", allocated-bytes ", aggregate.allocated_bytes },
-            .{ ", touched-cache-lines ", aggregate.touched_cache_lines },
-        }, "\n");
-    }
-    for (std.meta.tags(zjs.core.gc_trace_stw.MarkTraceClass)) |trace_class| {
-        const aggregate = fp.storage_by_trace_class[@intFromEnum(trace_class)];
-        try writer.writeAll("gc: mark trace class storage ");
-        try writer.writeAll(@tagName(trace_class));
-        try writeCounterLine(writer, &.{
-            .{ " allocation-touches ", aggregate.allocation_touches },
-            .{ ", allocated-bytes ", aggregate.allocated_bytes },
-            .{ ", touched-cache-lines ", aggregate.touched_cache_lines },
-        }, "\n");
-    }
-    for (zjs.core.gc_trace_stw.MarkFootprint.inline_limits, 0..) |limit, index| {
-        const plain_external = fp.inline_eligible_objects[index] -
-            fp.inline_direct_objects[index] -
-            fp.inline_tail_grown_external_objects[index];
-        try writeCounterLine(writer, &.{
-            .{ "gc: inline property upper slots ", limit },
-            .{ ", eligible-objects ", fp.inline_eligible_objects[index] },
-            .{ ", direct-inline ", fp.inline_direct_objects[index] },
-            .{ ", tail-grown-external ", fp.inline_tail_grown_external_objects[index] },
-            .{ ", plain-external ", plain_external },
-            .{ ", external-allocated-bytes ", fp.inline_property_bytes[index] },
-            .{ ", external-touched-cache-lines ", fp.inline_property_cache_lines[index] },
-        }, "\n");
-        const ordinary_plain_external = fp.inline_ordinary_eligible_objects[index] -
-            fp.inline_ordinary_direct_objects[index] -
-            fp.inline_ordinary_tail_grown_external_objects[index];
-        try writeCounterLine(writer, &.{
-            .{ "gc: inline ordinary property upper slots ", limit },
-            .{ ", eligible-objects ", fp.inline_ordinary_eligible_objects[index] },
-            .{ ", direct-inline ", fp.inline_ordinary_direct_objects[index] },
-            .{ ", tail-grown-external ", fp.inline_ordinary_tail_grown_external_objects[index] },
-            .{ ", plain-external ", ordinary_plain_external },
-            .{ ", external-allocated-bytes ", fp.inline_ordinary_property_bytes[index] },
-            .{ ", external-touched-cache-lines ", fp.inline_ordinary_property_cache_lines[index] },
-        }, "\n");
-    }
-}
-
 fn dumpGcStats(writer: *std.Io.Writer, detailed: zjs.GCDetailedStats, registry: *const zjs.core.gc.Registry) !void {
     const stats = detailed.counters;
     const minors = registry.generation.stats.minor_collections;
@@ -1374,17 +1277,16 @@ test "zjs args accept eval, file, and module jobs" {
 
 test "zjs args accept options" {
     const command = try parseArgs(&.{
-        "--memory-limit",   "7",
-        "--stack-size=9",   "-d",
-        "-T",               "-I",
-        "prelude.js",       "--include=setup.mjs",
-        "--gc-gate-settle", "--",
-        "input.js",         "-d",
+        "--memory-limit",      "7",
+        "--stack-size=9",      "-d",
+        "-I",                  "prelude.js",
+        "--include=setup.mjs", "--gc-gate-settle",
+        "--",                  "input.js",
+        "-d",
     });
     try std.testing.expectEqual(@as(?usize, 7 * 1024), command.options.memory_limit);
     try std.testing.expectEqual(@as(?usize, 9 * 1024), command.options.stack_size);
     try std.testing.expect(command.options.dump_memory);
-    try std.testing.expect(command.options.trace_memory);
     try std.testing.expect(command.options.gc_gate_settle);
     try std.testing.expect(command.options.gc_stats);
     try std.testing.expectEqual(@as(usize, 2), command.options.include_count);
@@ -1405,6 +1307,9 @@ test "zjs end of options treats command words as file paths" {
 }
 
 test "zjs args reject usage" {
+    try std.testing.expectError(error.Usage, parseArgs(&.{ "--trace", "-e", "1" }));
+    try std.testing.expectError(error.Usage, parseArgs(&.{ "-T", "-e", "1" }));
+    try std.testing.expectError(error.Usage, parseArgs(&.{ "--gc-mark-footprint", "-e", "1" }));
     try std.testing.expectError(error.Usage, parseArgs(&.{"-e"}));
     try std.testing.expectError(error.Usage, parseArgs(&.{"-m"}));
     try std.testing.expectError(error.Usage, parseArgs(&.{"-s"}));
@@ -1450,80 +1355,10 @@ test "opcode profile initialization preserves every default field" {
     try std.testing.expectEqualDeep(zjs.OpcodeProfile{}, profile);
 }
 
-test "zjs mark footprint serialization preserves populated rows and missing census" {
-    // Only the census field is read by this serializer; no collector is run.
-    var rt: zjs.core.JSRuntime = undefined;
-    rt.diagnostics.mark_footprint = .{ .major_censuses = 2, .marked_headers = 3, .block_headers = 4 };
-    const fp = &rt.diagnostics.mark_footprint;
-    fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.object)] = 1;
-    fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.function_bytecode)] = 2;
-    fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.var_ref)] = 3;
-    fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.realm_context)] = 4;
-    fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.module)] = 5;
-    fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.shape)] = 6;
-    fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.big_int)] = 7;
-    fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.string)] = 8;
-    fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.property_storage)] = 9;
-    fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.array_storage)] = 10;
-    fp.by_kind[@intFromEnum(zjs.core.gc.GcKind.payload)] = 11;
-    for (&fp.storage, 0..) |*row, i| row.* = .{ .allocation_touches = i + 1, .allocated_bytes = i + 11, .touched_cache_lines = i + 21 };
-    for (&fp.storage_by_trace_class, 0..) |*row, i| row.* = .{ .allocation_touches = i + 31, .allocated_bytes = i + 41, .touched_cache_lines = i + 51 };
-    for (0..fp.inline_eligible_objects.len) |i| {
-        fp.inline_eligible_objects[i] = i + 10;
-        fp.inline_direct_objects[i] = 2;
-        fp.inline_tail_grown_external_objects[i] = 3;
-        fp.inline_property_bytes[i] = i + 100;
-        fp.inline_property_cache_lines[i] = i + 20;
-        fp.inline_ordinary_eligible_objects[i] = i + 8;
-        fp.inline_ordinary_direct_objects[i] = 1;
-        fp.inline_ordinary_tail_grown_external_objects[i] = 2;
-        fp.inline_ordinary_property_bytes[i] = i + 80;
-        fp.inline_ordinary_property_cache_lines[i] = i + 15;
-    }
-    const old_census = zjs.core.gc_trace_stw.mark_footprint_census;
-    defer zjs.core.gc_trace_stw.mark_footprint_census = old_census;
-    zjs.core.gc_trace_stw.mark_footprint_census = true;
-    var buffer: [8192]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&buffer);
-    try dumpGcMarkFootprint(&writer, &rt);
-    const expected =
-        \\gc: marked-set census majors 2, headers 3, block headers 4
-        \\gc: marked-set kinds object 1, function-bytecode 2, var-ref 3, realm-context 4, module 5, shape 6, big-int 7, string 8, storage 30
-        \\gc: marked-set trace classes ordinary-object 0, fast-array 0, bytecode-function 0, exotic-object 0, non-object 0
-        \\gc: mark storage base allocation-touches 1, allocated-bytes 11, touched-cache-lines 21
-        \\gc: mark storage shape allocation-touches 2, allocated-bytes 12, touched-cache-lines 22
-        \\gc: mark storage property_slots allocation-touches 3, allocated-bytes 13, touched-cache-lines 23
-        \\gc: mark storage dense_elements allocation-touches 4, allocated-bytes 14, touched-cache-lines 24
-        \\gc: mark storage trace_payload allocation-touches 5, allocated-bytes 15, touched-cache-lines 25
-        \\gc: mark storage payload_backing allocation-touches 6, allocated-bytes 16, touched-cache-lines 26
-        \\gc: mark trace class storage ordinary_object allocation-touches 31, allocated-bytes 41, touched-cache-lines 51
-        \\gc: mark trace class storage fast_array allocation-touches 32, allocated-bytes 42, touched-cache-lines 52
-        \\gc: mark trace class storage bytecode_function allocation-touches 33, allocated-bytes 43, touched-cache-lines 53
-        \\gc: mark trace class storage exotic_object allocation-touches 34, allocated-bytes 44, touched-cache-lines 54
-        \\gc: mark trace class storage non_object allocation-touches 35, allocated-bytes 45, touched-cache-lines 55
-        \\gc: inline property upper slots 1, eligible-objects 10, direct-inline 2, tail-grown-external 3, plain-external 5, external-allocated-bytes 100, external-touched-cache-lines 20
-        \\gc: inline ordinary property upper slots 1, eligible-objects 8, direct-inline 1, tail-grown-external 2, plain-external 5, external-allocated-bytes 80, external-touched-cache-lines 15
-        \\gc: inline property upper slots 2, eligible-objects 11, direct-inline 2, tail-grown-external 3, plain-external 6, external-allocated-bytes 101, external-touched-cache-lines 21
-        \\gc: inline ordinary property upper slots 2, eligible-objects 9, direct-inline 1, tail-grown-external 2, plain-external 6, external-allocated-bytes 81, external-touched-cache-lines 16
-        \\gc: inline property upper slots 4, eligible-objects 12, direct-inline 2, tail-grown-external 3, plain-external 7, external-allocated-bytes 102, external-touched-cache-lines 22
-        \\gc: inline ordinary property upper slots 4, eligible-objects 10, direct-inline 1, tail-grown-external 2, plain-external 7, external-allocated-bytes 82, external-touched-cache-lines 17
-        \\
-    ;
-    try std.testing.expectEqualStrings(expected, writer.buffered());
-    zjs.core.gc_trace_stw.mark_footprint_census = false;
-    writer = std.Io.Writer.fixed(&buffer);
-    try dumpGcMarkFootprint(&writer, &rt);
-    try std.testing.expectEqualStrings("gc: marked-set census not run (pass --gc-mark-footprint; it costs a whole-heap walk inside every final remark)\n", writer.buffered());
-    zjs.core.gc_trace_stw.mark_footprint_census = true;
-    var small: [1]u8 = undefined;
-    writer = std.Io.Writer.fixed(&small);
-    try std.testing.expectError(error.WriteFailed, dumpGcMarkFootprint(&writer, &rt));
-}
-
 test "zjs generation diagnostic lines preserve populated snapshot" {
-    const memory = try mem_ops.createTestRuntime(std.testing.allocator);
+    const memory = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
     defer memory.destroy();
-    var registry: zjs.core.gc.Registry = .{ .runtime = memory };
+    var registry: zjs.core.gc.Registry = .{ .runtime = memory, .allocator = std.testing.allocator };
     // Position-based fill so every counter prints a distinct value; the
     // minor phase array takes one position per phase.
     comptime var position: usize = 0;
@@ -1614,9 +1449,9 @@ test "zjs doomed state line preserves mixed bools and counters" {
 }
 
 test "zjs registry diagnostic panels preserve populated snapshot" {
-    const memory = try mem_ops.createTestRuntime(std.testing.allocator);
+    const memory = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
     defer memory.destroy();
-    var registry: zjs.core.gc.Registry = .{ .runtime = memory };
+    var registry: zjs.core.gc.Registry = .{ .runtime = memory, .allocator = std.testing.allocator };
     inline for (@typeInfo(@TypeOf(registry.stats)).@"struct".fields, 0..) |field, i| {
         if (@typeInfo(field.type) == .int) @field(registry.stats, field.name) = @intCast(i + 11);
     }

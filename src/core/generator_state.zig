@@ -1,6 +1,5 @@
 //! Owned execution state parked while generators and async functions suspend.
 
-const mem_ops = @import("memory.zig");
 const gc_visit = @import("gc_visit.zig");
 const payloads = @import("object_payloads.zig");
 const runtime_mod = @import("../runtime.zig");
@@ -70,17 +69,17 @@ pub const SuspendedStackStorage = struct {
             }
             next_capacity *= 2;
         }
-        const next = try mem_ops.alloc(rt, JSValue, next_capacity);
-        errdefer mem_ops.free(rt, JSValue, next);
+        const next = try rt.allocNative(JSValue, next_capacity);
+        errdefer rt.freeNative(JSValue, next);
         @memcpy(next[0..self.values.len], self.values);
         const old_values = self.values;
         const old_capacity = self.capacity;
         self.values = next[0..old_values.len];
         self.capacity = next_capacity;
         if (old_capacity != 0 and !resident_backing) {
-            mem_ops.free(rt, JSValue, old_values.ptr[0..old_capacity]);
+            rt.freeNative(JSValue, old_values.ptr[0..old_capacity]);
         } else if (old_capacity == 0 and old_values.len != 0) {
-            mem_ops.free(rt, JSValue, old_values);
+            rt.freeNative(JSValue, old_values);
         }
     }
 
@@ -113,11 +112,11 @@ pub const SuspendedFrameStorage = struct {
         // release the backing: one shared slab, or the two separate windows.
         closeOpenVarRefCellSlots(rt, owned.open_var_refs);
         if (owned.storage.len != 0) {
-            mem_ops.free(rt, JSValue, owned.storage);
+            rt.freeNative(JSValue, owned.storage);
             return;
         }
-        if (owned.locals.len != 0) mem_ops.free(rt, JSValue, owned.locals);
-        if (owned.args.len != 0) mem_ops.free(rt, JSValue, owned.args);
+        if (owned.locals.len != 0) rt.freeNative(JSValue, owned.locals);
+        if (owned.args.len != 0) rt.freeNative(JSValue, owned.args);
     }
 
     /// Close the live window while leaving the backing bytes to the
@@ -438,14 +437,14 @@ fn freeGeneratorExecutionState(rt: *JSRuntime, execution: *GeneratorExecutionSta
     const combined_frame_slots = execution.combinedFrameSlotCount();
     execution.destroy(rt);
     if (combined_stack_slots == 0 and combined_frame_slots == 0) {
-        mem_ops.destroy(rt, GeneratorExecutionState, execution);
+        rt.destroyNative(GeneratorExecutionState, execution);
         return;
     }
     const total_slots = @as(usize, combined_stack_slots) + combined_frame_slots;
     const slot_bytes = total_slots * @sizeOf(JSValue);
     const allocation_size = generator_execution_storage_offset + slot_bytes;
     const bytes: [*]u8 = @ptrCast(execution);
-    mem_ops.freeAlignedBytes(rt, bytes[0..allocation_size], generator_execution_alignment);
+    rt.freeNativeAlignedBytes(bytes[0..allocation_size], generator_execution_alignment);
 }
 
 pub fn destroyGeneratorExecutionState(rt: *JSRuntime, slot: *?*GeneratorExecutionState) void {

@@ -3,8 +3,8 @@
 //! QuickJS source map: the js_*_funcs JSCFunctionListEntry arrays in
 //! quickjs.c. Standard natives are a compile-time closed set, so the dispatch table
 //! is materialized statically here (no runtime registration like the
-//! external-host registry) and `standard_globals.installStandardGlobals` points
-//! `JSRuntime.internal_builtins` at it. The outer index is the
+//! external-host registry). `engine_services.internalBuiltinRecord` queries it
+//! without installing per-Runtime state. The outer index is the
 //! `NativeBuiltinDomain` enum value (slot 0 unused). Each domain keeps a
 //! size-selected low-id prefix directly indexed and stores later occupied
 //! ids in a sparse tail, so stable gaps consume no empty records.
@@ -132,7 +132,7 @@ fn recordTable(comptime entries: []const InternalEntry) EntryTable {
 const primitive_entries = primitive.boolean_entries ++ primitive.shared_entries ++
     primitive.symbol_entries ++ primitive.bigint_static_entries ++ primitive.symbol_static_entries;
 
-/// The static table `JSRuntime.internal_builtins` points at. Every standard
+/// The static table queried by engine_services. Every standard
 /// native domain contributes its record entries here; exec owns both the
 /// table and the JS-visible operation implementations it dispatches to.
 pub const table: [domain_count]EntryTable = build: {

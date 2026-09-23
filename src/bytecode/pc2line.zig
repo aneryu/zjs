@@ -29,10 +29,9 @@
 //!   sleb128(diff_line)
 //!   sleb128(diff_col)
 
-const mem_ops = @import("../core/memory.zig");
+const runtime_owner = @import("../runtime.zig");
 const std = @import("std");
 const bytecode = @import("../bytecode.zig");
-const memory = @import("../core/memory.zig");
 const runtime = @import("../runtime.zig");
 
 /// PC2LINE encoding constants (mirror `quickjs.c`).
@@ -300,7 +299,7 @@ fn readSleb128(bytes: []const u8, i: *usize) !i32 {
 }
 
 test "pc2line: empty slot list contains the mandatory QuickJS header" {
-    const account = try mem_ops.createTestRuntime(std.testing.allocator);
+    const account = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
     defer account.destroy();
     var encoded = try encode(account.nativeAllocator(), &.{}, 1, 1);
     try std.testing.expectEqualSlices(u8, &.{ 0, 0 }, encoded.bytes);
@@ -316,7 +315,7 @@ test "pc2line: empty slot list contains the mandatory QuickJS header" {
 }
 
 test "pc2line: QuickJS header is zero-based ULEB128 byte-for-byte" {
-    const account = try mem_ops.createTestRuntime(std.testing.allocator);
+    const account = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
     defer account.destroy();
     var encoded = try encode(account.nativeAllocator(), &.{}, 130, 257);
     defer encoded.deinit();
@@ -330,7 +329,7 @@ test "pc2line: QuickJS header is zero-based ULEB128 byte-for-byte" {
 }
 
 test "pc2line: compact encoding for small line/pc deltas" {
-    const account = try mem_ops.createTestRuntime(std.testing.allocator);
+    const account = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
     defer account.destroy();
     // Two slots: same line, small pc delta. Compact form is one byte
     // (line/pc compact) plus a sleb128 col diff.
@@ -349,7 +348,7 @@ test "pc2line: compact encoding for small line/pc deltas" {
 }
 
 test "pc2line: long encoding for large pc delta" {
-    const account = try mem_ops.createTestRuntime(std.testing.allocator);
+    const account = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
     defer account.destroy();
     const slots = [_]SourceLocSlot{
         .{ .pc = 100, .line_num = 2, .col_num = 1 },
@@ -363,7 +362,7 @@ test "pc2line: long encoding for large pc delta" {
 }
 
 test "pc2line: encode/decode round-trip" {
-    const account = try mem_ops.createTestRuntime(std.testing.allocator);
+    const account = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
     defer account.destroy();
     const input_slots = [_]SourceLocSlot{
         .{ .pc = 5, .line_num = 1, .col_num = 4 },
@@ -386,7 +385,7 @@ test "pc2line: encode/decode round-trip" {
 }
 
 test "pc2line: source lookup covers definition, slots, and trailing pc" {
-    const account = try mem_ops.createTestRuntime(std.testing.allocator);
+    const account = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
     defer account.destroy();
     const input_slots = [_]SourceLocSlot{
         .{ .pc = 5, .line_num = 11, .col_num = 7 },
@@ -434,7 +433,7 @@ test "pc2line: malformed header or transition never returns a partial location" 
 }
 
 test "pc2line: full u32 pc delta is encoded without narrowing traps" {
-    const account = try mem_ops.createTestRuntime(std.testing.allocator);
+    const account = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
     defer account.destroy();
     const slots = [_]SourceLocSlot{
         .{ .pc = std.math.maxInt(u32), .line_num = 1, .col_num = 2 },
@@ -450,7 +449,7 @@ test "pc2line: full u32 pc delta is encoded without narrowing traps" {
 }
 
 test "pc2line: skips slots with no real change or backward pc" {
-    const account = try mem_ops.createTestRuntime(std.testing.allocator);
+    const account = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
     defer account.destroy();
     const slots = [_]SourceLocSlot{
         .{ .pc = 10, .line_num = 1, .col_num = 5 },
@@ -471,7 +470,7 @@ test "pc2line: skips slots with no real change or backward pc" {
 }
 
 test "pc2line: negative line delta encoded compactly" {
-    const account = try mem_ops.createTestRuntime(std.testing.allocator);
+    const account = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
     defer account.destroy();
     const slots = [_]SourceLocSlot{
         .{ .pc = 5, .line_num = 5, .col_num = 1 },
@@ -489,7 +488,7 @@ test "pc2line: negative line delta encoded compactly" {
 }
 
 test "pc2line: QuickJS signed deltas use zig-zag bytes" {
-    const account = try mem_ops.createTestRuntime(std.testing.allocator);
+    const account = try runtime_owner.createAllocationTestRuntime(std.testing.allocator);
     defer account.destroy();
     const slots = [_]SourceLocSlot{
         .{ .pc = 1, .line_num = 1, .col_num = 1 },

@@ -43,6 +43,21 @@ fn profileOpcodeCount(stdout: []const u8) !u64 {
     return try std.fmt.parseInt(u64, stdout[start..end], 10);
 }
 
+test "bundled host globals and bitmap GC tear down in an executable" {
+    const allocator = std.testing.allocator;
+    var path: [1024]u8 = undefined;
+    // A Zig test enables carrier auditing and cannot exercise the executable's
+    // bitmap-only reclamation path. Keep --leak-check's Runtime assertion on.
+    const result = try std.process.run(allocator, std.testing.io, .{
+        .argv = &.{ resolvedZjsPath(&path), "--leak-check", "-e", "print(atob(btoa('host'))); queueMicrotask(() => console.log('job')); gc();" },
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+    try std.testing.expectEqual(std.process.Child.Term{ .exited = 0 }, result.term);
+    try std.testing.expectEqualStrings("host\njob\n", result.stdout);
+    try std.testing.expectEqualStrings("", result.stderr);
+}
+
 test "zjs CLI behavior" {
     const allocator = std.testing.allocator;
     var zjs_path_buf: [1024]u8 = undefined;

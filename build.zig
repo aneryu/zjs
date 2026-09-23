@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) void {
         std.process.exit(1);
     }
     // OOM-injection coverage instrumentation (v1): records deduplicated
-    // allocation call sites in core/memory.zig. Default off and comptime
+    // Runtime native and GC cell allocation call sites. Default off and comptime
     // gated, so the default build's allocation hot path is unchanged.
     // `zig build test-oom -Dzjs_oom_coverage=true` prints the count.
     const zjs_oom_coverage = b.option(bool, "zjs_oom_coverage", "Record distinct allocation call sites for the OOM corpus coverage report") orelse false;

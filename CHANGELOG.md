@@ -5,6 +5,13 @@ roadmaps, plans, and measurement snapshots are available in Git history.
 
 ## Unreleased
 
+- **Host boundary / public API:** move bundled event scheduling, filesystem
+  module policy, output formatting, and print/console/btoa/atob/queueMicrotask/gc
+  installation to internal `zjs_host`. Remove `zjs.EventLoop` and `zjs.runtime`;
+  embedders register their own native functions and drive engine jobs.
+  The CLI and test262 runner explicitly install their host capabilities.
+  See [migration contract](docs/public-api-contract.md#event-loop) and
+  [remaining extraction scope](docs/host-boundary-design.md).
 - **Tests:** retire `src/stress.zig` / `test-stress`. The unique cheap
   pins (raw tail-opcode budget restore, padded-arg abrupt teardown,
   `subMulAt` pattern sweep, concise-arrow `tail_call` fold) live in

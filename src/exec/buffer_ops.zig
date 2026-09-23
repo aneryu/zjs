@@ -114,7 +114,7 @@ pub fn dataViewPrototypeMethodId(name: []const u8) ?u32 {
 /// handlers / the construct path, never by function-object record dispatch.
 /// Property installation resolves names/lengths through standard-global
 /// function lists and the `*MethodId` helpers above; this table is
-/// consumed by the record-dispatch path (`rt.internal_builtins`).
+/// consumed by the record-dispatch path (`internal_builtins.table`).
 pub const internal_entries = bufferEntries: {
     const Entry = core.host_function.InternalEntry;
     break :bufferEntries [_]Entry{
@@ -293,9 +293,6 @@ const typed_array_core = core.typed_array;
 // placement put them in exec (`exec/zig`); re-exported
 // here under their original names for the install/test side.
 
-
-
-
 pub const arrayBufferConstructLength = typed_array_core.arrayBufferConstructLength;
 pub const sharedArrayBufferConstructLength = typed_array_core.sharedArrayBufferConstructLength;
 pub const sharedArrayBufferFromStore = typed_array_core.sharedArrayBufferFromStore;
@@ -365,7 +362,6 @@ pub const typedArrayRejectImmutableBuffer = core.object.typedArrayRejectImmutabl
 pub const typedArrayImmutableBuffer = core.object.typedArrayImmutableBuffer;
 pub const markArrayBufferImmutable = core.object.markArrayBufferImmutable;
 pub const arrayBufferIsImmutable = core.object.arrayBufferIsImmutable;
-
 
 // ----- merged from typed_array_construct.zig -----
 // ArrayBuffer / SharedArrayBuffer argument-coercing construction primitives.

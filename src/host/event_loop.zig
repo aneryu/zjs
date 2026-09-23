@@ -7,17 +7,16 @@
 //! read/write handlers, signals, timers, and poll loop at
 //! quickjs-libc.c:2014-2175 and quickjs-libc.c:2422-2627.
 //!
-//! This file is the public `zjs.EventLoop` type. It must not grow into an
-//! Engine facade or re-export exec helpers. The in-tree engine root still
-//! re-exports this module as `runtime`.
+//! Internal bundled host implementation; the engine does not import it.
 
 const std = @import("std");
 const builtin = @import("builtin");
 
-const core = @import("core/root.zig");
-const exec = @import("exec/root.zig");
-const platform_clock = @import("platform_clock.zig");
-const js_context = @import("js_context.zig");
+const zjs = @import("zjs");
+const core = zjs.core;
+const exec = zjs.exec;
+const platform_clock = zjs.platform_clock;
+const js_context = zjs;
 
 const libc = if (builtin.os.tag == .windows)
     struct {}
@@ -146,17 +145,25 @@ pub const EventLoop = struct {
         };
     }
 
+    /// Only recover this implementation after checking the callback identity.
+    pub fn fromContext(ctx: *core.JSContext) ?*EventLoop {
+        const scheduler = ctx.hostScheduler() orelse return null;
+        if (scheduler.poll != pollHost) return null;
+        return @ptrCast(@alignCast(scheduler.ptr));
+    }
+
     pub fn install(self: *EventLoop) void {
-        self.context.setHostEventLoop(.{
+        self.context.setHostScheduler(.{
             .ptr = self,
-            .vtable = &vtable,
+            .traceRoots = traceHostRoots,
+            .poll = pollHost,
         });
         self.installed = true;
     }
 
     pub fn deinit(self: *EventLoop) void {
         if (self.installed) {
-            self.context.clearHostEventLoop(self);
+            self.context.clearHostScheduler(self);
             self.installed = false;
         }
         const rt = self.context.runtimePtr();
@@ -171,9 +178,9 @@ pub const EventLoop = struct {
         while (true) {
             try exec.atomics_ops.processExpiredAtomicsWaiters(self.context);
             try exec.zjs_vm.drainPendingPromiseJobs(self.context, self.output, global);
-            if (try exec.call.runNextOsSignalHandler(self.context, self.output, global)) continue;
-            if (try exec.call_runtime.runNextOsRwHandler(self.context, self.output, global)) continue;
-            if (try exec.call_runtime.runNextOsTimer(self.context, self.output, global)) continue;
+            if (try self.runNextSignalHandler(self.context, self.output, global)) continue;
+            if (try self.runNextRwHandler(self.context, self.output, global)) continue;
+            if (try self.runNextTimer(self.context, self.output, global)) continue;
             if (try exec.atomics_ops.runNextAtomicsHostCompletion(self.context, false)) continue;
             break;
         }
@@ -207,7 +214,7 @@ pub const EventLoop = struct {
         }
     }
 
-    fn takeNextTimerId(self: *EventLoop) i64 {
+    pub fn takeNextTimerId(self: *EventLoop) i64 {
         const id = self.next_timer_id;
         self.next_timer_id += 1;
         if (self.next_timer_id > 9007199254740991) self.next_timer_id = 1;
@@ -227,7 +234,7 @@ pub const EventLoop = struct {
         }
     }
 
-    fn runNextTimer(self: *EventLoop, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
+    pub fn runNextTimer(self: *EventLoop, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
         if (self.timers.items.len == 0) return false;
         const rt = ctx.runtimePtr();
         const now = nowMs();
@@ -426,7 +433,7 @@ pub const EventLoop = struct {
         _ = signal(@intCast(sig), @intFromPtr(&osSignalHandler));
     }
 
-    fn clearSignalHandler(self: *EventLoop, ctx: *core.JSContext, sig: u32, disposition: core.context.SignalDisposition) void {
+    fn clearSignalHandler(self: *EventLoop, ctx: *core.JSContext, sig: u32, disposition: SignalDisposition) void {
         for (self.signal_handlers.items, 0..) |handler, index| {
             if (handler.sig != sig) continue;
             self.signal_handlers.removeAt(ctx, index);
@@ -521,82 +528,19 @@ const SignalHandler = struct {
     }
 };
 
-const vtable = core.context.HostEventLoop.VTable{
-    .traceRoots = traceRoots,
-    .setExitCode = setExitCode,
-    .exitCode = exitCode,
-    .nextTimerId = nextTimerId,
-    .enqueueTimer = enqueueTimer,
-    .clearTimer = clearTimer,
-    .runNextTimer = runNextTimer,
-    .setRwHandler = setRwHandler,
-    .clearRwHandler = clearRwHandler,
-    .runNextRwHandler = runNextRwHandler,
-    .setSignalHandler = setSignalHandler,
-    .clearSignalHandler = clearSignalHandler,
-    .runNextSignalHandler = runNextSignalHandler,
-};
+pub const SignalDisposition = enum { default, ignore };
 
-fn fromOpaque(ptr: *anyopaque) *EventLoop {
-    return @ptrCast(@alignCast(ptr));
+fn traceHostRoots(ptr: *anyopaque, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
+    const loop: *EventLoop = @ptrCast(@alignCast(ptr));
+    try loop.traceRoots(visitor);
 }
 
-fn installedLoop(ptr: *anyopaque, core_ctx: *core.context.JSContext) *EventLoop {
-    const loop = fromOpaque(ptr);
-    std.debug.assert(loop.context == core_ctx);
-    return loop;
-}
-
-fn traceRoots(ptr: *anyopaque, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
-    try fromOpaque(ptr).traceRoots(visitor);
-}
-
-fn setExitCode(ptr: *anyopaque, code: u8) void {
-    fromOpaque(ptr).setExitCode(code);
-}
-
-fn exitCode(ptr: *anyopaque) ?u8 {
-    return fromOpaque(ptr).exitCode();
-}
-
-fn nextTimerId(ptr: *anyopaque) i64 {
-    return fromOpaque(ptr).takeNextTimerId();
-}
-
-fn enqueueTimer(ptr: *anyopaque, core_ctx: *core.context.JSContext, id: i64, callback: core.JSValue, delay_ms: u64, repeats: bool) !void {
-    try installedLoop(ptr, core_ctx).enqueueTimer(core_ctx, id, callback, delay_ms, repeats);
-}
-
-fn clearTimer(ptr: *anyopaque, core_ctx: *core.context.JSContext, id: i64) void {
-    installedLoop(ptr, core_ctx).clearTimer(core_ctx, id);
-}
-
-fn runNextTimer(ptr: *anyopaque, core_ctx: *core.context.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
-    return installedLoop(ptr, core_ctx).runNextTimer(core_ctx, output, global);
-}
-
-fn setRwHandler(ptr: *anyopaque, core_ctx: *core.context.JSContext, fd: i32, write_handler: bool, callback: core.JSValue) !void {
-    try installedLoop(ptr, core_ctx).setRwHandler(core_ctx, fd, write_handler, callback);
-}
-
-fn clearRwHandler(ptr: *anyopaque, core_ctx: *core.context.JSContext, fd: i32, write_handler: bool) void {
-    installedLoop(ptr, core_ctx).clearRwHandler(core_ctx, fd, write_handler);
-}
-
-fn runNextRwHandler(ptr: *anyopaque, core_ctx: *core.context.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
-    return installedLoop(ptr, core_ctx).runNextRwHandler(core_ctx, output, global);
-}
-
-fn setSignalHandler(ptr: *anyopaque, core_ctx: *core.context.JSContext, sig: u32, callback: core.JSValue) !void {
-    try installedLoop(ptr, core_ctx).setSignalHandler(core_ctx, sig, callback);
-}
-
-fn clearSignalHandler(ptr: *anyopaque, core_ctx: *core.context.JSContext, sig: u32, disposition: core.context.SignalDisposition) void {
-    installedLoop(ptr, core_ctx).clearSignalHandler(core_ctx, sig, disposition);
-}
-
-fn runNextSignalHandler(ptr: *anyopaque, core_ctx: *core.context.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
-    return installedLoop(ptr, core_ctx).runNextSignalHandler(core_ctx, output, global);
+fn pollHost(ptr: *anyopaque, ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object) !bool {
+    const loop: *EventLoop = @ptrCast(@alignCast(ptr));
+    std.debug.assert(loop.context == ctx);
+    if (try loop.runNextSignalHandler(ctx, output, global)) return true;
+    if (try loop.runNextRwHandler(ctx, output, global)) return true;
+    return loop.runNextTimer(ctx, output, global);
 }
 
 /// Set from the signal handler, consumed by `runNextSignalHandler` on the
@@ -617,281 +561,283 @@ fn hostTimerIo() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
 
-test "runtime.EventLoop drains queued JS callbacks" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
-    defer rt.destroy();
+pub const tests = if (@import("builtin").is_test) struct {
+    pub fn case0() !void {
+        const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+        defer rt.destroy();
 
-    const ctx = try js_context.JSContext.create(rt, .{});
-    defer ctx.destroy();
-    var loop = EventLoop.init(ctx, .{});
-    loop.install();
-    defer loop.deinit();
+        const ctx = try js_context.JSContext.create(rt, .{});
+        defer ctx.destroy();
+        var loop = EventLoop.init(ctx, .{});
+        loop.install();
+        defer loop.deinit();
 
-    const callback = try ctx.eval(
-        \\globalThis.__zjs_runtime_event_loop_hit = 0;
-        \\(() => { globalThis.__zjs_runtime_event_loop_hit = 7; })
-    , .{});
+        const callback = try ctx.eval(
+            \\globalThis.__zjs_runtime_event_loop_hit = 0;
+            \\(() => { globalThis.__zjs_runtime_event_loop_hit = 7; })
+        , .{});
 
-    try exec.call_runtime.enqueuePendingMicrotask(ctx.core, callback);
+        try exec.call_runtime.enqueuePendingMicrotask(ctx.core, callback);
 
-    const result = try loop.drain();
-    try std.testing.expect(!result.hasPendingError());
+        const result = try loop.drain();
+        try std.testing.expect(!result.hasPendingError());
 
-    const hit = try ctx.eval("globalThis.__zjs_runtime_event_loop_hit;", .{});
-    try std.testing.expectEqual(@as(?i32, 7), hit.as(.int));
-}
-
-test "runtime.EventLoop removes timers without allocation" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
-    defer rt.destroy();
-    const ctx = try js_context.JSContext.create(rt, .{});
-    defer ctx.destroy();
-
-    var loop = EventLoop.init(ctx, .{});
-    defer loop.deinit();
-
-    try loop.timers.ensureCapacity(ctx.core, 2);
-    loop.timers.items = loop.timers.items.ptr[0..2];
-    loop.timers.items[0] = .{
-        .id = 10,
-        .callback = core.JSValue.int32(1),
-        .timeout_ms = 100,
-        .delay_ms = 0,
-        .repeats = false,
-    };
-    loop.timers.items[1] = .{
-        .id = 11,
-        .callback = core.JSValue.int32(2),
-        .timeout_ms = 200,
-        .delay_ms = 5,
-        .repeats = true,
-    };
-
-    const old_bytes = rt.diagnostics.allocations.allocated_bytes;
-    const old_allocations = rt.diagnostics.allocations.allocation_count;
-    rt.setNativeBytesLimitForTest(old_bytes);
-    loop.timers.removeAt(ctx.core, 0);
-    rt.setNativeBytesLimitForTest(null);
-
-    try std.testing.expectEqual(@as(usize, 1), loop.timers.items.len);
-    try std.testing.expectEqual(@as(usize, 2), loop.timers.capacity);
-    try std.testing.expectEqual(@as(i64, 11), loop.timers.items[0].id);
-    try std.testing.expectEqual(old_bytes, rt.diagnostics.allocations.allocated_bytes);
-    try std.testing.expectEqual(old_allocations, rt.diagnostics.allocations.allocation_count);
-
-    loop.timers.removeAt(ctx.core, 0);
-    try std.testing.expectEqual(@as(usize, 0), loop.timers.items.len);
-    try std.testing.expectEqual(@as(usize, 0), loop.timers.capacity);
-}
-
-test "runtime.EventLoop removes rw handlers without allocation" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
-    defer rt.destroy();
-    const ctx = try js_context.JSContext.create(rt, .{});
-    defer ctx.destroy();
-
-    var loop = EventLoop.init(ctx, .{});
-    defer loop.deinit();
-
-    try loop.rw_handlers.ensureCapacity(ctx.core, 2);
-    loop.rw_handlers.items = loop.rw_handlers.items.ptr[0..2];
-    loop.rw_handlers.items[0] = .{
-        .fd = 10,
-        .read_callback = core.JSValue.int32(1),
-        .write_callback = core.JSValue.nullValue(),
-    };
-    loop.rw_handlers.items[1] = .{
-        .fd = 11,
-        .read_callback = core.JSValue.int32(2),
-        .write_callback = core.JSValue.nullValue(),
-    };
-
-    const old_bytes = rt.diagnostics.allocations.allocated_bytes;
-    const old_allocations = rt.diagnostics.allocations.allocation_count;
-    rt.setNativeBytesLimitForTest(old_bytes);
-    loop.rw_handlers.removeAt(ctx.core, 0);
-    rt.setNativeBytesLimitForTest(null);
-
-    try std.testing.expectEqual(@as(usize, 1), loop.rw_handlers.items.len);
-    try std.testing.expectEqual(@as(usize, 2), loop.rw_handlers.capacity);
-    try std.testing.expectEqual(@as(i32, 11), loop.rw_handlers.items[0].fd);
-    try std.testing.expectEqual(old_bytes, rt.diagnostics.allocations.allocated_bytes);
-    try std.testing.expectEqual(old_allocations, rt.diagnostics.allocations.allocation_count);
-
-    loop.rw_handlers.removeAt(ctx.core, 0);
-    try std.testing.expectEqual(@as(usize, 0), loop.rw_handlers.items.len);
-    try std.testing.expectEqual(@as(usize, 0), loop.rw_handlers.capacity);
-}
-
-test "runtime.EventLoop removes signal handlers without allocation" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
-    defer rt.destroy();
-    const ctx = try js_context.JSContext.create(rt, .{});
-    defer ctx.destroy();
-
-    var loop = EventLoop.init(ctx, .{});
-    defer loop.deinit();
-
-    try loop.signal_handlers.ensureCapacity(ctx.core, 2);
-    loop.signal_handlers.items = loop.signal_handlers.items.ptr[0..2];
-    loop.signal_handlers.items[0] = .{
-        .sig = 1,
-        .callback = core.JSValue.int32(1),
-    };
-    loop.signal_handlers.items[1] = .{
-        .sig = 2,
-        .callback = core.JSValue.int32(2),
-    };
-
-    const old_bytes = rt.diagnostics.allocations.allocated_bytes;
-    const old_allocations = rt.diagnostics.allocations.allocation_count;
-    rt.setNativeBytesLimitForTest(old_bytes);
-    loop.signal_handlers.removeAt(ctx.core, 0);
-    rt.setNativeBytesLimitForTest(null);
-
-    try std.testing.expectEqual(@as(usize, 1), loop.signal_handlers.items.len);
-    try std.testing.expectEqual(@as(usize, 2), loop.signal_handlers.capacity);
-    try std.testing.expectEqual(@as(u32, 2), loop.signal_handlers.items[0].sig);
-    try std.testing.expectEqual(old_bytes, rt.diagnostics.allocations.allocated_bytes);
-    try std.testing.expectEqual(old_allocations, rt.diagnostics.allocations.allocation_count);
-
-    loop.signal_handlers.removeAt(ctx.core, 0);
-    try std.testing.expectEqual(@as(usize, 0), loop.signal_handlers.items.len);
-    try std.testing.expectEqual(@as(usize, 0), loop.signal_handlers.capacity);
-}
-
-test "runtime.EventLoop keeps host-held unique symbol atoms until release" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
-    defer rt.destroy();
-    const ctx = try js_context.JSContext.create(rt, .{});
-    defer ctx.destroy();
-
-    var loop = EventLoop.init(ctx, .{});
-    loop.install();
-    defer loop.deinit();
-
-    const timer_symbol = try rt.atoms.newValueSymbol("gc-event-loop-timer-symbol");
-    const timer_value = try rt.takeSymbolValue(timer_symbol);
-    try loop.enqueueTimer(ctx.core, 1, timer_value, 0, false);
-
-    const rw_read_symbol = try rt.atoms.newValueSymbol("gc-event-loop-rw-read-symbol");
-    const rw_write_symbol = try rt.atoms.newValueSymbol("gc-event-loop-rw-write-symbol");
-    const rw_read_value = try rt.takeSymbolValue(rw_read_symbol);
-    try loop.setRwHandler(ctx.core, 1, false, rw_read_value);
-    const rw_write_value = try rt.takeSymbolValue(rw_write_symbol);
-    try loop.setRwHandler(ctx.core, 1, true, rw_write_value);
-
-    const signal_symbol = try rt.atoms.newValueSymbol("gc-event-loop-signal-symbol");
-    const signal_value = try rt.takeSymbolValue(signal_symbol);
-    try loop.signal_handlers.append(ctx.core, SignalHandler.init(2, signal_value));
-
-    _ = rt.collectForTest();
-    try std.testing.expect(rt.atoms.name(timer_symbol) != null);
-    try std.testing.expect(rt.atoms.name(rw_read_symbol) != null);
-    try std.testing.expect(rt.atoms.name(rw_write_symbol) != null);
-    try std.testing.expect(rt.atoms.name(signal_symbol) != null);
-
-    loop.clearTimer(ctx.core, 1);
-    loop.clearRwHandler(ctx.core, 1, false);
-    loop.clearRwHandler(ctx.core, 1, true);
-    loop.signal_handlers.removeAt(ctx.core, 0);
-
-    _ = rt.collectForTest();
-    try std.testing.expect(rt.atoms.name(timer_symbol) == null);
-    try std.testing.expect(rt.atoms.name(rw_read_symbol) == null);
-    try std.testing.expect(rt.atoms.name(rw_write_symbol) == null);
-    try std.testing.expect(rt.atoms.name(signal_symbol) == null);
-}
-
-test "runtime.root tracer visits EventLoop host roots" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
-    defer rt.destroy();
-
-    var ctx: js_context.JSContext = undefined;
-    try ctx.init(rt, .{});
-    defer ctx.deinit();
-
-    var loop = EventLoop.init(&ctx, .{});
-    loop.install();
-    defer loop.deinit();
-
-    try loop.enqueueTimer(ctx.core, 1, core.JSValue.int32(102), 0, false);
-    try loop.setRwHandler(ctx.core, 1, false, core.JSValue.int32(103));
-    try loop.setRwHandler(ctx.core, 1, true, core.JSValue.int32(104));
-    try loop.signal_handlers.append(ctx.core, SignalHandler.init(2, core.JSValue.int32(105)));
-
-    const Counter = struct {
-        count: usize = 0,
-
-        fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
-            const self: *@This() = @ptrCast(@alignCast(context));
-            if (slot.as(.int)) |value| {
-                if (value >= 102 and value <= 105) self.count += 1;
-            }
-        }
-
-        fn visitObject(context: *anyopaque, slot: *?*core.Object) core.runtime.RootTraceError!void {
-            _ = context;
-            _ = slot;
-        }
-    };
-    var counter = Counter{};
-    var visitor = core.runtime.RootVisitor{
-        .context = &counter,
-        .visit_value = Counter.visitValue,
-        .visit_object = Counter.visitObject,
-    };
-    try rt.traceActiveRoots(&visitor);
-
-    try std.testing.expectEqual(@as(usize, 4), counter.count);
-}
-
-test "runtime.EventLoop roots one-shot function bytecode timer callback after dequeue" {
-    const bytecode = @import("bytecode.zig");
-
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
-    const ctx = try js_context.JSContext.create(rt, .{});
-    const global = try js_context.globalObjectPtr(ctx);
-    defer {
-        ctx.destroy();
-        rt.destroy();
+        const hit = try ctx.eval("globalThis.__zjs_runtime_event_loop_hit;", .{});
+        try std.testing.expectEqual(@as(?i32, 7), hit.as(.int));
     }
 
-    var loop = EventLoop.init(ctx, .{});
-    defer loop.deinit();
+    pub fn case1() !void {
+        const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+        defer rt.destroy();
+        const ctx = try js_context.JSContext.create(rt, .{});
+        defer ctx.destroy();
 
-    const symbol_atom = try rt.atoms.newValueSymbol("gc-timer-bytecode-symbol");
-    const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{
-        .realm = ctx.core,
-        .flags = .{ .func_kind = .generator },
-        .cpool_count = 1,
-    }, &.{try rt.takeSymbolValue(symbol_atom)});
+        var loop = EventLoop.init(ctx, .{});
+        defer loop.deinit();
 
-    const callback = core.JSValue.functionBytecode(&fb.header);
+        try loop.timers.ensureCapacity(ctx.core, 2);
+        loop.timers.items = loop.timers.items.ptr[0..2];
+        loop.timers.items[0] = .{
+            .id = 10,
+            .callback = core.JSValue.int32(1),
+            .timeout_ms = 100,
+            .delay_ms = 0,
+            .repeats = false,
+        };
+        loop.timers.items[1] = .{
+            .id = 11,
+            .callback = core.JSValue.int32(2),
+            .timeout_ms = 200,
+            .delay_ms = 5,
+            .repeats = true,
+        };
 
-    try loop.enqueueTimer(ctx.core, 1, callback, 0, false);
-    const old_threshold = rt.gcThreshold();
-    rt.setGCThreshold(0);
-    defer rt.setGCThreshold(old_threshold);
-    try std.testing.expect(try loop.runNextTimer(ctx.core, null, global));
+        const old_bytes = rt.diagnostics.allocations.allocated_bytes;
+        const old_allocations = rt.diagnostics.allocations.allocation_count;
+        rt.setNativeBytesLimitForTest(old_bytes);
+        loop.timers.removeAt(ctx.core, 0);
+        rt.setNativeBytesLimitForTest(null);
 
-    try std.testing.expect(rt.atoms.name(symbol_atom) != null);
+        try std.testing.expectEqual(@as(usize, 1), loop.timers.items.len);
+        try std.testing.expectEqual(@as(usize, 2), loop.timers.capacity);
+        try std.testing.expectEqual(@as(i64, 11), loop.timers.items[0].id);
+        try std.testing.expectEqual(old_bytes, rt.diagnostics.allocations.allocated_bytes);
+        try std.testing.expectEqual(old_allocations, rt.diagnostics.allocations.allocation_count);
 
-    _ = rt.collectForTest();
-    try std.testing.expect(rt.atoms.name(symbol_atom) == null);
-}
+        loop.timers.removeAt(ctx.core, 0);
+        try std.testing.expectEqual(@as(usize, 0), loop.timers.items.len);
+        try std.testing.expectEqual(@as(usize, 0), loop.timers.capacity);
+    }
 
-test "runtime.namespace does not expose internals or kernel primitives" {
-    try std.testing.expect(!@hasDecl(@This(), "event_loop"));
-    try std.testing.expect(!@hasDecl(@This(), "cleanup"));
-    try std.testing.expect(!@hasDecl(@This(), "modules"));
-    try std.testing.expect(!@hasDecl(@This(), "plugin"));
-    try std.testing.expect(!@hasDecl(@This(), "buffer"));
-    try std.testing.expect(!@hasDecl(@This(), "Engine"));
-    try std.testing.expect(!@hasDecl(@This(), "JSRuntime"));
-    try std.testing.expect(!@hasDecl(@This(), "JSContext"));
-    try std.testing.expect(!@hasDecl(@This(), "JSValue"));
-    try std.testing.expect(!@hasDecl(@This(), "Object"));
-    try std.testing.expect(!@hasDecl(@This(), "binding"));
-    try std.testing.expect(!@hasDecl(@This(), "ffi"));
-}
+    pub fn case2() !void {
+        const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+        defer rt.destroy();
+        const ctx = try js_context.JSContext.create(rt, .{});
+        defer ctx.destroy();
+
+        var loop = EventLoop.init(ctx, .{});
+        defer loop.deinit();
+
+        try loop.rw_handlers.ensureCapacity(ctx.core, 2);
+        loop.rw_handlers.items = loop.rw_handlers.items.ptr[0..2];
+        loop.rw_handlers.items[0] = .{
+            .fd = 10,
+            .read_callback = core.JSValue.int32(1),
+            .write_callback = core.JSValue.nullValue(),
+        };
+        loop.rw_handlers.items[1] = .{
+            .fd = 11,
+            .read_callback = core.JSValue.int32(2),
+            .write_callback = core.JSValue.nullValue(),
+        };
+
+        const old_bytes = rt.diagnostics.allocations.allocated_bytes;
+        const old_allocations = rt.diagnostics.allocations.allocation_count;
+        rt.setNativeBytesLimitForTest(old_bytes);
+        loop.rw_handlers.removeAt(ctx.core, 0);
+        rt.setNativeBytesLimitForTest(null);
+
+        try std.testing.expectEqual(@as(usize, 1), loop.rw_handlers.items.len);
+        try std.testing.expectEqual(@as(usize, 2), loop.rw_handlers.capacity);
+        try std.testing.expectEqual(@as(i32, 11), loop.rw_handlers.items[0].fd);
+        try std.testing.expectEqual(old_bytes, rt.diagnostics.allocations.allocated_bytes);
+        try std.testing.expectEqual(old_allocations, rt.diagnostics.allocations.allocation_count);
+
+        loop.rw_handlers.removeAt(ctx.core, 0);
+        try std.testing.expectEqual(@as(usize, 0), loop.rw_handlers.items.len);
+        try std.testing.expectEqual(@as(usize, 0), loop.rw_handlers.capacity);
+    }
+
+    pub fn case3() !void {
+        const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+        defer rt.destroy();
+        const ctx = try js_context.JSContext.create(rt, .{});
+        defer ctx.destroy();
+
+        var loop = EventLoop.init(ctx, .{});
+        defer loop.deinit();
+
+        try loop.signal_handlers.ensureCapacity(ctx.core, 2);
+        loop.signal_handlers.items = loop.signal_handlers.items.ptr[0..2];
+        loop.signal_handlers.items[0] = .{
+            .sig = 1,
+            .callback = core.JSValue.int32(1),
+        };
+        loop.signal_handlers.items[1] = .{
+            .sig = 2,
+            .callback = core.JSValue.int32(2),
+        };
+
+        const old_bytes = rt.diagnostics.allocations.allocated_bytes;
+        const old_allocations = rt.diagnostics.allocations.allocation_count;
+        rt.setNativeBytesLimitForTest(old_bytes);
+        loop.signal_handlers.removeAt(ctx.core, 0);
+        rt.setNativeBytesLimitForTest(null);
+
+        try std.testing.expectEqual(@as(usize, 1), loop.signal_handlers.items.len);
+        try std.testing.expectEqual(@as(usize, 2), loop.signal_handlers.capacity);
+        try std.testing.expectEqual(@as(u32, 2), loop.signal_handlers.items[0].sig);
+        try std.testing.expectEqual(old_bytes, rt.diagnostics.allocations.allocated_bytes);
+        try std.testing.expectEqual(old_allocations, rt.diagnostics.allocations.allocation_count);
+
+        loop.signal_handlers.removeAt(ctx.core, 0);
+        try std.testing.expectEqual(@as(usize, 0), loop.signal_handlers.items.len);
+        try std.testing.expectEqual(@as(usize, 0), loop.signal_handlers.capacity);
+    }
+
+    pub fn case4() !void {
+        const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+        defer rt.destroy();
+        const ctx = try js_context.JSContext.create(rt, .{});
+        defer ctx.destroy();
+
+        var loop = EventLoop.init(ctx, .{});
+        loop.install();
+        defer loop.deinit();
+
+        const timer_symbol = try rt.atoms.newValueSymbol("gc-event-loop-timer-symbol");
+        const timer_value = try rt.takeSymbolValue(timer_symbol);
+        try loop.enqueueTimer(ctx.core, 1, timer_value, 0, false);
+
+        const rw_read_symbol = try rt.atoms.newValueSymbol("gc-event-loop-rw-read-symbol");
+        const rw_write_symbol = try rt.atoms.newValueSymbol("gc-event-loop-rw-write-symbol");
+        const rw_read_value = try rt.takeSymbolValue(rw_read_symbol);
+        try loop.setRwHandler(ctx.core, 1, false, rw_read_value);
+        const rw_write_value = try rt.takeSymbolValue(rw_write_symbol);
+        try loop.setRwHandler(ctx.core, 1, true, rw_write_value);
+
+        const signal_symbol = try rt.atoms.newValueSymbol("gc-event-loop-signal-symbol");
+        const signal_value = try rt.takeSymbolValue(signal_symbol);
+        try loop.signal_handlers.append(ctx.core, SignalHandler.init(2, signal_value));
+
+        _ = rt.collectForTest();
+        try std.testing.expect(rt.atoms.name(timer_symbol) != null);
+        try std.testing.expect(rt.atoms.name(rw_read_symbol) != null);
+        try std.testing.expect(rt.atoms.name(rw_write_symbol) != null);
+        try std.testing.expect(rt.atoms.name(signal_symbol) != null);
+
+        loop.clearTimer(ctx.core, 1);
+        loop.clearRwHandler(ctx.core, 1, false);
+        loop.clearRwHandler(ctx.core, 1, true);
+        loop.signal_handlers.removeAt(ctx.core, 0);
+
+        _ = rt.collectForTest();
+        try std.testing.expect(rt.atoms.name(timer_symbol) == null);
+        try std.testing.expect(rt.atoms.name(rw_read_symbol) == null);
+        try std.testing.expect(rt.atoms.name(rw_write_symbol) == null);
+        try std.testing.expect(rt.atoms.name(signal_symbol) == null);
+    }
+
+    pub fn case5() !void {
+        const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+        defer rt.destroy();
+
+        var ctx: js_context.JSContext = undefined;
+        try ctx.init(rt, .{});
+        defer ctx.deinit();
+
+        var loop = EventLoop.init(&ctx, .{});
+        loop.install();
+        defer loop.deinit();
+
+        try loop.enqueueTimer(ctx.core, 1, core.JSValue.int32(102), 0, false);
+        try loop.setRwHandler(ctx.core, 1, false, core.JSValue.int32(103));
+        try loop.setRwHandler(ctx.core, 1, true, core.JSValue.int32(104));
+        try loop.signal_handlers.append(ctx.core, SignalHandler.init(2, core.JSValue.int32(105)));
+
+        const Counter = struct {
+            count: usize = 0,
+
+            fn visitValue(context: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
+                const self: *@This() = @ptrCast(@alignCast(context));
+                if (slot.as(.int)) |value| {
+                    if (value >= 102 and value <= 105) self.count += 1;
+                }
+            }
+
+            fn visitObject(context: *anyopaque, slot: *?*core.Object) core.runtime.RootTraceError!void {
+                _ = context;
+                _ = slot;
+            }
+        };
+        var counter = Counter{};
+        var visitor = core.runtime.RootVisitor{
+            .context = &counter,
+            .visit_value = Counter.visitValue,
+            .visit_object = Counter.visitObject,
+        };
+        try rt.traceActiveRoots(&visitor);
+
+        try std.testing.expectEqual(@as(usize, 4), counter.count);
+    }
+
+    pub fn case6() !void {
+        const bytecode = zjs.bytecode;
+
+        const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+        const ctx = try js_context.JSContext.create(rt, .{});
+        const global = try js_context.globalObjectPtr(ctx);
+        defer {
+            ctx.destroy();
+            rt.destroy();
+        }
+
+        var loop = EventLoop.init(ctx, .{});
+        defer loop.deinit();
+
+        const symbol_atom = try rt.atoms.newValueSymbol("gc-timer-bytecode-symbol");
+        const fb = try bytecode.FunctionBytecode.createPublishedFixture(rt, .{
+            .realm = ctx.core,
+            .flags = .{ .func_kind = .generator },
+            .cpool_count = 1,
+        }, &.{try rt.takeSymbolValue(symbol_atom)});
+
+        const callback = core.JSValue.functionBytecode(&fb.header);
+
+        try loop.enqueueTimer(ctx.core, 1, callback, 0, false);
+        const old_threshold = rt.gcThreshold();
+        rt.setGCThreshold(0);
+        defer rt.setGCThreshold(old_threshold);
+        try std.testing.expect(try loop.runNextTimer(ctx.core, null, global));
+
+        try std.testing.expect(rt.atoms.name(symbol_atom) != null);
+
+        _ = rt.collectForTest();
+        try std.testing.expect(rt.atoms.name(symbol_atom) == null);
+    }
+
+    pub fn case7() !void {
+        try std.testing.expect(!@hasDecl(@This(), "event_loop"));
+        try std.testing.expect(!@hasDecl(@This(), "cleanup"));
+        try std.testing.expect(!@hasDecl(@This(), "modules"));
+        try std.testing.expect(!@hasDecl(@This(), "plugin"));
+        try std.testing.expect(!@hasDecl(@This(), "buffer"));
+        try std.testing.expect(!@hasDecl(@This(), "Engine"));
+        try std.testing.expect(!@hasDecl(@This(), "JSRuntime"));
+        try std.testing.expect(!@hasDecl(@This(), "JSContext"));
+        try std.testing.expect(!@hasDecl(@This(), "JSValue"));
+        try std.testing.expect(!@hasDecl(@This(), "Object"));
+        try std.testing.expect(!@hasDecl(@This(), "binding"));
+        try std.testing.expect(!@hasDecl(@This(), "ffi"));
+    }
+} else struct {};

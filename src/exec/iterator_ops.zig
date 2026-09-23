@@ -195,7 +195,7 @@ fn testAsyncFromSyncIsCallable(value: core.JSValue) bool {
 }
 
 test "createAsyncFromSyncIterator roots direct function bytecode next method while creating wrapper" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const ctx = try core.JSContext.create(rt, .{});
@@ -1094,7 +1094,7 @@ fn testArrayIteratorGetValueProperty(
 }
 
 test "arrayIteratorValue roots entry value while creating pair array" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const ctx = try core.JSContext.create(rt, .{});
@@ -1358,7 +1358,7 @@ fn testIteratorConcatGetIteratorMethod(
 }
 
 test "iteratorConcatCall roots direct function bytecode iterator method while creating helper" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const ctx = try core.JSContext.create(rt, .{});
@@ -1828,7 +1828,7 @@ pub fn iteratorZipStoreIndex(rt: *core.JSRuntime, object: *core.Object, index: u
 }
 
 test "iteratorZipStoreIndex roots direct function bytecode value while defining property" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
@@ -1859,7 +1859,7 @@ test "iteratorZipStoreIndex roots direct function bytecode value while defining 
 }
 
 test "iteratorZipStoreIndex roots direct symbol value while defining property" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const object = try core.Object.create(rt, core.class.ids.object, null);
@@ -2412,7 +2412,7 @@ fn iteratorCreateHelper(
 }
 
 test "iteratorCreateHelper roots direct function bytecode callback while creating helper" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const ctx = try core.JSContext.create(rt, .{});
@@ -3237,7 +3237,7 @@ pub fn closeIteratorForFromEntriesAbrupt(
 }
 
 test "createIteratorResult roots direct function bytecode value while creating result" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const symbol_atom = try rt.atoms.newValueSymbol("gc-closure-iterator-result-bytecode-symbol");
@@ -3400,7 +3400,7 @@ pub fn prototypeMethodId(name: []const u8) ?u32 {
 /// the static helpers reach the for-of machinery. Standard-global bootstrap
 /// resolves names through its iterator static/prototype method lists plus the
 /// accessor/dispose enum ids; this table is consumed by the record-dispatch
-/// path (`rt.internal_builtins`).
+/// path (`internal_builtins.table`).
 pub const internal_entries = iteratorEntries: {
     const Entry = core.host_function.InternalEntry;
     break :iteratorEntries [_]Entry{
@@ -3572,7 +3572,7 @@ fn forInFastArrayCount(rt: *core.JSRuntime, source: *core.Object) ?u32 {
         if (prop_flags.enumerable) return null;
         // qjs fast arrays never carry shape-resident index props; if zjs has
         // any (sparse remnants) the normal snapshot must merge them.
-        if (core.array.arrayIndexFromAtom(&rt.atoms, prop.atom_id) != null) return null;
+        if (core.array.arrayIndexFromAtom(rt.atoms, prop.atom_id) != null) return null;
     }
     return std.math.cast(u32, source.arrayElements().len) orelse null;
 }

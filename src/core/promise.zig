@@ -68,7 +68,7 @@ pub fn rejectedWithPrototype(realm: *core.RealmContext, reason: core.JSValue, pr
 }
 
 test "fulfilledWithPrototype roots direct function bytecode result while constructing promise" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
     const realm = try core.RealmContext.create(rt, .{});
     defer realm.destroy();

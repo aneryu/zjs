@@ -12,7 +12,7 @@ The examples below are covered by `tests/embedding_examples.zig`.
 const std = @import("std");
 const zjs = @import("zjs");
 
-const rt = try zjs.Runtime.create(.{ .allocator = allocator });
+const rt = try zjs.Runtime.create(allocator, .{});
 defer rt.destroy();
 
 const ctx = try zjs.Context.create(rt, .{});
@@ -29,17 +29,29 @@ Rooting Rules below for everything that is not a stack local.
 ## Eval With Output
 
 ```zig
+const Output = struct {
+    fn write(call: *zjs.Call) !zjs.Value {
+        const allocator = call.runtime().nativeAllocator();
+        const bytes = try call.ctx.toOwnedUtf8(call.arg(0), allocator);
+        defer allocator.free(bytes);
+        if (call.output()) |writer| try writer.print("{s}\n", .{bytes});
+        return zjs.Value.undefinedValue();
+    }
+};
+_ = try ctx.defineFunction("write", Output.write, .{ .length = 1 });
 var buffer: [128]u8 = undefined;
 var output = std.Io.Writer.fixed(&buffer);
 
-const result = try ctx.eval("print('ok');", .{
+const result = try ctx.eval("write('ok');", .{
     .output = &output,
 });
 ```
 
-The default global host surface is intentionally small: `print` and
-`console.log` are available, but Node/Deno/browser globals are not installed by
-default.
+The engine does not install bundled output functions. The CLI and test262
+runner explicitly install `print` and console through their internal host
+module. Embedders supply their own functions, as above. `zjs.EventLoop` and
+`zjs.runtime` were removed: own the event source and call `Context.runJobs`
+to drive engine jobs.
 
 ## Host-Held Values
 
@@ -230,7 +242,8 @@ teardown), not when the host's last reference goes away.
 ## Construction With Limits
 
 ```zig
-const rt = try zjs.Runtime.create(.{ .allocator = allocator, .stack_size = 512 * 1024,
+const rt = try zjs.Runtime.create(allocator, .{
+    .stack_size = 512 * 1024,
     .gc_threshold = 2 * 1024 * 1024,
 });
 defer rt.destroy();

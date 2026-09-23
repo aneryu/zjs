@@ -5,13 +5,12 @@
 //! teardown, falling back to an immediate call if the deferred queue cannot
 //! accept them. The lists stay on `JSRuntime`.
 
-const mem_ops = @import("memory.zig");
 const native_entry = @import("native_entry.zig");
 const JSRuntime = @import("../runtime.zig").JSRuntime;
 
 pub fn alloc(rt: *JSRuntime, template: native_entry.NativeEntry) !*const native_entry.NativeEntry {
-    const entry = try mem_ops.create(rt, native_entry.NativeEntry);
-    errdefer mem_ops.destroy(rt, native_entry.NativeEntry, entry);
+    const entry = try rt.createNative(native_entry.NativeEntry);
+    errdefer rt.destroyNative(native_entry.NativeEntry, entry);
     entry.* = template;
     try rt.native_entries.append(rt.nativeAllocator(), entry);
     return entry;
@@ -38,7 +37,7 @@ pub fn destroyOwned(rt: *JSRuntime) void {
     finalizers_storage.deinit(rt.nativeAllocator());
     const entries = rt.native_entries;
     rt.native_entries = .empty;
-    for (entries.items) |entry| mem_ops.destroy(rt, native_entry.NativeEntry, entry);
+    for (entries.items) |entry| rt.destroyNative(native_entry.NativeEntry, entry);
     var entries_storage = entries;
     entries_storage.deinit(rt.nativeAllocator());
 }

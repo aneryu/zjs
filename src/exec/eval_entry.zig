@@ -461,9 +461,7 @@ fn runOneModuleAwaitHostEvent(
     output: ?*std.Io.Writer,
     global: *core.Object,
 ) !bool {
-    if (try call.runNextOsSignalHandler(ctx, output, global)) return true;
-    if (try call_runtime.runNextOsRwHandler(ctx, output, global)) return true;
-    if (try call_runtime.runNextOsTimer(ctx, output, global)) return true;
+    if (try call_runtime.pollHostScheduler(ctx, output, global)) return true;
     return atomics_ops.runNextAtomicsHostCompletion(ctx, false);
 }
 

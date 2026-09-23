@@ -2,12 +2,12 @@
 //! Governing Layer: third_party/zjs/src/core/gc.zig
 //! Following Z-GE Architecture Contract v1.0
 
-const mem_ops = @import("memory.zig");
+const native_alloc = @import("../runtime_alloc.zig");
+pub const allocation = @import("gc_alloc.zig");
 const std = @import("std");
 pub const representation = @import("gc_representation_constants.zig");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
-const memory = @import("memory.zig");
 const carrier = @import("gc_carrier.zig");
 const bigint = @import("bigint.zig");
 const object = @import("object.zig");
@@ -57,7 +57,7 @@ pub const ResolvedCurrentMember = union(enum) {
 /// history, and adding a `print` to find out where moves the collection and the
 /// failure disappears. These three widen the window and then check the verdict.
 ///
-/// Read once at `Registry.init` rather than at each check: the minor path is
+/// Read once at `Registry.create` rather than at each check: the minor path is
 /// exactly where a `getenv` per collection is the probe that hides the bug --
 /// regexp performs 794 minors in a two-second script.
 pub const Forensics = struct {
@@ -598,7 +598,7 @@ pub fn ratioPerMille(numerator: usize, denominator: usize) usize {
 ///
 /// TGC S4-a: the kind grew from three bits into the retired `mark` bit
 /// (bit 3). Every other flag keeps its historical bit position, so the raw
-/// prefix writers in `memory.zig`, the free-cell poison and
+/// prefix writers in `gc_alloc.zig`, the free-cell poison and
 /// `metadata_young_mask` are all byte-identical to before.
 pub const BlockFlags = packed struct(u8) {
     /// GC kind tag (qjs `gc_obj_type`). Bits 0-3.
@@ -606,14 +606,14 @@ pub const BlockFlags = packed struct(u8) {
     /// Padding: former `in_cycle_list`. Membership is the cyclic list itself
     /// (qjs `list_add_tail` / `list_del`, quickjs.c). Kept so
     /// `finalizing` / the spare bit stay at their historical bit positions
-    /// — `memory.zig` writes this flags byte by layout.
+    /// — `gc_alloc.zig` writes this flags byte by layout.
     /// Was `in_cycle_list`, then padding. Now carries the sticky generation
     /// bit: set on publication, cleared when a collection lets the object
     /// survive. It lives here rather than in a side table because a hash-map
     /// insert on every allocation measured at 28% of throughput -- the object
     /// header is the only place cheap enough for a per-allocation fact.
     ///
-    /// The bit position is unchanged, so `memory.zig`'s by-layout write of
+    /// The bit position is unchanged, so `gc_alloc.zig`'s by-layout write of
     /// this byte still lands where it always did.
     young: bool = false,
     finalizing: bool = false,
@@ -718,7 +718,7 @@ pub const Metadata = extern struct {
 pub const metadata_prefix_size: usize = @sizeOf(Metadata);
 
 comptime {
-    // The allocator initializes the prefix by raw byte writes (memory.zig has no
+    // The allocator initializes the prefix by raw byte writes (gc_alloc.zig has no
     // gc import); these offsets and bit positions must remain stable.
     std.debug.assert(@sizeOf(Metadata) == representation.metadata_size);
     std.debug.assert(@alignOf(Metadata) == 8);
@@ -738,7 +738,7 @@ comptime {
     std.debug.assert(@as(u8, @bitCast(AllocInfo{ .block_size_idx = representation.block_cell_size_class })) == representation.block_cell_alloc_info);
     // Kind occupies the low 3 bits of the shared kind/flags byte; a bare tag
     // byte (all flags clear) equals the enum value, which is what the raw
-    // prefix writers in memory.zig and object.zig store.
+    // prefix writers in gc_alloc.zig and object.zig store.
     std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .big_int })) == @intFromEnum(GcKind.big_int));
     std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .rope })) == @intFromEnum(GcKind.rope));
     std.debug.assert(@as(u8, @bitCast(BlockFlags{ .kind = .object, .young = true })) == representation.metadata_young_mask);
@@ -1193,7 +1193,7 @@ pub fn verifyMetadataSemantics(
     if (meta.alloc_info.standalone) {
         if (meta.alloc_info.block_size_idx != 0)
             return error.RepresentationAllocationCarrierMismatch;
-    } else if (!is_block_cell and meta.alloc_info.block_size_idx >= memory.SmallObjectSlab.class_count) {
+    } else if (!is_block_cell and meta.alloc_info.block_size_idx >= allocation.SmallObjectSlab.class_count) {
         return error.RepresentationAllocationCarrierMismatch;
     }
     return verifyMetadataLifetime(meta, expected_kind, state);
@@ -1442,7 +1442,9 @@ pub const Registry = struct {
     // .text grew 5,260 bytes on address materialization alone.
     hot: HotWords align(64) = .{},
 
-    runtime: *JSRuntime,
+    /// Borrowed owner, attached only after Runtime storage is initialized.
+    runtime: ?*JSRuntime = null,
+    allocator: std.mem.Allocator,
 
     /// The published non-Object carrier list and its cursors.
     /// See `gc_registry_lists.zig`.
@@ -1488,7 +1490,7 @@ pub const Registry = struct {
     collection_epoch: u64 = 0,
     /// The slab whose arena lifetimes the address registry observes, for
     /// recovery.
-    arena_slab: ?*memory.SmallObjectSlab = null,
+    arena_slab: ?*allocation.SmallObjectSlab = null,
 
     /// Host pins and construction roots. See `gc_registry_pins.zig`.
     pins: PinLedger = .{},
@@ -1532,7 +1534,7 @@ pub const Registry = struct {
     /// with the JS heap limit.
     ///
     /// The OOM-injection tier must nevertheless route it through
-    /// `mem_ops.backing_allocator` -- the *unaccounted* raw allocator
+    /// `Registry.allocator` -- the *unaccounted* raw allocator
     /// the account itself sits on. Everything the tracing collector moved
     /// into the block heap (S2: the string family; S4-b: property storage
     /// and array element buffers) is otherwise invisible to
@@ -1546,7 +1548,7 @@ pub const Registry = struct {
     /// the shipped build, so only the injection surface changes. That surface
     /// is the `test-oom` step's alone: keyed off `builtin.is_test` it changed
     /// the allocator topology of the whole unit suite.
-    const block_heap_uses_account_backing = memory.oom_injection_enabled;
+    const block_heap_uses_account_backing = allocation.oom_injection_enabled;
 
     // The positional contract `hot` exists to hold. Prose in a doc comment
     // is not a constraint: before S5-d these facts were asserted only by a
@@ -1562,34 +1564,101 @@ pub const Registry = struct {
         std.debug.assert(@alignOf(Registry) >= 64);
     }
 
-    /// Infallible by construction: every sub-structure is default-initialized
-    /// and the only argument-derived fields are two pointers and the policy
-    /// block, so there is no partially-constructed Registry to roll back and
-    /// no errdefer to write. The rollback obligation is one level up --
-    /// `JSRuntime` construction can fail after this returns -- which is why
-    /// each sub-structure's `deinit` is idempotent instead.
-    pub fn init(account: *@import("../runtime.zig").JSRuntime, policy: Policy) Registry {
-        forensics.readFromEnv();
-        return .{
-            .runtime = account,
-            .scheduler = .{ .policy = policy },
+    pub const Options = struct {
+        policy: Policy,
+        threshold: usize,
+        memory_limit: ?usize,
+    };
+
+    // GC allocation operates on this Registry's budget and cell storage.
+    pub const allocStandaloneObject = allocation.allocStandaloneObject;
+    pub const freeStandaloneObject = allocation.freeStandaloneObject;
+    pub const createObjectConstFamNoTrigger = allocation.createObjectConstFamNoTrigger;
+    pub const createObjectWithFamNoTrigger = allocation.createObjectWithFamNoTrigger;
+    pub const createCell = allocation.create;
+    pub const createCellNoTrigger = allocation.createNoTrigger;
+    pub const allocPromotedObjectCell = allocation.allocPromotedObjectCell;
+    pub const carrierGenerationHandle = allocation.carrierGenerationHandle;
+    pub const carrierTransition = allocation.carrierTransition;
+    pub const carrierPublish = allocation.carrierPublish;
+    pub const deinitGcCarrier = allocation.deinitGcCarrier;
+    pub const destroyCell = allocation.destroy;
+    pub const destroyConstFam = allocation.destroyConstFam;
+    pub const createWithFam = allocation.createWithFam;
+    pub const createWithFamComptime = allocation.createWithFamComptime;
+    pub const destroyWithFam = allocation.destroyWithFam;
+    pub const createStringCell = allocation.createStringCell;
+    pub const destroyStringCell = allocation.destroyStringCell;
+    pub const createStringExtent = allocation.createStringExtent;
+    pub const createExtent = allocation.createExtent;
+    pub const destroyStringExtent = allocation.destroyStringExtent;
+    pub const createStorageCell = allocation.createStorageCell;
+    pub const noteBlockCellBitmapReclaim = allocation.noteBlockCellBitmapReclaim;
+    pub const debitBlockBytes = allocation.debitBlockBytes;
+    pub const enableSmallObjectSlab = allocation.enableSmallObjectSlab;
+    pub const useIndependentSmallObjectSlabArenaBacking = allocation.useIndependentSmallObjectSlabArenaBacking;
+    pub const deinitSmallObjectSlab = allocation.deinitSmallObjectSlab;
+    pub const noteAllocationProbe = allocation.noteAllocProbe;
+    pub const createRuntimeCell = allocation.createRuntimeCell;
+
+    /// Returns an owned, address-stable collector independent of any Runtime.
+    /// Caller must destroy it after draining any attached Runtime's heap.
+    pub fn create(allocator: std.mem.Allocator, options: Options) !*Registry {
+        const self = try allocator.create(Registry);
+        self.* = .{
+            .allocator = allocator,
+            .scheduler = .{ .policy = options.policy },
+            .heap_budget = .{
+                .gc_threshold = options.threshold,
+                .limit = options.memory_limit,
+            },
             .block_heap = BlockHeap.init(if (comptime block_heap_uses_account_backing)
-                account.allocator
+                allocator
             else
                 std.heap.page_allocator),
         };
+        errdefer self.destroy();
+        forensics.readFromEnv();
+        self.initLists();
+        self.observeSlabArenas(&self.cell_storage.slab);
+        try self.serveObjectCells();
+        return self;
+    }
+
+    pub const AllocationCallbacks = struct {
+        retry: *const fn (*anyopaque) void,
+        notify: *const fn (?*anyopaque, usize) void,
+    };
+
+    /// Commit allocation services after the runtime's roots, atoms, classes,
+    /// and shapes are ready to survive collection. Construction itself must
+    /// never invoke these callbacks or use the active slab allocation route.
+    pub fn activate(self: *Registry, account: *JSRuntime, callbacks: AllocationCallbacks) void {
+        std.debug.assert(self.runtime == null and account.gc == self);
+        self.runtime = account;
+        self.useIndependentSmallObjectSlabArenaBacking();
+        self.enableSmallObjectSlab();
+        self.heap_budget.retry = callbacks.retry;
+        self.heap_budget.retry_ctx = account;
+        if (comptime native_alloc.allocation_gc_trigger_enabled) {
+            self.heap_budget.owner_notify = callbacks.notify;
+            self.heap_budget.owner_ctx = account;
+        }
     }
 
     /// Bind the groups that hold self-referential state, after the Registry
     /// is in its final location (qjs `init_list_head` on `JSRuntime` fields).
     /// Must run before any header is published; each step is idempotent.
-    pub fn initLists(self: *Registry) void {
+    fn initLists(self: *Registry) void {
         self.refreshBarrierGate();
         self.lists.init();
         self.morgue.init();
     }
 
+    /// Drain managed cells while the owner and its subsystems remain valid.
+    /// Collector storage remains alive until destroy, after native cleanup.
     pub fn deinit(self: *Registry, rt: *JSRuntime) void {
+        std.debug.assert(self.runtime == rt);
         self.abortCycleEnvelope();
         self.invalidateCycleEnvelopeBaseline();
         self.hot.phase = .deinit;
@@ -1734,7 +1803,7 @@ pub const Registry = struct {
         while (held_shapes) |h| {
             const next = h.nextNonObject();
             h.setNextNonObject(null);
-            rt.shapes.destroyFromHeader(h);
+            rt.shapes.destroyFromHeader(rt, h);
             held_shapes = next;
         }
 
@@ -1747,35 +1816,20 @@ pub const Registry = struct {
 
         self.lists.init();
 
-        self.external.deinit(self.runtime);
-        self.pins.deinit(self.runtime);
+        self.external.deinit(self.runtime.?);
+        self.pins.deinit(self.runtime.?);
 
         // TGC S2: string carriers that survived the host-quiescent teardown
         // collections (atom-table roots) leave through the same unpublish +
         // return path the sweep uses, so the accounting oracle balances.
         string.destroyAllStringCarriersForDeinit(rt);
 
-        self.destroyNonblockAuthority();
-        self.cell_storage.slab.arena_observer = null;
-        self.arena_slab = null;
-        self.address_registry.deinit(addressRegistryAllocator());
-        self.generation.deinit(addressRegistryAllocator());
-        self.nursery.deinit(self.nursery.page_allocator);
-        self.block_heap.deinit();
-        if (comptime carrier_audit_enabled) {
-            std.debug.assert(self.heap_accounting_oracle.raw.count() == 0);
-            self.heap_accounting_oracle.deinit(std.heap.page_allocator);
-        }
-        if (comptime carrier.audit_enabled or carrier.audit_enabled) {
-            mem_ops.deinitGcCarrier(self.runtime);
-        }
-
         self.hot.phase = .none;
     }
 
     pub fn reportExternalAlloc(self: *Registry, bytes: usize) !ExternalMemoryToken {
         if (bytes == 0) return .{};
-        const id = try self.external.add(self.runtime, bytes);
+        const id = try self.external.add(self.runtime.?, bytes);
         self.stats.external_bytes = std.math.add(usize, self.stats.external_bytes, bytes) catch std.math.maxInt(usize);
         self.stats.peak_external_bytes = @max(self.stats.peak_external_bytes, self.stats.external_bytes);
         self.stats.external_alloc_count +|= 1;
@@ -1965,13 +2019,13 @@ pub const Registry = struct {
         }
         if (comptime carrier.audit_enabled) {
             if (!h.metaConst().alloc_info.nursery) {
-                mem_ops.carrierPublish(self.runtime, @intFromPtr(h), bytes) catch
+                self.carrierPublish(@intFromPtr(h), bytes) catch
                     @panic("gc: CARRIER IDENTITY: publication missing carrier record");
             }
         }
         // qjs add_gc_object writes header bookkeeping once and then
         // list_add_tail's. No membership flag. GC pacing
-        // is owned by mem_ops.allocated_bytes; logical space bytes and
+        // is owned by Runtime allocation diagnostics; logical space bytes and
         // counts are derived by statsSnapshot.
         if (comptime arm == .fast) {
             std.debug.assert(!is_large);
@@ -2038,7 +2092,7 @@ pub const Registry = struct {
             self.heap_accounting_oracle.recordPublish(@intFromPtr(h), bytes, false);
         }
         if (comptime carrier.audit_enabled) {
-            mem_ops.carrierPublish(self.runtime, @intFromPtr(h), bytes) catch
+            self.carrierPublish(@intFromPtr(h), bytes) catch
                 @panic("gc: CARRIER IDENTITY: publication missing carrier record");
         }
         self.lists.linkTail(h);
@@ -2145,7 +2199,7 @@ pub const Registry = struct {
         header.meta().alloc_info.heap_accounted = false;
         if (comptime carrier.audit_enabled) {
             if (in_carrier_ledgers) {
-                mem_ops.carrierTransition(self.runtime, @intFromPtr(header), .doomed) catch
+                self.carrierTransition(@intFromPtr(header), .doomed) catch
                     @panic("gc: CARRIER IDENTITY: retirement missing carrier record");
             }
         }
@@ -2163,7 +2217,7 @@ pub const Registry = struct {
     }
 
     pub fn pinHeader(self: *Registry, header: *Header) !void {
-        return self.pins.pin(self.runtime, header);
+        return self.pins.pin(self.runtime.?, header);
     }
 
     pub fn unpinHeader(self: *Registry, header: *Header) void {
@@ -2223,7 +2277,7 @@ pub const Registry = struct {
         kind_tag: u8,
         total_bytes: usize,
     ) ![*]u8 {
-        const cell = try mem_ops.createStorageCell(self.runtime, kind_tag, total_bytes);
+        const cell = try self.createStorageCell(kind_tag, total_bytes);
         const body = cell.base + metadata_prefix_size;
         self.addInitializedWithSizeNoFail(@ptrCast(@alignCast(body)), cell.accounted_bytes);
         return body;
@@ -2290,11 +2344,20 @@ pub const Registry = struct {
                     if (index >= block.cell_count) break;
                     const header: *Header = @ptrFromInt(cells_base + index * cell_size);
                     self.unpublishStringCell(header, accounted);
-                    if (comptime audit_walk) mem_ops.noteBlockCellBitmapReclaim(self.runtime, header);
+                    if (comptime audit_walk) self.noteBlockCellBitmapReclaim(header);
                 }
             }
         }
-        return self.block_heap.reclaimDoomedCells(block);
+        const reclaimed = self.block_heap.reclaimDoomedCells(block);
+        if (comptime native_alloc.diagnostic_accounting_enabled and !audit_walk) {
+            // Audit builds debit each cell above. Debug executables still
+            // account allocations, but retire bitmap-only cells in bulk.
+            // Bytes were already debited at condemnation; only counts remain.
+            const diagnostics = &self.runtime.?.diagnostics.allocations;
+            diagnostics.allocation_count -= reclaimed;
+            diagnostics.destroy_calls += reclaimed;
+        }
+        return reclaimed;
     }
 
     /// Sweep-time return of a condemned storage BLOCK CELL. Pure memory: a
@@ -2311,7 +2374,7 @@ pub const Registry = struct {
         std.debug.assert(kindIsPrefixCarrier(h.metaConst().flags.kind));
         const total = storageCellBlockTotalBytes(h);
         self.unpublishStringCell(h, BlockHeapMod.accountedBodyBytesForRequest(total, metadata_prefix_size).?);
-        mem_ops.destroyStringCell(self.runtime, h, total);
+        self.destroyStringCell(h, total);
     }
 
     /// Allocation size (prefix included) of a storage cell served by a block
@@ -3421,7 +3484,7 @@ pub const Registry = struct {
             self.heap_accounting_oracle.recordPublish(@intFromPtr(h), bytes, is_large);
         }
         if (comptime carrier.audit_enabled) {
-            mem_ops.carrierPublish(self.runtime, @intFromPtr(h), bytes) catch
+            self.carrierPublish(@intFromPtr(h), bytes) catch
                 @panic("gc: CARRIER IDENTITY: promotion missing carrier record");
         }
         self.observeNewPublication(h, bytes);
@@ -3446,7 +3509,7 @@ pub const Registry = struct {
         const body_bytes = heapByteSizeFromHeader(rt, old);
         const request = body_bytes + metadata_prefix_size;
         if (!BlockHeapMod.canAllocCellSize(request)) return null;
-        const cell_raw = mem_ops.allocPromotedObjectCell(self.runtime, request) orelse return null;
+        const cell_raw = self.allocPromotedObjectCell(request) orelse return null;
         const cell = @intFromPtr(cell_raw);
         const moved: *Header = @ptrFromInt(cell + metadata_prefix_size);
 
@@ -3525,28 +3588,31 @@ pub const Registry = struct {
         if (comptime builtin.is_test) nonblock_authorities_live_for_test -= 1;
     }
 
-    /// Drop what `init` / `initLists` / `serveObjectCells` acquired.
-    /// No heap walk: shapes, atoms, and classes are not owned here, and a
-    /// half-built runtime must not enter `deinit`.
-    pub fn rollbackConstruction(self: *Registry) void {
-        const account = self.runtime;
-        self.destroyNonblockAuthority();
-        mem_ops.deinitGcCarrier(account);
+    /// Release collector storage. An attached Runtime must first drain its
+    /// managed graph; this also handles creation failure before attachment.
+    pub fn destroy(self: *Registry) void {
+        const allocator = self.allocator;
         self.cell_storage.slab.arena_observer = null;
+        self.destroyNonblockAuthority();
+        self.cell_storage.detach();
         self.arena_slab = null;
         self.address_registry.deinit(addressRegistryAllocator());
         self.generation.deinit(addressRegistryAllocator());
         self.nursery.deinit(self.nursery.page_allocator);
         self.block_heap.deinit();
-        self.external.deinit(account);
-        self.pins.deinit(account);
+        if (self.runtime) |rt| {
+            self.external.deinit(rt);
+            self.pins.deinit(rt);
+        }
+        self.cell_storage.slab.deinit(allocator);
         if (comptime carrier_audit_enabled) {
             std.debug.assert(self.heap_accounting_oracle.raw.count() == 0);
             self.heap_accounting_oracle.deinit(std.heap.page_allocator);
         }
+        allocator.destroy(self);
     }
 
-    pub fn serveObjectCells(self: *Registry) !void {
+    fn serveObjectCells(self: *Registry) !void {
         // The conservative resolver needs the block geometry before the first
         // cell can appear in a stack slot.
         self.address_registry.block_heap = &self.block_heap;
@@ -3581,12 +3647,12 @@ pub const Registry = struct {
         registry.address_registry.noteArenaReleased(base);
     }
 
-    pub fn observeSlabArenas(self: *Registry, slab: *memory.SmallObjectSlab) void {
+    fn observeSlabArenas(self: *Registry, slab: *allocation.SmallObjectSlab) void {
         // Kept so a failed arena registration can be recovered by re-walking
         // the slab, instead of leaving that arena invisible for its whole life.
         self.arena_slab = slab;
-        // Arenas that already exist. In the current `initInPlace` order
-        // there are none -- `enableSmallObjectSlab` runs afterwards, so this
+        // Arenas that already exist. During create there are none:
+        // activate enables slab allocation afterwards, so this
         // walk visits nothing -- but the observer's correctness must not depend
         // on that ordering, because an arena created before it is installed is
         // invisible to the conservative scanner forever.
@@ -3904,7 +3970,7 @@ pub const Registry = struct {
     /// authorities behind it exist nowhere else).
     pub fn allocationHandle(self: *const Registry, header: *const Header) ?AllocationHandle {
         comptime std.debug.assert(carrier.audit_enabled);
-        return mem_ops.carrierGenerationHandle(self.runtime, @intFromPtr(header));
+        return self.carrierGenerationHandle(@intFromPtr(header));
     }
 
     /// Generation/state exact resolution (audit builds only).
@@ -3937,11 +4003,11 @@ pub const Registry = struct {
             return .{ .tracing = header };
         }
 
-        const record = try self.runtime.gc.cell_storage.extent_identity.resolve(
+        const record = try self.cell_storage.extent_identity.resolve(
             handle,
             if (expected_kind) |kind| @intFromEnum(kind) else null,
         );
-        const lifecycle = try self.runtime.gc.cell_storage.extent_lifecycle.resolve(handle.base, allowed_states);
+        const lifecycle = try self.cell_storage.extent_lifecycle.resolve(handle.base, allowed_states);
         const header: *Header = @ptrFromInt(handle.base);
         const kind = header.metaConst().flags.kind;
         if (@intFromEnum(kind) != record.kind) return error.HeaderMismatch;

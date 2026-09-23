@@ -23,7 +23,6 @@
 
 const std = @import("std");
 const gc = @import("gc.zig");
-const memory = @import("memory.zig");
 const object = @import("object.zig");
 
 const Header = gc.Header;

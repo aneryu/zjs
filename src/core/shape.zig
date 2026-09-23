@@ -9,11 +9,10 @@
 //! quickjs.c. This core object-layout authority may be imported by exec,
 //! never the reverse.
 
-const mem_ops = @import("memory.zig");
+const gc_alloc = @import("gc_alloc.zig");
 const atom = @import("atom.zig");
 const gc = @import("gc.zig");
 const gc_visit = @import("gc_visit.zig");
-const memory = @import("memory.zig");
 const Object = @import("object.zig").Object;
 const property = @import("property.zig");
 const JSValue = @import("value.zig").JSValue;
@@ -270,7 +269,7 @@ pub const Shape = extern struct {
     /// allocator header remains the free-time authority, so publication must
     /// credit that same usable payload instead of the smaller request.
     pub inline fn accountedAllocationSize(self: *const Shape) usize {
-        return mem_ops.gcSlabAccountedPayload(self) orelse self.allocationSize();
+        return gc_alloc.gcSlabAccountedPayload(self) orelse self.allocationSize();
     }
 
     /// A second holder adopted this shape: from now on every mutation must
@@ -337,7 +336,8 @@ pub const Shape = extern struct {
 };
 
 pub const Registry = struct {
-    runtime: *JSRuntime,
+    storage_allocator: std.mem.Allocator,
+    allocator: std.mem.Allocator,
     atoms: *atom.AtomTable,
     gc_registry: *gc.Registry,
 
@@ -362,8 +362,19 @@ pub const Registry = struct {
         self.gc_registry.generationalBarrier(owner.gcHeader(), &target.header);
     }
 
-    pub fn init(runtime: *JSRuntime, atoms: *atom.AtomTable, gc_registry: *gc.Registry) Registry {
-        return .{ .runtime = runtime, .atoms = atoms, .gc_registry = gc_registry };
+    /// Create an owned registry borrowing storage_allocator, atoms and GC.
+    /// Cell operations receive Runtime explicitly; caller releases with destroy.
+    pub fn create(allocator: std.mem.Allocator, storage_allocator: std.mem.Allocator, atoms: *atom.AtomTable, gc_registry: *gc.Registry) !*Registry {
+        const self = try allocator.create(Registry);
+        self.* = .{ .allocator = allocator, .storage_allocator = storage_allocator, .atoms = atoms, .gc_registry = gc_registry };
+        return self;
+    }
+
+    /// Managed shapes must already have been drained by GC.
+    pub fn destroy(self: *Registry) void {
+        const allocator = self.allocator;
+        self.deinit();
+        allocator.destroy(self);
     }
 
     pub fn deinit(self: *Registry) void {
@@ -375,11 +386,7 @@ pub const Registry = struct {
         self.shape_hash_buckets = &.{};
         self.shape_hash_bits = initial_shape_hash_bits;
         self.shape_hash_count = 0;
-        if (buckets.len != 0) mem_ops.free(self.runtime, ?*Shape, buckets);
-    }
-
-    pub fn create(self: *Registry, proto: ?*Object) !*Shape {
-        return self.createShape(proto);
+        if (buckets.len != 0) self.storage_allocator.free(buckets);
     }
 
     /// Tracing-gc-design.md §4.6: an unpublished Shape is initialized and
@@ -389,19 +396,19 @@ pub const Registry = struct {
         self.gc_registry.addInitializedShape(&shape_ref.header, shape_ref.accountedAllocationSize());
     }
 
-    pub inline fn createObjectRoot(self: *Registry, proto: ?*Object) !*Shape {
-        return createObjectRootMaybeReserved(self, proto, false);
+    pub inline fn createObjectRoot(self: *Registry, rt: *JSRuntime, proto: ?*Object) !*Shape {
+        return createObjectRootMaybeReserved(self, rt, proto, false);
     }
 
     /// Reserve/initialize a root shape without publishing it onto the GC list.
     /// Object constructors collect, then `publish`, then register the object.
-    pub inline fn createObjectRootReserved(self: *Registry, proto: ?*Object) !*Shape {
-        return createObjectRootMaybeReserved(self, proto, true);
+    pub inline fn createObjectRootReserved(self: *Registry, rt: *JSRuntime, proto: ?*Object) !*Shape {
+        return createObjectRootMaybeReserved(self, rt, proto, true);
     }
 
     /// Leftover hashed proto-root lookup. Comptime identity is only whether a
     /// miss calls `createShape` or `createShapeReserved`; take that at runtime.
-    noinline fn createObjectRootMaybeReserved(self: *Registry, proto: ?*Object, reserved: bool) !*Shape {
+    noinline fn createObjectRootMaybeReserved(self: *Registry, rt: *JSRuntime, proto: ?*Object, reserved: bool) !*Shape {
         // qjs find_hashed_shape_proto rejects bucket
         // co-residents on the already-loaded `hash` field before touching
         // proto/prop_count: `sh1->hash == h && sh1->proto == proto &&
@@ -414,12 +421,12 @@ pub const Registry = struct {
             found.markShared();
             return found;
         }
-        if (reserved) return self.createShapeReserved(proto);
-        return self.createShape(proto);
+        if (reserved) return self.createShapeReserved(rt, proto);
+        return self.createShape(rt, proto);
     }
 
-    pub fn createObjectRootWithPropertyCapacity(self: *Registry, proto: ?*Object, property_capacity: usize) !*Shape {
-        if (property_capacity == 0) return self.createObjectRoot(proto);
+    pub fn createObjectRootWithPropertyCapacity(self: *Registry, rt: *JSRuntime, proto: ?*Object, property_capacity: usize) !*Shape {
+        if (property_capacity == 0) return self.createObjectRoot(rt, proto);
         const expected_hash = initialHash(proto);
         var current = self.firstShapeWithHash(expected_hash);
         while (current) |found| : (current = found.registry_hash_next) {
@@ -432,11 +439,11 @@ pub const Registry = struct {
             found.markShared();
             return found;
         }
-        return self.createShapeWithPropertyCapacity(proto, property_capacity);
+        return self.createShapeWithPropertyCapacity(rt, proto, property_capacity);
     }
 
-    pub fn createObjectRootWithPropertyCapacityReserved(self: *Registry, proto: ?*Object, property_capacity: usize) !*Shape {
-        if (property_capacity == 0) return self.createObjectRootReserved(proto);
+    pub fn createObjectRootWithPropertyCapacityReserved(self: *Registry, rt: *JSRuntime, proto: ?*Object, property_capacity: usize) !*Shape {
+        if (property_capacity == 0) return self.createObjectRootReserved(rt, proto);
         const expected_hash = initialHash(proto);
         var current = self.firstShapeWithHash(expected_hash);
         while (current) |found| : (current = found.registry_hash_next) {
@@ -449,28 +456,28 @@ pub const Registry = struct {
             found.markShared();
             return found;
         }
-        return self.createShapeWithPropertyCapacityReserved(proto, property_capacity);
+        return self.createShapeWithPropertyCapacityReserved(rt, proto, property_capacity);
     }
 
     /// Build one context-owned initial shape without ever materializing a
     /// hidden template Object. The returned reference belongs to the caller.
-    pub fn createInitialShape(self: *Registry, proto: ?*Object, properties: []const InitialProperty) !*Shape {
+    pub fn createInitialShape(self: *Registry, rt: *JSRuntime, proto: ?*Object, properties: []const InitialProperty) !*Shape {
         // Preserve the object/value-buffer invariant used by mutation clones:
         // every non-empty shape has at least `initial_prop_size` slots.
-        var result = try self.createObjectRootWithPropertyCapacity(proto, propertyCapacityForNeeded(properties.len));
-        errdefer self.dropUnshared(result);
-        try self.prepareUpdate(&result);
-        for (properties) |prop| try self.addProperty(&result, prop.atom_id, prop.flags);
+        var result = try self.createObjectRootWithPropertyCapacity(rt, proto, propertyCapacityForNeeded(properties.len));
+        errdefer self.dropUnshared(rt, result);
+        try self.prepareUpdate(rt, &result);
+        for (properties) |prop| try self.addProperty(rt, &result, prop.atom_id, prop.flags);
         return result;
     }
 
-    fn createShape(self: *Registry, proto: ?*Object) !*Shape {
+    pub fn createShape(self: *Registry, rt: *JSRuntime, proto: ?*Object) !*Shape {
         // Single GC allocation = struct + inline FAM (qjs js_new_shape).
         // createWithFam initializes metadata once; the constructor initializes
         // the intrusive links before registration below.
         const fam_bytes = comptime famRegionBytes(initial_prop_size, initial_hash_size);
-        const shape = try mem_ops.createWithFamComptime(self.runtime, Shape, fam_bytes);
-        errdefer mem_ops.destroyWithFam(self.runtime, Shape, shape, fam_bytes);
+        const shape = try rt.gc.createWithFamComptime(Shape, fam_bytes);
+        errdefer rt.gc.destroyWithFam(Shape, shape, fam_bytes);
         shape.* = .{
             .header = .{},
             .proto = proto,
@@ -490,10 +497,10 @@ pub const Registry = struct {
         return shape;
     }
 
-    fn createShapeReserved(self: *Registry, proto: ?*Object) !*Shape {
+    fn createShapeReserved(self: *Registry, rt: *JSRuntime, proto: ?*Object) !*Shape {
         const fam_bytes = comptime famRegionBytes(initial_prop_size, initial_hash_size);
-        const shape = try mem_ops.createWithFamComptime(self.runtime, Shape, fam_bytes);
-        errdefer mem_ops.destroyWithFam(self.runtime, Shape, shape, fam_bytes);
+        const shape = try rt.gc.createWithFamComptime(Shape, fam_bytes);
+        errdefer rt.gc.destroyWithFam(Shape, shape, fam_bytes);
         shape.* = .{
             .header = .{},
             .proto = proto,
@@ -509,14 +516,15 @@ pub const Registry = struct {
 
     fn createShapeWithPropertyCapacity(
         self: *Registry,
+        rt: *JSRuntime,
         proto: ?*Object,
         property_capacity: usize,
     ) !*Shape {
         std.debug.assert(property_capacity != 0);
         const bucket_count: usize = @max(initial_hash_size, nextPowerOfTwo(property_capacity + 1));
         const fam_bytes = famRegionBytes(property_capacity, bucket_count);
-        const shape = try mem_ops.createWithFam(self.runtime, Shape, fam_bytes);
-        errdefer mem_ops.destroyWithFam(self.runtime, Shape, shape, fam_bytes);
+        const shape = try rt.gc.createWithFam(Shape, fam_bytes);
+        errdefer rt.gc.destroyWithFam(Shape, shape, fam_bytes);
         shape.* = .{
             .header = .{},
             .proto = proto,
@@ -535,14 +543,15 @@ pub const Registry = struct {
 
     fn createShapeWithPropertyCapacityReserved(
         self: *Registry,
+        rt: *JSRuntime,
         proto: ?*Object,
         property_capacity: usize,
     ) !*Shape {
         std.debug.assert(property_capacity != 0);
         const bucket_count: usize = @max(initial_hash_size, nextPowerOfTwo(property_capacity + 1));
         const fam_bytes = famRegionBytes(property_capacity, bucket_count);
-        const shape = try mem_ops.createWithFam(self.runtime, Shape, fam_bytes);
-        errdefer mem_ops.destroyWithFam(self.runtime, Shape, shape, fam_bytes);
+        const shape = try rt.gc.createWithFam(Shape, fam_bytes);
+        errdefer rt.gc.destroyWithFam(Shape, shape, fam_bytes);
         shape.* = .{
             .header = .{},
             .proto = proto,
@@ -566,12 +575,12 @@ pub const Registry = struct {
     /// leaves via the outlined destroyShape). Returns false on a miss with the
     /// shape untouched; the caller falls to `transitionPropertyUncached` for
     /// the shared-clone / unshared in-place legs.
-    pub inline fn tryCachedTransition(self: *Registry, shape_ptr: **Shape, atom_id: atom.Atom, flags: u6, property_capacity: usize) bool {
+    pub inline fn tryCachedTransition(self: *Registry, rt: *JSRuntime, shape_ptr: **Shape, atom_id: atom.Atom, flags: u6, property_capacity: usize) bool {
         const parent = shape_ptr.*;
         const cached = self.findHashedShapeProperty(parent, atom_id, flags, property_capacity) orelse return false;
         cached.markShared();
         shape_ptr.* = cached;
-        self.dropUnshared(parent);
+        self.dropUnshared(rt, parent);
         return true;
     }
 
@@ -583,7 +592,7 @@ pub const Registry = struct {
     /// inline-FAM growth can replace the allocation. This function owns every
     /// old-shape release required by a replacement; the in-place branch never
     /// releases the shape whose ownership merely moved during relocation.
-    pub fn transitionPropertyUncached(self: *Registry, shape_ptr: **Shape, atom_id: atom.Atom, flags: u6, property_capacity: usize) !void {
+    pub fn transitionPropertyUncached(self: *Registry, rt: *JSRuntime, shape_ptr: **Shape, atom_id: atom.Atom, flags: u6, property_capacity: usize) !void {
         const parent = shape_ptr.*;
         if (parent.isShared()) {
             // `prop_size` is not merely this Shape's own array capacity: it IS
@@ -602,10 +611,10 @@ pub const Registry = struct {
             // truth here, and it always covers the child's own props array
             // because the caller grew it to at least `prop_count + 1`.
             std.debug.assert(property_capacity >= parent.prop_count + 1);
-            var child = try self.cloneShape(parent, parent.proto, property_capacity, true);
+            var child = try self.cloneShape(rt, parent, parent.proto, property_capacity, true);
             // appendProperty may relocate `child` (inline FAM grow moves the
             // shape); thread &child so the fresh pointer flows back before hash.
-            try self.appendProperty(&child, atom_id, flags);
+            try self.appendProperty(rt, &child, atom_id, flags);
             const old_hash = child.hash;
             child.hash = transitionHash(parent.hash, atom_id, flags);
             self.rehashShape(child, old_hash);
@@ -618,8 +627,8 @@ pub const Registry = struct {
         // succeeds appendProperty has no fallible step that could leave a moved
         // shape committed while the owning object's value buffer rolls back.
         const old_hash = parent.hash;
-        try self.reservePropertyAppend(shape_ptr, property_capacity);
-        try self.appendProperty(shape_ptr, atom_id, flags);
+        try self.reservePropertyAppend(rt, shape_ptr, property_capacity);
+        try self.appendProperty(rt, shape_ptr, atom_id, flags);
         const shape = shape_ptr.*;
         if (shape.isHashed()) {
             shape.hash = transitionHash(old_hash, atom_id, flags);
@@ -653,12 +662,12 @@ pub const Registry = struct {
         return null;
     }
 
-    pub fn cloneForMutation(self: *Registry, source: *Shape) !*Shape {
-        const clone = try self.cloneShape(source, source.proto, source.prop_size, false);
+    pub fn cloneForMutation(self: *Registry, rt: *JSRuntime, source: *Shape) !*Shape {
+        const clone = try self.cloneShape(rt, source, source.proto, source.prop_size, false);
         return clone;
     }
 
-    pub fn prepareUpdate(self: *Registry, shape_ptr: **Shape) !void {
+    pub fn prepareUpdate(self: *Registry, rt: *JSRuntime, shape_ptr: **Shape) !void {
         const current = shape_ptr.*;
         if (current.isHashed() and !current.isShared()) {
             self.removeShapeHash(current);
@@ -675,7 +684,7 @@ pub const Registry = struct {
             current.identity = self.freshIdentity();
             return;
         }
-        const clone = try self.cloneForMutation(current);
+        const clone = try self.cloneForMutation(rt, current);
         shape_ptr.* = clone;
     }
 
@@ -717,7 +726,7 @@ pub const Registry = struct {
     /// unshared with a single `Object.shape_ref` owner = `shape_ptr.*`. Enforced by
     /// the callers' `ensureUniqueShapeForMutation` / `prepareUpdate` gating, so
     /// only that one pointer (plus the GC list + shape-hash chain) needs fixing.
-    fn relocateShape(self: *Registry, shape_ptr: **Shape, new_prop_size: u32, new_bucket_count: usize) !void {
+    fn relocateShape(self: *Registry, rt: *JSRuntime, shape_ptr: **Shape, new_prop_size: u32, new_bucket_count: usize) !void {
         const old = shape_ptr.*;
         std.debug.assert(!old.isShared());
         const old_prop_count = old.prop_count;
@@ -728,7 +737,7 @@ pub const Registry = struct {
 
         // The ONLY fallible / GC-triggering step. On failure `shape_ptr.*` (old)
         // is untouched — correct rollback with nothing to undo.
-        const new_shape = try mem_ops.createWithFam(self.runtime, Shape, new_fam_bytes);
+        const new_shape = try rt.gc.createWithFam(Shape, new_fam_bytes);
         // No further allocation below: the transient two-copy window is GC-safe.
 
         new_shape.* = .{
@@ -778,7 +787,7 @@ pub const Registry = struct {
         if (new_shape.isHashed()) self.insertShapeHash(new_shape);
 
         // Free the OLD block's raw memory only — proto + atoms have moved.
-        mem_ops.destroyWithFam(self.runtime, Shape, old, old_fam_bytes);
+        rt.gc.destroyWithFam(Shape, old, old_fam_bytes);
 
         shape_ptr.* = new_shape;
     }
@@ -791,8 +800,8 @@ pub const Registry = struct {
     // per-property call-frame prologue/epilogue + arg marshaling (3M+ crossings
     // on `o={a,b,c}` loops). Pure codegen hint — semantically identical, faithful
     // to qjs where add_shape_property is a leaf the compiler folds hot.
-    pub inline fn addProperty(self: *Registry, shape_ptr: **Shape, atom_id: atom.Atom, flags: u6) !void {
-        try self.appendProperty(shape_ptr, atom_id, flags);
+    pub inline fn addProperty(self: *Registry, rt: *JSRuntime, shape_ptr: **Shape, atom_id: atom.Atom, flags: u6) !void {
+        try self.appendProperty(rt, shape_ptr, atom_id, flags);
         const shape = shape_ptr.*;
         const old_hash = shape.hash;
         shape.hash = transitionHash(shape.hash, atom_id, flags);
@@ -839,7 +848,7 @@ pub const Registry = struct {
     /// of every live entry. Mirrors qjs `compact_properties`:
     /// the caller prepares an unshared, unhashed shape first, then this rebuilds
     /// the inline descriptor/hash layout and the object's parallel value array.
-    pub fn compactProperties(self: *Registry, object: *Object) !void {
+    pub fn compactProperties(self: *Registry, rt: *JSRuntime, object: *Object) !void {
         const old = object.shape_ref;
         std.debug.assert(!old.isShared());
         std.debug.assert(!old.isHashed());
@@ -861,8 +870,8 @@ pub const Registry = struct {
         // Keep both old arrays authoritative until every fallible allocation has
         // succeeded. Unlike qjs's best-effort realloc, zjs must know the exact
         // value-buffer capacity from shape.prop_size for later free accounting.
-        const new_shape = try mem_ops.createWithFam(self.runtime, Shape, new_fam_bytes);
-        errdefer mem_ops.destroyWithFam(self.runtime, Shape, new_shape, new_fam_bytes);
+        const new_shape = try rt.gc.createWithFam(Shape, new_fam_bytes);
+        errdefer rt.gc.destroyWithFam(Shape, new_shape, new_fam_bytes);
         const Entry = property.Entry;
         // TGC S4-c: a slots2 object that carries a class payload keeps its
         // payload POINTER in the arm word the inline tail would occupy, so it
@@ -947,7 +956,7 @@ pub const Registry = struct {
             // old-to-young edge, exactly like the Shape adoption above.
             self.gc_registry.rememberOwnerForBulkWrite(object.gcHeader());
         }
-        mem_ops.destroyWithFam(self.runtime, Shape, old, old_fam_bytes);
+        rt.gc.destroyWithFam(Shape, old, old_fam_bytes);
         // TGC S4-b: the old property buffer is a GC cell; dropping the pointer
         // is the whole release.
     }
@@ -961,7 +970,7 @@ pub const Registry = struct {
         shape.identity = self.freshIdentity();
     }
 
-    pub fn restorePropertyLayout(self: *Registry, shape_ptr: **Shape, baseline_props: []const Property, baseline_hash: u32, baseline_deleted_count: usize) !void {
+    pub fn restorePropertyLayout(self: *Registry, rt: *JSRuntime, shape_ptr: **Shape, baseline_props: []const Property, baseline_hash: u32, baseline_deleted_count: usize) !void {
         const old = shape_ptr.*;
         // The relocation updates only this single owner's pointer (shape_ptr),
         // so the layout being restored must not be shared (qjs clone-before-mutate).
@@ -981,8 +990,8 @@ pub const Registry = struct {
         // the inline FAM forces an allocate-new + swap rather than an in-place
         // storage replacement.
         const fam_bytes = famRegionBytes(target_capacity, bucket_count);
-        const new_shape = try mem_ops.createWithFam(self.runtime, Shape, fam_bytes);
-        errdefer mem_ops.destroyWithFam(self.runtime, Shape, new_shape, fam_bytes);
+        const new_shape = try rt.gc.createWithFam(Shape, fam_bytes);
+        errdefer rt.gc.destroyWithFam(Shape, new_shape, fam_bytes);
         new_shape.* = .{
             .header = .{},
             .trace_list_previous = initialTraceListState(old.isHashed()),
@@ -1026,12 +1035,12 @@ pub const Registry = struct {
 
         // Discard the OLD layout's block. Its property atoms need no teardown:
         // the atom table is not refcounted from shapes any more.
-        mem_ops.destroyWithFam(self.runtime, Shape, old, old_fam_bytes);
+        rt.gc.destroyWithFam(Shape, old, old_fam_bytes);
 
         shape_ptr.* = new_shape;
     }
 
-    pub fn reserveProperties(self: *Registry, shape_ptr: **Shape, needed: usize) !void {
+    pub fn reserveProperties(self: *Registry, rt: *JSRuntime, shape_ptr: **Shape, needed: usize) !void {
         const shape = shape_ptr.*;
         if (needed <= shape.prop_size) return;
         var next_capacity: usize = shape.prop_size;
@@ -1039,14 +1048,14 @@ pub const Registry = struct {
         // Grow the hash table alongside the prop array (qjs resize_properties,
         // quickjs.c) so bucket_count >= prop_size continues to hold and
         // a subsequent appendProperty needs no hash rebuild.
-        try self.relocateShape(shape_ptr, @intCast(next_capacity), lockstepBucketCount(shape.bucketCount(), next_capacity));
+        try self.relocateShape(rt, shape_ptr, @intCast(next_capacity), lockstepBucketCount(shape.bucketCount(), next_capacity));
     }
 
     /// Preflight one property append as a single transactional relocation.
     /// `deleted_prop_count` participates in hash capacity even though tombstone
     /// slots remain in `prop_count`; otherwise a property-FAM grow can commit and
     /// a second hash-only grow can fail after the owner has already changed size.
-    fn reservePropertyAppend(self: *Registry, shape_ptr: **Shape, requested_property_capacity: usize) !void {
+    fn reservePropertyAppend(self: *Registry, rt: *JSRuntime, shape_ptr: **Shape, requested_property_capacity: usize) !void {
         const shape = shape_ptr.*;
         const post_append_count = @as(usize, shape.prop_count) + 1;
         const needed_properties = @max(requested_property_capacity, post_append_count);
@@ -1059,14 +1068,14 @@ pub const Registry = struct {
         while (bucket_count < minimum_hash_capacity) : (bucket_count *= 2) {}
 
         if (property_capacity == shape.prop_size and bucket_count == shape.bucketCount()) return;
-        try self.relocateShape(shape_ptr, @intCast(property_capacity), bucket_count);
+        try self.relocateShape(rt, shape_ptr, @intCast(property_capacity), bucket_count);
     }
 
-    pub fn reservePropertyHash(self: *Registry, shape_ptr: **Shape, needed: usize) !void {
+    pub fn reservePropertyHash(self: *Registry, rt: *JSRuntime, shape_ptr: **Shape, needed: usize) !void {
         const shape = shape_ptr.*;
         const minimum = needed + shape.deletedPropCount();
         if (shape.hasPropertyHash() and minimum <= shape.prop_hash_mask + 1) return;
-        try self.rebuildPropertyHash(shape_ptr, @max(initial_hash_size, nextPowerOfTwo(minimum + 1)));
+        try self.rebuildPropertyHash(rt, shape_ptr, @max(initial_hash_size, nextPowerOfTwo(minimum + 1)));
     }
 
     pub fn hasReservedOwnPropertyCapacity(self: *Registry, shape: *const Shape, needed: usize) bool {
@@ -1089,23 +1098,23 @@ pub const Registry = struct {
     /// what a list carrier's `mark_epoch` field carries once the sweep has
     /// pulled it off `lists.objects` -- the O(1) membership answer the intrusive
     /// list cannot give.
-    pub fn dropUnshared(self: *Registry, shape: *Shape) void {
+    pub fn dropUnshared(self: *Registry, rt: *JSRuntime, shape: *Shape) void {
         if (shape.isShared()) return;
         if (self.gc_registry.hot.phase == .deinit) return;
         if (gc.headerCondemned(&shape.header)) return;
-        self.destroyShape(shape);
+        self.destroyShape(rt, shape);
     }
 
-    pub fn destroyFromHeader(self: *Registry, header: *gc.Header) void {
+    pub fn destroyFromHeader(self: *Registry, rt: *JSRuntime, header: *gc.Header) void {
         const shape: *Shape = @alignCast(@fieldParentPtr("header", header));
-        self.destroyShape(shape);
+        self.destroyShape(rt, shape);
     }
 
-    fn destroyShape(self: *Registry, shape: *Shape) void {
+    fn destroyShape(self: *Registry, rt: *JSRuntime, shape: *Shape) void {
         // qjs js_free_shape0 never re-derives block size from prop_size; the
         // malloc header carries it. Slab shapes debit the
         // class usable payload; standalone prefixes still read live fields.
-        const accounted = mem_ops.gcSlabAccountedPayload(shape) orelse
+        const accounted = gc_alloc.gcSlabAccountedPayload(shape) orelse
             (@sizeOf(Shape) + shape.famByteSize());
         const fam_bytes = accounted - @sizeOf(Shape);
         self.gc_registry.unlinkObjectWithBytes(&shape.header, accounted);
@@ -1113,11 +1122,12 @@ pub const Registry = struct {
         // qjs js_free_shape0 releases the prop atoms + proto before the single
         // allocation; here the atoms are not owned by the shape and the proto
         // is a traced edge, so only the block goes.
-        mem_ops.destroyWithFam(self.runtime, Shape, shape, fam_bytes);
+        rt.gc.destroyWithFam(Shape, shape, fam_bytes);
     }
 
     fn cloneShape(
         self: *Registry,
+        rt: *JSRuntime,
         source: *Shape,
         proto: ?*Object,
         needed: usize,
@@ -1137,8 +1147,8 @@ pub const Registry = struct {
         // Single contiguous block (struct + inline FAM) = qjs js_clone_shape's
         // js_malloc(get_shape_size(...)).
         const fam_bytes = famRegionBytes(capacity, bucket_count);
-        const shape = try mem_ops.createWithFam(self.runtime, Shape, fam_bytes);
-        errdefer mem_ops.destroyWithFam(self.runtime, Shape, shape, fam_bytes);
+        const shape = try rt.gc.createWithFam(Shape, fam_bytes);
+        errdefer rt.gc.destroyWithFam(Shape, shape, fam_bytes);
         shape.* = .{
             .header = .{},
             .hash = source.hash,
@@ -1172,10 +1182,10 @@ pub const Registry = struct {
         return shape;
     }
 
-    inline fn appendProperty(self: *Registry, shape_ptr: **Shape, atom_id: atom.Atom, flags: u6) !void {
+    inline fn appendProperty(self: *Registry, rt: *JSRuntime, shape_ptr: **Shape, atom_id: atom.Atom, flags: u6) !void {
         // All allocation happens before the atom/property commit. Callers that
         // already preflight a larger owner capacity hit this as a no-op.
-        try self.reservePropertyAppend(shape_ptr, @as(usize, shape_ptr.*.prop_count) + 1);
+        try self.reservePropertyAppend(rt, shape_ptr, @as(usize, shape_ptr.*.prop_count) + 1);
 
         const retained_atom = self.atoms.noteHolderStore(atom_id);
         var retained_atom_owned = true;
@@ -1200,11 +1210,11 @@ pub const Registry = struct {
         if (shape.hasPropertyHash()) self.linkPropertyHash(shape, index);
     }
 
-    fn rebuildPropertyHash(self: *Registry, shape_ptr: **Shape, bucket_count: usize) !void {
+    fn rebuildPropertyHash(self: *Registry, rt: *JSRuntime, shape_ptr: **Shape, bucket_count: usize) !void {
         std.debug.assert(std.math.isPowerOfTwo(bucket_count));
         // Same prop capacity, larger hash table: the relocation rebuilds the
         // hash chains (bucket indices shift with the new mask).
-        try self.relocateShape(shape_ptr, shape_ptr.*.prop_size, bucket_count);
+        try self.relocateShape(rt, shape_ptr, shape_ptr.*.prop_size, bucket_count);
     }
 
     fn linkPropertyHash(self: *Registry, shape: *Shape, index: usize) void {
@@ -1268,7 +1278,7 @@ pub const Registry = struct {
     noinline fn ensureShapeHashCapacity(self: *Registry, additional: usize) !void {
         if (self.shape_hash_buckets.len == 0) {
             const bucket_count = @as(usize, 1) << self.shape_hash_bits;
-            self.shape_hash_buckets = try mem_ops.alloc(self.runtime, ?*Shape, bucket_count);
+            self.shape_hash_buckets = try self.storage_allocator.alloc(?*Shape, bucket_count);
             @memset(self.shape_hash_buckets, null);
         }
         // qjs js_new_shape2 resizes BEFORE the load factor
@@ -1279,8 +1289,8 @@ pub const Registry = struct {
         if (self.shape_hash_bits == 32) return;
         const next_bits = self.shape_hash_bits + 1;
         const bucket_count = @as(usize, 1) << next_bits;
-        const next = try mem_ops.alloc(self.runtime, ?*Shape, bucket_count);
-        errdefer mem_ops.free(self.runtime, ?*Shape, next);
+        const next = try self.storage_allocator.alloc(?*Shape, bucket_count);
+        errdefer self.storage_allocator.free(next);
         @memset(next, null);
         // Re-link every hashed shape by walking the OLD buckets, not a separate
         // shapes array — faithful to qjs `resize_shape_hash`.
@@ -1297,7 +1307,7 @@ pub const Registry = struct {
         }
         self.shape_hash_buckets = next;
         self.shape_hash_bits = next_bits;
-        mem_ops.free(self.runtime, ?*Shape, old_buckets);
+        self.storage_allocator.free(old_buckets);
     }
 
     fn firstShapeWithHash(self: *Registry, hash: u32) ?*Shape {
@@ -1486,14 +1496,14 @@ pub fn shapeHash(seed: u32, value: u32) u32 {
 const std = @import("std");
 
 test "shapes keep property atoms addressable after a transition" {
-    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name_atom = try rt.internAtom("shapeProp");
-    var first = try rt.shapes.create(null);
-    var second = try rt.shapes.create(null);
-    try rt.shapes.addProperty(&first, name_atom, 0b000011);
-    try rt.shapes.addProperty(&second, name_atom, 0b000011);
+    var first = try rt.shapes.createShape(rt, null);
+    var second = try rt.shapes.createShape(rt, null);
+    try rt.shapes.addProperty(rt, &first, name_atom, 0b000011);
+    try rt.shapes.addProperty(rt, &second, name_atom, 0b000011);
 
     try std.testing.expect(first.isHashed());
     try std.testing.expectEqual(@as(usize, 1), first.prop_count);
@@ -1505,7 +1515,7 @@ test "shapes keep property atoms addressable after a transition" {
 }
 
 test "shape shared bit and prototype transitions are tracked" {
-    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const name_atom = try rt.internAtom("shapeProtoProp");
@@ -1513,10 +1523,10 @@ test "shape shared bit and prototype transitions are tracked" {
     const proto_one = try Object.create(rt, class.ids.object, null);
     const proto_two = try Object.create(rt, class.ids.object, null);
     const shape_hash_baseline = rt.shapes.shape_hash_count;
-    var first = try rt.shapes.create(proto_one);
-    var second = try rt.shapes.create(proto_two);
-    try rt.shapes.addProperty(&first, name_atom, 0b000001);
-    try rt.shapes.addProperty(&second, name_atom, 0b000001);
+    var first = try rt.shapes.createShape(rt, proto_one);
+    var second = try rt.shapes.createShape(rt, proto_two);
+    try rt.shapes.addProperty(rt, &first, name_atom, 0b000001);
+    try rt.shapes.addProperty(rt, &second, name_atom, 0b000001);
     try std.testing.expect(first.proto != second.proto);
 
     try std.testing.expect(!first.isShared());
@@ -1527,7 +1537,7 @@ test "shape shared bit and prototype transitions are tracked" {
 }
 
 test "restorePropertyLayout rebuilds a baseline layout after FAM relocation" {
-    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const flags: u6 = 0b000111; // data property: writable/enumerable/configurable
@@ -1535,10 +1545,10 @@ test "restorePropertyLayout rebuilds a baseline layout after FAM relocation" {
     var atoms: [6]atom.Atom = undefined;
     for (names, 0..) |name, i| atoms[i] = try rt.internAtom(name);
 
-    var shape = try rt.shapes.create(null);
+    var shape = try rt.shapes.createShape(rt, null);
     // Six properties exceed the initial capacity (2), forcing at least one FAM
     // relocation (the shape pointer moves; addProperty threads &shape back).
-    for (atoms) |a| try rt.shapes.addProperty(&shape, a, flags);
+    for (atoms) |a| try rt.shapes.addProperty(rt, &shape, a, flags);
     try std.testing.expectEqual(@as(u32, 6), shape.prop_count);
     try std.testing.expect(shape.prop_size >= 6); // grew past the initial capacity of 2
 
@@ -1549,7 +1559,7 @@ test "restorePropertyLayout rebuilds a baseline layout after FAM relocation" {
     baseline_hash = transitionHash(baseline_hash, atoms[0], flags);
     baseline_hash = transitionHash(baseline_hash, atoms[1], flags);
 
-    try rt.shapes.restorePropertyLayout(&shape, &baseline, baseline_hash, 0);
+    try rt.shapes.restorePropertyLayout(rt, &shape, &baseline, baseline_hash, 0);
 
     try std.testing.expectEqual(@as(u32, 2), shape.prop_count);
     try std.testing.expectEqual(atoms[0], shape.props()[0].atom_id);
@@ -1563,15 +1573,15 @@ test "restorePropertyLayout rebuilds a baseline layout after FAM relocation" {
 }
 
 test "shape registry create publishes hashed live shapes" {
-    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const hashed_baseline = rt.shapes.shape_hash_count;
     const live_baseline = rt.gc.liveCountKind(.shape);
 
-    _ = try rt.shapes.create(null);
-    _ = try rt.shapes.create(null);
-    _ = try rt.shapes.create(null);
+    _ = try rt.shapes.createShape(rt, null);
+    _ = try rt.shapes.createShape(rt, null);
+    _ = try rt.shapes.createShape(rt, null);
 
     // Every created shape is both hashed and live (qjs counts hashed shapes only,
     // and zjs has no separate registry array — both are intrusive GC-list shapes).
@@ -1581,50 +1591,50 @@ test "shape registry create publishes hashed live shapes" {
 }
 
 test "shape registry hash grows and reuses object root shapes" {
-    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var shapes: [70]*Shape = undefined;
     for (&shapes) |*slot| {
-        slot.* = try rt.shapes.create(null);
+        slot.* = try rt.shapes.createShape(rt, null);
     }
     try std.testing.expect(rt.shapes.shape_hash_buckets.len >= 128);
     try std.testing.expect(rt.shapes.shape_hash_bits > initial_shape_hash_bits);
 
-    const first = try rt.shapes.createObjectRoot(null);
-    const second = try rt.shapes.createObjectRoot(null);
+    const first = try rt.shapes.createObjectRoot(rt, null);
+    const second = try rt.shapes.createObjectRoot(rt, null);
     try std.testing.expectEqual(first, second);
     try std.testing.expect(first.isShared());
 }
 
 test "createObjectRoot leftover reserved flag shares hashed proto roots" {
-    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const first = try rt.shapes.createObjectRoot(null);
-    const reserved_hit = try rt.shapes.createObjectRootReserved(null);
+    const first = try rt.shapes.createObjectRoot(rt, null);
+    const reserved_hit = try rt.shapes.createObjectRootReserved(rt, null);
     try std.testing.expectEqual(first, reserved_hit);
     try std.testing.expect(first.isShared());
 
     const proto = try Object.create(rt, class.ids.object, null);
     const live_before = rt.gc.liveCountKind(.shape);
-    const reserved_miss = try rt.shapes.createObjectRootReserved(proto);
+    const reserved_miss = try rt.shapes.createObjectRootReserved(rt, proto);
     try std.testing.expect(!reserved_miss.header.metaConst().alloc_info.heap_accounted);
     try std.testing.expectEqual(live_before, rt.gc.liveCountKind(.shape));
     rt.shapes.publish(reserved_miss);
     try std.testing.expect(reserved_miss.header.metaConst().alloc_info.heap_accounted);
     try std.testing.expectEqual(live_before + 1, rt.gc.liveCountKind(.shape));
-    const published = try rt.shapes.createObjectRoot(proto);
+    const published = try rt.shapes.createObjectRoot(rt, proto);
     try std.testing.expectEqual(reserved_miss, published);
 }
 
 test "reserved object root shapes reuse only an exact property capacity" {
-    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
-    const four = try rt.shapes.createObjectRootWithPropertyCapacity(null, 4);
-    const eight = try rt.shapes.createObjectRootWithPropertyCapacity(null, 8);
-    const four_again = try rt.shapes.createObjectRootWithPropertyCapacity(null, 4);
+    const four = try rt.shapes.createObjectRootWithPropertyCapacity(rt, null, 4);
+    const eight = try rt.shapes.createObjectRootWithPropertyCapacity(rt, null, 8);
+    const four_again = try rt.shapes.createObjectRootWithPropertyCapacity(rt, null, 4);
 
     try std.testing.expectEqual(four, four_again);
     try std.testing.expect(four != eight);
@@ -1638,7 +1648,7 @@ test "reserved object root shapes reuse only an exact property capacity" {
 }
 
 test "ordinary object additions reuse transition shapes" {
-    const rt = try JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     const first = try Object.create(rt, class.ids.object, null);

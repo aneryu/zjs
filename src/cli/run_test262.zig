@@ -10,7 +10,7 @@ const std = @import("std");
 const cli_process = @import("cli_process.zig");
 const zjs = @import("zjs");
 
-const runtime_layer = zjs.runtime;
+const runtime_layer = @import("zjs_host");
 const parser = zjs.parser;
 const core_runtime = zjs.core.runtime;
 const runner_options = @import("run_test262_options.zig");
@@ -636,7 +636,7 @@ fn runEmbeddedEngine(
     stderr_storage: *[stderr_storage_len]u8,
     stderr_out: *[]const u8,
 ) !bool {
-    const rt = try zjs.JSRuntime.create(.{ .allocator = allocator });
+    const rt = try zjs.JSRuntime.create(allocator, .{});
     errdefer rt.destroy();
     const ctx = try zjs.JSContext.create(rt, .{});
     errdefer ctx.destroy();
@@ -1662,7 +1662,7 @@ test "test262 typed array iterator staging source parses after installing global
     defer allocator.free(source);
 
     {
-        const rt = try zjs.JSRuntime.create(.{ .allocator = allocator });
+        const rt = try zjs.JSRuntime.create(allocator, .{});
         defer rt.destroy();
         rt.setNativeStackSize(core_runtime.default_native_stack_size * 4);
         const ctx = try zjs.JSContext.create(rt, .{});
@@ -1678,7 +1678,7 @@ test "test262 typed array iterator staging source parses after installing global
     }
 
     {
-        const rt = try zjs.JSRuntime.create(.{ .allocator = allocator });
+        const rt = try zjs.JSRuntime.create(allocator, .{});
         defer rt.destroy();
         rt.setNativeStackSize(core_runtime.default_native_stack_size * 4);
         const ctx = try zjs.JSContext.create(rt, .{});

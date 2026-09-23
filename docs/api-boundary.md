@@ -15,7 +15,7 @@ surface exposes engine primitives while keeping host policy outside core.
   record that builtins, host functions, and native accessors resolve to.
 
 `src/root.zig` is the single Zig module imported as `zjs`. Embedders use
-`Runtime`, `Context`, `Value`, `Call`, and `EventLoop`. The same file
+`Runtime`, `Context`, `Value`, and `Call`. The same file
 re-exports engine layers for the CLI, test262, and in-tree tests.
 
 `src/js_context.zig` is the host `Context` facade. `src/native.zig` builds
@@ -23,11 +23,11 @@ the comptime thunk used by `Context.defineFunction`. There is no landed
 `src/kernel/` directory; earlier "kernel API" language maps to these files
 plus `src/root.zig`.
 
-`src/event_loop.zig` owns the host event loop and is the public
-`zjs.EventLoop` type. `src/root.zig` also re-exports that file as `runtime`
-for in-tree hosts. Module file graph helpers, Atomics waiter cleanup, and
-ArrayBuffer detach live in `src/exec/` and are not re-exported through this
-type. The former dynamic plugin loader (`plugin.zig`, the `zjs.ffi` ABI) was
+`src/host/` is the internal `zjs_host` module used by the two bundled
+programs and their tests. Event scheduling, file source policy, and host
+output live there. It imports the engine; the engine does not import or
+re-export it. Module graph semantics, Atomics waiter cleanup, and ArrayBuffer
+detach stay in `src/exec/`. The former dynamic plugin loader (`plugin.zig`, the `zjs.ffi` ABI) was
 deleted 2026-09-06; its successor, the FNABI loader, lives in the `fun`
 repository and is an embedder of `Context.defineFunction` like any other.
 
@@ -36,7 +36,7 @@ repository and is an embedder of `Context.defineFunction` like any other.
 - `src/core/` must not depend on CLI policy, test262 harness glue, plugin
   loaders, JSI/FFI policy, event-loop policy, or product-runtime APIs.
 - Public embedding APIs are added through `src/root.zig`, `src/js_context.zig`,
-  `src/native.zig`, or `zjs.EventLoop`. Layer re-exports on `src/root.zig`
+  or `src/native.zig`. Layer re-exports on `src/root.zig`
   (`core`, `exec`, `parser`, `JSRuntime`, …) are for in-tree hosts, not a
   second embedder surface.
 - New runtime features should depend on core primitives. Core must not depend
@@ -57,7 +57,6 @@ zjs.Runtime
 zjs.Context
 zjs.Value
 zjs.Call
-zjs.EventLoop
 Context.defineFunction
 Context.defineScriptArgs
 ```
@@ -92,9 +91,10 @@ and exception materialization.
 
 ## Runtime Policy
 
-The runtime layer may expose event loops, timers, and I/O policy. Module
-file graph helpers, SharedArrayBuffer wake/cleanup hooks, and ArrayBuffer
-detach stay in `src/exec/`. Those policies do not move into `src/core/`.
+The bundled host owns event loops, timers, and filesystem policy. The engine
+retains generic host progress/source contracts, module graph semantics,
+SharedArrayBuffer wake/cleanup hooks, and ArrayBuffer detach. Concrete host
+capabilities do not move into `src/core/`.
 
 The `zjs` CLI is a thin benchmark and smoke-test shell. Its default
 JavaScript-visible host surface is intentionally small:
@@ -142,9 +142,9 @@ in `docs/public-api-contract.md`.
 is harness and Annex-B specific; it is not a general embedding API.
 
 The QuickJS-shaped `std`/`os` host-function records and their installers have
-been deleted (recoverable from git history). The internal `HostFunction`
-enum is reserved for engine-internal callables; host-provided functions are
-`NativeEntry`s created through `Context.defineFunction`, never members of that enum.
+been deleted (recoverable from git history). Host-provided functions use
+`NativeEntry`s. Bundled output uses static entries; embedders register through
+`Context.defineFunction`. The old output-id dispatch table in exec is gone.
 Class slot 65 remains reserved for the removed legacy stdio class. File
 handles and close policy belong to the embedding host.
 

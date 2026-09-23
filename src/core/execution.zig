@@ -7,7 +7,6 @@
 //! resident executor, `active_native_call` for the native environment.
 //! Opcode profile and diagnostics remain separately owned by the Runtime.
 
-const mem_ops = @import("memory.zig");
 const std = @import("std");
 const atom = @import("atom.zig");
 const context_mod = @import("context.zig");
@@ -40,20 +39,20 @@ pub fn releaseStoredBacktrace(rt: *JSRuntime) void {
     const capacity = rt.backtrace_capacity;
     rt.backtrace_frames = &.{};
     rt.backtrace_capacity = 0;
-    if (capacity != 0) mem_ops.free(rt, BacktraceFrame, frames.ptr[0..capacity]);
+    if (capacity != 0) rt.freeNative(BacktraceFrame, frames.ptr[0..capacity]);
 }
 
 pub fn appendStoredBacktrace(rt: *JSRuntime, frame: BacktraceFrame) !void {
     if (rt.backtrace_frames.len == rt.backtrace_capacity) {
         var next_capacity: usize = if (rt.backtrace_capacity == 0) 16 else rt.backtrace_capacity * 2;
         if (next_capacity < rt.backtrace_frames.len + 1) next_capacity = rt.backtrace_frames.len + 1;
-        const next = try mem_ops.alloc(rt, BacktraceFrame, next_capacity);
+        const next = try rt.allocNative(BacktraceFrame, next_capacity);
         const old_frames = rt.backtrace_frames;
         const old_capacity = rt.backtrace_capacity;
         @memcpy(next[0..old_frames.len], old_frames);
         rt.backtrace_frames = next[0..old_frames.len];
         rt.backtrace_capacity = next_capacity;
-        if (old_capacity != 0) mem_ops.free(rt, BacktraceFrame, old_frames.ptr[0..old_capacity]);
+        if (old_capacity != 0) rt.freeNative(BacktraceFrame, old_frames.ptr[0..old_capacity]);
     }
     rt.backtrace_frames.ptr[rt.backtrace_frames.len] = frame;
     rt.backtrace_frames = rt.backtrace_frames.ptr[0 .. rt.backtrace_frames.len + 1];

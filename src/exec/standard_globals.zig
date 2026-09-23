@@ -154,7 +154,7 @@ const NoRecordReason = enum {
     name_cascade_debt,
 };
 
-/// Comptime mirror of `JSRuntime.internalBuiltinRecord` (runtime.zig:2291).
+/// Comptime mirror of `engine_services.internalBuiltinRecord`.
 /// The record table is a comptime constant, so "will this id dispatch at
 /// runtime?" is answerable while the method tables are still being built.
 fn comptimeInternalRecordExists(comptime encoded_id: i32) bool {
@@ -184,10 +184,6 @@ const NoRecordEntry = struct {
 const native_record_debt = [_]NoRecordEntry{
     // ---- legitimate, not debt -------------------------------------------
     .{ .table = .global_functions, .name = "eval", .reason = .direct_eval },
-    .{ .table = .global_functions, .name = "btoa", .reason = .host_domain_switch },
-    .{ .table = .global_functions, .name = "atob", .reason = .host_domain_switch },
-    .{ .table = .global_functions, .name = "queueMicrotask", .reason = .host_domain_switch },
-    .{ .table = .global_functions, .name = "gc", .reason = .host_domain_switch },
 
     // ---- DEBT: %TypedArray% statics + prototype (qjs js_typed_array_base_
     // proto_funcs, quickjs.c / js_typed_array_funcs) -----------------
@@ -521,10 +517,6 @@ const global_function_methods = preparedMethods([_]Method{
     .{ .name = "decodeURIComponent", .length = 1, .native_builtin_id = core.function.nativeBuiltinId(.uri, uri_builtin.methodId("decodeURIComponent").?) },
     .{ .name = "escape", .length = 1, .native_builtin_id = core.function.nativeBuiltinId(.uri, core.uri.escape_id) },
     .{ .name = "unescape", .length = 1, .native_builtin_id = core.function.nativeBuiltinId(.uri, core.uri.unescape_id) },
-    .{ .name = "btoa", .length = 1, .native_builtin_id = core.function.nativeBuiltinId(.host, @intFromEnum(core.function.HostGlobalMethod.btoa)) },
-    .{ .name = "atob", .length = 1, .native_builtin_id = core.function.nativeBuiltinId(.host, @intFromEnum(core.function.HostGlobalMethod.atob)) },
-    .{ .name = "queueMicrotask", .length = 1, .native_builtin_id = core.function.nativeBuiltinId(.host, @intFromEnum(core.function.HostGlobalMethod.queue_microtask)) },
-    .{ .name = "gc", .length = 0, .native_builtin_id = core.function.nativeBuiltinId(.host, @intFromEnum(core.function.HostGlobalMethod.gc)) },
 }, .global_functions);
 
 const math_namespace_auto_init = Method{ .name = "Math", .length = 0, .kind = .math_namespace };
@@ -1125,7 +1117,7 @@ const namespace_to_string_tag_property_count: usize = 1;
 const math_constant_property_count: usize = 8;
 const math_namespace_extra_property_count: usize = math_constant_property_count + namespace_to_string_tag_property_count;
 const number_constant_property_count: usize = 8;
-const global_lazy_function_property_count: usize = 15;
+const global_lazy_function_property_count: usize = 11;
 
 pub fn standardGlobalOwnPropertyCapacity() usize {
     return constructor_kind_count +
@@ -3451,7 +3443,7 @@ fn expectAutoInitOwnPropertyForTest(object: *core.Object, atom_id: core.Atom) !v
 }
 
 test "intrinsic bootstrap registers global builtin domains through object properties" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var intrinsics = try Intrinsics.init(rt);
@@ -3492,7 +3484,7 @@ test "intrinsic bootstrap registers global builtin domains through object proper
 }
 
 test "lazy standard functions attach typed records for every formerly exceptional domain" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var intrinsics = try Intrinsics.init(rt);
@@ -3537,7 +3529,7 @@ test "lazy standard functions attach typed records for every formerly exceptiona
 }
 
 test "bootstrap aliases retain exact native identity and records" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var intrinsics = try Intrinsics.init(rt);
@@ -3622,7 +3614,7 @@ test "bootstrap aliases retain exact native identity and records" {
 }
 
 test "Realm bootstrap publishes eager and alias function metadata without repair scans" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var intrinsics = try Intrinsics.init(rt);
@@ -3773,7 +3765,7 @@ test "Realm bootstrap publishes eager and alias function metadata without repair
 }
 
 test "lazy builtin namespaces remain AUTOINIT after Realm bootstrap" {
-    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
 
     var intrinsics = try Intrinsics.init(rt);
