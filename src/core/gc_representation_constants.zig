@@ -24,6 +24,7 @@ pub const rope_kind_tag: u8 = 11;
 /// out-edges and no destructor, so the allocator writes the tag and nothing
 /// else ever interprets its body as a header.
 pub const string_buffer_kind_tag: u8 = 12;
+pub const symbol_kind_tag: u8 = 13;
 /// TGC S4-b: an object's external property-entry buffer (`prop_values`) and an
 /// array/arguments element buffer as bare storage cells. Same contract as the
 /// tail buffer above -- the allocator writes the tag, the owner's `storageCell`

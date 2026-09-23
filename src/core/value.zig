@@ -333,9 +333,9 @@ pub const JSValue = extern struct {
         return body.atom_id;
     }
 
-    pub fn asSymbolBody(self: JSValue) ?*string_mod.String {
+    pub fn asSymbolBody(self: JSValue) ?*@import("symbol.zig").Symbol {
         if (!self.is(.symbol)) return null;
-        return ptrFromPayload(string_mod.String, self.payloadBits());
+        return ptrFromPayload(@import("symbol.zig").Symbol, self.payloadBits());
     }
 
     /// Extract a BigInt value as a signed i64. Handles BOTH the inline
@@ -394,10 +394,10 @@ pub const JSValue = extern struct {
     /// Value→String boundary (qjs `js_linearize_string_rope` call site): a
     /// `.string_rope` value is MATERIALIZED into a flat string and the borrowed
     /// flat `*String` is returned, so every downstream reader sees a flat
-    /// string. `.string`/`.symbol` values return their body directly.
+    /// string. Flat strings return their body directly; Symbols are rejected.
     pub fn asStringBody(self: JSValue) ?*string_mod.String {
         switch (self.tagOf()) {
-            Tag.string, Tag.symbol => return ptrFromPayload(string_mod.String, self.payloadBits()),
+            Tag.string => return ptrFromPayload(string_mod.String, self.payloadBits()),
             Tag.string_rope => {
                 const node = self.ropeBody() orelse return null;
                 return node.flattenInfallible();
@@ -407,11 +407,11 @@ pub const JSValue = extern struct {
     }
 
     /// Raw string body WITHOUT flattening: returns the `*String` for
-    /// `.string`/`.symbol` and null for a rope (which is not a `*String`).
+    /// `.string` and null for ropes and Symbols (neither is a `*String`).
     /// Used by the rope-internal walkers that already discriminate on tag.
     pub fn asStringBodyRaw(self: JSValue) ?*string_mod.String {
         switch (self.tagOf()) {
-            Tag.string, Tag.symbol => return ptrFromPayload(string_mod.String, self.payloadBits()),
+            Tag.string => return ptrFromPayload(string_mod.String, self.payloadBits()),
             else => return null,
         }
     }
@@ -444,18 +444,18 @@ pub const JSValue = extern struct {
 
     pub fn stringHeader(self: JSValue) ?*gc.Header {
         return switch (self.tagOf()) {
-            Tag.symbol, Tag.string, Tag.string_rope => ptrFromPayload(gc.Header, self.payloadBits()),
+            Tag.string, Tag.string_rope => ptrFromPayload(gc.Header, self.payloadBits()),
             else => null,
         };
     }
 
     /// Direct payload access for call sites that have already classified the
-    /// tag as string/symbol/string_rope. Mirrors QJS's JS_VALUE_GET_STRING*
+    /// tag as string/string_rope. Mirrors QJS's JS_VALUE_GET_STRING*
     /// macros and avoids repeating the tag switch while collecting multiple
     /// rope operand fields.
     pub inline fn stringHeaderAssumeStringLike(self: JSValue) *gc.Header {
         const tag = self.tagOf();
-        std.debug.assert(tag == Tag.string or tag == Tag.symbol or tag == Tag.string_rope);
+        std.debug.assert(tag == Tag.string or tag == Tag.string_rope);
         return ptrFromPayload(gc.Header, self.payloadBits()).?;
     }
 

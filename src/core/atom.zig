@@ -1,10 +1,9 @@
 //! Runtime-owned atom interning, predefined ids, and symbol identity.
 //!
-//! Atom ids are table handles: interning returns an owned reference unless an
-//! API explicitly says borrowed, and every owned dynamic id must be released
-//! through its originating Runtime's `AtomTable`. Value-symbol atoms also root
-//! their refcounted name storage. Predefined ids are process-stable and need no
-//! release. QuickJS source map: the shared JSString/JSAtom representation at
+//! Atom ids are tracing-owned table handles. Holders report id edges or host
+//! pins; there is no per-caller retain/release. String bodies are droppable
+//! caches, while Symbol bodies carry identity and own their inline description.
+//! Predefined ids are process-stable. QuickJS source map: atom operations at
 //! quickjs.c and atom-table operations nearby. This core module may be
 //! consumed by higher layers but never imports exec or binding.
 
@@ -15,6 +14,7 @@ const build_options = @import("build_options");
 const gc = @import("gc.zig");
 const memory = @import("memory.zig");
 const string = @import("string.zig");
+const Symbol = @import("symbol.zig").Symbol;
 const JSRuntime = @import("../runtime.zig").JSRuntime;
 const JSValue = @import("value.zig").JSValue;
 
@@ -1007,13 +1007,12 @@ inline fn predefinedStringIdHashed(bytes: []const u8, hash: u64) ?Atom {
 
 pub const DynamicAtom = struct {
     id: Atom,
+    /// Owned spelling until a Symbol body is materialized. String atoms keep
+    /// their spelling; value symbols move it into the inline body and clear it.
     bytes: []u8,
-    /// Lazily materialized runtime string for this atom (string kind only).
-    /// The table roots it (the tracer reaches it through this slot) and the
-    /// string's `atom_id` is a weak back-pointer, so the cached string cannot
-    /// die while it sits here; when `sweepDead` retires the entry it clears
-    /// the back-pointer and drops this slot.
-    str: ?*string.String = null,
+    /// String cache or Symbol identity, discriminated by `kind`. String
+    /// caches are weak; live symbol-id edges trace the Symbol body.
+    body: ?*gc.Header = null,
     /// Link in the table's free-slot list, only meaningful while the entry
     /// is dead (`occupied == false`). `no_free_slot` terminates the list.
     next_free: EntryIndex = no_free_slot,
@@ -1046,6 +1045,27 @@ pub const DynamicAtom = struct {
     registry_managed_symbol: bool = false,
     weakref_count: usize = 0,
     no_symbol_description: bool = false,
+
+    fn name(self: *const DynamicAtom) []const u8 {
+        if (self.symbolBody()) |symbol| return symbol.descriptionBytes() orelse "";
+        return self.bytes;
+    }
+
+    fn stringBody(self: *const DynamicAtom) ?*string.String {
+        if (self.kind != .string) return null;
+        return string.String.fromHeader(self.body orelse return null);
+    }
+
+    fn symbolBody(self: *const DynamicAtom) ?*Symbol {
+        if (!isValueSymbolKind(self.kind)) return null;
+        return Symbol.fromHeader(self.body orelse return null);
+    }
+
+    fn unbindBody(self: *DynamicAtom) void {
+        if (self.stringBody()) |s| s.atom_id = string.String.no_atom_id;
+        if (self.symbolBody()) |s| s.atom_id = Symbol.no_atom_id;
+        self.body = null;
+    }
 
     // TGC S3 §2.1/§2.4. A VALUE SYMBOL's identity is its body: holders that
     // name it by id (shape keys, bytecode operands) report a `visitAtom` edge
@@ -1225,7 +1245,7 @@ pub const AtomTable = struct {
     /// Lazily materialized strings for predefined string-kind atoms and
     /// predefined symbol bodies, indexed by `id - 1`. Predefined ids are never
     /// recycled, so entries here are released only by `releaseCachedStrings`.
-    predefined_str: [predefined_count]?*string.String = @splat(null),
+    predefined_bodies: [predefined_count]?*gc.Header = @splat(null),
     /// TGC S3: back-pointer to the owning runtime, installed by `JSRuntime`
     /// after its address is stable. Null for the standalone tables the
     /// compiler/parser fixtures build, which have no collector at all; every
@@ -1272,7 +1292,7 @@ pub const AtomTable = struct {
     /// body is old, no minor can reach it, and §2.2's edge rules alone decide
     /// its fate. Deliberately NOT a major root: a major must still be able to
     /// retire a symbol whose last holder died in the same cycle that created
-    /// it. Predefined bodies never enter -- `predefined_str` already roots
+    /// it. Predefined bodies never enter -- `predefined_bodies` already roots
     /// them unconditionally.
     ///
     /// ATOM IDS, not `*String`: a major can legally kill a listed body (it is
@@ -1280,12 +1300,24 @@ pub const AtomTable = struct {
     /// dangling pointer -- a retired or unbound entry simply reports nothing.
     young_symbol_atoms: std.ArrayListUnmanaged(Atom) = .empty,
 
-    /// Only the PREDEFINED bodies are table roots. A dynamic entry's cached
-    /// `str` is not: §2.2's holder edges shade a value symbol's body through
-    /// the id, a string atom's cache is droppable, and §2.4's sweep is what
-    /// decides the entry itself.
+    /// Predefined bodies and explicitly pinned/registered Symbol identities
+    /// are roots. Ordinary dynamic entries are only an index; their string
+    /// caches remain droppable and unpinned unique Symbols can die.
     pub fn traceRoots(self: *AtomTable, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
-        for (&self.predefined_str) |*slot| try visitor.stringSlot(slot);
+        for (&self.predefined_bodies, predefined_atoms) |*slot, pre| {
+            const body = slot.* orelse continue;
+            var value = if (pre.kind == .string) JSValue.string(body) else JSValue.symbol(body);
+            try visitor.value(&value);
+            slot.* = value.cycleMarkHeader();
+        }
+        for (self.entries) |*entry| {
+            if (!entry.occupied or !isValueSymbolKind(entry.kind)) continue;
+            if (entry.host_pins == 0 and !entry.registry_managed_symbol) continue;
+            const body = entry.body orelse continue;
+            var value = JSValue.symbol(body);
+            try visitor.value(&value);
+            entry.body = value.cycleMarkHeader();
+        }
     }
 
     /// The minor's extra root set (see `young_symbol_atoms`). Entries that
@@ -1295,8 +1327,10 @@ pub const AtomTable = struct {
         for (self.young_symbol_atoms.items) |id| {
             const entry = self.findDynamic(id) orelse continue;
             if (!entry.occupied or !isValueSymbolKind(entry.kind)) continue;
-            if (entry.str == null) continue;
-            try visitor.stringSlot(&entry.str);
+            if (entry.body == null) continue;
+            var value = JSValue.symbol(entry.body.?);
+            try visitor.value(&value);
+            entry.body = value.cycleMarkHeader();
         }
     }
 
@@ -1327,11 +1361,11 @@ pub const AtomTable = struct {
         const buckets = self.atom_hash;
         self.atom_hash = &.{};
         if (buckets.len != 0) mem_ops.free(account, Atom, buckets);
-        for (&self.predefined_str) |slot| std.debug.assert(slot == null);
+        for (&self.predefined_bodies) |slot| std.debug.assert(slot == null);
         for (entries) |*entry| {
             // Cached strings/symbol bodies must have been released through `free` or
             // `releaseCachedStrings` while the runtime was still usable.
-            std.debug.assert(entry.str == null);
+            std.debug.assert(entry.body == null);
             const bytes = entry.bytes;
             entry.bytes = &.{};
             if (bytes.len != 0) mem_ops.free(account, u8, bytes);
@@ -1349,7 +1383,7 @@ pub const AtomTable = struct {
         // The interval root ends with the last usable trace; the bodies
         // themselves are reclaimed wholesale by `gc.deinit`.
         self.young_symbol_atoms.clearRetainingCapacity();
-        for (&self.predefined_str) |*slot| {
+        for (&self.predefined_bodies) |*slot| {
             if (slot.* != null) {
                 slot.* = null;
                 // Predefined ids are never recycled, so the weak
@@ -1357,10 +1391,7 @@ pub const AtomTable = struct {
             }
         }
         for (self.entries) |*entry| {
-            if (entry.str) |cached| {
-                entry.str = null;
-                cached.atom_id = string.String.no_atom_id;
-            }
+            entry.unbindBody();
         }
     }
 
@@ -1376,8 +1407,8 @@ pub const AtomTable = struct {
     pub fn releaseValueSymbolBodiesAfterGc(self: *AtomTable) void {
         for (self.entries) |*entry| {
             if (!isValueSymbolKind(entry.kind)) continue;
-            if (entry.str == null) continue;
-            entry.str = null;
+            if (entry.body == null) continue;
+            entry.body = null;
         }
     }
 
@@ -1469,7 +1500,7 @@ pub const AtomTable = struct {
             } else {
                 const entry = &self.entries[i.raw() - first_dynamic_atom];
                 if (entry.hash == h and entry.kind == atom_kind and
-                    entry.bytes.len == bytes.len and std.mem.eql(u8, entry.bytes, bytes))
+                    entry.name().len == bytes.len and std.mem.eql(u8, entry.name(), bytes))
                 {
                     return i;
                 }
@@ -1608,7 +1639,7 @@ pub const AtomTable = struct {
         if (idx >= self.entries.len) return false;
         const entry = self.entries[idx];
         if (!entry.occupied or entry.kind != .global_symbol) return false;
-        return self.findAtom(entry.bytes, .global_symbol, entry.hash) == atom_id;
+        return self.findAtom(entry.name(), .global_symbol, entry.hash) == atom_id;
     }
 
     // ---- TGC S3: tracing-owned atom liveness ----
@@ -1634,7 +1665,7 @@ pub const AtomTable = struct {
     /// body (`getOwnPropertySymbols` hands out the JSValue), so the id edge
     /// keeps the body alive. A string atom's `str` is a droppable cache and is
     /// deliberately not shaded.
-    pub fn markAtomAtEpoch(self: *AtomTable, id: Atom, epoch: u64) ?*string.String {
+    pub fn markAtomAtEpoch(self: *AtomTable, id: Atom, epoch: u64) ?*gc.Header {
         return self.atomEdge(id, epoch, .stamp);
     }
 
@@ -1648,13 +1679,13 @@ pub const AtomTable = struct {
     /// OWN epoch, which overwrites the cycle's stamp beyond recovery and makes
     /// the probe's roots, not the cycle's, decide which atoms survive. The
     /// audit counters are writes too, and the real walk already made them.
-    pub fn atomEdgeBodyWithoutStamp(self: *AtomTable, id: Atom) ?*string.String {
+    pub fn atomEdgeBodyWithoutStamp(self: *AtomTable, id: Atom) ?*gc.Header {
         return self.atomEdge(id, 0, .observe);
     }
 
     const EdgeMode = enum { stamp, observe };
 
-    fn atomEdge(self: *AtomTable, id: Atom, epoch: u64, mode: EdgeMode) ?*string.String {
+    fn atomEdge(self: *AtomTable, id: Atom, epoch: u64, mode: EdgeMode) ?*gc.Header {
         if (id == null_atom or id.isConst() or id.isTaggedInt()) return null;
         const entry = self.findDynamic(id) orelse return null;
         if (!entry.occupied) {
@@ -1692,12 +1723,12 @@ pub const AtomTable = struct {
         // a string atom's droppable cache is still never shaded, so the
         // ordinary shape-key walk leaves on the kind test as before.
         if (!isValueSymbolKind(entry.kind)) return null;
-        return entry.str;
+        return entry.body;
     }
 
     noinline fn shadeAtomBarrierSlow(self: *AtomTable, rt: *runtime_mod.JSRuntime, id: Atom) void {
         const epoch = rt.gc.block_heap.mark_epoch;
-        if (self.markAtomAtEpoch(id, epoch)) |body| rt.gc.shadeCellForAtomBarrier(body.header());
+        if (self.markAtomAtEpoch(id, epoch)) |body| rt.gc.shadeCellForAtomBarrier(body);
     }
 
     /// §2.4 companion for `gc_trace_stw.computeFullReachable`.
@@ -1766,7 +1797,7 @@ pub const AtomTable = struct {
     /// why). This is the only place a dynamic atom entry dies.
     ///
     /// On the STW path every doomed cell is already destroyed and the
-    /// `onSymbolBodyDead` handshake has already nulled its `entry.str`. On the
+    /// `onSymbolBodyDead` handshake has already nulled its `entry.body`. On the
     /// INCREMENTAL path destruction is sliced across later polls, so a doomed
     /// string body is still addressable here -- which is why the sweep must
     /// also unbind the caches whose body did not survive the mark. Leaving them
@@ -1787,7 +1818,7 @@ pub const AtomTable = struct {
             // already reported dead by `symbolValueIfLive`; re-running the
             // verdict on it would unlink it from a hash chain it left long ago.
             if (!entry.occupied) continue;
-            const body_marked = if (entry.str) |body| rt.gc.headerMarked(body.header()) else false;
+            const body_marked = if (entry.body) |body| rt.gc.headerMarked(body) else false;
             const live = entry.mark_epoch == epoch or
                 entry.born_epoch == epoch or
                 entry.host_pins != 0 or
@@ -1801,10 +1832,7 @@ pub const AtomTable = struct {
                 // observe the corpse. A value symbol's body IS its identity and
                 // every id edge shades it, so it is left to the handshake.
                 if (!body_marked and entry.kind == .string) {
-                    if (entry.str) |cached| {
-                        entry.str = null;
-                        cached.atom_id = string.String.no_atom_id;
-                    }
+                    entry.unbindBody();
                 }
                 continue;
             }
@@ -1812,10 +1840,7 @@ pub const AtomTable = struct {
                 // WeakRef'd symbol: keep the shell so `symbolValueIfLive`
                 // can report the death, exactly as `onSymbolBodyDead` does.
                 self.unindexEntry(idx);
-                if (entry.str) |cached| {
-                    entry.str = null;
-                    cached.atom_id = string.String.no_atom_id;
-                }
+                entry.unbindBody();
                 entry.occupied = false;
                 continue;
             }
@@ -1840,7 +1865,7 @@ pub const AtomTable = struct {
         if (atom.isTaggedInt()) return null;
         if (predefinedById(atom)) |entry| return entry.name;
         if (self.findDynamicConst(atom)) |entry| {
-            if (entry.occupied) return entry.bytes;
+            if (entry.occupied) return entry.name();
         }
         return null;
     }
@@ -1919,7 +1944,8 @@ pub const AtomTable = struct {
     /// `top_ptr` were kept alive by the atom table rather than by the stack.
     pub inline fn cachedPushValue(self: *AtomTable, atom_id: Atom) ?JSValue {
         if (atom_id != null_atom and atom_id.raw() < first_dynamic_atom) {
-            if (self.predefined_str[atom_id.raw() - 1]) |cached| return cached.value();
+            if (predefined_atoms[atom_id.raw() - 1].kind != .string) return null;
+            if (self.predefined_bodies[atom_id.raw() - 1]) |cached| return JSValue.string(cached);
             return null;
         }
         if (atom_id.raw() >= first_dynamic_atom and atom_id.raw() < tagged_int_bit) {
@@ -1927,7 +1953,7 @@ pub const AtomTable = struct {
             if (idx < self.entries.len) {
                 const entry = &self.entries[idx];
                 if (entry.kind == .string) {
-                    if (entry.str) |cached| return cached.value();
+                    if (entry.body) |cached| return JSValue.string(cached);
                 }
             }
         }
@@ -1940,6 +1966,8 @@ pub const AtomTable = struct {
     }
 
     pub fn toStringValue(self: *AtomTable, rt: anytype, atom_id: Atom) !JSValue {
+        self.pinForHost(atom_id);
+        defer self.unpinForHost(atom_id);
         if (atom_id.isTaggedInt()) {
             var buf: [10]u8 = undefined;
             const text = std.fmt.bufPrint(&buf, "{d}", .{atom_id.toUInt32()}) catch unreachable;
@@ -1967,17 +1995,17 @@ pub const AtomTable = struct {
                 const created = try string.String.createUtf8(rt, text);
                 return created.value();
             }
-            const slot = &self.predefined_str[atom_id.raw() - 1];
-            if (slot.*) |cached| return cached.value();
+            const slot = &self.predefined_bodies[atom_id.raw() - 1];
+            if (slot.*) |cached| return JSValue.string(cached);
             const created = try string.String.createUtf8(rt, text);
             created.atom_id = atom_id;
-            slot.* = created;
+            slot.* = created.header();
             return created.value();
         }
 
         const entry = self.findDynamic(atom_id) orelse return JSValue.undefinedValue();
         if (!entry.isLive()) return JSValue.undefinedValue();
-        const text = entry.bytes;
+        const text = entry.name();
         if (text.len == 1 and text[0] <= 0x7f) {
             const cached = try rt.singleByteString(text[0]);
             // QJS `__JS_AtomToValue` is a single
@@ -1986,8 +2014,8 @@ pub const AtomTable = struct {
             // entry's materialized-string slot so `toStringValueForPush`'s
             // inline cached arm hits on every later push instead of
             // repeating this findDynamic hash walk per OP_push_atom_value.
-            if (entry.kind == .string and entry.str == null) {
-                entry.str = cached;
+            if (entry.kind == .string and entry.body == null) {
+                entry.body = cached.header();
                 if (cached.atom_id == string.String.no_atom_id) cached.bindAtomId(rt, atom_id);
             }
             return cached.value();
@@ -1996,9 +2024,9 @@ pub const AtomTable = struct {
             const created = try string.String.createUtf8(rt, text);
             return created.value();
         }
-        if (entry.str) |cached| return cached.value();
+        if (entry.body) |cached| return JSValue.string(cached);
         const created = try string.String.createUtf8(rt, text);
-        entry.str = created;
+        entry.body = created.header();
         created.bindAtomId(rt, atom_id);
         return created.value();
     }
@@ -2008,10 +2036,13 @@ pub const AtomTable = struct {
     /// never converted.
     pub fn cachedString(self: *const AtomTable, atom_id: Atom) ?*string.String {
         if (atom_id == null_atom or atom_id.isTaggedInt()) return null;
-        if (atom_id.isConst()) return self.predefined_str[atom_id.raw() - 1];
+        if (atom_id.isConst()) {
+            if (predefined_atoms[atom_id.raw() - 1].kind != .string) return null;
+            return string.String.fromHeader(self.predefined_bodies[atom_id.raw() - 1] orelse return null);
+        }
         const entry = self.findDynamicConst(atom_id) orelse return null;
         if (!entry.isLive()) return null;
-        return entry.str;
+        return entry.stringBody();
     }
 
     /// Bind `s` as the materialized string for `atom_id`, if the slot is
@@ -2037,15 +2068,15 @@ pub const AtomTable = struct {
             // Predefined ids are never recycled either, so the weak
             // back-pointer is safe even when the cache slot is taken.
             s.atom_id = atom_id;
-            const slot = &self.predefined_str[atom_id.raw() - 1];
+            const slot = &self.predefined_bodies[atom_id.raw() - 1];
             if (slot.* == null) {
-                slot.* = s;
+                slot.* = s.header();
             }
             return;
         }
         const entry = self.findDynamic(atom_id) orelse return;
-        if (!entry.isLive() or entry.kind != .string or entry.str != null) return;
-        entry.str = s;
+        if (!entry.isLive() or entry.kind != .string or entry.body != null) return;
+        entry.body = s.header();
         s.bindAtomId(rt, atom_id);
     }
 
@@ -2074,7 +2105,7 @@ pub const AtomTable = struct {
         if (idx >= self.entries.len) return;
         const entry = &self.entries[idx];
         if (!entry.occupied or !isValueSymbolKind(entry.kind)) return;
-        if (entry.str != null) return;
+        if (entry.body != null) return;
         if (entry.host_pins != 0 or entry.weakref_count != 0) return;
         self.finalizeDeadEntry(@intCast(idx));
     }
@@ -2102,15 +2133,14 @@ pub const AtomTable = struct {
         entry.weakref_count -= 1;
         // Only a weak shell (body already swept, no ID holder) is finalized
         // here; a live body is the sweep's business.
-        if (entry.weakref_count == 0 and entry.str == null and !entry.occupied) {
+        if (entry.weakref_count == 0 and entry.body == null and !entry.occupied) {
             self.finalizeDeadEntry(@intCast(idx));
         }
     }
 
     pub fn symbolDescription(self: *const AtomTable, rt: *const JSRuntime, symbol: Atom) ?[]const u8 {
         const body = self.symbolBodyIfLive(rt, symbol) orelse return null;
-        if (body.isSymbolNoDescription()) return null;
-        return self.name(symbol);
+        return body.descriptionBytes();
     }
 
     /// GC weak-key liveness query. The atom id is only an identity; under
@@ -2121,7 +2151,7 @@ pub const AtomTable = struct {
         return @ptrCast(@alignCast(body));
     }
 
-    /// TGC S2 §6 lane A: `entry.str` is the mutator's liveness authority, but
+    /// TGC S2 §6 lane A: `entry.body` is the mutator's liveness authority, but
     /// only outside the sweep. Once the collector has entered
     /// `.tracer_destroy` the trace has already decided who lives, and the
     /// unbinding handshake (`onSymbolBodyDead`) has not necessarily reached
@@ -2136,12 +2166,12 @@ pub const AtomTable = struct {
     /// `liveObjectFromWeakIdentity`, one step earlier: the husk bit only
     /// appears once teardown has actually stripped the object, whereas the
     /// mark is already false for the whole condemned set.
-    fn bodyLiveForCurrentPhase(rt: *const JSRuntime, body: *string.String) bool {
+    fn bodyLiveForCurrentPhase(rt: *const JSRuntime, body: *Symbol) bool {
         if (rt.gc.hot.phase != .tracer_destroy) return true;
         return rt.gc.headerMarked(body.header());
     }
 
-    fn symbolBodyIfLive(self: *const AtomTable, rt: *const JSRuntime, atom_id: Atom) ?*string.String {
+    fn symbolBodyIfLive(self: *const AtomTable, rt: *const JSRuntime, atom_id: Atom) ?*Symbol {
         if (atom_id == null_atom or atom_id.isTaggedInt()) return null;
         if (atom_id.isConst()) {
             const pre = predefined_atoms[atom_id.raw() - 1];
@@ -2149,13 +2179,13 @@ pub const AtomTable = struct {
             // Predefined bodies are unconditional trace roots (`traceRoots`),
             // so they are marked whenever a sweep is running; the phase test
             // rides along rather than special-casing them.
-            const body = self.predefined_str[atom_id.raw() - 1] orelse return null;
+            const body = Symbol.fromHeader(self.predefined_bodies[atom_id.raw() - 1] orelse return null);
             if (!bodyLiveForCurrentPhase(rt, body)) return null;
             return body;
         }
         const entry = self.findDynamicConst(atom_id) orelse return null;
         if (!isValueSymbolKind(entry.kind)) return null;
-        const body = entry.str orelse return null;
+        const body = entry.symbolBody() orelse return null;
         // A body that is still bound is live until the sweep
         // handshake unbinds it (weak shell) or retires the entry --
         // except inside the sweep itself, where the mark decides.
@@ -2163,21 +2193,20 @@ pub const AtomTable = struct {
         return body;
     }
 
-    fn ensureSymbolBody(self: *AtomTable, rt: *JSRuntime, atom_id: Atom) !*string.String {
+    fn ensureSymbolBody(self: *AtomTable, rt: *JSRuntime, atom_id: Atom) !*Symbol {
         if (atom_id == null_atom or atom_id.isTaggedInt()) return error.InvalidAtom;
         if (atom_id.isConst()) {
             const pre = predefined_atoms[atom_id.raw() - 1];
             if (!isValueSymbolKind(pre.kind)) return error.InvalidAtom;
-            const slot = &self.predefined_str[atom_id.raw() - 1];
-            if (slot.*) |cached| return cached;
-            const body = try string.String.createUtf8(rt, pre.name);
-            body.atom_id = atom_id;
-            slot.* = body;
+            const slot = &self.predefined_bodies[atom_id.raw() - 1];
+            if (slot.*) |cached| return Symbol.fromHeader(cached);
+            const body = try Symbol.create(rt, atom_id, pre.name);
+            slot.* = body.header();
             return body;
         }
         const entry = self.findDynamic(atom_id) orelse return error.InvalidAtom;
         if (!entry.occupied or !isValueSymbolKind(entry.kind)) return error.InvalidAtom;
-        if (entry.str) |cached| return cached;
+        if (entry.symbolBody()) |cached| return cached;
         // The fresh body is YOUNG and its only holder may be an old object's
         // shape, which reaches it over an atom id no minor traces. Reserve the
         // interval-root slot BEFORE the body exists, so the publish and the
@@ -2185,18 +2214,19 @@ pub const AtomTable = struct {
         try self.young_symbol_atoms.ensureUnusedCapacity(self.youngListAllocator(), 1);
         // Nothing roots the ENTRY across the allocation below: it has no body
         // for the sweep's `body_marked` test, and a birth epoch only covers the
-        // major it was born in. A collection inside `createUtf8` would retire
-        // it and `entry.str` would then publish a body onto a dead slot. Pin
+        // major it was born in. A collection inside `Symbol.create` would retire
+        // it and `entry.body` would then publish a body onto a dead slot. Pin
         // for the window. (Hidden until the incremental major was retired: a
         // threshold crossing used to open a cycle rather than sweep the table.)
         self.pinForHost(atom_id);
         defer self.unpinForHost(atom_id);
-        const body = if (entry.no_symbol_description)
-            try string.String.createSymbolNoDescription(rt)
-        else
-            try string.String.createUtf8(rt, entry.bytes);
-        body.bindAtomId(rt, atom_id);
-        entry.str = body;
+        const body = try Symbol.create(rt, atom_id, if (entry.no_symbol_description) null else entry.bytes);
+        // No allocation between publication and installation. The table now
+        // borrows the inline description instead of owning a second copy.
+        entry.body = body.header();
+        if (entry.bytes.len != 0) mem_ops.free(self.owner, u8, entry.bytes);
+        entry.bytes = &.{};
+        entry.no_symbol_description = false;
         self.young_symbol_atoms.appendAssumeCapacity(atom_id);
         return body;
     }
@@ -2230,7 +2260,7 @@ pub const AtomTable = struct {
             const entry = &self.entries[idx];
             std.debug.assert(!entry.slotOccupied());
             std.debug.assert(entry.id.raw() == idx + first_dynamic_atom);
-            std.debug.assert(entry.str == null);
+            std.debug.assert(entry.body == null);
             self.free_slot_head = entry.next_free;
             entry.bytes = owned;
             entry.kind = atom_kind;
@@ -2327,11 +2357,7 @@ pub const AtomTable = struct {
     fn finalizeDeadEntry(self: *AtomTable, idx: EntryIndex) void {
         const entry = &self.entries[idx];
         self.unindexEntry(idx);
-        if (entry.str) |cached| {
-            entry.str = null;
-            std.debug.assert(cached.atom_id == entry.id);
-            cached.atom_id = string.String.no_atom_id;
-        }
+        entry.unbindBody();
         const bytes = entry.bytes;
         entry.bytes = &.{};
         if (bytes.len != 0) mem_ops.free(self.owner, u8, bytes);
@@ -2394,27 +2420,25 @@ pub const AtomTable = struct {
         return &self.entries[idx];
     }
 
-    /// TGC S2 §5.7 atom handshake: the tracer found symbol body `body` unmarked and
-    /// `String.destroyCellFromHeader` is about to recycle its cell, so the
-    /// entry must stop naming it. Same outcome as the rc-zero path -- a
-    /// WeakRef'd entry stays as a weak shell (unindexed, `str = null`, so
-    /// `symbolValueIfLive` reports it dead), anything else is finalized --
-    /// with no retain/release transition.
-    pub fn onSymbolBodyDead(self: *AtomTable, atom_id: Atom, body: *string.String) void {
+    /// Losing a string cache does not retire the name's identity.
+    pub fn onStringBodyDead(self: *AtomTable, atom_id: Atom, body: *string.String) void {
+        const entry = self.findDynamic(atom_id) orelse return;
+        std.debug.assert(entry.kind == .string);
+        if (entry.body == body.header()) entry.body = null;
+    }
+
+    /// Called before a Symbol body is recycled. Weak observers keep only an
+    /// unindexed shell; otherwise the id is retired along with the body.
+    pub fn onSymbolBodyDead(self: *AtomTable, atom_id: Atom, body: *Symbol) void {
         std.debug.assert(!atom_id.isConst() and !atom_id.isTaggedInt());
         const idx = dynamicEntryIndex(atom_id) orelse return;
         if (idx >= self.entries.len) return;
         const entry = &self.entries[idx];
-        if (!isValueSymbolKind(entry.kind)) {
-            // TGC S3 §2.4: the entry does not root its cached body, so losing
-            // that cache is a legal event -- drop the binding.
-            if (entry.str == body) entry.str = null;
-            return;
-        }
-        if (entry.str != body) return;
+        std.debug.assert(isValueSymbolKind(entry.kind));
+        if (entry.body != body.header()) return;
         if (entry.weakref_count != 0) {
             self.unindexEntry(@intCast(idx));
-            entry.str = null;
+            entry.body = null;
             entry.occupied = false;
             return;
         }

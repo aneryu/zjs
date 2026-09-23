@@ -1083,6 +1083,85 @@ test "TGC S3: a module record name is an atom trace edge" {
     try std.testing.expectEqual(s3MarkEpoch(rt), s3AtomEntry(rt, module_name).mark_epoch);
 }
 
+test "symbol inline extent survives id roots and leaves a weak shell on collection" {
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    const text = "long-description" ** 1024;
+    const value = try rt.newSymbolValue(text);
+    const id = value.asSymbolAtom().?;
+    try std.testing.expect(!core.gc.Registry.isBlockCellHeader(value.asSymbolBody().?.header()));
+    try std.testing.expectEqual(core.gc.RefKind.symbol, value.asSymbolBody().?.header().metaConst().flags.kind);
+    rt.atoms.pinForHost(id);
+    rt.atoms.retainSymbolWeakRef(id);
+    defer rt.atoms.releaseSymbolWeakRef(rt, id);
+    try s3RunMajor(rt);
+    try std.testing.expectEqualStrings(text, rt.atoms.symbolDescription(rt, id).?);
+    try std.testing.expect(rt.gc.containsHeader(value.asSymbolBody().?.header()));
+    rt.atoms.unpinForHost(id);
+    try s3RunMajor(rt);
+    try std.testing.expect(rt.atoms.symbolValueIfLive(rt, id).is(.undefined_value));
+    try std.testing.expect(rt.atoms.name(id) == null);
+    const replacement = try rt.newSymbolValue(text);
+    try std.testing.expect(replacement.asSymbolAtom().? != id);
+}
+
+test "symbol registry roots preserve inline identity across major collections" {
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    const key = "registry-description" ** 512;
+    const value = try rt.globalSymbolValue(key);
+    const id = value.asSymbolAtom().?;
+    const body = value.asSymbolBody().?;
+    // No value or atom pin remains: the registry itself is the root.
+    try s3RunMajor(rt);
+    try s3RunMajor(rt);
+    try std.testing.expectEqualStrings(key, core.symbol.registryKey(&rt.atoms, id).?);
+    try std.testing.expectEqual(body, (try rt.globalSymbolValue(key)).asSymbolBody().?);
+    try std.testing.expectEqual(@as(usize, 0), rt.atoms.entries[id.raw() - core.atom.first_dynamic_atom].bytes.len);
+}
+
+test "symbol failed registry materialization releases pending description" {
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    const key = "failed-registered-symbol";
+    const id = try rt.atoms.internRegisteredValueSymbol(key);
+    rt.setMemoryLimit(0);
+    try std.testing.expectError(error.OutOfMemory, rt.symbolValue(id));
+    rt.setMemoryLimit(null);
+    try s3RunMajor(rt);
+    try s3RunMajor(rt);
+    try std.testing.expect(rt.atoms.name(id) == null);
+    const value = try rt.globalSymbolValue(key);
+    try std.testing.expectEqualStrings(key, value.asSymbolBody().?.descriptionBytes().?);
+}
+
+test "symbol body allocation failure preserves pending atom and description" {
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    defer rt.destroy();
+    rt.forcePreciseRootScanForTest();
+    const id = try rt.atoms.newValueSymbol("pending-symbol");
+    rt.atoms.pinForHost(id);
+    defer rt.atoms.unpinForHost(id);
+    rt.setMemoryLimit(0);
+    try std.testing.expectError(error.OutOfMemory, rt.symbolValue(id));
+    try std.testing.expectEqualStrings("pending-symbol", rt.atoms.name(id).?);
+    try std.testing.expect(rt.atoms.entries[id.raw() - core.atom.first_dynamic_atom].body == null);
+    rt.setMemoryLimit(null);
+    var value = try rt.symbolValue(id);
+    var roots = core.runtime.rootValues(.{&value});
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    const body = value.asSymbolBody().?;
+    rt.setMemoryLimit(0);
+    try std.testing.expectError(error.OutOfMemory, body.descriptionValue(rt));
+    try std.testing.expectEqualStrings("pending-symbol", body.descriptionBytes().?);
+    rt.setMemoryLimit(null);
+    try std.testing.expect((try body.descriptionValue(rt)).isString());
+}
+
 test "TGC S3: an id-held value symbol keeps its body marked" {
     const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
     defer rt.destroy();
@@ -1094,7 +1173,7 @@ test "TGC S3: an id-held value symbol keeps its body marked" {
     // Materialize the body, then drop the JSValue: the body is now reachable
     // only through the entry the shape names by id.
     const body_value = try rt.symbolValue(symbol_atom);
-    const body_header = body_value.stringHeader().?;
+    const body_header = body_value.asSymbolBody().?.header();
 
     const object = try core.Object.createPlainObject(rt, null);
     try rt.gc.pinHeader(object.gcHeader());
@@ -1246,7 +1325,7 @@ test "TGC S3-c: a young symbol body a shape names by id survives a minor" {
 
     _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
     try std.testing.expect(entry.slotOccupied());
-    try std.testing.expect(entry.str != null);
+    try std.testing.expect(entry.body != null);
     try std.testing.expect(rt.atoms.name(symbol_atom) != null);
     try std.testing.expect(!rt.atoms.symbolValueIfLive(rt, symbol_atom).is(.undefined_value));
 
@@ -1351,7 +1430,7 @@ test "TGC S3-c: a WeakRef'd symbol still leaves a weak shell instead of a recycl
     try std.testing.expect(rt.atoms.symbolValueIfLive(rt, symbol_atom).is(.undefined_value));
     try std.testing.expect(rt.atoms.name(symbol_atom) == null);
     try std.testing.expect(rt.atoms.entries[entry_index].slotOccupied());
-    try std.testing.expect(rt.atoms.entries[entry_index].str == null);
+    try std.testing.expect(rt.atoms.entries[entry_index].body == null);
 
     // A second major must not re-run the verdict on the shell.
     try s3RunMajor(rt);

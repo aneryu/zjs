@@ -417,6 +417,8 @@ pub const RefKind = enum(u4) {
     /// that reads it. Unlike a flat body or rope node, a buffer is not a
     /// shape that a string JSValue can name; only rope nodes reference it.
     string_buffer = 12,
+    /// Unique Symbol identity with an inline description; a prefix leaf.
+    symbol = 13,
 };
 
 /// Kinds whose carrier may be a collector block cell. Mirrors the catalog's
@@ -424,7 +426,7 @@ pub const RefKind = enum(u4) {
 /// guards that must not index the catalog.
 pub inline fn kindIsBlockCellKind(kind: RefKind) bool {
     return switch (kind) {
-        .object, .string, .rope, .string_buffer, .property_storage, .array_storage, .payload => true,
+        .object, .string, .symbol, .rope, .string_buffer, .property_storage, .array_storage, .payload => true,
         .function_bytecode, .var_ref, .realm_context, .module, .shape, .big_int => false,
     };
 }
@@ -438,7 +440,7 @@ pub inline fn kindIsBlockCellKind(kind: RefKind) bool {
 /// flat body and rope node shapes that a string JSValue can name.
 pub inline fn kindIsPrefixCarrier(kind: RefKind) bool {
     return switch (kind) {
-        .string, .rope, .string_buffer, .property_storage, .array_storage, .payload => true,
+        .string, .symbol, .rope, .string_buffer, .property_storage, .array_storage, .payload => true,
         .object, .function_bytecode, .var_ref, .realm_context, .module, .shape, .big_int => false,
     };
 }
@@ -461,7 +463,7 @@ pub inline fn kindIsPrefixCarrier(kind: RefKind) bool {
 pub inline fn kindIsOwnedStorageCell(kind: RefKind) bool {
     return switch (kind) {
         .property_storage, .array_storage, .payload, .string_buffer => true,
-        .string, .rope, .object, .function_bytecode, .var_ref, .realm_context, .module, .shape, .big_int => false,
+        .string, .symbol, .rope, .object, .function_bytecode, .var_ref, .realm_context, .module, .shape, .big_int => false,
     };
 }
 
@@ -473,7 +475,7 @@ pub inline fn kindIsOwnedStorageCell(kind: RefKind) bool {
 /// single equality test in the hot mark probes.
 inline fn kindIsExtentCapable(kind: RefKind) bool {
     return switch (kind) {
-        .string, .string_buffer, .property_storage, .array_storage, .payload => true,
+        .string, .symbol, .string_buffer, .property_storage, .array_storage, .payload => true,
         .rope, .object, .function_bytecode, .var_ref, .realm_context, .module, .shape, .big_int => false,
     };
 }
@@ -505,6 +507,7 @@ pub const representation_kind_catalog = [_]RepresentationKindDescriptor{
     .{ .kind = .payload, .allocation = .block_slab_or_standalone },
     .{ .kind = .rope, .allocation = .block_slab_or_standalone },
     .{ .kind = .string_buffer, .allocation = .block_slab_or_standalone },
+    .{ .kind = .symbol, .allocation = .block_slab_or_standalone },
 };
 
 pub inline fn representationKindDescriptor(kind: RefKind) *const RepresentationKindDescriptor {
@@ -753,6 +756,7 @@ comptime {
     std.debug.assert(@intFromEnum(GcKind.payload) == 10 and @intFromEnum(GcKind.rope) == 11);
     std.debug.assert(@intFromEnum(GcKind.rope) == representation.rope_kind_tag);
     std.debug.assert(@intFromEnum(GcKind.string_buffer) == representation.string_buffer_kind_tag);
+    std.debug.assert(@intFromEnum(GcKind.symbol) == representation.symbol_kind_tag);
     std.debug.assert(@intFromEnum(GcKind.property_storage) == representation.property_storage_kind_tag);
     std.debug.assert(@intFromEnum(GcKind.array_storage) == representation.array_storage_kind_tag);
     std.debug.assert(@intFromEnum(GcKind.payload) == representation.payload_kind_tag);
@@ -876,7 +880,7 @@ pub const Header = TraceHeader;
 /// kind retains the eight-byte TraceHeader word ahead of its body.
 pub inline fn bodyOffsetFromHeader(comptime kind: GcKind) usize {
     return switch (kind) {
-        .object => 0,
+        .object, .symbol => 0,
         .function_bytecode,
         .var_ref,
         .realm_context,
@@ -2073,6 +2077,7 @@ pub const Registry = struct {
                 break :blk sh.accountedAllocationSize();
             },
             .string, .rope => string.accountedAllocationSizeFromHeader(h),
+            .symbol => @import("symbol.zig").Symbol.fromHeader(@constCast(h)).accountedSize(),
             .string_buffer => string.accountedStorageSizeFromHeader(h),
             // TGC S4-b: a storage cell is not self-describing -- its body is
             // the owner's raw array -- so the carrier answers instead. A block
@@ -2112,6 +2117,7 @@ pub const Registry = struct {
             .module,
             .big_int,
             .string,
+            .symbol,
             .rope,
             .string_buffer,
             .property_storage,

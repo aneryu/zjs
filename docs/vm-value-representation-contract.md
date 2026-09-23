@@ -156,7 +156,7 @@ Metadata 8B + 普通对象 slots2 体 56B = 64B 块 cell(objectBodyBytes(ids.obj
 
 ### 1.6 载体家族
 
-`gc.RefKind = enum(u4)`,13 个值(`gc.zig:RefKind`):
+`gc.RefKind = enum(u4)`,14 个值(`gc.zig:RefKind`):
 
 | tag | kind | 载体 | 体偏移 | 边 |
 |---|---|---|---|---|
@@ -173,8 +173,9 @@ Metadata 8B + 普通对象 slots2 体 56B = 64B 块 cell(objectBodyBytes(ids.obj
 | 10 | payload | 块 cell / extent | 8 | 叶(体内容由 owner 的 payload trace 走) |
 | 11 | rope | 块 cell / extent | 8 | `string.traceRopeEdges`(left/right/tail buffer) |
 | 12 | string_buffer | 块 cell / extent | 8 | 叶,rope 边 |
+| 13 | symbol | 块 cell / extent | 0(handle 即 body) | 叶,描述内联 |
 
-- **prefix carrier**(`gc.kindIsPrefixCarrier`:6/8/9/10/11/12):体紧跟
+- **prefix carrier**(`gc.kindIsPrefixCarrier`:6/8/9/10/11/12/13):体紧跟
   8B 前缀、无 `TraceHeader` 链接字、不上 `lists.objects`、standalone 形态
   是块堆 **extent** 而非 slab 分配。
 - **存储 cell**(8/9/10/12)的生命由**唯一 owner 边**决定:无根命名它、

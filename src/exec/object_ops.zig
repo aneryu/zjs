@@ -1322,9 +1322,8 @@ fn symbolConstructorCall(
 /// Symbol wrapper object and returns its description string (or undefined).
 fn symbolDescriptionValue(rt: *core.JSRuntime, this_value: core.JSValue) !core.JSValue {
     const primitive = try symbolPrimitiveValue(rt, this_value);
-    const atom_id = primitive.asSymbolAtom() orelse return error.TypeError;
-    const desc = core.symbol.description(rt, atom_id) orelse return core.JSValue.undefinedValue();
-    return value_ops.createStringValue(rt, desc);
+    const body = primitive.asSymbolBody() orelse return error.TypeError;
+    return body.descriptionValue(rt);
 }
 
 /// `Symbol.prototype[Symbol.toPrimitive]`: returns the wrapped symbol

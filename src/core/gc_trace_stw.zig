@@ -92,7 +92,7 @@ pub fn traceHeaderEdges(rt: *JSRuntime, visitor: anytype, header: *gc.Header) Co
         },
         // A flat body is a leaf; an extent is always flat (`allocRopeNode`
         // asserts a rope node fits a cell), so this arm has no edges to walk.
-        .string => return,
+        .string, .symbol => return,
         .rope => return string_mod.traceRopeEdges(rt, visitor, header),
         .big_int => return,
         // Storage cells are marked by their owner's edge and have no
@@ -1504,6 +1504,7 @@ fn destroyCondemnedSlice(rt: *JSRuntime, budget_ns: u64, sweep_string_extents: b
                 // stamped ones are the bodies bound to a dynamic atom, and
                 // the string side performs that handshake.
                 .string, .rope, .string_buffer => string_mod.destroyCellFromHeader(rt, header),
+                .symbol => @import("symbol.zig").Symbol.destroy(rt, header),
                 // A bare storage cell never owes destructor work, so it
                 // can never carry the bit.
                 else => unreachable,
@@ -2079,11 +2080,11 @@ const Collector = struct {
         if (self.atom_stamps_frozen) {
             // Diagnostic probe: shade the body the edge keeps alive, leave the
             // entry alone (`AtomTable.atomEdgeBodyWithoutStamp`).
-            if (self.rt.atoms.atomEdgeBodyWithoutStamp(id)) |body| self.shadeExact(body.header());
+            if (self.rt.atoms.atomEdgeBodyWithoutStamp(id)) |body| self.shadeExact(body);
             return;
         }
         const epoch = self.rt.gc.block_heap.mark_epoch;
-        if (self.rt.atoms.markAtomAtEpoch(id, epoch)) |body| self.shadeExact(body.header());
+        if (self.rt.atoms.markAtomAtEpoch(id, epoch)) |body| self.shadeExact(body);
     }
 
     /// Strong mark must not promote a weak edge. Ephemeron values are

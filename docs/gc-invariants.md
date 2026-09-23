@@ -10,12 +10,22 @@ contract.
 
 The collector is a non-moving, generational (sticky mark bit), incrementally
 marking stop-the-world tracer (`src/core/gc_trace_stw.zig`). It owns every
-`gc.Header` kind. `gc.RefKind` is a `u4` with thirteen values: 0 `object`,
+`gc.Header` kind. `gc.RefKind` is a `u4` with fourteen values: 0 `object`,
 1 `function_bytecode`, 2 `var_ref`, 3 `realm_context`, 4 `module`, 5 `shape`,
 6 `string`, 7 `big_int`, 8 `property_storage`, 9 `array_storage`,
-10 `payload`, 11 `rope`, 12 `string_buffer` -- the string family joined in S2
+10 `payload`, 11 `rope`, 12 `string_buffer`, 13 `symbol` -- the string family joined in S2
 (2026-09-03), the dynamic atom table in S3 (2026-09-04), and 8/9/10/11/12 are
 the S4-a..S4-c and S2-i additions.
+
+Symbol bodies are separate prefix-carrier leaves, allocated as block cells or
+extents. Each owns its inline WTF-8 description and an explicit absence flag;
+no String pointer aliases a Symbol body. Atom-id edges shade the Symbol, and
+its sweep handshake retires the id or leaves a weak shell. Once materialized,
+the atom entry owns no duplicate description bytes. A pending atom may still
+own bytes before materialization (including parser-only tables without GC).
+Host-pinned Symbol ids and registered Symbols are explicit atom-table roots;
+unreferenced unique Symbols are not. Registry identity follows
+[ECMA-262 Symbol.for](https://tc39.es/ecma262/multipage/fundamental-objects.html#sec-symbol.for).
 
 No kind carries a reference count any more: `RefCountHeader`/`StringHeader`
 and the 4-byte string rc prefix, `headerRefCount`, `gc.retain`/`gc.release`,

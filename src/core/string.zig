@@ -485,15 +485,9 @@ pub const String = struct {
         return self;
     }
 
-    pub fn createSymbolNoDescription(rt: *JSRuntime) !*String {
-        return createUninitialized(rt, .utf16, 0);
-    }
-
-    pub fn isSymbolNoDescription(self: *const String) bool {
-        return self.len() == 0 and self.isWide();
-    }
-
     pub fn createAtomBacked(rt: *JSRuntime, atom_id: atom_mod.Atom) !*String {
+        rt.atoms.pinForHost(atom_id);
+        defer rt.atoms.unpinForHost(atom_id);
         // Atom-table cache hit: reuse the traced string already materialized
         // for this atom, skipping the UTF-8 decode.
         if (rt.atoms.cachedString(atom_id)) |cached| {
@@ -1279,7 +1273,7 @@ fn stringValueInfo(value: JSValue) StringValueInfo {
         const node = StringRope.fromHeader(header);
         return .{ .len = node.len_(), .depth = node.depth, .wide = node.wide };
     }
-    std.debug.assert(tag == ValueTag.string or tag == ValueTag.symbol);
+    std.debug.assert(tag == ValueTag.string);
     const flat = String.fromHeader(header);
     return .{ .len = flat.len(), .depth = 0, .wide = flat.isWide() };
 }
@@ -1666,6 +1660,10 @@ pub fn accountedAllocationSizeFromHeader(header: *const gc.Header) usize {
 pub fn destroyCellFromHeader(rt: *JSRuntime, header: *gc.Header) void {
     std.debug.assert(gc.Registry.isBlockCellHeader(header));
     const meta: *const gc.Metadata = @ptrFromInt(@intFromPtr(header) - gc.string_prefix_size);
+    if (meta.flags.kind == .symbol) {
+        @import("symbol.zig").Symbol.destroy(rt, header);
+        return;
+    }
     if (meta.flags.kind == .string_buffer) {
         destroyStringBufferCell(rt, header);
         return;
@@ -1697,7 +1695,7 @@ pub fn destroyCellFromHeader(rt: *JSRuntime, header: *gc.Header) void {
     // retires or weakens the entry).
     const atom_id = body.atom_id;
     if (atom_id != String.no_atom_id and !atom_id.isConst() and !atom_id.isTaggedInt()) {
-        rt.atoms.onSymbolBodyDead(atom_id, body);
+        rt.atoms.onStringBodyDead(atom_id, body);
     }
     const layout = if (body.len_meta.is_wide)
         inlineAllocationLayout(.utf16, body.len_meta.len).?
@@ -1723,7 +1721,7 @@ pub fn destroyAllStringCarriersForDeinit(rt: *JSRuntime) void {
     cells.ensureTotalCapacity(std.heap.page_allocator, rt.gc.liveCountKind(.string) +
         rt.gc.liveCountKind(.rope) + rt.gc.liveCountKind(.string_buffer) +
         rt.gc.liveCountKind(.property_storage) + rt.gc.liveCountKind(.array_storage) +
-        rt.gc.liveCountKind(.payload)) catch {};
+        rt.gc.liveCountKind(.payload) + rt.gc.liveCountKind(.symbol)) catch {};
     while (true) {
         cells.clearRetainingCapacity();
         var overflow: ?*gc.Header = null;
@@ -1772,6 +1770,10 @@ pub fn sweepYoungExtents(rt: *JSRuntime) usize {
 fn destroyDeadStringExtent(ctx: *anyopaque, base: usize, user_bytes: usize, needs_finalizer: bool) void {
     const rt: *JSRuntime = @ptrCast(@alignCast(ctx));
     const meta: *const gc.Metadata = @ptrFromInt(base);
+    if (meta.flags.kind == .symbol) {
+        @import("symbol.zig").Symbol.destroy(rt, @ptrFromInt(base + gc.string_prefix_size));
+        return;
+    }
     // TGC S4-d spec 2.4: the table row already answered "does this death owe
     // anything?". Only a string body bound to a DYNAMIC atom ever sets it, so
     // an unstamped extent skips the kind dispatch and the atom probe outright.
@@ -1813,7 +1815,7 @@ fn destroyDeadStringExtent(ctx: *anyopaque, base: usize, user_bytes: usize, need
     // tagged-int ids have no entry to tell.
     const atom_id = body.atom_id;
     if (atom_id != String.no_atom_id and !atom_id.isConst() and !atom_id.isTaggedInt()) {
-        rt.atoms.onSymbolBodyDead(atom_id, body);
+        rt.atoms.onStringBodyDead(atom_id, body);
     }
     rt.gc.unpublishStringExtent(header, user_bytes - gc.string_prefix_size);
     mem_ops.destroyStringExtent(rt, body, user_bytes);
@@ -1908,6 +1910,12 @@ const Utf8Plan = struct {
     units: usize,
     wide: bool,
 };
+
+/// Validate a WTF-8 description without allocating a temporary String.
+pub fn validateUtf8Length(bytes: []const u8) !void {
+    const plan = try scanUtf8(bytes);
+    if (plan.units > max_length) return error.StringTooLong;
+}
 
 fn scanUtf8(bytes: []const u8) StringError!Utf8Plan {
     var i: usize = 0;

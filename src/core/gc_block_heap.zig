@@ -18,7 +18,6 @@ const carrier = @import("gc_carrier.zig");
 const carrier_audit_enabled = carrier.audit_enabled;
 const space = @import("gc_space.zig");
 
-
 /// Test-only proof that a young-only morgue close does not accidentally run
 /// the major-only whole-heap publication scan.
 pub var publish_completed_hot_blocks_calls_for_test: if (builtin.is_test) usize else void =
@@ -2826,6 +2825,7 @@ pub const Heap = struct {
                         alloc_info & gc_representation.alloc_info_class_mask == block_cell_marker and
                         (cell_kind == object_kind or
                             cell_kind == gc_representation.string_kind_tag or
+                            cell_kind == gc_representation.symbol_kind_tag or
                             cell_kind == gc_representation.rope_kind_tag or
                             cell_kind == gc_representation.string_buffer_kind_tag or
                             cell_kind == gc_representation.property_storage_kind_tag or
