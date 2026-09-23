@@ -463,9 +463,9 @@ test "interrupt remains uncatchable when error construction runs out of memory" 
     const function = try global.getProperty(function_key);
     const preallocated = js.context.preallocated_oom_error orelse return error.TestUnexpectedResult;
 
-    const baseline_call_depth = js.runtime.hot.call_depth;
-    const baseline_native_depth = js.runtime.hot.native_call_depth;
-    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_call_depth = js.runtime.call_depth;
+    const baseline_native_depth = js.runtime.native_call_depth;
+    const baseline_stack_bytes = js.runtime.active_bytecode_stack_bytes;
     const baseline_arena_mark = js.runtime.vm_stack.mark();
 
     var state = InterruptTestState{ .stop = true };
@@ -498,9 +498,9 @@ test "interrupt remains uncatchable when error construction runs out of memory" 
 
     const caught = try global.getProperty(caught_key);
     try std.testing.expectEqual(false, caught.as(.boolean).?);
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
-    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
 
     js.runtime.setInterruptHandler(null, null);
@@ -516,9 +516,9 @@ test "interrupt remains uncatchable when error construction runs out of memory" 
     );
     try std.testing.expectEqual(@as(?i32, 42), recovered.as(.int));
     try std.testing.expectEqual(@as(usize, 2), arm.calls);
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
-    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
 }
 
@@ -609,9 +609,9 @@ test "synchronous native fence reuses one Machine and restores native cleanup or
         null,
     );
 
-    const baseline_call_depth = js.runtime.hot.call_depth;
-    const baseline_native_depth = js.runtime.hot.native_call_depth;
-    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_call_depth = js.runtime.call_depth;
+    const baseline_native_depth = js.runtime.native_call_depth;
+    const baseline_stack_bytes = js.runtime.active_bytecode_stack_bytes;
     const baseline_arena_mark = js.runtime.vm_stack.mark();
     inline_calls.resetMachineTestMetrics();
 
@@ -672,10 +672,10 @@ test "synchronous native fence reuses one Machine and restores native cleanup or
     try std.testing.expectEqual(@as(usize, 5), probe.invoke_calls);
     try std.testing.expect(probe.cleanup_ran);
     try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
-    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
 }
 
@@ -706,9 +706,9 @@ test "synchronous native reentry crosses Entry chunk boundaries exactly" {
     const depths = [_]usize{ 15, 16, 17, 31, 32, 33 };
 
     for (depths) |depth| {
-        const baseline_call_depth = js.runtime.hot.call_depth;
-        const baseline_native_depth = js.runtime.hot.native_call_depth;
-        const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+        const baseline_call_depth = js.runtime.call_depth;
+        const baseline_native_depth = js.runtime.native_call_depth;
+        const baseline_stack_bytes = js.runtime.active_bytecode_stack_bytes;
         const baseline_arena_mark = js.runtime.vm_stack.mark();
         inline_calls.resetMachineTestMetrics();
 
@@ -733,9 +733,9 @@ test "synchronous native reentry crosses Entry chunk boundaries exactly" {
             metrics.entry_chunk_allocations,
         );
         try std.testing.expect(js.runtime.active_invocation == null);
-        try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
-        try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
-        try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+        try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+        try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+        try std.testing.expectEqual(baseline_stack_bytes, js.runtime.active_bytecode_stack_bytes);
         try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
     }
 }
@@ -773,9 +773,9 @@ test "synchronous native fence restores every budget after interrupt" {
     const caught_key = try js.runtime.internAtom("__nativeFenceInterruptCaught");
     const outer = try global.getProperty(outer_key);
 
-    const baseline_call_depth = js.runtime.hot.call_depth;
-    const baseline_native_depth = js.runtime.hot.native_call_depth;
-    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_call_depth = js.runtime.call_depth;
+    const baseline_native_depth = js.runtime.native_call_depth;
+    const baseline_stack_bytes = js.runtime.active_bytecode_stack_bytes;
     const baseline_arena_mark = js.runtime.vm_stack.mark();
     var state = InterruptTestState{ .stop = true };
     js.runtime.setInterruptHandler(InterruptTestState.run, &state);
@@ -809,10 +809,10 @@ test "synchronous native fence restores every budget after interrupt" {
     const caught = try global.getProperty(caught_key);
     try std.testing.expectEqual(false, caught.as(.boolean).?);
     try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
-    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expect(js.runtime.current_backtrace_frame == null);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
 
     _ = js.context.takeException();
@@ -866,7 +866,7 @@ test "Function and Reflect apply opt into the active Machine explicitly" {
     try std.testing.expectEqual(@as(usize, 1), metrics.same_machine_sync_calls);
     try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
     try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    try std.testing.expect(js.runtime.current_backtrace_frame == null);
 }
 
 test "synchronous apply fallbacks restore the outer active invocation" {
@@ -910,7 +910,7 @@ test "synchronous apply fallbacks restore the outer active invocation" {
     // foreign-Realm apply leaves the Machine (and starts the second one).
     try std.testing.expectEqual(@as(usize, 0), metrics.same_machine_sync_calls);
     try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    try std.testing.expect(js.runtime.current_backtrace_frame == null);
 }
 
 test "ordinary spread calls enter eligible bytecode targets on the current Machine" {
@@ -966,7 +966,7 @@ test "ordinary spread calls enter eligible bytecode targets on the current Machi
     try std.testing.expectEqual(@as(usize, 2), metrics.machine_inits);
     try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
     try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    try std.testing.expect(js.runtime.current_backtrace_frame == null);
 }
 
 test "publish-time simple-ctor gate keeps prototype-miss and non-simple fallbacks" {
@@ -1179,7 +1179,7 @@ test "constructor spread preserves new target on the current Machine" {
     try std.testing.expectEqual(@as(usize, 1), derived_metrics.machine_inits);
     try std.testing.expectEqual(@as(usize, 1), derived_metrics.entry_chunk_allocations);
     try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    try std.testing.expect(js.runtime.current_backtrace_frame == null);
 
     const foreign_outer_key = try js.runtime.internAtom("__spreadConstructorForeignOuter");
     const foreign_outer = try global.getProperty(foreign_outer_key);
@@ -1313,7 +1313,7 @@ test "Array and TypedArray synchronous callback cohort stays on one Machine" {
     try std.testing.expectEqual(@as(usize, 42), metrics.same_machine_sync_calls);
     try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
     try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    try std.testing.expect(js.runtime.current_backtrace_frame == null);
 }
 
 test "Map and Set synchronous callback cohort stays on one Machine" {
@@ -1445,9 +1445,9 @@ test "Map and Set synchronous callback cohort stays on one Machine" {
     const outer_key = try js.runtime.internAtom("__collectionCallbackCohortOuter");
     const outer = try global.getProperty(outer_key);
 
-    const baseline_call_depth = js.runtime.hot.call_depth;
-    const baseline_native_depth = js.runtime.hot.native_call_depth;
-    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_call_depth = js.runtime.call_depth;
+    const baseline_native_depth = js.runtime.native_call_depth;
+    const baseline_stack_bytes = js.runtime.active_bytecode_stack_bytes;
     const baseline_arena_mark = js.runtime.vm_stack.mark();
 
     inline_calls.resetMachineTestMetrics();
@@ -1467,12 +1467,12 @@ test "Map and Set synchronous callback cohort stays on one Machine" {
     try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
     try std.testing.expectEqual(@as(usize, 18), metrics.same_machine_sync_calls);
     try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
-    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
     try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    try std.testing.expect(js.runtime.current_backtrace_frame == null);
 
     const interrupt_key = try js.runtime.internAtom("__collectionCallbackInterrupt");
     const interrupt_function = try global.getProperty(interrupt_key);
@@ -1493,12 +1493,12 @@ test "Map and Set synchronous callback cohort stays on one Machine" {
         ),
     );
     try std.testing.expectEqual(@as(usize, 1), interrupt_state.hits);
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
-    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
     try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    try std.testing.expect(js.runtime.current_backtrace_frame == null);
     _ = js.context.takeException();
 
     js.runtime.setInterruptHandler(null, null);
@@ -1765,9 +1765,9 @@ test "accessors Proxy traps and primitive coercion stay on the active Machine" {
     const outer_key = try js.runtime.internAtom("__propertyCallbackCohortOuter");
     const outer = try global.getProperty(outer_key);
 
-    const baseline_call_depth = js.runtime.hot.call_depth;
-    const baseline_native_depth = js.runtime.hot.native_call_depth;
-    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_call_depth = js.runtime.call_depth;
+    const baseline_native_depth = js.runtime.native_call_depth;
+    const baseline_stack_bytes = js.runtime.active_bytecode_stack_bytes;
     const baseline_arena_mark = js.runtime.vm_stack.mark();
 
     inline_calls.resetMachineTestMetrics();
@@ -1787,12 +1787,12 @@ test "accessors Proxy traps and primitive coercion stay on the active Machine" {
     try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
     try std.testing.expectEqual(@as(usize, 21), metrics.same_machine_sync_calls);
     try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
-    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
     try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    try std.testing.expect(js.runtime.current_backtrace_frame == null);
 
     const foreign_key = try js.runtime.internAtom("__propertyCallbackForeignOuter");
     const foreign = try global.getProperty(foreign_key);
@@ -1814,7 +1814,7 @@ test "accessors Proxy traps and primitive coercion stay on the active Machine" {
     // InlineCallRequest; only the foreign accessor needs a fresh root.
     try std.testing.expectEqual(@as(usize, 0), foreign_metrics.same_machine_sync_calls);
     try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    try std.testing.expect(js.runtime.current_backtrace_frame == null);
 
     const interrupt_key = try js.runtime.internAtom("__propertyCallbackInterrupt");
     const interrupt_function = try global.getProperty(interrupt_key);
@@ -1835,12 +1835,12 @@ test "accessors Proxy traps and primitive coercion stay on the active Machine" {
         ),
     );
     try std.testing.expectEqual(@as(usize, 1), interrupt_state.hits);
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
-    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
     try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    try std.testing.expect(js.runtime.current_backtrace_frame == null);
     _ = js.context.takeException();
 
     js.runtime.setInterruptHandler(null, null);
@@ -1965,9 +1965,9 @@ test "JSON synchronous callback cohort stays on one Machine" {
     const outer_key = try js.runtime.internAtom("__jsonCallbackCohortOuter");
     const outer = try global.getProperty(outer_key);
 
-    const baseline_call_depth = js.runtime.hot.call_depth;
-    const baseline_native_depth = js.runtime.hot.native_call_depth;
-    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_call_depth = js.runtime.call_depth;
+    const baseline_native_depth = js.runtime.native_call_depth;
+    const baseline_stack_bytes = js.runtime.active_bytecode_stack_bytes;
     const baseline_arena_mark = js.runtime.vm_stack.mark();
 
     inline_calls.resetMachineTestMetrics();
@@ -1987,12 +1987,12 @@ test "JSON synchronous callback cohort stays on one Machine" {
     try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
     try std.testing.expectEqual(@as(usize, 15), metrics.same_machine_sync_calls);
     try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
-    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
     try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    try std.testing.expect(js.runtime.current_backtrace_frame == null);
 
     const foreign_key = try js.runtime.internAtom("__jsonCallbackForeignOuter");
     const foreign = try global.getProperty(foreign_key);
@@ -2012,7 +2012,7 @@ test "JSON synchronous callback cohort stays on one Machine" {
     try std.testing.expectEqual(@as(usize, 2), foreign_metrics.machine_inits);
     try std.testing.expectEqual(@as(usize, 0), foreign_metrics.same_machine_sync_calls);
     try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    try std.testing.expect(js.runtime.current_backtrace_frame == null);
 
     const interrupt_key = try js.runtime.internAtom("__jsonCallbackInterrupt");
     const interrupt_function = try global.getProperty(interrupt_key);
@@ -2033,12 +2033,12 @@ test "JSON synchronous callback cohort stays on one Machine" {
         ),
     );
     try std.testing.expectEqual(@as(usize, 1), interrupt_state.hits);
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
-    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
     try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    try std.testing.expect(js.runtime.current_backtrace_frame == null);
     _ = js.context.takeException();
 
     js.runtime.setInterruptHandler(null, null);
@@ -2221,9 +2221,9 @@ test "string regexp iterator helpers and DisposableStack stay on one Machine" {
     const outer_key = try js.runtime.internAtom("__cohortFiveOuter");
     const outer = try global.getProperty(outer_key);
 
-    const baseline_call_depth = js.runtime.hot.call_depth;
-    const baseline_native_depth = js.runtime.hot.native_call_depth;
-    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_call_depth = js.runtime.call_depth;
+    const baseline_native_depth = js.runtime.native_call_depth;
+    const baseline_stack_bytes = js.runtime.active_bytecode_stack_bytes;
     const baseline_arena_mark = js.runtime.vm_stack.mark();
 
     inline_calls.resetMachineTestMetrics();
@@ -2243,12 +2243,12 @@ test "string regexp iterator helpers and DisposableStack stay on one Machine" {
     try std.testing.expectEqual(@as(usize, 1), metrics.machine_inits);
     try std.testing.expectEqual(@as(usize, 29), metrics.same_machine_sync_calls);
     try std.testing.expectEqual(@as(usize, 1), metrics.entry_chunk_allocations);
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
-    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
     try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    try std.testing.expect(js.runtime.current_backtrace_frame == null);
 
     const foreign_key = try js.runtime.internAtom("__cohortFiveForeignOuter");
     const foreign = try global.getProperty(foreign_key);
@@ -2268,7 +2268,7 @@ test "string regexp iterator helpers and DisposableStack stay on one Machine" {
     try std.testing.expectEqual(@as(usize, 2), foreign_metrics.machine_inits);
     try std.testing.expectEqual(@as(usize, 1), foreign_metrics.same_machine_sync_calls);
     try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    try std.testing.expect(js.runtime.current_backtrace_frame == null);
 
     const interrupt_key = try js.runtime.internAtom("__cohortFiveInterrupt");
     const interrupt_function = try global.getProperty(interrupt_key);
@@ -2289,12 +2289,12 @@ test "string regexp iterator helpers and DisposableStack stay on one Machine" {
         ),
     );
     try std.testing.expectEqual(@as(usize, 1), interrupt_state.hits);
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
-    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
     try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    try std.testing.expect(js.runtime.current_backtrace_frame == null);
     _ = js.context.takeException();
 
     js.runtime.setInterruptHandler(null, null);
@@ -2447,9 +2447,9 @@ test "Promise executor reuses the active Machine while reactions remain roots" {
     const outer_key = try js.runtime.internAtom("__promiseExecutorOuter");
     const outer = try global.getProperty(outer_key);
 
-    const baseline_call_depth = js.runtime.hot.call_depth;
-    const baseline_native_depth = js.runtime.hot.native_call_depth;
-    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_call_depth = js.runtime.call_depth;
+    const baseline_native_depth = js.runtime.native_call_depth;
+    const baseline_stack_bytes = js.runtime.active_bytecode_stack_bytes;
     const baseline_arena_mark = js.runtime.vm_stack.mark();
 
     inline_calls.resetMachineTestMetrics();
@@ -2469,19 +2469,19 @@ test "Promise executor reuses the active Machine while reactions remain roots" {
     try std.testing.expectEqual(@as(usize, 1), executor_metrics.machine_inits);
     try std.testing.expectEqual(@as(usize, 6), executor_metrics.same_machine_sync_calls);
     try std.testing.expectEqual(@as(usize, 1), executor_metrics.entry_chunk_allocations);
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
-    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
     try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    try std.testing.expect(js.runtime.current_backtrace_frame == null);
 
     try js.runJobs();
     const reaction_metrics = inline_calls.machineTestMetrics();
     try std.testing.expectEqual(@as(usize, 3), reaction_metrics.machine_inits);
     try std.testing.expectEqual(@as(usize, 6), reaction_metrics.same_machine_sync_calls);
     try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    try std.testing.expect(js.runtime.current_backtrace_frame == null);
 
     const reaction_value_key = try js.runtime.internAtom("__promiseExecutorReactionValue");
     const reaction_value = try global.getProperty(reaction_value_key);
@@ -2508,7 +2508,7 @@ test "Promise executor reuses the active Machine while reactions remain roots" {
     try std.testing.expectEqual(@as(usize, 2), foreign_metrics.machine_inits);
     try std.testing.expectEqual(@as(usize, 1), foreign_metrics.same_machine_sync_calls);
     try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    try std.testing.expect(js.runtime.current_backtrace_frame == null);
 
     const interrupt_key = try js.runtime.internAtom("__promiseExecutorInterrupt");
     const interrupt_function = try global.getProperty(interrupt_key);
@@ -2528,12 +2528,12 @@ test "Promise executor reuses the active Machine while reactions remain roots" {
     );
     try std.testing.expectEqual(@as(?i32, 42), interrupted_executor_result.as(.int));
     try std.testing.expectEqual(@as(usize, 1), interrupt_state.hits);
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
-    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
     try std.testing.expect(js.runtime.active_invocation == null);
-    try std.testing.expect(js.runtime.hot.current_backtrace_frame == null);
+    try std.testing.expect(js.runtime.current_backtrace_frame == null);
     try std.testing.expect(!js.context.hasException());
 
     js.runtime.setInterruptHandler(null, null);
@@ -2740,9 +2740,9 @@ test "initial async resume rejects with the caller-Realm interrupt exception" {
     const function_key = try js.runtime.internAtom("__w2_async_interrupt");
     const async_function = try child_global.getProperty(function_key);
 
-    const baseline_call_depth = js.runtime.hot.call_depth;
-    const baseline_native_depth = js.runtime.hot.native_call_depth;
-    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_call_depth = js.runtime.call_depth;
+    const baseline_native_depth = js.runtime.native_call_depth;
+    const baseline_stack_bytes = js.runtime.active_bytecode_stack_bytes;
     const baseline_arena_mark = js.runtime.vm_stack.mark();
 
     var state = InterruptTestState{ .stop = true };
@@ -2788,9 +2788,9 @@ test "initial async resume rejects with the caller-Realm interrupt exception" {
     try std.testing.expectEqual(@as(usize, 1), state.hits);
     try std.testing.expect(!js.context.hasException());
     try std.testing.expect(!js.context.exceptionIsUncatchable());
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
-    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
 }
 
@@ -2939,9 +2939,9 @@ test "tail-frame reuse charges planned stack bytes and fully restores both budge
     defer js.deinit();
     js.runtime.setNativeStackSize(128 * 1024);
 
-    const baseline_call_depth = js.runtime.hot.call_depth;
-    const baseline_native_depth = js.runtime.hot.native_call_depth;
-    const baseline_tail_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_call_depth = js.runtime.call_depth;
+    const baseline_native_depth = js.runtime.native_call_depth;
+    const baseline_tail_bytes = js.runtime.active_bytecode_stack_bytes;
 
     _ = try js.eval(
         \\globalThis.__w2SmallLinks = 0;
@@ -3028,14 +3028,29 @@ test "tail-frame reuse charges planned stack bytes and fully restores both budge
             "bounded:done\n",
         stream.buffered(),
     );
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
-    try std.testing.expectEqual(baseline_tail_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_tail_bytes, js.runtime.active_bytecode_stack_bytes);
 }
 
 test "exact-simple method admission respects aggregate stack byte budget" {
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
+
+    const rt = js.runtime;
+    const budget = rt.stackSize();
+    try std.testing.expect(vm_call.callBudgetWouldOverflow(
+        rt,
+        budget,
+        0,
+        0,
+    ));
+    try std.testing.expect(!vm_call.callBudgetWouldOverflow(
+        rt,
+        budget - 1,
+        budget,
+        0,
+    ));
 
     _ = try js.eval(
         \\globalThis.__stackBudgetEntries = 0;
@@ -3050,7 +3065,6 @@ test "exact-simple method admission respects aggregate stack byte budget" {
     );
 
     const global = try engine.exec.zjs_vm.contextGlobal(js.context);
-    const rt = js.runtime;
     const receiver_name = try rt.internAtom("__stackBudgetReceiver");
     const receiver = try global.getProperty(receiver_name);
     const receiver_object = try property_ops.expectObject(receiver);
@@ -3095,9 +3109,9 @@ test "exact-simple method admission respects aggregate stack byte budget" {
     const entries_name = try rt.internAtom("__stackBudgetEntries");
     const entries = try global.getProperty(entries_name);
     try std.testing.expectEqual(@as(?i32, 3), entries.as(.int));
-    try std.testing.expectEqual(@as(usize, 0), rt.hot.call_depth);
-    try std.testing.expectEqual(@as(usize, 0), rt.hot.native_call_depth);
-    try std.testing.expectEqual(@as(usize, 0), rt.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(@as(usize, 0), rt.call_depth);
+    try std.testing.expectEqual(@as(usize, 0), rt.native_call_depth);
+    try std.testing.expectEqual(@as(usize, 0), rt.active_bytecode_stack_bytes);
 }
 
 test "raw tail call opcodes share the bounded tail-chain stack contract" {
@@ -3138,9 +3152,9 @@ test "raw tail call opcodes share the bounded tail-chain stack contract" {
         core.Descriptor.data(method, .all),
     );
 
-    const baseline_call_depth = js.runtime.hot.call_depth;
-    const baseline_native_depth = js.runtime.hot.native_call_depth;
-    const baseline_tail_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_call_depth = js.runtime.call_depth;
+    const baseline_native_depth = js.runtime.native_call_depth;
+    const baseline_tail_bytes = js.runtime.active_bytecode_stack_bytes;
     var output_buffer: [256]u8 = undefined;
     var stream = std.Io.Writer.fixed(&output_buffer);
     const result = try js.evalWithOutput(
@@ -3161,9 +3175,9 @@ test "raw tail call opcodes share the bounded tail-chain stack contract" {
             "recovered:42\n",
         stream.buffered(),
     );
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
-    try std.testing.expectEqual(baseline_tail_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_tail_bytes, js.runtime.active_bytecode_stack_bytes);
 }
 
 test "tail target setup OOM remains catchable in the retiring caller" {
@@ -3240,9 +3254,9 @@ test "tail target setup OOM remains catchable in the retiring caller" {
     const body_runs_before = try global.getProperty(body_runs_key);
     try std.testing.expectEqual(@as(?f64, 1), body_runs_before.asNumber());
 
-    const baseline_call_depth = js.runtime.hot.call_depth;
-    const baseline_native_depth = js.runtime.hot.native_call_depth;
-    const baseline_tail_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_call_depth = js.runtime.call_depth;
+    const baseline_native_depth = js.runtime.native_call_depth;
+    const baseline_tail_bytes = js.runtime.active_bytecode_stack_bytes;
     const baseline_arena_mark = js.runtime.vm_stack.mark();
 
     // The host callback clamps the account after all native-call setup. argc=1
@@ -3268,9 +3282,9 @@ test "tail target setup OOM remains catchable in the retiring caller" {
     try std.testing.expect(!js.context.hasException());
     const body_runs_after_oom = try global.getProperty(body_runs_key);
     try std.testing.expectEqual(@as(?f64, 1), body_runs_after_oom.asNumber());
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
-    try std.testing.expectEqual(baseline_tail_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_tail_bytes, js.runtime.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
     // The two metrics below are live-allocation metrics, so both the reading
     // taken here and every reading compared against it have to be taken with
@@ -3301,9 +3315,9 @@ test "tail target setup OOM remains catchable in the retiring caller" {
     try std.testing.expect(!js.context.hasException());
     const body_runs_after_second_oom = try global.getProperty(body_runs_key);
     try std.testing.expectEqual(@as(?f64, 1), body_runs_after_second_oom.asNumber());
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
-    try std.testing.expectEqual(baseline_tail_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_tail_bytes, js.runtime.active_bytecode_stack_bytes);
     helpers.reclaimNow(js.runtime);
     try std.testing.expectEqual(stable_allocated_bytes, js.runtime.diagnostics.allocations.allocated_bytes);
     try std.testing.expectEqual(stable_allocation_count, js.runtime.diagnostics.allocations.allocation_count);
@@ -3323,9 +3337,9 @@ test "tail target setup OOM remains catchable in the retiring caller" {
     try std.testing.expectEqual(@as(usize, 4), arm.calls);
     const body_runs_after_recovery = try global.getProperty(body_runs_key);
     try std.testing.expectEqual(@as(?f64, 2), body_runs_after_recovery.asNumber());
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
-    try std.testing.expectEqual(baseline_tail_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_tail_bytes, js.runtime.active_bytecode_stack_bytes);
     helpers.reclaimNow(js.runtime);
     try std.testing.expectEqual(stable_allocated_bytes, js.runtime.diagnostics.allocations.allocated_bytes);
     try std.testing.expectEqual(stable_allocation_count, js.runtime.diagnostics.allocations.allocation_count);
@@ -4483,8 +4497,8 @@ test "ordinary constructor Machine completion preserves bindings eval recursion 
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
-    const baseline_call_depth = js.runtime.hot.call_depth;
-    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_call_depth = js.runtime.call_depth;
+    const baseline_stack_bytes = js.runtime.active_bytecode_stack_bytes;
     const baseline_arena_mark = js.runtime.vm_stack.mark();
     const result = try js.eval(
         \\let observed;
@@ -4537,8 +4551,8 @@ test "ordinary constructor Machine completion preserves bindings eval recursion 
         \\assert.sameValue(gcValue.value, 11);
     );
     try std.testing.expect(result.is(.undefined_value));
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
-    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
 }
 
@@ -4546,8 +4560,8 @@ test "derived constructor Machine completion preserves inherited new target and 
     var js = try helpers.TestEngine.init(std.testing.allocator);
     defer js.deinit();
 
-    const baseline_call_depth = js.runtime.hot.call_depth;
-    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_call_depth = js.runtime.call_depth;
+    const baseline_stack_bytes = js.runtime.active_bytecode_stack_bytes;
     const baseline_arena_mark = js.runtime.vm_stack.mark();
     const result = try js.eval(
         \\let baseNewTarget;
@@ -4619,8 +4633,8 @@ test "derived constructor Machine completion preserves inherited new target and 
         \\$262.gc();
     );
     try std.testing.expect(result.is(.undefined_value));
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
-    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
 }
 
@@ -4973,7 +4987,7 @@ test "bound function call skips zero-length combined args allocation" {
     // Exclude bootstrap garbage from the allocation-free call baseline. A
     // stress safepoint may collect it during the call even without allocating.
     var rooted_bound = bound.value();
-    var root_values = [_]core.runtime.ValueRootValue{.{ .value = &rooted_bound }};
+    var root_values = [_]*core.JSValue{&rooted_bound};
     var root_frame = core.runtime.ValueRootFrame{ .values = &root_values };
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
@@ -13979,7 +13993,7 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     } };
     var machine = inline_calls.Machine.init(ctx, null, global, &l0);
     defer machine.deinit();
-    const initial_call_depth = ctx.runtime.hot.call_depth;
+    const initial_call_depth = ctx.runtime.call_depth;
 
     // A fresh Machine has neither Entry nor arena backing. The speculative
     // arm must miss without consuming the source or changing call depth.
@@ -13988,13 +14002,13 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     l0_stack.setTopPtr(region_start);
     const l0_resume_pc = l0_frame.function.byteCode().ptr + l0_frame.pc;
     try std.testing.expect(machine.tryPushEmptyLeafCallFast(.sloppy_global, ctx.runtime, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) == null);
-    try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     try std.testing.expect(!region_start[0].is(.undefined_value));
 
     const first = try machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, resolved.fb, resolved.call_facts, region_start);
     try std.testing.expect(first.isEmptyLeaf());
     machine.popReturnedEmptyLeaf(ctx.runtime);
-    try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     const steady_bytes = rt.diagnostics.allocations.allocated_bytes;
 
     // Entry and arena chunks are now warm. A second exact call must publish
@@ -14022,7 +14036,7 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     region_start = l0_stack.topPtr() - 1;
     l0_stack.setTopPtr(region_start);
     try std.testing.expect(machine.tryPushEmptyLeafCallFast(.sloppy_global, ctx.runtime, global, &l0_stack, oversized, oversized.callFacts(), region_start, l0_resume_pc) == null);
-    try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     const heap_entry = try machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, oversized, oversized.callFacts(), region_start);
     try std.testing.expect(!heap_entry.isEmptyLeaf());
     var continuation = machine.popReturnedFrame();
@@ -14042,7 +14056,7 @@ test "inline empty leaf warm constructor preserves miss fallback and ownership" 
     const failed = machine.pushEmptyLeafCall(.sloppy_global, global, &l0_stack, oversized, oversized.callFacts(), region_start);
     rt.setNativeBytesLimitForTest(null);
     try std.testing.expectError(error.OutOfMemory, failed);
-    try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     try std.testing.expect(region_start[0].is(.undefined_value));
     try std.testing.expectEqual(oversized_bytes, rt.diagnostics.allocations.allocated_bytes);
     oversized.destroyUnpublishedFixture(rt);
@@ -14240,7 +14254,7 @@ test "method empty leaf warm constructor moves receiver ownership" {
     } };
     var machine = inline_calls.Machine.init(ctx, null, global, &l0);
     defer machine.deinit();
-    const initial_call_depth = ctx.runtime.hot.call_depth;
+    const initial_call_depth = ctx.runtime.call_depth;
 
     // Fresh Machine: the speculative arm must miss without consuming either
     // slot of the [receiver, callable] region or changing call depth.
@@ -14250,7 +14264,7 @@ test "method empty leaf warm constructor moves receiver ownership" {
     l0_stack.setTopPtr(region_start);
     const l0_resume_pc = l0_frame.function.byteCode().ptr + l0_frame.pc;
     try std.testing.expect(machine.tryPushEmptyLeafCallFast(.receiver, ctx.runtime, global, &l0_stack, resolved.fb, resolved.call_facts, region_start, l0_resume_pc) == null);
-    try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     try std.testing.expect(!region_start[0].is(.undefined_value));
     try std.testing.expect(!region_start[1].is(.undefined_value));
 
@@ -14261,7 +14275,7 @@ test "method empty leaf warm constructor moves receiver ownership" {
     try std.testing.expect(first.frame.this_value.same(receiver));
     try std.testing.expect(region_start[0].is(.undefined_value));
     machine.popReturnedEmptyLeaf(ctx.runtime);
-    try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     const steady_bytes = rt.diagnostics.allocations.allocated_bytes;
 
     // Warm hit: same leaf shape and allocation-free movement.
@@ -14298,7 +14312,7 @@ test "method empty leaf warm constructor moves receiver ownership" {
     rt.setNativeBytesLimitForTest(null);
     rt.suppressLimitCollectionForTest(false);
     try std.testing.expectError(error.OutOfMemory, failed);
-    try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     try std.testing.expect(region_start[0].is(.undefined_value));
     try std.testing.expect(region_start[1].is(.undefined_value));
     try std.testing.expectEqual(oversized_bytes, rt.diagnostics.allocations.allocated_bytes);
@@ -14418,7 +14432,7 @@ test "strict empty leaf frame preserves undefined this and borrowed ownership" {
     } };
     var machine = inline_calls.Machine.init(ctx, null, global, &l0);
     defer machine.deinit();
-    const initial_call_depth = ctx.runtime.hot.call_depth;
+    const initial_call_depth = ctx.runtime.call_depth;
 
     // Authoritative constructor: `this` stays undefined, matching
     // setupSimpleInlineEntryImpl's strict plain arm.
@@ -14429,7 +14443,7 @@ test "strict empty leaf frame preserves undefined this and borrowed ownership" {
     try std.testing.expect(first.isEmptyLeaf());
     try std.testing.expect(first.frame.this_value.is(.undefined_value));
     machine.popReturnedEmptyLeaf(ctx.runtime);
-    try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     const steady_bytes = rt.diagnostics.allocations.allocated_bytes;
 
     // Warm arm publishes the same strict shape allocation-free.
@@ -14446,7 +14460,7 @@ test "strict empty leaf frame preserves undefined this and borrowed ownership" {
     try std.testing.expectEqual(alloc_calls, rt.diagnostics.allocations.alloc_calls);
     try std.testing.expectEqual(create_calls, rt.diagnostics.allocations.create_calls);
     machine.popReturnedEmptyLeaf(ctx.runtime);
-    try std.testing.expectEqual(initial_call_depth, ctx.runtime.hot.call_depth);
+    try std.testing.expectEqual(initial_call_depth, ctx.runtime.call_depth);
     try std.testing.expectEqual(steady_bytes, rt.diagnostics.allocations.allocated_bytes);
 }
 
@@ -14528,11 +14542,73 @@ test "inline call teardown releases every escaped storage shape" {
     try std.testing.expectEqual(baseline_bytes, rt.diagnostics.allocations.allocated_bytes);
 }
 
-test "inline operand Stack keeps limit and ownership flags in one word" {
+test "VM stack storage borrowed windows survive growth and teardown" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const rt = js.runtime;
+    const Stack = engine.exec.stack.Stack;
+
+    // An interior slice models the operand window of a Frame-owned heap slab.
+    // Its owner frees the complete allocation after Stack teardown.
+    const slab = try std.testing.allocator.alloc(core.JSValue, 4);
+    defer std.testing.allocator.free(slab);
+    for ([_]bool{ false, true }) |resident| {
+        var stack = Stack.initFrameWindow(rt, rt.vm_stack_frame_storage, slab[1..3]);
+        if (resident) stack.setBackingOwnership(.resident_window);
+        defer stack.deinit(rt);
+        try stack.push(core.JSValue.int32(17));
+        const original = stack.values;
+        try stack.reserveAdditional(2);
+        try std.testing.expect(stack.values != original);
+        try std.testing.expect(stack.storage.ownership == .owned);
+        try std.testing.expectEqual(@as(i32, 17), stack.liveValues()[0].as(.int).?);
+        // Growth must not invalidate or clear the borrowed window.
+        try std.testing.expectEqual(@as(i32, 17), slab[1].as(.int).?);
+    }
+    for ([_]bool{ false, true }) |resident| {
+        var stack = Stack.initFrameWindow(rt, rt.vm_stack_frame_storage, slab[1..3]);
+        if (resident) stack.setBackingOwnership(.resident_window);
+        try stack.push(core.JSValue.int32(23));
+        stack.deinit(rt);
+        try std.testing.expect(slab[1].is(.undefined_value));
+        try std.testing.expectEqual(@as(usize, 0), stack.capacity);
+    }
+}
+
+test "VM stack storage arena restores nested windows and preserves limits" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const rt = js.runtime;
+    const Stack = engine.exec.stack.Stack;
+    rt.setStackSize(2);
+    const initial = rt.vm_stack.mark();
+    defer rt.vm_stack.restore(initial);
+    const window = rt.vm_stack.carve(rt, 2).?;
+    var stack = Stack.initFrameWindow(rt, rt.vm_stack_frame_storage, window);
+    defer stack.deinit(rt);
+    try stack.push(core.JSValue.int32(7));
+    try stack.push(core.JSValue.int32(9));
+    try std.testing.expectError(error.StackOverflow, stack.push(core.JSValue.int32(11)));
+    try std.testing.expect(stack.storage.ownership == .frame_window);
+    try std.testing.expectEqual(@as(usize, 2), stack.stackLimit());
+
+    const nested = rt.vm_stack.mark();
+    const other = rt.vm_stack.carve(rt, core.VmStackArena.chunk_slots).?;
+    try std.testing.expectEqual(@as(i32, 7), stack.liveValues()[0].as(.int).?);
+    rt.vm_stack.restore(nested);
+    const reused = rt.vm_stack.carve(rt, core.VmStackArena.chunk_slots).?;
+    try std.testing.expectEqual(other.ptr, reused.ptr);
+    rt.vm_stack.restore(nested);
+    // Oversized requests fall back at the frame layer, without changing watermarks.
+    try std.testing.expect(rt.vm_stack.carve(rt, core.VmStackArena.chunk_slots + 1) == null);
+    try std.testing.expectEqualDeep(nested, rt.vm_stack.mark());
+}
+
+test "inline operand Stack keeps limit and ownership state in one word" {
     try std.testing.expectEqual(@as(usize, 40), @sizeOf(engine.exec.stack.Stack));
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(inline_calls.Machine.ArgsSource));
     // Frame and Entry are layout-sensitive (see the Entry pin in
-    // inline_calls.zig and the QCP-1B note in docs/refactor-policy.md), so pin
+    // inline_calls.zig and the layout note in docs/compiler-contract.md), so pin
     // both sizes here rather than leaving them to a benchmark to notice.
     try std.testing.expectEqual(@as(usize, 136), @sizeOf(engine.exec.frame.Frame));
     try std.testing.expectEqual(@as(usize, 240), @sizeOf(inline_calls.Entry));
@@ -20236,9 +20312,9 @@ test "K2 warm leaf miss retreat keeps call accounting balanced across chunk and 
     // depends on it — an admission failure commits nothing).
     js.runtime.setNativeStackSize(8 * 1024 * 1024);
 
-    const baseline_call_depth = js.runtime.hot.call_depth;
-    const baseline_native_depth = js.runtime.hot.native_call_depth;
-    const baseline_stack_bytes = js.runtime.hot.active_bytecode_stack_bytes;
+    const baseline_call_depth = js.runtime.call_depth;
+    const baseline_native_depth = js.runtime.native_call_depth;
+    const baseline_stack_bytes = js.runtime.active_bytecode_stack_bytes;
     const baseline_arena_mark = js.runtime.vm_stack.mark();
 
     // A right-nested addition gives the leaf bodies a ~97-slot operand stack
@@ -20277,9 +20353,9 @@ test "K2 warm leaf miss retreat keeps call accounting balanced across chunk and 
 
     // Every warm miss committed and then retreated its budget charge; any
     // imbalance (missing or doubled retreat) leaves a residue here.
-    try std.testing.expectEqual(baseline_call_depth, js.runtime.hot.call_depth);
-    try std.testing.expectEqual(baseline_native_depth, js.runtime.hot.native_call_depth);
-    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.hot.active_bytecode_stack_bytes);
+    try std.testing.expectEqual(baseline_call_depth, js.runtime.call_depth);
+    try std.testing.expectEqual(baseline_native_depth, js.runtime.native_call_depth);
+    try std.testing.expectEqual(baseline_stack_bytes, js.runtime.active_bytecode_stack_bytes);
     try std.testing.expectEqual(baseline_arena_mark, js.runtime.vm_stack.mark());
 }
 

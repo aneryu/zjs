@@ -218,40 +218,25 @@ pub fn callValueOrBytecodeRoot(
     var rooted_func = func;
     var inline_args: [8]core.JSValue = undefined;
     var args_buffer: core.runtime.ValueRootBuffer = .{};
-    defer args_buffer.deinit(ctx.runtime);
-    var rooted_args: []core.JSValue = inline_args[0..0];
-    if (args.len <= inline_args.len) {
-        rooted_args = inline_args[0..args.len];
-        @memcpy(rooted_args, args);
-    } else {
-        // `initCopy` allocates, and an allocation is a collection point. The
-        // caller's `args` window is the only storage naming these values until
-        // the copy lands, so it has to be a declared root for the duration of
-        // the copy -- the destination buffer does not exist yet.
-        var source_slices = [_]core.runtime.ValueRootSlice{
-            .{ .borrowed = args },
-        };
-        var source_frame = core.runtime.ValueRootFrame{ .slices = &source_slices };
-        source_frame.activate(ctx.runtime);
-        defer source_frame.deactivate(ctx.runtime);
+    defer args_buffer.deinit();
+    const rooted_args: []const core.JSValue = if (args.len <= inline_args.len) blk: {
+        @memcpy(inline_args[0..args.len], args);
+        break :blk inline_args[0..args.len];
+    } else blk: {
         args_buffer = try core.runtime.ValueRootBuffer.initCopy(ctx.runtime, args);
-        rooted_args = args_buffer.values;
-    }
-    // The copy above -- not the caller's window -- is the authoritative
-    // storage for the whole call, so the root frame has to name it and stay
-    // active until the callee returns. Without this the "Root" in the name was
-    // a copy and nothing else: the callee's allocations could collect an
-    // argument that only this frame still held.
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_this },
-        .{ .value = &rooted_func },
+        break :blk args_buffer.values();
+    };
+    // The inline window needs a frame; the overflow buffer owns its roots.
+    var root_values = [_]*core.JSValue{
+        &rooted_this,
+        &rooted_func,
     };
     var root_slices = [_]core.runtime.ValueRootSlice{
-        .{ .mutable = &rooted_args },
+        .{ .borrowed = inline_args[0..@min(args.len, inline_args.len)] },
     };
     var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
-        .slices = &root_slices,
+        .slices = if (args.len <= inline_args.len) &root_slices else &.{},
     };
     root_frame.activate(ctx.runtime);
     defer root_frame.deactivate(ctx.runtime);
@@ -3378,8 +3363,8 @@ pub fn indirectEval(
             owned_root,
             .root_global,
         ) catch |err| break :blk err;
-        var root_values = [_]core.runtime.ValueRootValue{
-            .{ .value = &root_function_value },
+        var root_values = [_]*core.JSValue{
+            &root_function_value,
         };
         var root_frame = core.runtime.ValueRootFrame{
             .values = &root_values,
@@ -3707,7 +3692,7 @@ fn callFunctionBytecodeModeStateAfterInterruptPoll(
     else
         null;
     var nested_stack = if (operand_window) |window|
-        stack_mod.Stack.initArenaWindow(ctx.runtime, ctx.runtime.vm_stack_arena_policy, window)
+        stack_mod.Stack.initFrameWindow(ctx.runtime, ctx.runtime.vm_stack_frame_storage, window)
     else
         stack_mod.Stack.init(ctx.runtime, ctx.runtime.stackSize());
     defer if (generator_state) |generator| generator.finalizeGeneratorExecutionCompletion(ctx.runtime);

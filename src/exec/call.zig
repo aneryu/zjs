@@ -1033,19 +1033,15 @@ fn createBoundFunction(
     const rt = ctx.runtime;
     var rooted_target = target;
     var rooted_bound_this = bound_this;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_target },
-        .{ .value = &rooted_bound_this },
+    var root_values = [_]*core.JSValue{
+        &rooted_target,
+        &rooted_bound_this,
     };
     var rooted_bound_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, bound_args);
-    defer rooted_bound_args_buffer.deinit(rt);
-    const rooted_bound_args = rooted_bound_args_buffer.values;
-    var root_slices = [_]core.runtime.ValueRootSlice{
-        rooted_bound_args_buffer.slice(),
-    };
+    defer rooted_bound_args_buffer.deinit();
+    const rooted_bound_args = rooted_bound_args_buffer.values();
     var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
-        .slices = &root_slices,
     };
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
@@ -1275,7 +1271,7 @@ test "callValueOrBytecodeRoot roots overflow args across the copy allocation" {
     // The caller's own GC-visible state here is the callee value; the argument
     // window is deliberately left undeclared, because covering it across the
     // copy is the callee-side obligation under test.
-    var callee_roots = [_]core.runtime.ValueRootValue{.{ .value = &callee }};
+    var callee_roots = [_]*core.JSValue{&callee};
     var callee_frame = core.runtime.ValueRootFrame{ .values = &callee_roots };
     callee_frame.activate(rt);
     defer callee_frame.deactivate(rt);
@@ -1845,10 +1841,10 @@ fn descriptorObject(rt: *core.JSRuntime, desc: core.Descriptor) !core.JSValue {
     var desc_value = desc.value;
     var desc_getter = desc.getter;
     var desc_setter = desc.setter;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &desc_value },
-        .{ .value = &desc_getter },
-        .{ .value = &desc_setter },
+    var root_values = [_]*core.JSValue{
+        &desc_value,
+        &desc_getter,
+        &desc_setter,
     };
     var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
@@ -1986,7 +1982,7 @@ pub fn evalGlobalScriptSource(
     // ctx.evalScript embedding API + test262 $262.evalScript) — analogue of
     // eval()'s JS_UpdateStackTop refresh — so deeply nested source here surfaces
     // a catchable SyntaxError/InternalError instead of a native crash.
-    if (ctx.runtime.hot.call_depth == 0) ctx.runtime.updateNativeStackTop();
+    if (ctx.runtime.call_depth == 0) ctx.runtime.updateNativeStackTop();
 
     const context_global = ctx.global;
     const use_global_lexicals = context_global == null or context_global.? != global;
@@ -2015,8 +2011,8 @@ pub fn evalGlobalScriptSource(
             owned_root,
             .root_global,
         ) catch |err| break :blk err;
-        var root_values = [_]core.runtime.ValueRootValue{
-            .{ .value = &root_function_value },
+        var root_values = [_]*core.JSValue{
+            &root_function_value,
         };
         var root_frame = core.runtime.ValueRootFrame{
             .values = &root_values,

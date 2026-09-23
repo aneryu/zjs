@@ -160,8 +160,8 @@ with the task, not in a new project-wide status file.
 | `superseded` | Replaced by a newer task, decision, or implementation |
 | `out_of_scope` | Outside the agreed task or product boundary |
 
-These describe implementation progress. Ticket triage labels live in
-[project experience](docs/agents/project-experience.md) §11.
+These describe implementation progress. For ticket triage, use `needs-triage`,
+`needs-info`, `ready-for-agent`, `ready-for-human`, or `wontfix` separately.
 
 ### B.4 Classification Vocabulary
 
@@ -280,5 +280,24 @@ the verification policy.
 - Check runner selection before changing engine semantics for an excluded
   case. Isolate broad failures to the smallest reproducer.
 
-Diagnosis and evidence pitfalls: [project experience](docs/agents/project-experience.md).
+- Worktrees share Git refs and the stash stack. Transfer work with named commits
+  or patches; keep concurrent edits and build outputs isolated.
+- Hot-path moves and type-layout changes can alter native code generation even
+  when bytecode is unchanged. Split by ownership or dependency, not line count.
+
 Other contracts: [documentation index](docs/README.md).
+
+### B.8 Performance Investigation
+
+Performance tools are diagnostic, not additional merge gates. For a claim,
+record source revision and dirty state, build configuration, immutable binary
+hashes, host/compiler, workload, output checksum, measurement window, raw
+samples, and process exit status. Do not measure a binary another build can
+replace; record affinity and PMU selection when used.
+
+Compare equal work under controlled conditions. Include startup, parsing,
+warmup, and teardown only when they belong to the claim. Shared-resource
+interference can invalidate attribution. Fewer instructions, smaller code,
+or a faster microbenchmark alone do not prove a workload-level speedup.
+Count event frequency and inspect call/address context before assigning cost
+to a symbol. Historical results and inconclusive runs are not current passes.

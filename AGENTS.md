@@ -70,9 +70,8 @@ loading every document it references.
 | Find source owners or change layer boundaries | [Architecture](docs/architecture.md) |
 | Public API, embedding, or host lifetimes | [Public API contract](docs/public-api-contract.md) |
 | GC edges, roots, or finalization | [GC invariants](docs/gc-invariants.md) |
-| Compiler layout | [Compiler contract](docs/compiler-contract.md), [QCP-1](docs/qcp1_switch_decision.md) §9 |
-| Performance investigation | [Performance workflow](docs/perf/README.md) |
-| Recurring diagnosis / worktree issues / local tickets | [Project experience](docs/agents/project-experience.md), relevant section (§11 for tickets) |
+| Compiler layout | [Compiler contract](docs/compiler-contract.md) |
+| Performance investigation | [GUIDE](GUIDE.md#b8-performance-investigation), [verification policy](docs/verification-policy.md) |
 | Other documentation | [Documentation index](docs/README.md) |
 
 Entry points: `src/root.zig` exports `zjs`; `src/parser.zig` parses;

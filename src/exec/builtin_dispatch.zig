@@ -666,13 +666,13 @@ pub inline fn callManagedFromWindow(
 ) core.JSValue {
     var bt_data: NativeBacktraceData = .{ .function_value = func_obj.value() };
     var bt_frame: core.ActiveBacktraceFrame = .{
-        .previous = rt.hot.current_backtrace_frame,
+        .previous = rt.current_backtrace_frame,
         .data = &bt_data,
         .resolver = resolveNativeBacktrace,
     };
-    rt.hot.current_backtrace_frame = &bt_frame;
+    rt.current_backtrace_frame = &bt_frame;
     const result = entry.managed()(realm, this_value, args.ptr, @intCast(args.len), entry, func_obj);
-    rt.hot.current_backtrace_frame = bt_frame.previous;
+    rt.current_backtrace_frame = bt_frame.previous;
     return result;
 }
 
@@ -689,13 +689,13 @@ pub inline fn callGetterFromWindow(
 ) core.JSValue {
     var bt_data: NativeBacktraceData = .{ .function_value = func_obj.value() };
     var bt_frame: core.ActiveBacktraceFrame = .{
-        .previous = rt.hot.current_backtrace_frame,
+        .previous = rt.current_backtrace_frame,
         .data = &bt_data,
         .resolver = resolveNativeBacktrace,
     };
-    rt.hot.current_backtrace_frame = &bt_frame;
+    rt.current_backtrace_frame = &bt_frame;
     const result = entry.getter()(realm, receiver, entry);
-    rt.hot.current_backtrace_frame = bt_frame.previous;
+    rt.current_backtrace_frame = bt_frame.previous;
     return result;
 }
 
@@ -713,13 +713,13 @@ pub inline fn callMethodManagedFromWindow(
 ) core.JSValue {
     var bt_data: NativeBacktraceData = .{ .function_value = func_obj.value() };
     var bt_frame: core.ActiveBacktraceFrame = .{
-        .previous = rt.hot.current_backtrace_frame,
+        .previous = rt.current_backtrace_frame,
         .data = &bt_data,
         .resolver = resolveNativeBacktrace,
     };
-    rt.hot.current_backtrace_frame = &bt_frame;
+    rt.current_backtrace_frame = &bt_frame;
     const result = entry.methodManaged()(realm, self_ptr, this_value, args.ptr, @intCast(args.len), entry);
-    rt.hot.current_backtrace_frame = bt_frame.previous;
+    rt.current_backtrace_frame = bt_frame.previous;
     return result;
 }
 
@@ -780,7 +780,7 @@ noinline fn callTypedInternalRecordDirect(
     // is already a `traceStack` root.
     var receiver = this_value;
     var call_roots = core.runtime.ValueRootFrame{
-        .values = &[_]core.runtime.ValueRootValue{.{ .value = &receiver }},
+        .values = &[_]*core.JSValue{&receiver},
         .slices = &[_]core.runtime.ValueRootSlice{.{ .borrowed = args }},
     };
     call_roots.activate(ctx.runtime);
@@ -1400,9 +1400,8 @@ pub fn callerResultIsDropped(caller_function: ?*const Bytecode, caller_frame: ?*
     return frame.pc < function.byteCode().len and function.byteCode()[frame.pc] == bytecode.opcode.op.drop;
 }
 
-
 // ----- merged from native_legacy.zig -----
-// Phase A2 of the NB2 boundary (docs/perf/native-boundary-design.md §3.3):
+// Phase A2 of the NB2 boundary:
 // comptime adapters that turn a legacy `InternalEntry` declaration (qjs
 // `cproto` + typed Zig body returning `HostError!JSValue`) into a
 // `NativeEntry` whose `target` is a `callconv(.c)` thunk of the NB2

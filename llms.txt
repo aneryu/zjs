@@ -27,5 +27,4 @@ attribution.
 - [Verification policy](https://github.com/aneryu/zjs/blob/main/docs/verification-policy.md): authoritative verification obligations.
 - [Architecture](https://github.com/aneryu/zjs/blob/main/docs/architecture.md): source owners and layers.
 - [Status](https://github.com/aneryu/zjs/blob/main/STATUS.md): dated validation snapshots.
-- [Performance snapshot](https://github.com/aneryu/zjs/blob/main/docs/perf/bench-v8-status.md): historical measurements and provenance.
 - [Documentation index](https://github.com/aneryu/zjs/blob/main/docs/README.md): remaining contracts and plans.

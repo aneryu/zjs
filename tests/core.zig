@@ -2044,8 +2044,8 @@ test "TGC S4-c: a payload slice over the block-cell ceiling takes the extent rou
 const bytecode = zjs.bytecode;
 const Rng = std.Random.DefaultPrng;
 
-fn bindObjectRoots(slots: []?*core.Object, roots: []core.runtime.ObjectRootValue) void {
-    for (roots, slots) |*root, *slot| root.* = .{ .object = slot };
+fn bindObjectRoots(slots: []?*core.Object, roots: []*?*core.Object) void {
+    for (roots, slots) |*root, *slot| root.* = slot;
 }
 
 test "gc stress deterministic tiny heap preserves live roots" {
@@ -2054,7 +2054,7 @@ test "gc stress deterministic tiny heap preserves live roots" {
 
     const count = 32;
     var objects: [count]?*core.Object = @splat(null);
-    var object_roots: [count]core.runtime.ObjectRootValue = undefined;
+    var object_roots: [count]*?*core.Object = undefined;
     bindObjectRoots(&objects, &object_roots);
     var frame = core.runtime.ValueRootFrame{ .objects = &object_roots };
     frame.activate(rt);
@@ -2106,7 +2106,7 @@ test "gc stress deterministic object cycles are reclaimed" {
 
     const count = 128;
     var objects: [count]?*core.Object = @splat(null);
-    var object_roots: [count]core.runtime.ObjectRootValue = undefined;
+    var object_roots: [count]*?*core.Object = undefined;
     bindObjectRoots(&objects, &object_roots);
     var frame = core.runtime.ValueRootFrame{ .objects = &object_roots };
     frame.activate(rt);
@@ -2154,8 +2154,8 @@ test "gc stress weak map preserved key keeps value alive" {
     const preserved_index = random.uintLessThan(usize, count);
     var keys: [count]?*core.Object = @splat(null);
     var values: [count]?*core.Object = @splat(null);
-    var key_roots: [count]core.runtime.ObjectRootValue = undefined;
-    var value_roots: [count]core.runtime.ObjectRootValue = undefined;
+    var key_roots: [count]*?*core.Object = undefined;
+    var value_roots: [count]*?*core.Object = undefined;
     bindObjectRoots(&keys, &key_roots);
     bindObjectRoots(&values, &value_roots);
     var weakmap_slot: ?*core.Object = weakmap;
@@ -2208,8 +2208,8 @@ test "gc stress weak map dead cyclic keys clear values" {
     const count = 24;
     var keys: [count]?*core.Object = @splat(null);
     var values: [count]?*core.Object = @splat(null);
-    var key_roots: [count]core.runtime.ObjectRootValue = undefined;
-    var value_roots: [count]core.runtime.ObjectRootValue = undefined;
+    var key_roots: [count]*?*core.Object = undefined;
+    var value_roots: [count]*?*core.Object = undefined;
     bindObjectRoots(&keys, &key_roots);
     bindObjectRoots(&values, &value_roots);
     var weakmap_slot: ?*core.Object = weakmap;
@@ -2323,8 +2323,8 @@ test "gc stress function bytecode constant pool object cycles are reclaimed" {
     const step = 1 + random.uintLessThan(usize, count - 1);
     var functions: [count]?*core.Object = @splat(null);
     var captured: [count]?*core.Object = @splat(null);
-    var function_roots: [count]core.runtime.ObjectRootValue = undefined;
-    var captured_roots: [count]core.runtime.ObjectRootValue = undefined;
+    var function_roots: [count]*?*core.Object = undefined;
+    var captured_roots: [count]*?*core.Object = undefined;
     bindObjectRoots(&functions, &function_roots);
     bindObjectRoots(&captured, &captured_roots);
     var function_frame = core.runtime.ValueRootFrame{ .objects = &function_roots };
@@ -4062,9 +4062,9 @@ test "runtime termination crosses threads and idle recovery permits new executio
     try std.testing.expect(rt.isExecutionTerminating());
     try std.testing.expectError(error.Interrupted, ctx.eval("1 + 1", .{}));
     _ = ctx.takeException();
-    rt.hot.call_depth = 1;
+    rt.call_depth = 1;
     try std.testing.expectError(error.RuntimeBusy, rt.cancelTerminateExecution());
-    rt.hot.call_depth = 0;
+    rt.call_depth = 0;
     try rt.cancelTerminateExecution();
 }
 
@@ -4554,4 +4554,171 @@ test "runtime review handler installed OOM keeps its failure classification" {
     try rt.job_queue.enqueueFunc(ctx.core, MicrotaskContractProbe.fail, &.{});
     try std.testing.expectError(error.OutOfMemory, rt.runMicrotasks());
     try std.testing.expectEqual(@as(f64, 99), ctx.takeException().asNumber().?);
+}
+
+const BufferCollectionProbe = struct {
+    runtime: *core.JSRuntime,
+    source_to_clear: []core.JSValue = &.{},
+    calls: usize = 0,
+    failure: ?core.gc.CollectionError = null,
+
+    fn trigger(raw: ?*anyopaque, _: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(raw.?));
+        self.calls += 1;
+        // The copy is complete when provider growth allocates. Its source
+        // may now change through a reentrant owner, without changing the copy.
+        if (self.calls == 2) @memset(self.source_to_clear, core.JSValue.undefinedValue());
+        _ = self.runtime.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch |err| {
+            self.failure = err;
+        };
+    }
+};
+
+fn traceEmptyBufferTestProvider(_: *anyopaque, _: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {}
+
+test "ValueRootBuffer protects copy and provider growth then owns liveness" {
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    defer rt.destroy();
+    // Occupy the inline provider slot so registration must allocate too.
+    const dummy = core.runtime.RootProvider{ .context = rt, .trace = traceEmptyBufferTestProvider };
+    try rt.registerRootProvider(dummy);
+    defer rt.unregisterRootProvider(dummy);
+    try std.testing.expectEqual(rt.roots.root_providers_capacity, rt.roots.root_providers.len);
+    const source = try std.testing.allocator.alloc(core.JSValue, 1);
+    defer std.testing.allocator.free(source);
+    const first_id = try rt.atoms.newValueSymbol("root-buffer-first");
+    source[0] = try rt.takeSymbolValue(first_id);
+    var probe = BufferCollectionProbe{ .runtime = rt, .source_to_clear = source };
+    const epoch = rt.gc.collection_epoch;
+    rt.gc.heap_budget.probe = BufferCollectionProbe.trigger;
+    rt.gc.heap_budget.probe_ctx = &probe;
+    defer {
+        rt.gc.heap_budget.probe = null;
+        rt.gc.heap_budget.probe_ctx = null;
+    }
+    var first = try core.runtime.ValueRootBuffer.initCopy(rt, source);
+    defer first.deinit();
+    rt.gc.heap_budget.probe = null;
+    rt.gc.heap_budget.probe_ctx = null;
+    if (probe.failure) |err| return err;
+    try std.testing.expectEqual(@as(usize, 2), probe.calls);
+    try std.testing.expectEqual(epoch + 2, rt.gc.collection_epoch);
+    try std.testing.expect(rt.atoms.name(first_id) != null);
+    try std.testing.expect(rt.active_value_roots == null);
+    source[0] = core.JSValue.undefinedValue();
+    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    try std.testing.expect(rt.atoms.name(first_id) != null);
+    try std.testing.expect(!first.values()[0].is(.undefined_value));
+
+    const second_id = try rt.atoms.newValueSymbol("root-buffer-second");
+    source[0] = try rt.takeSymbolValue(second_id);
+    var second = try core.runtime.ValueRootBuffer.initCopy(rt, source);
+    defer second.deinit();
+    source[0] = core.JSValue.undefinedValue();
+    // Non-LIFO removal must leave the other provider intact.
+    first.deinit();
+    first.deinit();
+    try std.testing.expectEqual(@as(usize, 0), first.values().len);
+    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    try std.testing.expect(rt.atoms.name(first_id) == null);
+    try std.testing.expect(rt.atoms.name(second_id) != null);
+    second.deinit();
+    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+    try std.testing.expect(rt.atoms.name(second_id) == null);
+    try std.testing.expectEqual(@as(usize, 0), rt.roots.value_root_buffers);
+}
+
+test "ValueRootBuffer allocation failures restore roots and storage" {
+    for (0..2) |fail_offset| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        const rt = try core.JSRuntime.create(.{ .allocator = failing.allocator() });
+        defer rt.destroy();
+        const dummy = core.runtime.RootProvider{ .context = rt, .trace = traceEmptyBufferTestProvider };
+        try rt.registerRootProvider(dummy);
+        defer rt.unregisterRootProvider(dummy);
+        const slices = [_]core.runtime.ValueRootSlice{.{ .borrowed = &.{} }};
+        var outer = core.runtime.ValueRootFrame{ .slices = &slices };
+        outer.activate(rt);
+        defer outer.deactivate(rt);
+        const live_bytes = failing.allocated_bytes - failing.freed_bytes;
+        failing.fail_index = failing.alloc_index + fail_offset;
+        try std.testing.expectError(error.OutOfMemory, core.runtime.ValueRootBuffer.initCopy(rt, &.{core.JSValue.int32(42)}));
+        failing.fail_index = std.math.maxInt(usize);
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expectEqual(live_bytes, failing.allocated_bytes - failing.freed_bytes);
+        try std.testing.expectEqual(@as(usize, 1), rt.roots.root_providers.len);
+        try std.testing.expectEqual(@as(usize, 0), rt.roots.value_root_buffers);
+        try std.testing.expect(rt.active_value_roots == &outer);
+        var retry = try core.runtime.ValueRootBuffer.initCopy(rt, &.{core.JSValue.int32(42)});
+        defer retry.deinit();
+        try std.testing.expect(retry.values()[0].same(core.JSValue.int32(42)));
+    }
+}
+
+test "ValueRootBuffer empty needs no allocation or registration" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(.{ .allocator = failing.allocator() });
+    defer rt.destroy();
+    failing.fail_index = failing.alloc_index;
+    var buffer = try core.runtime.ValueRootBuffer.initCopy(rt, &.{});
+    buffer.deinit();
+    buffer.deinit();
+    try std.testing.expect(!failing.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), buffer.values().len);
+    try std.testing.expectEqual(@as(usize, 0), rt.roots.value_root_buffers);
+    failing.fail_index = std.math.maxInt(usize);
+}
+
+test "ValueRootBuffer teardown guard" {
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    defer rt.destroy();
+    var buffer = try core.runtime.ValueRootBuffer.initCopy(rt, &.{core.JSValue.int32(1)});
+    defer buffer.deinit();
+    // Run through zig build test with this filter to exercise the real
+    // Runtime.destroy guard, rather than a test-only copy of its predicate.
+    if (std.c.getenv("ZJS_VALUE_ROOT_BUFFER_INJECT")) |raw| {
+        if (std.mem.eql(u8, std.mem.span(raw), "1")) rt.destroy();
+    }
+}
+
+test "ValueRootBuffer registration survives allocation probe reentry" {
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    defer rt.destroy();
+    const dummy = core.runtime.RootProvider{ .context = rt, .trace = traceEmptyBufferTestProvider };
+    try rt.registerRootProvider(dummy);
+    defer rt.unregisterRootProvider(dummy);
+    const Probe = struct {
+        runtime: *core.JSRuntime,
+        calls: usize = 0,
+        nested: [3]core.runtime.ValueRootBuffer = @splat(.{}),
+        failure: ?std.mem.Allocator.Error = null,
+
+        fn trigger(raw: ?*anyopaque, _: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.calls += 1;
+            // Reenter specifically while the outer provider table is growing.
+            if (self.calls != 2) return;
+            for (&self.nested) |*buffer| {
+                buffer.* = core.runtime.ValueRootBuffer.initCopy(self.runtime, &.{core.JSValue.int32(7)}) catch |err| {
+                    self.failure = err;
+                    return;
+                };
+            }
+        }
+    };
+    var probe = Probe{ .runtime = rt };
+    defer for (&probe.nested) |*buffer| buffer.deinit();
+    rt.gc.heap_budget.probe = Probe.trigger;
+    rt.gc.heap_budget.probe_ctx = &probe;
+    defer {
+        rt.gc.heap_budget.probe = null;
+        rt.gc.heap_budget.probe_ctx = null;
+    }
+    var outer = try core.runtime.ValueRootBuffer.initCopy(rt, &.{core.JSValue.int32(9)});
+    defer outer.deinit();
+    if (probe.failure) |err| return err;
+    try std.testing.expect(probe.calls >= 2);
+    try std.testing.expectEqual(@as(usize, 4), rt.roots.value_root_buffers);
+    try std.testing.expectEqual(@as(usize, 5), rt.roots.root_providers.len);
+    _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
 }

@@ -42,6 +42,8 @@ pub const RootSet = struct {
     root_providers: []RootProvider = &.{},
     root_providers_capacity: usize = 0,
     root_providers_inline: [provider_inline_capacity]RootProvider = undefined,
+    /// Native owning buffers must be released before Runtime teardown.
+    value_root_buffers: usize = 0,
     local_root_slots: std.ArrayListUnmanaged(*RootSlot) = .empty,
     persistent_root_slots: std.ArrayListUnmanaged(*RootSlot) = .empty,
     weak_root_slots: std.ArrayListUnmanaged(*WeakRootSlot) = .empty,
@@ -50,6 +52,7 @@ pub const RootSet = struct {
         self.root_providers_inline = undefined;
         self.root_providers = self.root_providers_inline[0..0];
         self.root_providers_capacity = self.root_providers_inline.len;
+        self.value_root_buffers = 0;
         self.local_root_slots = .empty;
         self.persistent_root_slots = .empty;
         self.weak_root_slots = .empty;
@@ -111,10 +114,21 @@ pub const RootSet = struct {
     }
 
     fn append(self: *RootSet, rt: *JSRuntime, provider: RootProvider) !void {
-        if (self.root_providers.len == self.root_providers_capacity) {
-            const next_capacity = if (self.root_providers_capacity == 0) provider_inline_capacity else self.root_providers_capacity * 2;
+        while (self.root_providers.len == self.root_providers_capacity) {
+            const next_capacity = if (self.root_providers_capacity == 0)
+                provider_inline_capacity
+            else
+                std.math.mul(usize, self.root_providers_capacity, 2) catch return error.OutOfMemory;
             const next = try mem_ops.alloc(rt, RootProvider, next_capacity);
-            errdefer mem_ops.free(rt, RootProvider, next);
+            // Allocation can reenter registration through a collection/probe.
+            // Re-read the live table before copying: a nested call may already
+            // have grown it, or filled more entries than this candidate holds.
+            if (self.root_providers.len < self.root_providers_capacity or
+                self.root_providers.len >= next_capacity)
+            {
+                mem_ops.free(rt, RootProvider, next);
+                continue;
+            }
             @memcpy(next[0..self.root_providers.len], self.root_providers);
             const old_capacity = self.root_providers_capacity;
             const old_using_inline = self.usingInline();
@@ -227,6 +241,11 @@ pub const RootSet = struct {
         const index = found.?;
         _ = self.persistent_root_slots.orderedRemove(index);
         if (self.persistent_root_slots.items.len == 0) self.persistent_root_slots.clearAndFree(rt.nativeAllocator());
+    }
+
+    pub fn assertNoOutstandingBuffers(self: *const RootSet) void {
+        if (self.value_root_buffers != 0)
+            @panic("JSRuntime destroyed with outstanding value root buffers");
     }
 
     pub fn assertNoOutstanding(self: *const RootSet) void {
@@ -422,3 +441,80 @@ pub fn pinHeaderForNative(runtime: *JSRuntime, header: *gc.Header) !NativePin {
         .header = header,
     };
 }
+
+/// Fixed-length native copy whose values are strong roots until deinit.
+/// Owns its backing block; assignment does not duplicate ownership. Moving
+/// ownership (including return by value) is safe because registration points
+/// at the block, never at this wrapper. Runtime must outlive the buffer.
+pub const ValueRootBuffer = struct {
+    block: ?*Block = null,
+
+    const Block = struct {
+        runtime: *JSRuntime,
+        len: usize,
+
+        fn slots(self: *Block) []JSValue {
+            const bytes: [*]u8 = @ptrCast(self);
+            const ptr: [*]JSValue = @ptrCast(@alignCast(bytes + slots_offset));
+            return ptr[0..self.len];
+        }
+
+        fn provider(self: *Block) RootProvider {
+            return .{ .context = self, .trace = trace };
+        }
+
+        fn trace(raw: *anyopaque, visitor: *RootVisitor) RootTraceError!void {
+            const self: *Block = @ptrCast(@alignCast(raw));
+            try visitor.values(self.slots());
+        }
+    };
+    const block_alignment = std.mem.Alignment.fromByteUnits(@max(@alignOf(Block), @alignOf(JSValue)));
+    const slots_offset = std.mem.alignForward(usize, @sizeOf(Block), @alignOf(JSValue));
+
+    /// Protects source during allocation, then the copy through registration.
+    /// Source storage must remain valid until this call returns. Success needs
+    /// no additional ValueRootFrame, including across subsequent collections.
+    pub fn initCopy(rt: *JSRuntime, source: []const JSValue) !ValueRootBuffer {
+        rt.assertOwnerThread();
+        if (source.len == 0) return .{};
+        const payload_bytes = std.math.mul(usize, source.len, @sizeOf(JSValue)) catch return error.OutOfMemory;
+        const total_bytes = std.math.add(usize, slots_offset, payload_bytes) catch return error.OutOfMemory;
+        var slices = [_]runtime_mod.ValueRootSlice{.{ .borrowed = source }};
+        var frame = runtime_mod.ValueRootFrame{ .slices = &slices };
+        frame.activate(rt);
+        defer frame.deactivate(rt);
+
+        const bytes = try mem_ops.allocElements(rt, total_bytes, 1, block_alignment);
+        errdefer mem_ops.freeAlignedBytes(rt, bytes, block_alignment);
+        const block: *Block = @ptrCast(@alignCast(bytes.ptr));
+        block.* = .{ .runtime = rt, .len = source.len };
+        const copied_values = block.slots();
+        @memcpy(copied_values, source);
+        // Transfer temporary protection to the snapshot before registration:
+        // reentrant work during provider growth may modify the original source.
+        slices[0] = .{ .mutable = &copied_values };
+        try rt.registerRootProvider(block.provider());
+        rt.roots.value_root_buffers += 1;
+        return .{ .block = block };
+    }
+
+    /// Borrowed view, valid until deinit. The container retains root ownership.
+    pub fn values(self: *const ValueRootBuffer) []const JSValue {
+        return if (self.block) |block| block.slots() else &.{};
+    }
+
+    /// May run in any order relative to other buffers. Repeated calls on the
+    /// same wrapper are harmless; aliased owners must never be destroyed twice.
+    pub fn deinit(self: *ValueRootBuffer) void {
+        const block = self.block orelse return;
+        const rt = block.runtime;
+        rt.assertOwnerThread();
+        rt.unregisterRootProvider(block.provider());
+        std.debug.assert(rt.roots.value_root_buffers != 0);
+        rt.roots.value_root_buffers -= 1;
+        const bytes: [*]u8 = @ptrCast(block);
+        const total_bytes = slots_offset + block.len * @sizeOf(JSValue);
+        self.block = null;
+        mem_ops.freeAlignedBytes(rt, bytes[0..total_bytes], block_alignment);
+    }
+};

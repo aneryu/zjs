@@ -302,7 +302,7 @@ pub inline fn callOnceInto(
     out: *JSValue,
 ) HostError!void {
     const rt = ctx.runtime;
-    const outermost = rt.hot.call_depth == 0 and rt.hot.native_call_depth == 0 and rt.active_invocation == null;
+    const outermost = rt.call_depth == 0 and rt.native_call_depth == 0 and rt.active_invocation == null;
     try callOnceIntoInternal(ctx, output, global, this_value, callee, args, caller_function, caller_frame, out);
     if (outermost) {
         const slices = [_]core.runtime.ValueRootSlice{.{ .borrowed = @as([*]JSValue, @ptrCast(out))[0..1] }};
@@ -762,9 +762,8 @@ pub const HostInvocation = struct {
         // `rt` by parameter, not `ctx.runtime`: the caller already holds it,
         // and re-deriving it here cost two dependent loads per publish and
         // two more per unpublish on every embedder crossing.
-        const hot = &rt.hot;
-        self.backtrace_frame.previous = hot.current_backtrace_frame;
-        hot.current_backtrace_frame = &self.backtrace_frame;
+        self.backtrace_frame.previous = rt.current_backtrace_frame;
+        rt.current_backtrace_frame = &self.backtrace_frame;
         rt.active_invocation = &self.invocation;
         if (comptime builtin.mode == .Debug or builtin.mode == .ReleaseSafe) self.published = true;
     }
@@ -772,10 +771,9 @@ pub const HostInvocation = struct {
     pub inline fn unpublish(self: *HostInvocation, rt: *core.JSRuntime) void {
         std.debug.assert(self.published);
         std.debug.assert(self.machine.depth == 0);
-        std.debug.assert(rt.hot.current_backtrace_frame == &self.backtrace_frame);
-        const hot = &rt.hot;
+        std.debug.assert(rt.current_backtrace_frame == &self.backtrace_frame);
         rt.active_invocation = null;
-        hot.current_backtrace_frame = self.backtrace_frame.previous;
+        rt.current_backtrace_frame = self.backtrace_frame.previous;
         if (comptime builtin.mode == .Debug or builtin.mode == .ReleaseSafe) self.published = false;
     }
 };

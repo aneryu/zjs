@@ -2177,19 +2177,37 @@ fn dynamicImportRejectionValue(
 /// the next collection walked a poisoned pointer.
 pub const DynamicImportScope = struct {
     loader: core.runtime.DynamicImportLoaderScope,
-    state: *DynamicImportState,
+    rooted_state: ?*DynamicImportState = null,
 
     pub fn deinit(self: *DynamicImportScope) void {
         self.loader.deinit();
-        self.state.deactivateRoots();
+        if (self.rooted_state) |state| state.deactivateRoots();
     }
 };
+
+/// Module execution owns dynamic-import loader installation. Keep the Runtime
+/// callback slot as a low-level mechanism; production module loaders enter
+/// through this helper so loader restoration and any required GC roots share
+/// one scope type.
+fn installDynamicImportCallback(
+    runtime: *core.JSRuntime,
+    callback: core.context.DynamicImportCallback,
+    userdata: ?*anyopaque,
+    rooted_state: ?*DynamicImportState,
+) DynamicImportScope {
+    return .{
+        .rooted_state = rooted_state,
+        .loader = runtime.installDynamicImportLoader(.{ .callback = callback, .userdata = userdata }),
+    };
+}
+
 pub fn installDynamicImport(state: *DynamicImportState) !DynamicImportScope {
     try state.activateRoots();
-    return .{ .state = state, .loader = state.runtime.installDynamicImportLoader(.{
-        .callback = DynamicImportState.load,
-        .userdata = state,
-    }) };
+    return installDynamicImportCallback(state.runtime, DynamicImportState.load, state, state);
+}
+
+pub fn installDynamicImportHost(state: *DynamicImportHostState) DynamicImportScope {
+    return installDynamicImportCallback(state.runtime, DynamicImportHostState.load, state, null);
 }
 
 fn runJobs(runtime: *core.JSRuntime, context: *core.JSContext, output: ?*std.Io.Writer) !void {
@@ -2213,7 +2231,7 @@ pub fn evalFileModuleGraphWithOutput(
     // measures against a precise base. The construction-time baseline already
     // covers it; this tightens it for the running thread (test262 workers run on
     // a different C stack than where the runtime was constructed).
-    if (context.runtime.hot.call_depth == 0) runtime.updateNativeStackTop();
+    if (context.runtime.call_depth == 0) runtime.updateNativeStackTop();
     const normalized_filename = try std.fs.path.resolve(allocator, &.{filename});
     defer allocator.free(normalized_filename);
 
@@ -2342,10 +2360,7 @@ pub fn evalFileModuleGraphWithHostHooks(
         .host_hooks = host_hooks,
         .allocator = allocator,
     };
-    var dynamic_import_scope = runtime.installDynamicImportLoader(.{
-        .callback = DynamicImportHostState.load,
-        .userdata = &dynamic_import_state,
-    });
+    var dynamic_import_scope = installDynamicImportHost(&dynamic_import_state);
     defer dynamic_import_scope.deinit();
 
     var continuations = std.ArrayList(ModuleContinuation).empty;

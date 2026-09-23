@@ -17,57 +17,46 @@ needs. Historical measurements and plans are labeled separately from contracts.
 | Agent task execution and reading triggers | [AGENTS](../AGENTS.md) |
 | Zig engineering and command reference | [GUIDE](../GUIDE.md) |
 | Verification obligations | [Verification policy](verification-policy.md) |
-| Diagnosis, worktrees, local `.scratch/` tickets (§11) | [Project experience](agents/project-experience.md) |
 
 ## Source and contracts
 
 | Area | References |
 | --- | --- |
 | Source ownership and layers | [Architecture](architecture.md), [API boundary](api-boundary.md) |
-| Function-level source tour (Chinese) | [Code walkthrough](code-walkthrough/README.md) |
 | Exec calls and import hubs | [Exec dependency graph](exec-dependency-graph.md) |
 | Test roots and build steps | [Testing graph](testing-graph.md) |
-| Runtime ownership and lifecycle | [Runtime design and implementation record](runtime-target-design.md) |
-| GC and values | [GC invariants](gc-invariants.md), [VM value representation](vm-value-representation-contract.md), [borrowed atoms](borrowed_atom_audit.md) |
+| Runtime ownership and lifecycle | [Runtime contract](runtime-target-design.md) |
+| GC and values | [GC invariants](gc-invariants.md), [VM value representation](vm-value-representation-contract.md), [Atom rooting](atom-rooting.md) |
 | Compiler and TS parser | [Compiler contract](compiler-contract.md), [TypeScript parser](parser-ts-first-class-design.md) |
-| Native calls and host boundary | [Native boundary design](perf/native-boundary-design.md), public API contract above |
-| Object/shape layouts | [Object and shape implementation](perf/object-shape-design.md) |
-| Opcode design | [Opcode design](perf/opcode-design.md), [engine comparison](perf/opcode-engines.md), [opcode table](perf/opcode-audit-table.md) |
+| Native calls and host boundary | [API boundary](api-boundary.md), [public API contract](public-api-contract.md) |
+| Object/shape layouts | [Architecture](architecture.md), [VM value representation](vm-value-representation-contract.md) |
+| Bytecode and opcode contracts | [Compiler contract](compiler-contract.md), [opcode declarations](../src/bytecode/opcode.zig) |
 
 ## Evidence and release
 
 - [STATUS](../STATUS.md): dated validation and milestone records.
 - [Changelog](../CHANGELOG.md): release history.
 - [Release checklist](release-checklist.md): API, lifecycle, and artifact checks.
-- [Performance workflow](perf/README.md): diagnostic tools and evidence guidance.
-- [bench-v8 snapshot](perf/bench-v8-status.md): historical performance results.
+- [Performance investigation](../GUIDE.md#b8-performance-investigation): diagnostic evidence guidance; historical bench-v8 snapshots are available in Git history.
 - [Runtime allocator comparison](runtime-allocator-todo.md): default allocator decision and remaining experiments.
 - [Binary composition](binary-size.md): dated ReleaseFast size breakdown.
-- [Refactor policy](refactor-policy.md): hot-path layout risk and validation.
 - [Retrieval index](../llms.txt): compact project facts for retrieval tools.
 
-`reports/test262-latest/` contains gitignored local output. Existing
-`reports/evidence/` artifacts are historical evidence, not new gate requirements.
+`reports/test262-latest/` contains gitignored local output. Removed measurement
+archives are available in Git history, not required checkout inputs.
 
-## Planned work
+## Remaining investigations
 
-Plans describe work to evaluate or implement, not shipped capabilities:
+- [Nursery evaluation](runtime-nursery-todo.md): recorded correctness blockers and evaluation sequence; disabled by default.
+- [Runtime follow-ups](runtime-target-design.md#后续范围): retained capability boundaries and allocator experiments.
 
-- [Roadmap](roadmap.md) and [work-item registry](roadmap/work-items.yaml): scope,
-  dependencies, and recorded decisions.
-- [Backlog](backlog.md): dated implementation/refactoring queue; recheck open items against source.
-- [Nursery evaluation](runtime-nursery-todo.md): current correctness blockers and evaluation sequence; disabled by default.
-- [Engine evolution](engine-evolution-plan.md),
-  [type-directed optimization](type-directed-optimization-plan.md), and
-  [process model](process-model-design.md): design proposals and contracts
-  for the corresponding planned work.
+Older roadmaps, task registries, and engine/type/process proposals are available
+in Git history. Their removal from this index does not cancel product directions;
+a new implementation task must establish its scope against current source.
 
-## Historical decisions
+## GC direction
 
-- [GC target review](gc-target-design-review.md): target constraints and migration rationale; current nursery blockers live in the evaluation above.
-- [QCP-1 switch](qcp1_switch_decision.md): compiler switch and layout lessons (§9).
-- [QuickJS charter transition](qjs_alignment_charter_transition.md): retirement
-  of implementation-faithfulness constraints.
+- [GC design boundaries](gc-target-design-review.md): retained target constraints and diagnostic methods; current nursery blockers live in the evaluation above.
 
 Recover completed campaign logs and older revisions from Git history when
 investigating those versions. Do not apply retired procedures as current gates.

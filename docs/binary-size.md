@@ -27,7 +27,7 @@ later `ReleaseSmall` build does not overwrite the shipped CLI
 | Opcode-handler island (`.text.zjs.op_handlers`) | 150,368 | 146.8 KiB |
 
 The 2026-08-21 owner ruling closed the binary-size *campaign* at 4.26 MiB
-stripped (`47cf81ef`; [CHANGELOG](../CHANGELOG.md), [backlog.md](backlog.md)).
+stripped (`47cf81ef`; [CHANGELOG](../CHANGELOG.md)).
 That figure was not re-measured after `71505d11`. This snapshot is 946,640 B
 smaller (−22%) than 4,264,592 B. The two builds were not reproduced
 side-by-side; treat the delta as a description, not a bisect.
@@ -116,7 +116,7 @@ GC itself is **79,360 B (2.9%)**; the rest of `core` is the object model,
 runtime, strings, and typed arrays. The handler island is 5.5% of machine
 code — the hot entry, not the bulk of opcode work.
 
-[engine-evolution-plan.md](engine-evolution-plan.md) §2.2 recorded the
+The historical engine evolution plan (available in Git history) recorded the
 handler island at 163 KiB of a 3.74 MiB `.text`. This snapshot is 146.8 KiB
 of 2.60 MiB `.text*`.
 
@@ -144,8 +144,8 @@ of 2.60 MiB `.text*`.
 Volume is not “one large VM”. It is **exec builtins and the call path**,
 then the **parser**. Handler code plus `exec.array_ops` / `call_runtime` /
 `string_ops` / `object_ops` is the specialized-opcode position already
-described in [backlog.md](backlog.md) (a lean monolithic dispatch was
-built and rejected).
+described in the historical backlog (available in Git history); a lean
+monolithic dispatch was built and rejected.
 
 ### `exec.*` files (machine code)
 

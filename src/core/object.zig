@@ -3486,10 +3486,10 @@ pub const Object = extern struct {
         var rooted_target = target;
         var rooted_held_value = held_value;
         var rooted_unregister_token = unregister_token;
-        var root_values = [_]runtime_mod.ValueRootValue{
-            .{ .value = &rooted_target },
-            .{ .value = &rooted_held_value },
-            .{ .value = &rooted_unregister_token },
+        var root_values = [_]*JSValue{
+            &rooted_target,
+            &rooted_held_value,
+            &rooted_unregister_token,
         };
         var root_frame = runtime_mod.ValueRootFrame{
             .values = &root_values,

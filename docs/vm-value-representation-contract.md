@@ -1,12 +1,9 @@
-# VM 值表示契约(engine plan × tracing GC 同步点)
+# VM 值表示契约
 
 Version: 3
 Date: 2026-09-06
-Status: normative — 本契约是
-[engine-evolution-plan.md](engine-evolution-plan.md)(§3.1 裁决 A 的
-"表示定型"里程碑)、[type-directed-optimization-plan.md](type-directed-optimization-plan.md)
-(§4/§5 的 GC 集成条款)与 [gc-invariants.md](gc-invariants.md)
-的共同约束面。**修改本页所述协议 = 先改本契约并递增版本号,再动任一线
+Status: normative — 本契约定义 VM 值表示与 GC 的共同约束面，
+收集器规则见 [gc-invariants.md](gc-invariants.md)。**修改本页所述协议 = 先改本契约并递增版本号,再动任一线
 代码。**
 
 来源:v3 全部条款自 **main 实物导出**(`8be2ca7d`,2026-09-06,
@@ -288,7 +285,7 @@ values, objects, headers, atoms }`;**生产只链接 container/window 帧**
 
   生产:host-quiescent 触发(显式 forceGC、事件循环 idle)精确-only,
   其余(分配阈值、safepoint、回调边界)加保守趟。测试:按触发的
-  `GCPollMode.rootScan()`——`engine_active` 触发开保守(mutator 原生帧
+  `gc.PollMode.rootScan()`——`engine_active` 触发开保守(mutator 原生帧
   在栈上,精确模式在该场景被证不 sound),`declared_only` 触发保持精确
   以让活性测试确定、漏根仍以 SEGV 暴露。v2「`conservative_on =
   !is_test`」的表述作废。
@@ -332,7 +329,8 @@ ABI 只含指针与出口协议,不编码值内部;`can_gc` helper 边界 = 发�
 #### 5.2.1 W1 属性站点缓存的落地形态(2026-09-07,已实现)
 
 上面三条的具体兑现,`bytecode.PropSiteCache` + `Shape.identity`
-(PERF-SHAPE-ID,native-boundary-design §8.2 / §15 R8):
+（PERF-SHAPE-ID；实现见 [`PropSiteCache`](../src/bytecode/function_bytecode.zig)
+与 [`Shape`](../src/core/shape.zig)）：
 
 - **版本号 = `Shape.identity: u64`**,per-Registry(即 per-Runtime)单调
   计数器,**永不复用**。取新值的时机:创建(`link`)、以及**每次原地变异

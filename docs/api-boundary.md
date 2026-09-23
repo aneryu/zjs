@@ -113,8 +113,7 @@ helpers.
 ## Native Functions
 
 Every native callable -- engine builtin, embedder function, native accessor
--- resolves to one immutable `NativeEntry` (`src/core/native_entry.zig`,
-design `docs/perf/native-boundary-design.md` §3-§5). The entry is an
+-- resolves to one immutable `NativeEntry` ([`src/core/native_entry.zig`](../src/core/native_entry.zig)). The entry is an
 offset-pinned `extern struct` carrying the code pointer, the call kind
 (`managed`, `leaf`, constructor, getter/setter, ...), the leaf signature id,
 the arity, the optional `state` pointer, and JIT effect annotations. The VM

@@ -416,7 +416,7 @@ const FullReachable = struct {
 /// half -- without it the epoch this function returns under is four ahead of
 /// every stamp the cycle made, `sweepAtomTable` finds the whole table dead,
 /// and the run this is supposed to be auditing dies of missing property keys.
-fn computeFullReachable(rt: *JSRuntime, scan: runtime_mod.GCRootScan) !FullReachable {
+fn computeFullReachable(rt: *JSRuntime, scan: gc.RootScan) !FullReachable {
     // The backing allocator, not the accounted one: an oracle that charges
     // the heap it is auditing changes the very numbers a settled-account test
     // reads back (and inherits the suite's OOM injection, which only made the
@@ -674,7 +674,7 @@ fn recordFinalMarkFootprint(rt: *JSRuntime) void {
     }
 }
 
-pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) CollectError!usize {
+pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: gc.RootScan) CollectError!usize {
     rt.gc.last_census_ns = 0;
     rt.gc.stats.collections += 1;
     rt.gc.collection_epoch += 1;
@@ -730,7 +730,7 @@ pub fn collectCycles(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootF
 ///
 /// Returns the number of young objects reclaimed, or null when there is no
 /// generational state to work with.
-pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) CollectError!?usize {
+pub fn collectMinor(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: gc.RootScan) CollectError!?usize {
     // Hard guard, not only the scheduler's. `shouldTryMinor` is the policy
     // gate, but a minor can also be reached directly, and running one with a
     // retirement transaction open means reading a young population the trace
@@ -1770,7 +1770,7 @@ const Collector = struct {
     /// (`AtomTable.atomEdgeBodyWithoutStamp`).
     atom_stamps_frozen: bool = false,
 
-    fn init(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: runtime_mod.GCRootScan) std.mem.Allocator.Error!Collector {
+    fn init(rt: *JSRuntime, extra_roots: ?*const runtime_mod.ValueRootFrame, scan: gc.RootScan) std.mem.Allocator.Error!Collector {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         errdefer arena.deinit();
         return .{
@@ -1778,8 +1778,8 @@ const Collector = struct {
             .extra_roots = extra_roots,
             .arena = arena,
             .work = .empty,
-            // CLI STW always adds the conservative pass over containers-only
-            // frames (same split as shadow). Tests honour the trigger's scan
+            // Production STW adds the conservative pass whenever the host is
+            // not quiescent. Tests honour the trigger's scan
             // policy: engine-internal triggers (allocation threshold,
             // safepoint, callback boundary) run with mutator native frames
             // live — frames entitled to hold rc refs without a

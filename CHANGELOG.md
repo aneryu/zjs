@@ -1,5 +1,8 @@
 # Changelog
 
+Paths below describe files at the time of each release. Retired documentation,
+roadmaps, plans, and measurement snapshots are available in Git history.
+
 ## Unreleased
 
 - **Tests:** retire `src/stress.zig` / `test-stress`. The unique cheap

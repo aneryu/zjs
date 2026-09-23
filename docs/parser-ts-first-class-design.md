@@ -1,14 +1,15 @@
-# Parser：TypeScript 一等公民重设计
+# TypeScript 解析与降级
 
-状态：v1.0，2026-09-19 落地。取代 lexer 侧的"类型区间擦除器"。
+当前实现入口：[`src/parser/typescript.zig`](../src/parser/typescript.zig)、
+[`src/parser/lookahead.zig`](../src/parser/lookahead.zig) 与
+[`src/lexer.zig`](../src/lexer.zig)。支持边界见 [LIMITATIONS](../LIMITATIONS.md)。
 
 ## 1. 目标与边界
 
 - **一套文法**。lexer 与 parser 不再区分 JS 与 TS 输入：`Options.source_kind`、
   `EvalSourceKind`、文件后缀判定全部删除。任何文件都按 TS 文法（JS 的超集）解析。
 - **发射层不动**。类型语法由 parser 内一组**纯解析函数**消费：只推进 token，
-  不发射字节码、不登记作用域、不改 `features`。JS 输入产出的字节码逐位不变，
-  由 `zjs --bytecode-fingerprint` 在语料上前后对比作硬门。
+  不发射字节码、不登记作用域、不改 `features`。
 - **运行时语义的 TS 语法保留并补齐**：`enum`/`const enum`（常量折叠 + 运行时表达式
   兜底）、`namespace`/`module`（含点号嵌套、`export`）、构造器参数属性、
   `import x = A.B` 别名。装饰器、`accessor` 字段与 `import x = require()`/`export =`
@@ -32,13 +33,9 @@ TS 文法在三处与 JS 对同一 token 序列给出不同解释，全部按 TS
 `satisfies`/`readonly`/`keyof`…）只在特定形状下生效，其余位置仍是普通标识符，
 test262 的 `var interface = 1` 一类用例保持通过。
 
-## 3. 词法层改动（`src/lexer.zig`）
+## 3. 泛型 token 切分（`src/lexer.zig`）
 
-- 删除：`is_typescript`、`skipped_intervals`、`enableTypeScript`、`skipRange`、
-  `getSkippedIntervalAtPos`、`skipTrivia` 里的区间跳过、`SourceKindImpl`、
-  `isTypeScriptPath`、`shouldStrip`、`findUnsupportedTypeScriptSyntax`、`tsTokenize`
-  与全部 `mark*` 启发式（约 1.5k 行）。
-- 新增 `splitGreaterThan(tok)` / `splitLessThan(tok)`：当类型解析器需要一个 `>`（`<`）
+- `splitGreaterThan(tok)` / `splitLessThan(tok)`：当类型解析器需要一个 `>`（`<`）
   而当前 token 是 `>>`/`>>>`/`>=`/`>>=`/`>>>=`（`<<`/`<<=`）时，把 token 截成单字符，
   并把 `pos` 回退到该字符之后，余下字符由下一次 `nextInto` 重新切分。这是泛型闭合
   `A<B<C>>` 的唯一词法支持。表达式上下文的泛型实参（`f<T>(x)`）闭合必须是独立的 `>`
@@ -48,7 +45,7 @@ test262 的 `var interface = 1` 一类用例保持通过。
 遇到 `(...) :` 返回 `null`，把带返回类型的箭头头判定交给完整扫描；`(...) {` 让
 `tsFunctionHasBodyAhead` 不必回退到完整 lexer。
 
-## 4. 类型解析器（`src/parser.zig`，纯函数族）
+## 4. 类型解析器（`src/parser/typescript.zig`，纯函数族）
 
 全部签名为 `fn (s: *State) Error!void`，只用 `advance`/`peekKind`/`isIdent` 与
 lexer 光标快照，任何一处失败都以普通 SyntaxError 报出。
@@ -89,8 +86,9 @@ lexer 光标快照，任何一处失败都以普通 SyntaxError 报出。
 | `parseImport` / `parseExport` | `import type`、`import { type X }`、`export type`、`export { type X }`、`export type *`、`export interface/type/declare/abstract/enum/namespace`、`import x = A.B`、`export import`、`export as namespace X;` |
 
 泛型实参试探与箭头头判定都用 `takeParserSnapshot`/`restoreParserLexerSnapshot`
-回退（`TsSpeculation`），回退时同时恢复 `pending_diagnostic`。函数级细节见
-`docs/code-walkthrough/03-parser-ts.md`。
+回退（`TsSpeculation`），回退时同时恢复 `pending_diagnostic`。实现见
+[`src/parser/typescript.zig`](../src/parser/typescript.zig) 与
+[`src/parser/lookahead.zig`](../src/parser/lookahead.zig) 中的对应函数。
 
 ## 6. enum 与 namespace 降级规则
 
@@ -110,19 +108,8 @@ undefined），同名再次声明复用既有绑定（声明合并）。namespac
   （与 tsc 一致）。
 - 成员名允许标识符与字符串字面量。
 
-## 7. 删除清单与 API 变化
+## 验证
 
-- `parser.Options.source_kind`、`parser.SourceKind`、`core.context.EvalSourceKind`、
-  `ContextEvalOptions.source_kind`、`compiler/test_entry.Options.source_kind`、
-  测试 helpers 的同名字段。调用方去掉该字段即可，行为不变。
-- 文档：`docs/code-walkthrough/02-lexer-typescript.md` 删除，`03-parser-ts.md` 重写。
-
-## 8. 门禁
-
-1. `zig build test`（含新增 TS 语料单测）。
-2. `zig build test262-check -Doptimize=ReleaseFast`：0 失败。
-3. `zjs --bytecode-fingerprint` 在 test262
-   全部用例 + jetstream3 + fixtures 上与改动前逐行一致（含 SyntaxError 的行列与消息）。
-   落地时唯一的差异是诊断文本/位置：装饰器改报专用消息；类体内的词法错误改在出错
-   token 处报告。
-4. `zig build smoke`。
+解析与运行时降级修改需保留对应回归测试；验证范围由
+[验证政策](verification-policy.md)决定。2026-09-19 的迁移清单和验收记录
+可从 Git 历史恢复，不构成额外常设门禁。

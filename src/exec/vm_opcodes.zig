@@ -812,10 +812,10 @@ pub const CallDepthGuard = struct {
 
     pub fn deinit(self: CallDepthGuard) void {
         const rt = self.ctx.runtime;
-        std.debug.assert(rt.hot.active_bytecode_stack_bytes >= self.planned_stack_bytes);
-        rt.hot.active_bytecode_stack_bytes -= self.planned_stack_bytes;
-        rt.hot.call_depth -= 1;
-        rt.hot.native_call_depth -= 1;
+        std.debug.assert(rt.active_bytecode_stack_bytes >= self.planned_stack_bytes);
+        rt.active_bytecode_stack_bytes -= self.planned_stack_bytes;
+        rt.call_depth -= 1;
+        rt.native_call_depth -= 1;
     }
 };
 pub fn enterCallDepth(
@@ -824,7 +824,7 @@ pub fn enterCallDepth(
     planned_stack_bytes: usize,
 ) !CallDepthGuard {
     const rt = ctx.runtime;
-    if (rt.hot.native_call_depth >= maxNativeJsCallDepth(ctx) or
+    if (rt.native_call_depth >= maxNativeJsCallDepth(ctx) or
         bytecodeStackBudgetWouldOverflow(rt, planned_stack_bytes))
     {
         // QuickJS JS_CallInternal stack guard -> JS_ThrowStackOverflow =
@@ -832,9 +832,9 @@ pub fn enterCallDepth(
         _ = exception_ops.throwInternalErrorMessage(ctx, global, "stack overflow") catch |err| return err;
         return error.StackOverflow;
     }
-    rt.hot.active_bytecode_stack_bytes += planned_stack_bytes;
-    rt.hot.call_depth += 1;
-    rt.hot.native_call_depth += 1;
+    rt.active_bytecode_stack_bytes += planned_stack_bytes;
+    rt.call_depth += 1;
+    rt.native_call_depth += 1;
     return .{ .ctx = ctx, .planned_stack_bytes = planned_stack_bytes };
 }
 
@@ -876,9 +876,9 @@ inline fn bytecodeStackBudgetWouldOverflow(
     planned_stack_bytes: usize,
 ) bool {
     return admissionCeilingsReject(
-        &rt.hot,
-        rt.hot.call_depth,
-        rt.hot.active_bytecode_stack_bytes +% planned_stack_bytes,
+        rt,
+        rt.call_depth,
+        rt.active_bytecode_stack_bytes +% planned_stack_bytes,
         planned_stack_bytes,
     );
 }
@@ -886,24 +886,24 @@ inline fn bytecodeStackBudgetWouldOverflow(
 /// Logical call depth and planned VM-frame bytes are separate ceilings, even
 /// though both use `stack_size`. Detect byte-sum wrap before committing.
 pub inline fn callBudgetWouldOverflow(
-    hot: *const core.JSRuntime.HotExecState,
+    rt: *const core.JSRuntime,
     depth: usize,
     accumulated: usize,
     planned_stack_bytes: usize,
 ) bool {
-    return depth >= hot.stack_size or accumulated < planned_stack_bytes or
-        accumulated > hot.stack_size;
+    return depth >= rt.stack_size or accumulated < planned_stack_bytes or
+        accumulated > rt.stack_size;
 }
 
 /// Add the actual native stack-address guard to the VM budget predicate.
 inline fn admissionCeilingsReject(
-    hot: *const core.JSRuntime.HotExecState,
+    rt: *const core.JSRuntime,
     depth: usize,
     accumulated: usize,
     planned_stack_bytes: usize,
 ) bool {
-    return callBudgetWouldOverflow(hot, depth, accumulated, planned_stack_bytes) or
-        @frameAddress() < hot.native_stack_limit;
+    return callBudgetWouldOverflow(rt, depth, accumulated, planned_stack_bytes) or
+        @frameAddress() < rt.native_stack_limit;
 }
 
 /// Byte-priced variants: constructors that already hold the planned frame
@@ -923,35 +923,25 @@ pub inline fn commitInlineCallDepthBytes(
     planned_stack_bytes: usize,
 ) void {
     const rt = ctx.runtime;
-    std.debug.assert(std.math.maxInt(usize) - rt.hot.active_bytecode_stack_bytes >= planned_stack_bytes);
-    rt.hot.active_bytecode_stack_bytes += planned_stack_bytes;
-    rt.hot.call_depth += 1;
+    std.debug.assert(std.math.maxInt(usize) - rt.active_bytecode_stack_bytes >= planned_stack_bytes);
+    rt.active_bytecode_stack_bytes += planned_stack_bytes;
+    rt.call_depth += 1;
 }
 
-/// K2 fused admission+commit for the warm leaf constructors: the check and
-/// the commit RMW run back-to-back on one caller-supplied `rt` (no chunk or
-/// carve stores in between), so the whole budget transaction is a single
-/// hot-line load cluster instead of the admission/commit split that reloaded
-/// ctx→runtime after the arena carve's aliasing store (M1 dossier K2: rt
-/// reloads #3/#4). Mirrors qjs check-then-alloca where the check IS the
-/// commitment; a later chunk/carve miss must retreat
-/// the charge via `retreatInlineCallDepthBytesMiss` before the pure-miss
-/// null return. `bytecodeStackBudgetWouldOverflow` already rejects a wrapping
-/// add, so the commit needs no second overflow assert.
+/// Admit and charge a leaf frame in one step. If later Entry or arena setup
+/// fails, the caller must undo this charge before returning a pure miss.
 pub inline fn tryCommitInlineCallDepthBytesRt(
     rt: *core.JSRuntime,
     planned_stack_bytes: usize,
 ) bool {
-    // One load cluster, one sum, one commit: the accumulated byte figure the
-    // ceilings test IS the figure that is stored back, so the crossing pays
-    // a single `adds` instead of the check's add plus the commit's add.
-    const hot = &rt.hot;
-    const depth = hot.call_depth;
-    const bytes = hot.active_bytecode_stack_bytes;
+    // Check and commit the same accumulated byte figure so miss handling can
+    // reverse exactly the charge installed here.
+    const depth = rt.call_depth;
+    const bytes = rt.active_bytecode_stack_bytes;
     const accumulated = bytes +% planned_stack_bytes;
-    if (admissionCeilingsReject(hot, depth, accumulated, planned_stack_bytes)) return false;
-    hot.active_bytecode_stack_bytes = accumulated;
-    hot.call_depth = depth + 1;
+    if (admissionCeilingsReject(rt, depth, accumulated, planned_stack_bytes)) return false;
+    rt.active_bytecode_stack_bytes = accumulated;
+    rt.call_depth = depth + 1;
     return true;
 }
 
@@ -993,9 +983,9 @@ pub inline fn leaveInlineCallDepthBytesRt(
     rt: *core.JSRuntime,
     planned_stack_bytes: usize,
 ) void {
-    std.debug.assert(rt.hot.active_bytecode_stack_bytes >= planned_stack_bytes);
-    rt.hot.active_bytecode_stack_bytes -= planned_stack_bytes;
-    rt.hot.call_depth -= 1;
+    std.debug.assert(rt.active_bytecode_stack_bytes >= planned_stack_bytes);
+    rt.active_bytecode_stack_bytes -= planned_stack_bytes;
+    rt.call_depth -= 1;
 }
 
 /// Preflight for a tail-call frame replacement. QuickJS's OP_tail_call enters
@@ -2030,8 +2020,7 @@ fn residentFrameViewsMatch(state: *const core.object.SuspendedExecutionState, fr
 
 fn clearLiveExecutionViews(stack: *stack_mod.Stack, frame: *frame_mod.Frame) void {
     stack.clearBacking();
-    stack.setArenaWindow(false);
-    stack.setResidentWindow(false);
+    stack.setBackingOwnership(.owned);
     frame.storage_values = &.{};
     frame.ownership.storage = .borrowed;
     frame.locals = &.{};
@@ -2162,7 +2151,7 @@ pub noinline fn saveGeneratorExecutionState(
     // Generator frames must run on heap-backed stacks: suspension transfers
     // buffer ownership into the generator object, which is incompatible with
     // borrowed VM stack-arena windows.
-    std.debug.assert(!stack.isArenaWindow());
+    std.debug.assert(!stack.isFrameWindow());
     std.debug.assert(frame.ownership.storage == .owned or frame.storage_values.len == 0 or execution.frameUsesCombinedStorage());
     std.debug.assert(frame.ownership.var_refs == .owned or frame.var_refs.len == 0);
     std.debug.assert(frame.open_var_refs.len == 0 or frame.storage_values.len != 0);
@@ -2209,8 +2198,7 @@ inline fn installSuspendedExecutionStorage(
     frame.ownership.var_refs = .owned;
     frame.open_var_refs = suspended.frame.open_var_refs;
     stack.installBacking(suspended.stack.values, suspended.stack.capacity);
-    stack.setArenaWindow(false);
-    stack.setResidentWindow(resident_stack or resident_owner);
+    stack.setBackingOwnership(if (resident_stack or resident_owner) .resident_window else .owned);
     state.beginRunningAliases();
 }
 
@@ -2249,16 +2237,15 @@ noinline fn resumeExecutionStateRaw(
         if (execution.stackUsesCombinedStorage()) {
             std.debug.assert(stack.capacity == 0 and stack.len() == 0);
             stack.installBacking(state.storage.stack.values, state.storage.stack.capacity);
-            stack.setArenaWindow(false);
-            stack.setResidentWindow(true);
+            stack.setBackingOwnership(.resident_window);
             state.beginRunningAliases();
         }
         payload.just_yielded = false;
         return .{};
     }
     // Resume installs generator-owned heap buffers into the stack; the stack
-    // must not be an arena window (its deinit would skip freeing them).
-    std.debug.assert(!stack.isArenaWindow());
+    // must not retain frame-window ownership (deinit would skip freeing them).
+    std.debug.assert(!stack.isFrameWindow());
     // ESCAPE CONTRACT (v2 escape audit §5.4, git history): `state.pc` is a bare
     // compiler-assigned offset — not a tagged pointer and not a
     // (function, offset) pair — so it has no provenance of its own. `function`
@@ -2990,8 +2977,8 @@ pub noinline fn copyDataProperties(vm: *Vm) HostError!void {
             const value = object_ops.getValueProperty(ctx, output, global, rooted_source_value, key, vm.function, caller_frame) catch |err|
                 return try handleLiteralRuntimeError(ctx, output, stack, caller_frame, catch_target, global, err);
             var rooted_value = value;
-            var value_root_values = [_]core.runtime.ValueRootValue{
-                .{ .value = &rooted_value },
+            var value_root_values = [_]*core.JSValue{
+                &rooted_value,
             };
             var value_root_frame = core.runtime.ValueRootFrame{
                 .values = &value_root_values,
@@ -4119,12 +4106,13 @@ pub noinline fn disposeStackVm(vm: *Vm, disposition: DisposalDisposition) HostEr
 }
 
 test "VM byte admission is independent of native stack addresses" {
-    var hot = core.JSRuntime.HotExecState{};
-    hot.stack_size = 1024;
-    hot.native_stack_limit = 0;
-    try std.testing.expect(!admissionCeilingsReject(&hot, 0, 1024, 512));
-    try std.testing.expect(admissionCeilingsReject(&hot, 0, 1025, 512));
-    try std.testing.expect(admissionCeilingsReject(&hot, 0, 2, 512));
-    hot.native_stack_limit = std.math.maxInt(usize);
-    try std.testing.expect(admissionCeilingsReject(&hot, 0, 512, 512));
+    const rt = try core.JSRuntime.create(.{ .allocator = std.testing.allocator });
+    defer rt.destroy();
+    rt.stack_size = 1024;
+    rt.native_stack_limit = 0;
+    try std.testing.expect(!admissionCeilingsReject(rt, 0, 1024, 512));
+    try std.testing.expect(admissionCeilingsReject(rt, 0, 1025, 512));
+    try std.testing.expect(admissionCeilingsReject(rt, 0, 2, 512));
+    rt.native_stack_limit = std.math.maxInt(usize);
+    try std.testing.expect(admissionCeilingsReject(rt, 0, 512, 512));
 }

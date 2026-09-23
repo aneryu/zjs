@@ -2,8 +2,7 @@
 
 Source map for the Zig JavaScript / TypeScript engine. ECMA-262 governs
 JavaScript semantics; QuickJS is a comparison reference. Validation commands
-live in [GUIDE.md](../GUIDE.md) Part B.6. Function-level Chinese walkthrough of every
-`src/` function: [code-walkthrough/README.md](code-walkthrough/README.md).
+live in [GUIDE.md](../GUIDE.md) Part B.6.
 Shipped ReleaseFast binary size by layer and function:
 [binary-size.md](binary-size.md).
 
@@ -55,7 +54,7 @@ Values, atoms, strings, objects, shapes, properties, arrays, and GC.
 
 | Enter here | Owns |
 | --- | --- |
-| `context.zig` | `JSContext` and per-realm state |
+| `context.zig` | `RealmContext` (compatibility alias `JSContext`) and per-Realm state |
 | `value.zig` | `JSValue` representation, tagging and coercion entry |
 | `object.zig` / `shape.zig` / `property.zig` | objects, shapes, properties |
 | `gc.zig` | registry, policy, external-memory accounting |
@@ -293,12 +292,9 @@ zjs is already a bytecode interpreter:
 - `zjs_vm.zig` / `tailcall_dispatch.zig` execute opcodes;
 - `vm_opcodes.zig` and `vm_property.zig` own the concrete opcode families.
 
-There is no evidence supporting a rewrite to a register/accumulator VM
-(reaffirmed by [engine-evolution-plan.md](engine-evolution-plan.md) §17).
-Forward-looking evolution — feedback slots, baseline JIT, dispatch-skeleton
-alternatives — is owned by
-[engine-evolution-plan.md](engine-evolution-plan.md); this chapter stays a
-status record.
+The engine uses stack bytecode. Historical proposals for feedback slots,
+baseline JIT, and dispatch alternatives are available in Git history; this
+chapter describes implementation boundaries, not an implementation schedule.
 
 ### 2. Current Carriers
 
@@ -432,9 +428,7 @@ Not implemented:
 
 - register / accumulator bytecode;
 - baseline JIT;
-- call inline cache (property sites are cached since W1, see §4 above;
-  Phase 0.5 feedback slots are approved and unlocked,
-  [engine-evolution-plan.md](engine-evolution-plan.md) §3.4);
+- call inline cache (property sites are cached, see §4 above);
 - JIT GC stack maps;
 - moving nursery;
 - concurrent collector;

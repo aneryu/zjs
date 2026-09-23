@@ -33,7 +33,7 @@ pub const ResolvedProduct = resolve_variables.ResolvedProduct;
 /// This is an architectural phase boundary, not a speculative inline hint.
 /// Removing unrelated legacy state changed Zig/LLVM whole-program inlining and
 /// folded lowering into the packed finalizer, regressing crypto/code-load.
-/// Keep the boundary explicit; see docs/qcp1_switch_decision.md §9.3.
+/// Keep the boundary explicit; see docs/compiler-contract.md (Production layout and phase boundaries).
 pub noinline fn compileFunction(
     function: *bytecode.Bytecode,
     fd: *bytecode.function_def.FunctionDef,

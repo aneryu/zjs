@@ -2,7 +2,7 @@
 
 Status: 2026-09-23 已核对启用路径并执行正确性探针；发现阻塞，性能评估 INCONCLUSIVE，保持默认关闭。
 
-所属设计：[Runtime 后续工作范围](runtime-target-design.md#711-不随结构重构自动扩展的工作)。
+所属设计：[Runtime 后续工作范围](runtime-target-design.md#后续范围)。
 
 2026-09-21：用户要求将 nursery 评估记录为待办；当时只记录，未实施改造。
 2026-09-23 的核对与探针结果见下文。
@@ -26,7 +26,9 @@ zjs 实现入口：`src/core/gc_nursery.zig`、`src/core/gc.zig`。
 
 ## 2026-09-23 核对结果与实施顺序
 
-证据、源码路径和复现方法见 [nursery 探针记录](runtime-review/nursery-2026-09-23/README.md)。本轮未修改生产源码。
+原探针目录 `docs/runtime-review/nursery-2026-09-23/` 已移出工作树，
+证据与复现方法需从 Git 历史恢复。以下保留当时的阻塞项；重新开展工作时
+先在当前源码复现，不能把旧探针结果当成当前验证。
 
 - [x] N1：核对默认开关、分配对象范围、bootstrap 绕行、页面来源、触发条件和预算归属。
 - [x] N2：隔离工作区显式 on/off 探针；Debug 构建通过，四次运行均失败，原始输出已保留。不能记为性能样本。

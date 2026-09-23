@@ -1602,7 +1602,7 @@ fn readRelTarget32(bytes: []const u8, op_offset: usize) usize {
 }
 
 /// Cold-plane counterpart: reclaimed opcodes are encoded as `{using, sub}`,
-/// so presence checks scan for the pair (docs/perf/opcode-space-survey.md §8).
+/// so presence checks scan for the pair.
 fn countSubOpcode(code: []const u8, sub: u8) usize {
     var count: usize = 0;
     var pc: usize = 0;

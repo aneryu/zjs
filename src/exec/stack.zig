@@ -55,7 +55,7 @@ pub const PendingCallRegion = struct {
 };
 
 pub const Stack = struct {
-    const Policy = runtime.VmStackWindowPolicy;
+    const Storage = runtime.VmStackStorage;
 
     /// Explicit owner, kept pointer-sized so inline_calls.Entry stays compact.
     /// No allocator-vtable introspection is needed for growth or release.
@@ -66,10 +66,10 @@ pub const Stack = struct {
     values: [*]JSValue,
     top_ptr: [*]JSValue,
     capacity: usize = 0,
-    /// Stack limit and the two mutually independent backing-ownership flags in
-    /// one word. A 62-bit slot limit is far beyond any addressable JSValue
-    /// buffer while avoiding the six bytes of tail padding the booleans created.
-    policy: Policy,
+    /// Slot limit and mutually exclusive backing ownership, packed to keep
+    /// Stack and inline_calls.Entry compact. Ownership describes who releases
+    /// the backing, independently of the live JSValues stored in it.
+    storage: Storage,
 
     pub fn init(rt: *runtime.JSRuntime, limit: usize) Stack {
         const empty = emptyPtr();
@@ -77,18 +77,18 @@ pub const Stack = struct {
             .runtime = rt,
             .values = empty,
             .top_ptr = empty,
-            .policy = Policy.forLimit(limit),
+            .storage = Storage.forLimit(limit),
         };
     }
 
-    pub fn initArenaWindow(rt: *runtime.JSRuntime, policy: Policy, window: []JSValue) Stack {
-        std.debug.assert(policy.arena_window and !policy.resident_window);
+    pub fn initFrameWindow(rt: *runtime.JSRuntime, storage: Storage, window: []JSValue) Stack {
+        std.debug.assert(storage.ownership == .frame_window);
         return .{
             .runtime = rt,
             .values = window.ptr,
             .top_ptr = window.ptr,
             .capacity = window.len,
-            .policy = policy,
+            .storage = storage,
         };
     }
 
@@ -99,19 +99,17 @@ pub const Stack = struct {
     }
 
     pub inline fn stackLimit(self: *const Stack) usize {
-        return @intCast(self.policy.limit);
+        return @intCast(self.storage.limit);
     }
 
-    pub inline fn isArenaWindow(self: *const Stack) bool {
-        return self.policy.arena_window;
+    pub inline fn isFrameWindow(self: *const Stack) bool {
+        return self.storage.ownership == .frame_window;
     }
 
-    pub inline fn setArenaWindow(self: *Stack, value: bool) void {
-        self.policy.arena_window = value;
-    }
-
-    pub inline fn setResidentWindow(self: *Stack, value: bool) void {
-        self.policy.resident_window = value;
+    /// Caller must transfer/relinquish backing ownership before changing this
+    /// state; this operation neither allocates nor releases storage.
+    pub inline fn setBackingOwnership(self: *Stack, ownership: Storage.Ownership) void {
+        self.storage.ownership = ownership;
     }
 
     pub inline fn topPtr(self: *const Stack) [*]JSValue {
@@ -203,7 +201,7 @@ pub const Stack = struct {
     /// Used when `reserveAdditional` grew storage and a later allocation failed.
     pub fn discardEmptyHeapBacking(self: *Stack) void {
         if (self.len() != 0 or self.capacity == 0) return;
-        if (self.policy.arena_window or self.policy.resident_window) return;
+        if (self.storage.ownership != .owned) return;
         const backing = self.backingValues();
         self.clearBacking();
         mem_ops.free(self.runtime, JSValue, backing);
@@ -213,15 +211,13 @@ pub const Stack = struct {
         const values = self.liveValues();
         const backing = self.backingValues();
         const stack_capacity = self.capacity;
-        const arena_window = self.policy.arena_window;
-        const resident_window = self.policy.resident_window;
+        const owns_backing = self.storage.ownership == .owned;
         self.clearBacking();
-        self.policy.arena_window = false;
-        self.policy.resident_window = false;
+        self.storage.ownership = .owned;
         for (values) |*slot| {
             slot.* = JSValue.undefinedValue();
         }
-        if (stack_capacity != 0 and !arena_window and !resident_window) mem_ops.free(self.runtime, JSValue, backing);
+        if (stack_capacity != 0 and owns_backing) mem_ops.free(self.runtime, JSValue, backing);
     }
 
     pub fn push(self: *Stack, value: JSValue) !void {
@@ -290,14 +286,12 @@ pub const Stack = struct {
         const old_values = self.liveValues();
         const old_backing = self.backingValues();
         const old_capacity = current_capacity;
-        const old_arena_window = self.policy.arena_window;
-        const old_resident_window = self.policy.resident_window;
+        const owned_old_backing = self.storage.ownership == .owned;
         @memcpy(next[0..old_values.len], old_values);
         self.values = next.ptr;
         self.top_ptr = next.ptr + old_values.len;
         self.capacity = next_capacity;
-        self.policy.arena_window = false;
-        self.policy.resident_window = false;
-        if (old_capacity != 0 and !old_arena_window and !old_resident_window) mem_ops.free(self.runtime, JSValue, old_backing);
+        self.storage.ownership = .owned;
+        if (old_capacity != 0 and owned_old_backing) mem_ops.free(self.runtime, JSValue, old_backing);
     }
 };

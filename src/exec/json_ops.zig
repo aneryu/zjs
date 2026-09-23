@@ -594,7 +594,7 @@ fn JsonUnitParser(comptime T: type) type {
         fn parseObject(self: *Self, record: ?*JsonParseRecord) JsonParseError!core.JSValue {
             self.index += 1; // '{'
             var object_value = (try core.Object.create(self.rt, core.class.ids.object, objectPrototypeFromGlobal(self.rt, self.global))).value();
-            var root_values = [_]core.runtime.ValueRootValue{.{ .value = &object_value }};
+            var root_values = [_]*core.JSValue{&object_value};
             var root_frame = core.runtime.ValueRootFrame{ .values = &root_values };
             root_frame.activate(self.rt);
             defer root_frame.deactivate(self.rt);
@@ -673,7 +673,7 @@ fn JsonUnitParser(comptime T: type) type {
             self.index += 1; // '['
             const object = try core.Object.createArray(self.rt, arrayPrototypeFromGlobal(self.rt, self.global));
             var object_value = object.value();
-            var root_values = [_]core.runtime.ValueRootValue{.{ .value = &object_value }};
+            var root_values = [_]*core.JSValue{&object_value};
             var root_frame = core.runtime.ValueRootFrame{ .values = &root_values };
             root_frame.activate(self.rt);
             defer root_frame.deactivate(self.rt);
@@ -893,10 +893,10 @@ pub fn rawJSON(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     var rooted_value = value;
     var object_value = core.JSValue.undefinedValue();
     var text = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_value },
-        .{ .value = &object_value },
-        .{ .value = &text },
+    var root_values = [_]*core.JSValue{
+        &rooted_value,
+        &object_value,
+        &text,
     };
     var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
@@ -1114,8 +1114,8 @@ const SimpleJsonParser = struct {
             if (self.peek() == '}') 0 else 4,
         );
         var object_value = object.value();
-        var root_values = [_]core.runtime.ValueRootValue{
-            .{ .value = &object_value },
+        var root_values = [_]*core.JSValue{
+            &object_value,
         };
         var root_frame = core.runtime.ValueRootFrame{
             .values = &root_values,
@@ -1140,8 +1140,8 @@ const SimpleJsonParser = struct {
             self.expectByte(':') catch return error.UnsupportedSimpleJson;
             const item_value = try self.parseValue();
             var root_item = item_value;
-            var item_roots = [_]core.runtime.ValueRootValue{
-                .{ .value = &root_item },
+            var item_roots = [_]*core.JSValue{
+                &root_item,
             };
             var item_root_frame = core.runtime.ValueRootFrame{
                 .values = &item_roots,

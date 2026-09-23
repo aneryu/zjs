@@ -5,11 +5,9 @@ an untested checkout. Product scope lives in [LIMITATIONS.md](LIMITATIONS.md),
 selection in [COMPATIBILITY.md](COMPATIBILITY.md), and current gate obligations
 in [verification policy](docs/verification-policy.md).
 
-## Roadmap governance
+## Tracing-GC migration
 
-[Roadmap v2.0](docs/roadmap.md) and its
-[work-item registry](docs/roadmap/work-items.yaml) record planned work and
-dependencies. The 2026-09-06 snapshot records the completed tracing-GC
+The 2026-09-06 snapshot records the completed tracing-GC
 migration (`e972c4b5` → `f005aee7`): tracing is the only collector; heap reference
 counting and the `gc/tracing` branch are retired.
 
@@ -34,8 +32,8 @@ See [Compatibility](COMPATIBILITY.md) for the selection rules.
 
 ## Performance
 
-[bench-v8 status](docs/perf/bench-v8-status.md) owns the historical measurements
-and reference fingerprints. The recorded suite is Octane 2.0 / V8 suite v9;
+Historical bench-v8 measurements and reference fingerprints are available
+in Git history. The recorded suite is Octane 2.0 / V8 suite v9;
 its GCC-16 QuickJS yardstick was selected on 2026-08-26. Ratios cannot be
 compared across suite versions, reference compilers, or binary fingerprints.
 The measurements are maintainer single-machine snapshots, not an independent
@@ -70,7 +68,7 @@ This is a historical disposition list, not an exhaustive current bug inventory.
 
 | Recorded disposition | Finding / evidence |
 | --- | --- |
-| Fixed 2026-09-06, Q21 | Dense-array storage-cell tracing now follows the storage-owning arm rather than `flags.fast_array`; regression in `tests/core.zig`, analysis in [backlog](docs/backlog.md) |
+| Fixed 2026-09-06, Q21 | Dense-array storage-cell tracing now follows the storage-owning arm rather than `flags.fast_array`; regression in `tests/core.zig`, historical analysis available in Git history |
 | Closed 2026-09-06, Q22 | Per-corpse accounting does not debit the byte ledger twice; invariant regression in `tests/core.zig`, analysis in backlog |
 | Fixed 2026-08-22 | Frame teardown read bytecode after releasing its function; the regression records the dynamic-function case |
 

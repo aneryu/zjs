@@ -1223,7 +1223,7 @@ fn setLikeKeys(rt: *core.JSRuntime, record: SetLikeRecord, host: CallbackHost) !
 fn appendValue(rt: *core.JSRuntime, values: *[]core.JSValue, value: core.JSValue) !void {
     var rooted_value = value;
     var root_slices = [_]core.runtime.ValueRootSlice{.{ .mutable = values }};
-    var root_values = [_]core.runtime.ValueRootValue{.{ .value = &rooted_value }};
+    var root_values = [_]*core.JSValue{&rooted_value};
     var root_frame = core.runtime.ValueRootFrame{
         .slices = &root_slices,
         .values = &root_values,
@@ -1322,11 +1322,11 @@ fn addGroupedItem(
     var key = core.JSValue.undefinedValue();
     var existing = core.JSValue.undefinedValue();
     var group_value = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_item },
-        .{ .value = &key },
-        .{ .value = &existing },
-        .{ .value = &group_value },
+    var root_values = [_]*core.JSValue{
+        &rooted_item,
+        &key,
+        &existing,
+        &group_value,
     };
     var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,

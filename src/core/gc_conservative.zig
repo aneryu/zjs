@@ -167,7 +167,7 @@ fn scanHigh(rt: *const JSRuntime, sp: usize) usize {
     if (threadStackHigh()) |high| {
         if (high > sp) return high;
     }
-    const top = rt.hot.native_stack_top;
+    const top = rt.native_stack_top;
     if (top > sp) return top;
     return sp;
 }

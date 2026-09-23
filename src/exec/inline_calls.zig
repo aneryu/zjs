@@ -579,7 +579,7 @@ pub const Entry = struct {
     /// one masked compare, so nothing is stored and Entry does not grow.
     ///
     /// Reads ONLY completion-type facts. `frame.cold`, storage ownership, and
-    /// whether the operand stack still owns its arena window are all decided
+    /// whether the operand stack still borrows its frame window are all decided
     /// while the body runs -- a callee can materialize `arguments`, fall back to
     /// heap storage, or grow its stack -- so they stay out of the
     /// classification and the ordinary epilogue keeps testing them dynamically.
@@ -596,7 +596,7 @@ pub const Entry = struct {
 
     inline fn canUseSimpleTeardown(self: *const Entry) bool {
         return self.teardown.simple and self.frame.cold == null and
-            self.frame.ownership.storage == .borrowed and self.stack.isArenaWindow();
+            self.frame.ownership.storage == .borrowed and self.stack.isFrameWindow();
     }
 
     /// Release this frame after its continuation has been moved out. This is
@@ -666,7 +666,7 @@ pub const Entry = struct {
         std.debug.assert(frame.ownership.storage == .borrowed);
         std.debug.assert(frame.locals.len == 0 and frame.args.len == 0);
         std.debug.assert(frame.var_refs.len == 0 and frame.open_var_refs.len == 0);
-        std.debug.assert(self.stack.isArenaWindow() and self.stack.len() == 0);
+        std.debug.assert(self.stack.isFrameWindow() and self.stack.len() == 0);
         rt.vm_stack.restore(self.arena_mark);
     }
 
@@ -695,7 +695,7 @@ pub const Entry = struct {
         // borrowed var_refs); the callee can never CREATE cells.
         std.debug.assert(frame.ownership.var_refs == .borrowed);
         std.debug.assert(frame.open_var_refs.len == 0);
-        std.debug.assert(self.stack.isArenaWindow() and self.stack.len() == 0);
+        std.debug.assert(self.stack.isFrameWindow() and self.stack.len() == 0);
         rt.vm_stack.restore(self.arena_mark);
     }
 
@@ -717,7 +717,7 @@ pub const Entry = struct {
         std.debug.assert(frame.args.len == frame.function.arg_count);
         std.debug.assert(frame.ownership.var_refs == .borrowed or frame.var_refs.len == 0);
         std.debug.assert(frame.open_var_refs.len == 0);
-        std.debug.assert(self.stack.isArenaWindow() and self.stack.len() == 0);
+        std.debug.assert(self.stack.isFrameWindow() and self.stack.len() == 0);
         rt.vm_stack.restore(self.arena_mark);
     }
 
@@ -1077,9 +1077,9 @@ pub const NativeBoundaryScope = struct {
                     .stack_top = stack.topPtr(),
                     .stack_len = stack.len(),
                     .arena_mark = machine.ctx.runtime.vm_stack.mark(),
-                    .call_depth = machine.ctx.runtime.hot.call_depth,
-                    .native_call_depth = machine.ctx.runtime.hot.native_call_depth,
-                    .stack_bytes = machine.ctx.runtime.hot.active_bytecode_stack_bytes,
+                    .call_depth = machine.ctx.runtime.call_depth,
+                    .native_call_depth = machine.ctx.runtime.native_call_depth,
+                    .stack_bytes = machine.ctx.runtime.active_bytecode_stack_bytes,
                 };
             } else .{},
         };
@@ -1091,8 +1091,8 @@ pub const NativeBoundaryScope = struct {
             .data = &self.view,
             .resolver = resolveMachineBacktraceView,
         };
-        self.frame.previous = self.rt.hot.current_backtrace_frame;
-        self.rt.hot.current_backtrace_frame = &self.frame;
+        self.frame.previous = self.rt.current_backtrace_frame;
+        self.rt.current_backtrace_frame = &self.frame;
         self.invocation.current_backtrace_view = &self.view;
     }
 
@@ -1110,9 +1110,9 @@ pub const NativeBoundaryScope = struct {
             const mark = machine.ctx.runtime.vm_stack.mark();
             std.debug.assert(mark.chunk == self.validation.arena_mark.chunk);
             std.debug.assert(mark.used == self.validation.arena_mark.used);
-            std.debug.assert(machine.ctx.runtime.hot.call_depth == self.validation.call_depth);
-            std.debug.assert(machine.ctx.runtime.hot.native_call_depth == self.validation.native_call_depth);
-            std.debug.assert(machine.ctx.runtime.hot.active_bytecode_stack_bytes == self.validation.stack_bytes);
+            std.debug.assert(machine.ctx.runtime.call_depth == self.validation.call_depth);
+            std.debug.assert(machine.ctx.runtime.native_call_depth == self.validation.native_call_depth);
+            std.debug.assert(machine.ctx.runtime.active_bytecode_stack_bytes == self.validation.stack_bytes);
         }
 
         machine.vm.restoreEntryState(&self.vm_entry);
@@ -1133,9 +1133,9 @@ pub const NativeBoundaryScope = struct {
             const mark = machine.ctx.runtime.vm_stack.mark();
             std.debug.assert(mark.chunk == self.validation.arena_mark.chunk);
             std.debug.assert(mark.used == self.validation.arena_mark.used);
-            std.debug.assert(machine.ctx.runtime.hot.call_depth == self.validation.call_depth);
-            std.debug.assert(machine.ctx.runtime.hot.native_call_depth == self.validation.native_call_depth);
-            std.debug.assert(machine.ctx.runtime.hot.active_bytecode_stack_bytes == self.validation.stack_bytes);
+            std.debug.assert(machine.ctx.runtime.call_depth == self.validation.call_depth);
+            std.debug.assert(machine.ctx.runtime.native_call_depth == self.validation.native_call_depth);
+            std.debug.assert(machine.ctx.runtime.active_bytecode_stack_bytes == self.validation.stack_bytes);
         }
         machine.vm.restoreEntryState(&self.vm_entry);
         self.popBacktrace();
@@ -1158,8 +1158,8 @@ pub const NativeBoundaryScope = struct {
             // permanently. Avoid clearing dead fields on the ReleaseFast hot
             // leg; the next freeze overwrites `frozen_top`, and a live view
             // never reads it.
-            std.debug.assert(self.rt.hot.current_backtrace_frame == &self.frame);
-            self.rt.hot.current_backtrace_frame = self.frame.previous;
+            std.debug.assert(self.rt.current_backtrace_frame == &self.frame);
+            self.rt.current_backtrace_frame = self.frame.previous;
             self.invocation.current_backtrace_view = self.outer_view;
             self.outer_view.live = true;
         } else {
@@ -1289,7 +1289,7 @@ pub const LeanFrame = struct {
         // Geometry that never changes per call: the argument window length
         // and the operand-stack capacity (the pointers are carved per call).
         entry.frame.args = @as([*]core.JSValue, undefined)[0..frame_arg_count];
-        entry.stack = stack_mod.Stack.initArenaWindow(rt, rt.vm_stack_arena_policy, @as([*]core.JSValue, undefined)[0..stack_count]);
+        entry.stack = stack_mod.Stack.initFrameWindow(rt, rt.vm_stack_frame_storage, @as([*]core.JSValue, undefined)[0..stack_count]);
         entry.teardown = .{
             .simple = true,
             .special_return = true,
@@ -1892,7 +1892,7 @@ pub const Machine = struct {
             },
             .cold = null,
         };
-        entry.stack = stack_mod.Stack.initArenaWindow(rt, rt.vm_stack_arena_policy, stack_window);
+        entry.stack = stack_mod.Stack.initFrameWindow(rt, rt.vm_stack_frame_storage, stack_window);
     }
 
     /// Warm-first dispatch. Inlined so a `carveActiveMarked` hit is a `void`
@@ -2152,7 +2152,7 @@ pub const Machine = struct {
             },
             .cold = cold,
         };
-        entry.stack = stack_mod.Stack.initArenaWindow(rt, rt.vm_stack_arena_policy, stack_window);
+        entry.stack = stack_mod.Stack.initFrameWindow(rt, rt.vm_stack_frame_storage, stack_window);
     }
 
     /// Deep constructor for an exact simple frame. The common call path used to
@@ -2200,16 +2200,16 @@ pub const Machine = struct {
         // qjs:17837 is a predicate-only check. Check logical depth and the
         // aggregate VM-byte budget together; the physical native guard uses
         // the caller's frame address so this leaf needs no own @frameAddress.
-        const base = rt.hot.active_bytecode_stack_bytes;
+        const base = rt.active_bytecode_stack_bytes;
         const accumulated = base +% planned_stack_bytes;
         if (vm_call.callBudgetWouldOverflow(
-            &rt.hot,
-            rt.hot.call_depth,
+            rt,
+            rt.call_depth,
             accumulated,
             planned_stack_bytes,
         )) return null;
         const sp = caller_fp -| planned_stack_bytes;
-        if (sp < rt.hot.native_stack_limit) return null;
+        if (sp < rt.native_stack_limit) return null;
 
         const index = self.depth;
         const chunk_index = index / entries_per_chunk;
@@ -2239,8 +2239,8 @@ pub const Machine = struct {
         const chunk = arena.chunks[active];
         if (chunk.len - used < total) return null;
 
-        rt.hot.active_bytecode_stack_bytes = accumulated;
-        rt.hot.call_depth = rt.hot.call_depth + 1;
+        rt.active_bytecode_stack_bytes = accumulated;
+        rt.call_depth = rt.call_depth + 1;
         arena.used[active] = used + total;
         const slab_values = chunk[used .. used + total];
 
@@ -2302,7 +2302,7 @@ pub const Machine = struct {
             .values = stack_window.ptr,
             .top_ptr = stack_window.ptr,
             .capacity = stack_window.len,
-            .policy = rt.vm_stack_arena_policy,
+            .storage = rt.vm_stack_frame_storage,
         };
         entry.prev = self.top;
         self.top = entry;
@@ -2664,7 +2664,7 @@ pub const Machine = struct {
                 .storage = if (storage_on_heap) .owned else .borrowed,
             },
         };
-        entry.stack = stack_mod.Stack.initArenaWindow(rt, rt.vm_stack_arena_policy, stack_window);
+        entry.stack = stack_mod.Stack.initFrameWindow(rt, rt.vm_stack_frame_storage, stack_window);
         entry.teardown = .{
             .simple = true,
             .empty_leaf = !storage_on_heap,
@@ -2751,7 +2751,7 @@ pub const Machine = struct {
                 .storage = if (storage_on_heap) .owned else .borrowed,
             },
         };
-        entry.stack = stack_mod.Stack.initArenaWindow(rt, rt.vm_stack_arena_policy, stack_window);
+        entry.stack = stack_mod.Stack.initFrameWindow(rt, rt.vm_stack_frame_storage, stack_window);
         if (comptime forwarded) {
             std.debug.assert(!storage_on_heap);
             // NOT `exact_args_leaf`: that bit routes `popAndResume`'s hot arm
@@ -2832,7 +2832,7 @@ pub const Machine = struct {
                 .storage = if (storage_on_heap) .owned else .borrowed,
             },
         };
-        entry.stack = stack_mod.Stack.initArenaWindow(rt, rt.vm_stack_arena_policy, stack_window);
+        entry.stack = stack_mod.Stack.initFrameWindow(rt, rt.vm_stack_frame_storage, stack_window);
         entry.teardown = .{
             .simple = true,
             .exact_args_leaf = !storage_on_heap,
@@ -3178,7 +3178,7 @@ pub const Machine = struct {
             .var_refs = if (slab.var_refs.len != 0) slab.var_refs else null,
             .open_var_refs = if (slab.open_var_refs.len != 0) slab.open_var_refs else null,
         };
-        entry.stack = stack_mod.Stack.initArenaWindow(rt, rt.vm_stack_arena_policy, slab.stack);
+        entry.stack = stack_mod.Stack.initFrameWindow(rt, rt.vm_stack_frame_storage, slab.stack);
         errdefer entry.stack.deinit(rt);
 
         try vm_call.initFrameLocals(ctx, function, &entry.frame, true, frame_windows);
@@ -3298,7 +3298,7 @@ pub const Machine = struct {
                 .storage = if (storage_on_heap) .owned else .borrowed,
             },
         };
-        entry.stack = stack_mod.Stack.initArenaWindow(rt, rt.vm_stack_arena_policy, stack_window);
+        entry.stack = stack_mod.Stack.initFrameWindow(rt, rt.vm_stack_frame_storage, stack_window);
     }
 
     fn sourceCallableSlot(source: ArgsSource) *core.JSValue {
@@ -3888,9 +3888,9 @@ pub const Machine = struct {
         };
         copyValueSlotPinned(&entry.frame.this_value, &target.this_value);
         copyValueSlotPinned(&entry.frame.current_function, &target.callable);
-        entry.stack = stack_mod.Stack.initArenaWindow(
+        entry.stack = stack_mod.Stack.initFrameWindow(
             rt,
-            rt.vm_stack_arena_policy,
+            rt.vm_stack_frame_storage,
             carve.window,
         );
         entry.teardown = .{
@@ -3984,9 +3984,9 @@ pub const Machine = struct {
         };
         copyValueSlotPinned(&entry.frame.this_value, &target.this_value);
         copyValueSlotPinned(&entry.frame.current_function, &target.callable);
-        entry.stack = stack_mod.Stack.initArenaWindow(
+        entry.stack = stack_mod.Stack.initFrameWindow(
             rt,
-            rt.vm_stack_arena_policy,
+            rt.vm_stack_frame_storage,
             stack_window,
         );
         entry.teardown = .{
@@ -4100,9 +4100,9 @@ pub const Machine = struct {
         };
         copyValueSlotPinned(&entry.frame.this_value, &target.this_value);
         copyValueSlotPinned(&entry.frame.current_function, &target.callable);
-        entry.stack = stack_mod.Stack.initArenaWindow(
+        entry.stack = stack_mod.Stack.initFrameWindow(
             rt,
-            rt.vm_stack_arena_policy,
+            rt.vm_stack_frame_storage,
             stack_window,
         );
         entry.teardown = .{
@@ -4247,9 +4247,9 @@ pub const Machine = struct {
                 .storage = if (storage_on_heap) .owned else .borrowed,
             },
         };
-        entry.stack = stack_mod.Stack.initArenaWindow(
+        entry.stack = stack_mod.Stack.initFrameWindow(
             rt,
-            rt.vm_stack_arena_policy,
+            rt.vm_stack_frame_storage,
             stack_window,
         );
         entry.teardown = .{
@@ -4324,9 +4324,9 @@ pub const Machine = struct {
                 .storage = if (storage_on_heap) .owned else .borrowed,
             },
         };
-        entry.stack = stack_mod.Stack.initArenaWindow(
+        entry.stack = stack_mod.Stack.initFrameWindow(
             rt,
-            rt.vm_stack_arena_policy,
+            rt.vm_stack_frame_storage,
             stack_window,
         );
         entry.teardown = .{
@@ -4449,9 +4449,9 @@ pub const Machine = struct {
             },
             .cold = cold,
         };
-        entry.stack = stack_mod.Stack.initArenaWindow(
+        entry.stack = stack_mod.Stack.initFrameWindow(
             rt,
-            rt.vm_stack_arena_policy,
+            rt.vm_stack_frame_storage,
             stack_window,
         );
     }
@@ -4692,7 +4692,7 @@ pub const Machine = struct {
             .storage = .borrowed,
         };
         frame.cold = null;
-        entry.stack = stack_mod.Stack.initArenaWindow(rt, rt.vm_stack_arena_policy, stack_window);
+        entry.stack = stack_mod.Stack.initFrameWindow(rt, rt.vm_stack_frame_storage, stack_window);
         entry.teardown = .{ .simple = true };
         entry.prev = self.top;
         self.top = entry;
@@ -4876,10 +4876,10 @@ pub const Machine = struct {
         else
             dying.deinit(self.ctx);
         vm_call.leaveInlineCallDepthBytes(self.ctx, dying_stack_bytes);
-        std.debug.assert(self.ctx.runtime.hot.call_depth >= chain_budget.extra_depth);
-        std.debug.assert(self.ctx.runtime.hot.active_bytecode_stack_bytes >= chain_budget.planned_stack_bytes);
-        self.ctx.runtime.hot.call_depth -= chain_budget.extra_depth;
-        self.ctx.runtime.hot.active_bytecode_stack_bytes -= chain_budget.planned_stack_bytes;
+        std.debug.assert(self.ctx.runtime.call_depth >= chain_budget.extra_depth);
+        std.debug.assert(self.ctx.runtime.active_bytecode_stack_bytes >= chain_budget.planned_stack_bytes);
+        self.ctx.runtime.call_depth -= chain_budget.extra_depth;
+        self.ctx.runtime.active_bytecode_stack_bytes -= chain_budget.planned_stack_bytes;
         self.depth -= 1;
         self.top = dying.prev;
         return continuation;
@@ -4958,10 +4958,10 @@ pub const Machine = struct {
         else
             dying.deinitReturned(self.ctx);
         vm_call.leaveInlineCallDepthBytesRt(rt, dying_stack_bytes);
-        std.debug.assert(rt.hot.call_depth >= chain_budget.extra_depth);
-        std.debug.assert(rt.hot.active_bytecode_stack_bytes >= chain_budget.planned_stack_bytes);
-        rt.hot.call_depth -= chain_budget.extra_depth;
-        rt.hot.active_bytecode_stack_bytes -= chain_budget.planned_stack_bytes;
+        std.debug.assert(rt.call_depth >= chain_budget.extra_depth);
+        std.debug.assert(rt.active_bytecode_stack_bytes >= chain_budget.planned_stack_bytes);
+        rt.call_depth -= chain_budget.extra_depth;
+        rt.active_bytecode_stack_bytes -= chain_budget.planned_stack_bytes;
         self.depth -= 1;
         self.top = dying.prev;
     }
@@ -4972,7 +4972,7 @@ pub const Machine = struct {
     /// depends on -- no FrameCold, borrowed storage, arena window -- are
     /// static for this shape: FrameCold is only installed at frame
     /// construction (new.target, an original-args snapshot), storage
-    /// ownership only changes at construction, and the arena-window policy
+    /// ownership only changes at construction, and the frame-window ownership
     /// is only flipped by the generator park (not a simple leaf). A tail
     /// call that reuses the physical Entry rebuilds it as a generic frame and
     /// drops the marker (`adoptContinuation`).

@@ -590,7 +590,7 @@ noinline fn initFreshEntryFrame(
         .open_var_refs = if (slab.open_var_refs.len != 0) slab.open_var_refs else null,
     };
     if (entry_stack.capacity == 0 and slab.stack.len != 0) {
-        entry_stack.* = stack_mod.Stack.initArenaWindow(ctx.runtime, ctx.runtime.vm_stack_arena_policy, slab.stack);
+        entry_stack.* = stack_mod.Stack.initFrameWindow(ctx.runtime, ctx.runtime.vm_stack_frame_storage, slab.stack);
     }
     try vm_call.initFrameLocals(ctx, entry_function, frame_storage, use_inline_frame_storage, frame_windows);
     try frame_storage.initArguments(ctx.runtime, frame_arena, args, need_original_args, frame_windows);

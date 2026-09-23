@@ -11,13 +11,13 @@ const gc = @import("gc.zig");
 const profile = @import("profile.zig");
 const runtime_mod = @import("../runtime.zig");
 const JSRuntime = runtime_mod.JSRuntime;
-const GCPollMode = runtime_mod.GCPollMode;
+const PollMode = gc.PollMode;
 const ValueRootFrame = runtime_mod.ValueRootFrame;
 
 pub fn continuePoll(
     self: *JSRuntime,
     roots: ?*const ValueRootFrame,
-    mode: GCPollMode,
+    mode: PollMode,
 ) gc.CollectionError!gc.CollectionResult {
     // A morgue can only be non-empty if a collection was interrupted
     // mid-destruction by an allocation failure; finish it before starting

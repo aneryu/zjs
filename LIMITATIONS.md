@@ -26,8 +26,7 @@ scope. Detailed parsing rules are in the
 ## Debugging
 
 A Chrome DevTools Protocol inspector/debugger is not implemented. Breakpoints,
-stepping, call stacks, and scope inspection remain planned capabilities;
-see the [roadmap](docs/roadmap.md).
+stepping, call stacks, and scope inspection remain planned capabilities.
 
 ## Security Boundary
 
@@ -94,9 +93,9 @@ resolution, package exports/import maps, and hybrid Node-style loading are not.
 
 ## Performance
 
-[bench-v8 status](docs/perf/bench-v8-status.md) is a configuration-specific
-historical comparison. It is neither per-benchmark parity nor a performance
-merge gate. Local measurements are diagnostic.
+Historical bench-v8 comparisons are available in Git history and apply only
+to their recorded configurations. They establish neither per-benchmark parity
+nor a performance merge gate. Local measurements are diagnostic.
 
 Per-opcode counts require `zig build zjs-profile`; the default CLI rejects
-`--profile-opcodes`. See [performance workflow](docs/perf/README.md).
+`--profile-opcodes`. See [GUIDE](GUIDE.md#b8-performance-investigation).

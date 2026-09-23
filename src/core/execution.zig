@@ -1,11 +1,11 @@
 //! Cold execution bookkeeping: resident host invocation, stored backtrace,
 //! and small-inline hooks.
 //!
-//! `hot` and `vm_stack` stay on `JSRuntime` at their aligned offsets. The
+//! Execution counters, stack guards, and the VM arena are Runtime-owned. The
 //! three live pointers stay distinct and are restored by their own callers:
 //! `active_invocation` for the bytecode entry, `host_invocation` for the
 //! resident executor, `active_native_call` for the native environment.
-//! Opcode profile and diagnostics stay off `HotExecState`.
+//! Opcode profile and diagnostics remain separately owned by the Runtime.
 
 const mem_ops = @import("memory.zig");
 const std = @import("std");
@@ -86,13 +86,13 @@ pub fn setStoredBacktraceLocation(rt: *JSRuntime, pc: usize, line_num: i32, col_
 }
 
 pub fn linkActiveBacktrace(rt: *JSRuntime, frame: *ActiveBacktraceFrame) void {
-    frame.previous = rt.hot.current_backtrace_frame;
-    rt.hot.current_backtrace_frame = frame;
+    frame.previous = rt.current_backtrace_frame;
+    rt.current_backtrace_frame = frame;
 }
 
 pub fn unlinkActiveBacktrace(rt: *JSRuntime, frame: *ActiveBacktraceFrame) void {
-    std.debug.assert(rt.hot.current_backtrace_frame == frame);
-    rt.hot.current_backtrace_frame = frame.previous;
+    std.debug.assert(rt.current_backtrace_frame == frame);
+    rt.current_backtrace_frame = frame.previous;
     frame.previous = null;
 }
 
@@ -111,15 +111,4 @@ pub fn addSmallInlineSpecialized(rt: *JSRuntime, bytes: usize) void {
 
 pub fn storedFunctionValue(value: JSValue) JSValue {
     return if (value.is(.object)) value else JSValue.undefinedValue();
-}
-
-comptime {
-    const Hot = JSRuntime.HotExecState;
-    std.debug.assert(@sizeOf(Hot) == 64);
-    std.debug.assert(@hasField(Hot, "current_backtrace_frame"));
-    std.debug.assert(!@hasField(Hot, "active_invocation"));
-    std.debug.assert(!@hasField(Hot, "host_invocation"));
-    std.debug.assert(!@hasField(Hot, "active_native_call"));
-    std.debug.assert(!@hasField(Hot, "opcode_profile"));
-    std.debug.assert(!@hasField(Hot, "diagnostics"));
 }

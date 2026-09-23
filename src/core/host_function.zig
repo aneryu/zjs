@@ -192,7 +192,7 @@ pub fn isConstructorCProto(cproto: NativeCProto) bool {
     };
 }
 
-/// NB2 (docs/perf/native-boundary-design.md §3): the dispatch record is the
+/// NB2: the dispatch record is the
 /// unified `NativeEntry` (`native_entry.zig`). The phase-A2 transition
 /// aliases `InternalRecord` / `SparseInternalRecord` / `InternalRecordTable`
 /// are gone; declaration tables still speak `InternalEntry` (below) and

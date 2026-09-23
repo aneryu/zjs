@@ -490,8 +490,8 @@ pub const ext0_sub = struct {
     /// Cold-plane reclamations (2026-08-27, opcode-space reclaim). These
     /// opcodes execute 0 times in 41.9 billion across the benchmark suite;
     /// they pay a second-level branch they will never notice, and hand
-    /// their first-class ids to the typed family. See
-    /// docs/perf/opcode-space-survey.md §7.
+    /// their first-class ids to the typed family. The 2026-08-27 opcode-space
+    /// survey is available in Git history.
     pub const check_ctor_return: u8 = 15;
     pub const set_proto: u8 = 16;
     pub const put_super_value: u8 = 17;

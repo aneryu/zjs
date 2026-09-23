@@ -1,13 +1,13 @@
-//! NativeEntry: the single native-function kind of the NB2 boundary
-//! (docs/perf/native-boundary-design.md §3.1, §4). Builtins, host functions,
-//! and native accessors all resolve to one immutable entry; steady-state
+//! NativeEntry: the single native-function kind of the NB2 boundary.
+//! Builtins, host functions, and native accessors all resolve to one immutable
+//! entry; steady-state
 //! dispatch never branches on where the entry came from.
 //!
 //! Layout is `extern` and offset-pinned because the entry is the direct input
-//! of the interpreter's native arms today and of machine code tomorrow (§15
-//! R1): the JIT reads `target`/`kind`/`sig`/`class_id` at fixed offsets.
+//! of the interpreter's native arms today and of machine code tomorrow: the
+//! JIT reads `target`/`kind`/`sig`/`class_id` at fixed offsets.
 //!
-//! Lifetime (§5.5): an entry is never freed before its runtime dies. Builtin
+//! Lifetime: an entry is never freed before its runtime dies. Builtin
 //! entries are comptime rodata; host entries live in the runtime's entry
 //! arena. Retiring an entry rewrites `kind = .retired` in place (tombstone),
 //! so a call-site cache that compares `func_obj.entry == cached` on a live
@@ -23,7 +23,7 @@ pub const JSValue = value.JSValue;
 pub const JSContext = context_mod.JSContext;
 pub const Object = object_mod.Object;
 
-/// Call kinds (§4). The VM switches on this once per call; everything the
+/// Call kinds. The VM switches on this once per call; everything the
 /// arm needs is in the entry.
 pub const Kind = enum(u8) {
     /// K0: `ManagedFn`, `this` by value, argv into the operand window.
@@ -43,7 +43,7 @@ pub const Kind = enum(u8) {
     /// K2: `MethodManagedFn` with `self` unwrapped.
     method_managed = 7,
     // 8 / 9 were `forward_call` / `forward_apply`. Function.prototype.call /
-    // apply never became call kinds: §5.4 landed as an operand-window rewrite
+    // apply never became call kinds: forwarding uses an operand-window rewrite
     // driven by `Flags.forwards_call` plus target identity
     // (`function_ops.call_entry_target` / `apply_entry_target`), so the
     // entries stay `managed`. Ids left unused rather than recycled.
@@ -63,18 +63,18 @@ pub const Flags = packed struct(u8) {
     /// Function.prototype.call/apply-style transparent forwarding: the VM's
     /// native arms skip `vm_native.dispatchNativeCall` and, for a same-Realm bytecode
     /// target, rewrite the operand window into an ordinary method call
-    /// (§5.4; `op_call_method` selects the call / apply body by target
+    /// (`op_call_method` selects the call / apply body by target
     /// identity, `function_ops.call_entry_target` / `apply_entry_target`).
     /// Any other receiver or argument-list shape falls to the managed body.
     forwards_call: bool = false,
     /// The target reads `argv[0..arity]` without checking `argc`: the
-    /// dispatcher must pad the operand window with `undefined` (§4.1).
+    /// dispatcher must pad the operand window with `undefined`.
     /// Legacy bodies take an exact slice and leave this clear.
     pad_args: bool = false,
     _pad: u5 = 0,
 };
 
-/// JIT scheduling annotation (§15 R2); same meaning as the engine plan's
+/// JIT scheduling annotation; same meaning as the engine plan's
 /// `HelperDescriptor { can_gc, can_throw, can_reenter_js }`. Leaf = all zero.
 /// The interpreter only reads `may_throw`.
 pub const Effect = packed struct(u8) {
@@ -89,7 +89,7 @@ pub const Effect = packed struct(u8) {
     pub const managed: Effect = .{};
 };
 
-/// K0 machine signature (§4.1): 7 integer registers on AArch64 / SysV.
+/// K0 machine signature: 7 integer registers on AArch64 / SysV.
 /// With `flags.pad_args`, `argv[0..max(argc, entry.arity)]` is readable (the
 /// dispatcher pads with `undefined`); extra arguments are ignored. `func_obj`
 /// is the callee (qjs `js_call_c_function` has it too): legacy bodies need it
@@ -160,7 +160,7 @@ pub const NativeEntry = extern struct {
     class_id: u16 = 0,
     /// @32 Builtin magic selector (qjs `magic`).
     magic: u16 = 0,
-    /// @34 Static builtin table index (§15 R9); 0 for host entries.
+    /// @34 Static builtin table index; 0 for host entries.
     builtin_id: u16 = 0,
     /// @36 Name atom for backtraces / diagnostics (null_atom = anonymous).
     name: atom.Atom = atom.null_atom,
@@ -178,7 +178,7 @@ pub const NativeEntry = extern struct {
     }
 
     /// K3 managed prototype. A typed accessor (`sig != .none`, the `self_*`
-    /// leaf prototypes of §4.4) is dispatched by the VM-side typed arm
+    /// leaf prototypes) is dispatched by the VM-side typed arm
     /// instead and never through this cast.
     pub inline fn getter(self: *const NativeEntry) GetterFn {
         std.debug.assert(self.kind == .getter and self.sig == .none);

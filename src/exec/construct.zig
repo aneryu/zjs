@@ -41,16 +41,8 @@ pub fn functionObject(ctx: *core.RealmContext, name: core.Atom) !core.JSValue {
 
 pub fn constructErrorObject(rt: *core.JSRuntime, name: []const u8, constructor: core.JSValue, prototype: ?*core.Object, args: []const core.JSValue) !core.JSValue {
     var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
-    defer rooted_args_buffer.deinit(rt);
-    const rooted_args = rooted_args_buffer.values;
-    var root_slices = [_]core.runtime.ValueRootSlice{
-        rooted_args_buffer.slice(),
-    };
-    var root_frame = core.runtime.ValueRootFrame{
-        .slices = &root_slices,
-    };
-    root_frame.activate(rt);
-    defer root_frame.deactivate(rt);
+    defer rooted_args_buffer.deinit();
+    const rooted_args = rooted_args_buffer.values();
 
     if (std.mem.eql(u8, name, "AggregateError")) return constructAggregateErrorObject(rt, constructor, prototype, rooted_args);
     const instance = try core.Object.create(rt, core.class.ids.error_, prototype);
@@ -92,16 +84,8 @@ test "constructErrorObject roots direct symbol message while creating error" {
 
 pub fn constructDOMExceptionObject(rt: *core.JSRuntime, prototype: ?*core.Object, args: []const core.JSValue) !core.JSValue {
     var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
-    defer rooted_args_buffer.deinit(rt);
-    const rooted_args = rooted_args_buffer.values;
-    var root_slices = [_]core.runtime.ValueRootSlice{
-        rooted_args_buffer.slice(),
-    };
-    var root_frame = core.runtime.ValueRootFrame{
-        .slices = &root_slices,
-    };
-    root_frame.activate(rt);
-    defer root_frame.deactivate(rt);
+    defer rooted_args_buffer.deinit();
+    const rooted_args = rooted_args_buffer.values();
 
     const instance = try core.Object.create(rt, core.class.ids.error_, prototype);
     errdefer core.Object.destroyFromHeader(rt, instance.gcHeader());
@@ -197,20 +181,16 @@ fn constructAggregateErrorObject(rt: *core.JSRuntime, constructor: core.JSValue,
     var errors_array_val = core.JSValue.undefinedValue();
     var copied_error_val = core.JSValue.undefinedValue();
     var cause_val = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &errors_array_val },
-        .{ .value = &copied_error_val },
-        .{ .value = &cause_val },
+    var root_values = [_]*core.JSValue{
+        &errors_array_val,
+        &copied_error_val,
+        &cause_val,
     };
     var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
-    defer rooted_args_buffer.deinit(rt);
-    const rooted_args = rooted_args_buffer.values;
-    var root_slices = [_]core.runtime.ValueRootSlice{
-        rooted_args_buffer.slice(),
-    };
+    defer rooted_args_buffer.deinit();
+    const rooted_args = rooted_args_buffer.values();
     var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
-        .slices = &root_slices,
     };
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
@@ -261,8 +241,8 @@ pub fn isConstructErrorObjectName(name: []const u8) bool {
 
 pub fn weakRefWithPrototype(rt: *core.JSRuntime, target: core.JSValue, prototype: ?*core.Object) !core.JSValue {
     var rooted_target = target;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_target },
+    var root_values = [_]*core.JSValue{
+        &rooted_target,
     };
     var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,

@@ -1,15 +1,16 @@
 //! Realm context state: globals, modules, exceptions, backtraces, and hooks.
 //!
-//! A `JSContext` is a GC node owned by one Runtime. Its global object, module
+//! A `RealmContext` is a GC node owned by one Runtime. Its global object, module
 //! registry, lexical state, pending exception, and class prototypes form one
 //! realm and must be read together; `RealmRef` is the retained cross-job/
-//! callback handle, while raw context pointers are borrowed. QuickJS source
+//! callback handle, while raw RealmContext pointers are borrowed. QuickJS source
 //! map: `JSContext` realm fields at quickjs.c. Core owns this type;
 //! exec/runtime/binding may consume it, but context must not import those
 //! higher layers.
 
 const mem_ops = @import("memory.zig");
 const std = @import("std");
+const platform_clock = @import("../platform_clock.zig");
 
 const atom = @import("atom.zig");
 const errors = @import("errors.zig");
@@ -129,16 +130,26 @@ pub const DynamicImportError = errors.RuntimeError || error{
 
 pub const DynamicImportCallback = *const fn (
     userdata: ?*anyopaque,
-    ctx: *JSContext,
+    ctx: *RealmContext,
     output: ?*std.Io.Writer,
     global: *Object,
     referrer_path: []const u8,
     specifier: []const u8,
 ) DynamicImportError!JSValue;
 
+/// QuickJS initializes each JSContext's Math.random state from wall-clock
+/// microseconds. Keep the default at Realm construction; callers may provide
+/// a non-zero state explicitly for deterministic runs.
+fn realmMathRandomSeed(configured_seed: ?u64) u64 {
+    const seed = configured_seed orelse @as(u64, @bitCast(platform_clock.realtimeMicros()));
+    return if (seed == 0) 1 else seed;
+}
+
 pub const ContextOptions = struct {
     stack_size: ?usize = null,
     track_unhandled_rejections: bool = false,
+    /// Optional initial state for this Realm's Math.random generator.
+    math_random_seed: ?u64 = null,
 };
 
 pub const Options = ContextOptions;
@@ -254,15 +265,15 @@ pub const HostEventLoop = struct {
         setExitCode: *const fn (*anyopaque, u8) void,
         exitCode: *const fn (*anyopaque) ?u8,
         nextTimerId: *const fn (*anyopaque) i64,
-        enqueueTimer: *const fn (*anyopaque, *JSContext, i64, JSValue, u64, bool) anyerror!void,
-        clearTimer: *const fn (*anyopaque, *JSContext, i64) void,
-        runNextTimer: *const fn (*anyopaque, *JSContext, ?*std.Io.Writer, *Object) anyerror!bool,
-        setRwHandler: *const fn (*anyopaque, *JSContext, i32, bool, JSValue) anyerror!void,
-        clearRwHandler: *const fn (*anyopaque, *JSContext, i32, bool) void,
-        runNextRwHandler: *const fn (*anyopaque, *JSContext, ?*std.Io.Writer, *Object) anyerror!bool,
-        setSignalHandler: *const fn (*anyopaque, *JSContext, u32, JSValue) anyerror!void,
-        clearSignalHandler: *const fn (*anyopaque, *JSContext, u32, SignalDisposition) void,
-        runNextSignalHandler: *const fn (*anyopaque, *JSContext, ?*std.Io.Writer, *Object) anyerror!bool,
+        enqueueTimer: *const fn (*anyopaque, *RealmContext, i64, JSValue, u64, bool) anyerror!void,
+        clearTimer: *const fn (*anyopaque, *RealmContext, i64) void,
+        runNextTimer: *const fn (*anyopaque, *RealmContext, ?*std.Io.Writer, *Object) anyerror!bool,
+        setRwHandler: *const fn (*anyopaque, *RealmContext, i32, bool, JSValue) anyerror!void,
+        clearRwHandler: *const fn (*anyopaque, *RealmContext, i32, bool) void,
+        runNextRwHandler: *const fn (*anyopaque, *RealmContext, ?*std.Io.Writer, *Object) anyerror!bool,
+        setSignalHandler: *const fn (*anyopaque, *RealmContext, u32, JSValue) anyerror!void,
+        clearSignalHandler: *const fn (*anyopaque, *RealmContext, u32, SignalDisposition) void,
+        runNextSignalHandler: *const fn (*anyopaque, *RealmContext, ?*std.Io.Writer, *Object) anyerror!bool,
     };
 
     pub fn traceRoots(self: HostEventLoop, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
@@ -281,39 +292,39 @@ pub const HostEventLoop = struct {
         return self.vtable.nextTimerId(self.ptr);
     }
 
-    pub fn enqueueTimer(self: HostEventLoop, ctx: *JSContext, id: i64, callback: JSValue, delay_ms: u64, repeats: bool) !void {
+    pub fn enqueueTimer(self: HostEventLoop, ctx: *RealmContext, id: i64, callback: JSValue, delay_ms: u64, repeats: bool) !void {
         try self.vtable.enqueueTimer(self.ptr, ctx, id, callback, delay_ms, repeats);
     }
 
-    pub fn clearTimer(self: HostEventLoop, ctx: *JSContext, id: i64) void {
+    pub fn clearTimer(self: HostEventLoop, ctx: *RealmContext, id: i64) void {
         self.vtable.clearTimer(self.ptr, ctx, id);
     }
 
-    pub fn runNextTimer(self: HostEventLoop, ctx: *JSContext, output: ?*std.Io.Writer, global: *Object) !bool {
+    pub fn runNextTimer(self: HostEventLoop, ctx: *RealmContext, output: ?*std.Io.Writer, global: *Object) !bool {
         return self.vtable.runNextTimer(self.ptr, ctx, output, global);
     }
 
-    pub fn setRwHandler(self: HostEventLoop, ctx: *JSContext, fd: i32, write_handler: bool, callback: JSValue) !void {
+    pub fn setRwHandler(self: HostEventLoop, ctx: *RealmContext, fd: i32, write_handler: bool, callback: JSValue) !void {
         try self.vtable.setRwHandler(self.ptr, ctx, fd, write_handler, callback);
     }
 
-    pub fn clearRwHandler(self: HostEventLoop, ctx: *JSContext, fd: i32, write_handler: bool) void {
+    pub fn clearRwHandler(self: HostEventLoop, ctx: *RealmContext, fd: i32, write_handler: bool) void {
         self.vtable.clearRwHandler(self.ptr, ctx, fd, write_handler);
     }
 
-    pub fn runNextRwHandler(self: HostEventLoop, ctx: *JSContext, output: ?*std.Io.Writer, global: *Object) !bool {
+    pub fn runNextRwHandler(self: HostEventLoop, ctx: *RealmContext, output: ?*std.Io.Writer, global: *Object) !bool {
         return self.vtable.runNextRwHandler(self.ptr, ctx, output, global);
     }
 
-    pub fn setSignalHandler(self: HostEventLoop, ctx: *JSContext, sig: u32, callback: JSValue) !void {
+    pub fn setSignalHandler(self: HostEventLoop, ctx: *RealmContext, sig: u32, callback: JSValue) !void {
         try self.vtable.setSignalHandler(self.ptr, ctx, sig, callback);
     }
 
-    pub fn clearSignalHandler(self: HostEventLoop, ctx: *JSContext, sig: u32, disposition: SignalDisposition) void {
+    pub fn clearSignalHandler(self: HostEventLoop, ctx: *RealmContext, sig: u32, disposition: SignalDisposition) void {
         self.vtable.clearSignalHandler(self.ptr, ctx, sig, disposition);
     }
 
-    pub fn runNextSignalHandler(self: HostEventLoop, ctx: *JSContext, output: ?*std.Io.Writer, global: *Object) !bool {
+    pub fn runNextSignalHandler(self: HostEventLoop, ctx: *RealmContext, output: ?*std.Io.Writer, global: *Object) !bool {
         return self.vtable.runNextSignalHandler(self.ptr, ctx, output, global);
     }
 };
@@ -321,7 +332,7 @@ pub const HostEventLoop = struct {
 const class_prototype_inline_capacity: usize = class.ids.init_count;
 
 /// QuickJS `JSErrorEnum` subset whose intrinsic prototypes live in
-/// `JSContext.native_error_proto[]`. These are realm state, independent of the
+/// `RealmContext.native_error_proto[]`. These are realm state, independent of the
 /// mutable constructor bindings on the global object.
 pub const NativeErrorKind = enum(u8) {
     error_,
@@ -353,7 +364,7 @@ pub const UnhandledRejectionEntry = struct {
     reason: JSValue = JSValue.undefinedValue(),
 };
 
-pub const JSContext = struct {
+pub const RealmContext = struct {
     pub const gc_kind_tag: u8 = @intFromEnum(gc.GcKind.realm_context);
     pub const Options = ContextOptions;
     pub const EvalOptions = ContextEvalOptions;
@@ -378,10 +389,10 @@ pub const JSContext = struct {
     runtime: *JSRuntime,
     /// Independent, non-owning membership in `JSRuntime.context_*`.  The GC
     /// header links above are reserved exclusively for the collector.
-    runtime_prev: ?*JSContext = null, // gc-slot: weak
-    runtime_next: ?*JSContext = null, // gc-slot: weak
-    construction_prev: ?*JSContext = null, // gc-slot: weak
-    construction_next: ?*JSContext = null, // gc-slot: weak
+    runtime_prev: ?*RealmContext = null, // gc-slot: weak
+    runtime_next: ?*RealmContext = null, // gc-slot: weak
+    construction_prev: ?*RealmContext = null, // gc-slot: weak
+    construction_next: ?*RealmContext = null, // gc-slot: weak
     publication_state: RealmPublicationState = .constructing,
     construction_complete: bool = false,
     /// Consumed by `destroy` / `tryDestroy` and by `RealmRef.takeOwned`.
@@ -419,7 +430,7 @@ pub const JSContext = struct {
     regexp_result_shape: ?*shape.Shape = null,
     regexp_legacy_statics: ?*object_mod.RegExpLegacyStatics = null,
     random_state: u64 = 0x1234_5678_9abc_def0,
-    /// QuickJS `JSContext.interrupt_counter`. The raw context allocation is
+    /// QuickJS `JSContext.interrupt_counter`. The raw RealmContext allocation is
     /// zero-filled, so the first semantic poll takes the slow arm and resets
     /// this to `interrupt_counter_reset`; later callbacks are exactly one reset
     /// interval apart. Runtime handler installation never mutates this state.
@@ -443,11 +454,11 @@ pub const JSContext = struct {
     pub const trace_list_previous_offset: usize = 1320;
 
     /// O(1) list predecessor stored in the compact layout's tail hole.
-    pub inline fn traceListPreviousPtr(self: *JSContext) *?*gc.Header {
+    pub inline fn traceListPreviousPtr(self: *RealmContext) *?*gc.Header {
         return @ptrFromInt(@intFromPtr(self) + trace_list_previous_offset);
     }
 
-    pub inline fn traceListPreviousPtrConst(self: *const JSContext) *const ?*gc.Header {
+    pub inline fn traceListPreviousPtrConst(self: *const RealmContext) *const ?*gc.Header {
         return @ptrFromInt(@intFromPtr(self) + trace_list_previous_offset);
     }
 
@@ -457,26 +468,26 @@ pub const JSContext = struct {
     /// in TGC S1-b; the realm dies in the next major that finds it
     /// unreachable), and `createRealm` transfers the child's create-ref onto
     /// the realm-record value instead of returning it here.
-    pub fn create(rt: *JSRuntime, options: ContextOptions) !*JSContext {
+    pub fn create(rt: *JSRuntime, options: ContextOptions) !*RealmContext {
         return createWithPublication(rt, options, true);
     }
 
     /// Engine bootstrap constructor: the GC header is registered immediately,
     /// but the realm stays off every public/live traversal until `publishLive`.
-    pub fn createConstructingWithOptions(rt: *JSRuntime, options: ContextOptions) !*JSContext {
+    pub fn createConstructingWithOptions(rt: *JSRuntime, options: ContextOptions) !*RealmContext {
         return createWithPublication(rt, options, false);
     }
 
-    fn createWithPublication(rt: *JSRuntime, options: ContextOptions, publish_immediately: bool) !*JSContext {
+    fn createWithPublication(rt: *JSRuntime, options: ContextOptions, publish_immediately: bool) !*RealmContext {
         try rt.requireOwnerThread();
         // A realm's intrinsics are long-lived by definition and are held as
         // bare pointers all over the engine; build them in the old generation.
         const nursery_was_suspended = rt.gc.nursery.suspended;
         rt.gc.nursery.suspended = true;
         defer rt.gc.nursery.suspended = nursery_was_suspended;
-        const ctx = try rt.createRuntime(JSContext);
+        const ctx = try rt.createRuntime(RealmContext);
         var initialized = false;
-        errdefer if (initialized) ctx.destroy() else rt.destroyRuntime(JSContext, ctx);
+        errdefer if (initialized) ctx.destroy() else rt.destroyRuntime(RealmContext, ctx);
         try ctx.initConstructing(rt, options);
         initialized = true;
         if (publish_immediately) try ctx.finishConstruction();
@@ -494,14 +505,14 @@ pub const JSContext = struct {
         }
     }
 
-    fn initConstructing(self: *JSContext, rt: *JSRuntime, options: ContextOptions) !void {
+    fn initConstructing(self: *RealmContext, rt: *JSRuntime, options: ContextOptions) !void {
         if (options.stack_size) |stack_size| rt.setStackSize(stack_size);
         self.* = .{
             .header = .{},
             .runtime = rt,
             .track_unhandled_rejections = options.track_unhandled_rejections,
             .modules = module.Registry.init(rt, &rt.atoms, &rt.gc),
-            .random_state = runtime_mod.newRealmRandomSeed(),
+            .random_state = realmMathRandomSeed(options.math_random_seed),
             .class_prototypes_inline = undefined,
         };
         fillNullJsValues(&self.class_prototypes_inline);
@@ -516,11 +527,11 @@ pub const JSContext = struct {
             self.class_prototypes = prototypes;
         }
         errdefer self.deinitClassPrototypeSlots();
-        try rt.gc.addInitializedWithSize(&self.header, @sizeOf(JSContext));
+        try rt.gc.addInitializedWithSize(&self.header, @sizeOf(RealmContext));
         // If a later step fails, createWithPublication still raw-frees via
         // destroyRuntime (initialized=false). Unlink first so gc.deinit
         // cannot destroyFromHeader the same cell.
-        errdefer rt.gc.unlinkObjectWithBytes(&self.header, @sizeOf(JSContext));
+        errdefer rt.gc.unlinkObjectWithBytes(&self.header, @sizeOf(RealmContext));
         rt.linkConstructingContext(self);
         errdefer rt.unlinkConstructingContext(self);
         // Host create-ref is a root (gc-invariants.md). Membership on
@@ -529,7 +540,7 @@ pub const JSContext = struct {
         try rt.registerRootProvider(self.rootProvider());
     }
 
-    pub fn publishLive(self: *JSContext) !void {
+    pub fn publishLive(self: *RealmContext) !void {
         self.runtime.assertOwnerThread();
         switch (self.publication_state) {
             .live => return,
@@ -545,7 +556,7 @@ pub const JSContext = struct {
         self.runtime.linkContext(self);
     }
 
-    pub fn finishConstruction(self: *JSContext) !void {
+    pub fn finishConstruction(self: *RealmContext) !void {
         self.runtime.assertOwnerThread();
         if (self.publication_state == .live) return;
         if (self.publication_state != .constructing) return error.InvalidBuiltinRegistry;
@@ -553,28 +564,28 @@ pub const JSContext = struct {
         try self.publishLive();
     }
 
-    pub fn finishConstructionChecked(self: *JSContext) !void {
+    pub fn finishConstructionChecked(self: *RealmContext) !void {
         try self.runtime.requireOwnerThread();
         return self.finishConstruction();
     }
 
-    pub fn publicationState(self: *const JSContext) RealmPublicationState {
+    pub fn publicationState(self: *const RealmContext) RealmPublicationState {
         return self.publication_state;
     }
 
-    pub fn isLive(self: *const JSContext) bool {
+    pub fn isLive(self: *const RealmContext) bool {
         return self.publication_state == .live;
     }
 
-    pub fn runtimePtr(self: *JSContext) *JSRuntime {
+    pub fn runtimePtr(self: *RealmContext) *JSRuntime {
         return self.runtime;
     }
 
-    pub fn setStackLimit(self: *JSContext, size: usize) void {
+    pub fn setStackLimit(self: *RealmContext, size: usize) void {
         self.runtime.setStackSize(size);
     }
 
-    pub fn stackLimit(self: JSContext) usize {
+    pub fn stackLimit(self: RealmContext) usize {
         return self.runtime.stackSize();
     }
 
@@ -583,7 +594,7 @@ pub const JSContext = struct {
     /// Advance this Realm's persistent interrupt cadence. Returns true only
     /// when the Runtime handler requests termination. The counter advances and
     /// resets even while no handler is installed.
-    pub inline fn pollInterrupt(self: *JSContext) bool {
+    pub inline fn pollInterrupt(self: *RealmContext) bool {
         if (self.runtime.isExecutionTerminating()) return true;
         if (!self.pollInterruptTick()) return false;
         return self.pollInterruptSlow();
@@ -594,17 +605,17 @@ pub const JSContext = struct {
     /// hit; the caller must then route to a cold path whose own `pollInterrupt`
     /// resets the counter and runs the handler (a hit leaves the counter ≤0,
     /// so the cold re-poll still triggers the slow leg).
-    pub inline fn pollInterruptTick(self: *JSContext) bool {
+    pub inline fn pollInterruptTick(self: *RealmContext) bool {
         self.interrupt_counter -= 1;
         return self.interrupt_counter <= 0;
     }
 
     /// Public name of the slow leg for dispatchers that tick inline.
-    pub fn pollInterruptSlowPublic(self: *JSContext) bool {
+    pub fn pollInterruptSlowPublic(self: *RealmContext) bool {
         return self.pollInterruptSlow();
     }
 
-    noinline fn pollInterruptSlow(self: *JSContext) bool {
+    noinline fn pollInterruptSlow(self: *RealmContext) bool {
         self.interrupt_counter = interrupt_counter_reset;
         // The young budget's safepoint: the interpreter's own cadence, between
         // instructions. Safe only because the builtin dispatch funnel roots
@@ -619,41 +630,41 @@ pub const JSContext = struct {
         return self.runtime.runInterruptHandler();
     }
 
-    pub fn setTrackUnhandledRejections(self: *JSContext, enabled: bool) void {
+    pub fn setTrackUnhandledRejections(self: *RealmContext, enabled: bool) void {
         self.track_unhandled_rejections = enabled;
     }
 
-    pub fn tracksUnhandledRejections(self: JSContext) bool {
+    pub fn tracksUnhandledRejections(self: RealmContext) bool {
         return self.track_unhandled_rejections;
     }
 
-    pub fn setPreserveUncaughtException(self: *JSContext, enabled: bool) void {
+    pub fn setPreserveUncaughtException(self: *RealmContext, enabled: bool) void {
         self.preserve_uncaught_exception = enabled;
     }
 
-    pub fn preservesUncaughtException(self: JSContext) bool {
+    pub fn preservesUncaughtException(self: RealmContext) bool {
         return self.preserve_uncaught_exception;
     }
 
-    pub fn setHostEventLoop(self: *JSContext, host_event_loop: HostEventLoop) void {
+    pub fn setHostEventLoop(self: *RealmContext, host_event_loop: HostEventLoop) void {
         self.host_event_loop = host_event_loop;
     }
 
-    pub fn clearHostEventLoop(self: *JSContext, ptr: *anyopaque) void {
+    pub fn clearHostEventLoop(self: *RealmContext, ptr: *anyopaque) void {
         if (self.host_event_loop) |host_event_loop| {
             if (host_event_loop.ptr == ptr) self.host_event_loop = null;
         }
     }
 
-    pub fn hostEventLoop(self: *JSContext) ?HostEventLoop {
+    pub fn hostEventLoop(self: *RealmContext) ?HostEventLoop {
         return self.host_event_loop;
     }
 
-    fn usingInlineClassPrototypes(self: *const JSContext) bool {
+    fn usingInlineClassPrototypes(self: *const RealmContext) bool {
         return self.class_prototypes.ptr == self.class_prototypes_inline[0..].ptr;
     }
 
-    fn deinitClassPrototypeSlots(self: *JSContext) void {
+    fn deinitClassPrototypeSlots(self: *RealmContext) void {
         const rt = self.runtime;
         const class_prototypes = self.class_prototypes;
         const using_inline = self.usingInlineClassPrototypes();
@@ -666,7 +677,7 @@ pub const JSContext = struct {
         }
     }
 
-    pub fn ensureClassPrototypeSlot(self: *JSContext, class_id: class.ClassId) !*JSValue {
+    pub fn ensureClassPrototypeSlot(self: *RealmContext, class_id: class.ClassId) !*JSValue {
         self.runtime.assertOwnerThread();
         const index: usize = @intCast(class_id);
         if (index >= self.class_prototypes.len) {
@@ -690,7 +701,7 @@ pub const JSContext = struct {
         return &self.class_prototypes[index];
     }
 
-    pub fn setClassPrototype(self: *JSContext, class_id: class.ClassId, prototype: *Object) !void {
+    pub fn setClassPrototype(self: *RealmContext, class_id: class.ClassId, prototype: *Object) !void {
         const slot = try self.ensureClassPrototypeSlot(class_id);
         slot.* = prototype.value();
         // A realm fills these lazily: `%ArrayIteratorPrototype%` is built the
@@ -701,14 +712,14 @@ pub const JSContext = struct {
         self.runtime.gc.generationalBarrier(&self.header, prototype.gcHeader());
     }
 
-    pub fn clearClassPrototype(self: *JSContext, class_id: class.ClassId) void {
+    pub fn clearClassPrototype(self: *RealmContext, class_id: class.ClassId) void {
         self.runtime.assertOwnerThread();
         const index: usize = @intCast(class_id);
         if (index >= self.class_prototypes.len) return;
         self.class_prototypes[index] = JSValue.nullValue();
     }
 
-    pub fn classPrototypeObject(self: *JSContext, class_id: class.ClassId) ?*Object {
+    pub fn classPrototypeObject(self: *RealmContext, class_id: class.ClassId) ?*Object {
         const index: usize = @intCast(class_id);
         if (index >= self.class_prototypes.len) return null;
         const value = self.class_prototypes[index];
@@ -718,7 +729,7 @@ pub const JSContext = struct {
         return Object.fromHeader(header);
     }
 
-    pub fn setNativeErrorPrototype(self: *JSContext, kind: NativeErrorKind, prototype: *Object) void {
+    pub fn setNativeErrorPrototype(self: *RealmContext, kind: NativeErrorKind, prototype: *Object) void {
         self.runtime.assertOwnerThread();
         std.debug.assert(kind != .count);
         const slot = &self.native_error_prototypes[@intFromEnum(kind)];
@@ -726,7 +737,7 @@ pub const JSContext = struct {
         self.runtime.gc.generationalBarrier(&self.header, prototype.gcHeader());
     }
 
-    pub fn nativeErrorPrototypeObject(self: *JSContext, kind: NativeErrorKind) ?*Object {
+    pub fn nativeErrorPrototypeObject(self: *RealmContext, kind: NativeErrorKind) ?*Object {
         if (kind == .count) return null;
         const value = self.native_error_prototypes[@intFromEnum(kind)];
         if (!value.is(.object)) return null;
@@ -736,7 +747,7 @@ pub const JSContext = struct {
     }
 
     pub fn initializeInitialShapes(
-        self: *JSContext,
+        self: *RealmContext,
         object_prototype: ?*Object,
         array_prototype: ?*Object,
         regexp_prototype: ?*Object,
@@ -801,14 +812,14 @@ pub const JSContext = struct {
         }
     }
 
-    fn releaseInitialShape(self: *JSContext, slot: *?*shape.Shape) void {
+    fn releaseInitialShape(self: *RealmContext, slot: *?*shape.Shape) void {
         const owned = slot.* orelse return;
         slot.* = null;
         // Never adopted by an object: free now. Otherwise the sweep owns it.
         self.runtime.shapes.dropUnshared(owned);
     }
 
-    fn clearIntrinsicBootstrapValues(self: *JSContext) void {
+    fn clearIntrinsicBootstrapValues(self: *RealmContext) void {
         self.eval_function = JSValue.nullValue();
         self.cached_function_proto = null;
         self.cached_promise_proto = null;
@@ -831,7 +842,7 @@ pub const JSContext = struct {
     /// native-function Realm lookups stay valid during recursive release.
     /// Dynamic class prototype slots belong to embedders and survive a retry;
     /// the standard prefix is rebuilt with the next candidate global.
-    pub fn rollbackIntrinsicBootstrap(self: *JSContext) void {
+    pub fn rollbackIntrinsicBootstrap(self: *RealmContext) void {
         self.runtime.assertOwnerThread();
         std.debug.assert(self.publication_state != .finalizing);
         std.debug.assert(self.lexicals == null);
@@ -844,7 +855,7 @@ pub const JSContext = struct {
         if (self.publication_state == .constructing) self.construction_complete = false;
     }
 
-    fn deinitResources(self: *JSContext) void {
+    fn deinitResources(self: *RealmContext) void {
         const rt = self.runtime;
         rt.assertOwnerThread();
         switch (self.publication_state) {
@@ -875,19 +886,19 @@ pub const JSContext = struct {
     /// while any heap edge (function realm, job, auto-init slot, ...) reaches
     /// it and is torn down by the next major that finds it unreachable, or
     /// by `gc.deinit` at runtime teardown.
-    pub fn destroy(self: *JSContext) void {
+    pub fn destroy(self: *RealmContext) void {
         self.runtime.assertOwnerThread();
         self.consumeHostApiRelease();
     }
 
     /// Checked release entry for hosts that cannot statically guarantee the
     /// Runtime owner thread. A wrong-thread call does not drop the root.
-    pub fn tryDestroy(self: *JSContext) runtime_mod.RuntimeMutationError!void {
+    pub fn tryDestroy(self: *RealmContext) runtime_mod.RuntimeMutationError!void {
         try self.runtime.requireOwnerThread();
         self.consumeHostApiRelease();
     }
 
-    fn consumeHostApiRelease(self: *JSContext) void {
+    fn consumeHostApiRelease(self: *RealmContext) void {
         // Debug/ReleaseSafe: a second host destroy (createRealm child looked
         // up via contextForGlobal, or destroy twice) undercounts visitRealm
         // edges. ReleaseFast keeps the flag write so the layout matches.
@@ -898,7 +909,7 @@ pub const JSContext = struct {
         self.dropHostRootProvider();
     }
 
-    fn dropHostRootProvider(self: *JSContext) void {
+    fn dropHostRootProvider(self: *RealmContext) void {
         switch (self.publication_state) {
             .live, .constructing => self.runtime.unregisterRootProvider(self.rootProvider()),
             .finalizing => {},
@@ -907,21 +918,21 @@ pub const JSContext = struct {
 
     pub fn destroyFromHeader(rt: *JSRuntime, header: *gc.Header) void {
         rt.assertOwnerThread();
-        const self: *JSContext = @alignCast(@fieldParentPtr("header", header));
+        const self: *RealmContext = @alignCast(@fieldParentPtr("header", header));
         self.deinitResources();
         // TGC S4-e spec 2.5: no Pass-B deferral.
-        rt.destroyRuntime(JSContext, self);
+        rt.destroyRuntime(RealmContext, self);
     }
 
-    pub fn createValueHandle(self: *JSContext, value: JSValue) !runtime_mod.JSValueHandle {
+    pub fn createValueHandle(self: *RealmContext, value: JSValue) !runtime_mod.JSValueHandle {
         return self.runtime.createValueHandle(value);
     }
 
-    pub fn takeValueHandle(self: *JSContext, value: JSValue) !runtime_mod.JSValueHandle {
+    pub fn takeValueHandle(self: *RealmContext, value: JSValue) !runtime_mod.JSValueHandle {
         return self.runtime.takeValueHandle(value);
     }
 
-    pub fn traceRoots(self: *JSContext, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
+    pub fn traceRoots(self: *RealmContext, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
         if (self.publication_state != .live) return;
         // Cycle-collector child edges already include the module registry and
         // the five initial Shapes. Mirror them on the root Interface only when
@@ -974,7 +985,7 @@ pub const JSContext = struct {
     /// Infallible owned-edge enumeration used by the RC cycle collector.  The
     /// runtime context-list link is deliberately absent: it is membership, not
     /// ownership.
-    pub fn traceChildEdgesNoFail(self: *JSContext, visitor: anytype) void {
+    pub fn traceChildEdgesNoFail(self: *RealmContext, visitor: anytype) void {
         if (self.publication_state == .finalizing) return;
         self.modules.traceChildEdgesNoFail(visitor);
         for (self.unhandled_rejections) |*entry| {
@@ -1005,11 +1016,11 @@ pub const JSContext = struct {
         visitor.visitObject(&self.lexicals);
     }
 
-    pub fn arrayBuffer(self: *JSContext, store: *JSValue.Bytes.Store) !JSValue {
+    pub fn arrayBuffer(self: *RealmContext, store: *JSValue.Bytes.Store) !JSValue {
         return store.toArrayBuffer(self);
     }
 
-    fn rootProvider(self: *JSContext) runtime_mod.RootProvider {
+    fn rootProvider(self: *RealmContext) runtime_mod.RootProvider {
         return .{
             .context = self,
             .trace = traceRootProvider,
@@ -1017,7 +1028,7 @@ pub const JSContext = struct {
     }
 
     fn traceRootProvider(context: *anyopaque, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
-        const self: *JSContext = @ptrCast(@alignCast(context));
+        const self: *RealmContext = @ptrCast(@alignCast(context));
         // Membership on `context_head` is not a root (gc-invariants.md). This
         // provider is the host create-ref; once that ref is consumed the
         // realm stays alive only through heap RealmRef edges.
@@ -1026,45 +1037,45 @@ pub const JSContext = struct {
         try self.traceRoots(visitor);
     }
 
-    pub fn throwValue(self: *JSContext, value: JSValue) JSValue {
+    pub fn throwValue(self: *RealmContext, value: JSValue) JSValue {
         exception_state.install(self.runtime, value);
         return JSValue.exception();
     }
 
-    pub fn setExceptionUncatchable(self: *JSContext, uncatchable: bool) void {
+    pub fn setExceptionUncatchable(self: *RealmContext, uncatchable: bool) void {
         std.debug.assert(!uncatchable or self.hasException());
         exception_state.setUncatchable(self.runtime, uncatchable);
     }
 
-    pub fn exceptionIsUncatchable(self: JSContext) bool {
+    pub fn exceptionIsUncatchable(self: RealmContext) bool {
         return self.hasException() and self.runtime.current_exception_uncatchable;
     }
 
     /// Record that the pending exception is the engine's out-of-memory
     /// InternalError. Call immediately after the `throwValue` that installs
     /// it: `throwValue` resets the flag, like it does the uncatchable one.
-    pub fn markExceptionOutOfMemory(self: *JSContext) void {
+    pub fn markExceptionOutOfMemory(self: *RealmContext) void {
         std.debug.assert(self.hasException());
         exception_state.markOutOfMemory(self.runtime);
     }
 
-    pub fn exceptionIsOutOfMemory(self: JSContext) bool {
+    pub fn exceptionIsOutOfMemory(self: RealmContext) bool {
         return self.hasException() and self.runtime.current_exception_out_of_memory;
     }
 
-    pub fn hasException(self: JSContext) bool {
+    pub fn hasException(self: RealmContext) bool {
         return !self.runtime.current_exception.is(.uninitialized);
     }
 
-    pub fn takeException(self: *JSContext) JSValue {
+    pub fn takeException(self: *RealmContext) JSValue {
         return exception_state.take(self.runtime);
     }
 
-    pub fn clearException(self: *JSContext) void {
+    pub fn clearException(self: *RealmContext) void {
         exception_state.clear(self.runtime);
     }
 
-    pub fn recordUnhandledRejection(self: *JSContext, value: JSValue) void {
+    pub fn recordUnhandledRejection(self: *RealmContext, value: JSValue) void {
         self.recordUnhandledPromiseRejection(null, value);
     }
 
@@ -1074,7 +1085,7 @@ pub const JSContext = struct {
     /// unhandled rejection is reported once, in rejection order. Allocation
     /// failure silently drops the entry, exactly as the qjs CLI's unchecked
     /// malloc does.
-    pub fn recordUnhandledPromiseRejection(self: *JSContext, promise: ?JSValue, value: JSValue) void {
+    pub fn recordUnhandledPromiseRejection(self: *RealmContext, promise: ?JSValue, value: JSValue) void {
         if (promise) |promise_value| {
             for (self.unhandled_rejections) |entry| {
                 if (entry.promise.same(promise_value)) return;
@@ -1086,7 +1097,7 @@ pub const JSContext = struct {
         }
     }
 
-    fn appendUnhandledRejection(self: *JSContext, promise: ?JSValue, value: JSValue) !void {
+    fn appendUnhandledRejection(self: *RealmContext, promise: ?JSValue, value: JSValue) !void {
         const index = self.unhandled_rejections.len;
         if (index + 1 > self.unhandled_rejections_capacity) {
             var next_capacity = if (self.unhandled_rejections_capacity == 0) @as(usize, 4) else self.unhandled_rejections_capacity * 2;
@@ -1110,7 +1121,7 @@ pub const JSContext = struct {
     /// quickjs-libc.c:4259-4268): handling a promise unreports THAT promise
     /// only — entries for other promises stay tracked (even with a sameValue
     /// reason).
-    pub fn removeUnhandledPromiseRejection(self: *JSContext, promise_value: JSValue) void {
+    pub fn removeUnhandledPromiseRejection(self: *RealmContext, promise_value: JSValue) void {
         const entries = self.unhandled_rejections;
         for (entries, 0..) |entry, index| {
             if (!entry.promise.same(promise_value)) continue;
@@ -1123,14 +1134,14 @@ pub const JSContext = struct {
         }
     }
 
-    pub fn hasUnhandledRejection(self: JSContext) bool {
+    pub fn hasUnhandledRejection(self: RealmContext) bool {
         return self.unhandled_rejections.len != 0;
     }
 
     /// Pops the OLDEST tracked rejection and returns its reason (owned by the
     /// caller); reporting loops call this until the list drains, matching
     /// js_std_promise_rejection_check's in-order walk (quickjs-libc.c:4281).
-    pub fn takeUnhandledRejection(self: *JSContext) JSValue {
+    pub fn takeUnhandledRejection(self: *RealmContext) JSValue {
         const entries = self.unhandled_rejections;
         if (entries.len == 0) return JSValue.undefinedValue();
         const entry = entries[0];
@@ -1141,7 +1152,7 @@ pub const JSContext = struct {
         return entry.reason;
     }
 
-    pub fn clearUnhandledRejection(self: *JSContext) void {
+    pub fn clearUnhandledRejection(self: *RealmContext) void {
         const rt = self.runtime;
         const entries = self.unhandled_rejections;
         const capacity = self.unhandled_rejections_capacity;
@@ -1150,12 +1161,12 @@ pub const JSContext = struct {
         if (capacity != 0) mem_ops.free(rt, UnhandledRejectionEntry, entries.ptr[0..capacity]);
     }
 
-    pub fn classPrototypeSlotCount(self: JSContext) usize {
+    pub fn classPrototypeSlotCount(self: RealmContext) usize {
         return self.class_prototypes.len;
     }
 
     pub fn pushBacktraceFrame(
-        self: *JSContext,
+        self: *RealmContext,
         function_name: atom.Atom,
         filename: atom.Atom,
         line_num: i32,
@@ -1165,7 +1176,7 @@ pub const JSContext = struct {
     }
 
     pub fn pushBacktraceFrameWithResolver(
-        self: *JSContext,
+        self: *RealmContext,
         function_name: atom.Atom,
         filename: atom.Atom,
         line_num: i32,
@@ -1176,22 +1187,22 @@ pub const JSContext = struct {
         try self.pushBacktraceFrameLazyName(function_name, filename, line_num, col_num, location_data, location_resolver, JSValue.undefinedValue());
     }
 
-    pub fn pushActiveBacktraceFrame(self: *JSContext, frame: *ActiveBacktraceFrame) void {
+    pub fn pushActiveBacktraceFrame(self: *RealmContext, frame: *ActiveBacktraceFrame) void {
         execution.linkActiveBacktrace(self.runtime, frame);
     }
 
-    pub fn popActiveBacktraceFrame(self: *JSContext, frame: *ActiveBacktraceFrame) void {
+    pub fn popActiveBacktraceFrame(self: *RealmContext, frame: *ActiveBacktraceFrame) void {
         execution.unlinkActiveBacktrace(self.runtime, frame);
     }
 
-    pub fn snapshotBacktraceFrames(self: *JSContext) ![]BacktraceFrame {
+    pub fn snapshotBacktraceFrames(self: *RealmContext) ![]BacktraceFrame {
         // Each active node now resolves a whole frame GROUP (a VM invocation's
         // inline Entry chain + its L0 frame), enumerated innermost-first via the
         // indexed resolver until it returns null. A `backtrace_barrier` frame
         // stops the entire walk (and is itself excluded), matching qjs.
         var active_count: usize = 0;
         {
-            var active = self.runtime.hot.current_backtrace_frame;
+            var active = self.runtime.current_backtrace_frame;
             count: while (active) |frame| {
                 var index: usize = 0;
                 while (frame.resolver(frame.data, index)) |snapshot| : (index += 1) {
@@ -1215,7 +1226,7 @@ pub const JSContext = struct {
         // order the previous per-node walk produced.
         var active_index = active_count;
         {
-            var active = self.runtime.hot.current_backtrace_frame;
+            var active = self.runtime.current_backtrace_frame;
             fill: while (active) |frame| {
                 var index: usize = 0;
                 while (frame.resolver(frame.data, index)) |snapshot| : (index += 1) {
@@ -1229,11 +1240,11 @@ pub const JSContext = struct {
         return frames;
     }
 
-    pub fn freeBacktraceFrameSnapshot(self: *JSContext, frames: []BacktraceFrame) void {
+    pub fn freeBacktraceFrameSnapshot(self: *RealmContext, frames: []BacktraceFrame) void {
         if (frames.len != 0) mem_ops.free(self.runtime, BacktraceFrame, frames);
     }
 
-    fn dupBacktraceFrame(self: *JSContext, frame: BacktraceFrame) BacktraceFrame {
+    fn dupBacktraceFrame(self: *RealmContext, frame: BacktraceFrame) BacktraceFrame {
         return .{
             .function_name = self.runtime.atoms.noteHolderStore(frame.function_name),
             .filename = self.runtime.atoms.noteHolderStore(frame.filename),
@@ -1247,7 +1258,7 @@ pub const JSContext = struct {
         };
     }
 
-    fn dupActiveBacktraceFrameFromSnapshot(self: *JSContext, snapshot: ActiveBacktraceSnapshot) BacktraceFrame {
+    fn dupActiveBacktraceFrameFromSnapshot(self: *RealmContext, snapshot: ActiveBacktraceSnapshot) BacktraceFrame {
         return .{
             .function_name = self.runtime.atoms.noteHolderStore(snapshot.function_name),
             .filename = self.runtime.atoms.noteHolderStore(snapshot.filename),
@@ -1265,7 +1276,7 @@ pub const JSContext = struct {
     /// `function_value` (an object) only when a backtrace is materialized.
     /// `function_name` stays the fallback for non-object function values.
     pub fn pushBacktraceFrameLazyName(
-        self: *JSContext,
+        self: *RealmContext,
         function_name: atom.Atom,
         filename: atom.Atom,
         line_num: i32,
@@ -1285,23 +1296,23 @@ pub const JSContext = struct {
         });
     }
 
-    pub fn popBacktraceFrame(self: *JSContext) void {
+    pub fn popBacktraceFrame(self: *RealmContext) void {
         execution.popStoredBacktrace(self.runtime);
     }
 
-    pub fn updateBacktracePc(self: *JSContext, pc: usize) void {
+    pub fn updateBacktracePc(self: *RealmContext, pc: usize) void {
         execution.setStoredBacktracePc(self.runtime, pc);
     }
 
-    pub fn borrowBacktracePc(self: *JSContext, pc_source: *const usize) void {
+    pub fn borrowBacktracePc(self: *RealmContext, pc_source: *const usize) void {
         execution.borrowStoredBacktracePc(self.runtime, pc_source);
     }
 
-    pub fn updateBacktraceLocation(self: *JSContext, pc: usize, line_num: i32, col_num: i32) void {
+    pub fn updateBacktraceLocation(self: *RealmContext, pc: usize, line_num: i32, col_num: i32) void {
         execution.setStoredBacktraceLocation(self.runtime, pc, line_num, col_num);
     }
 
-    pub fn takePendingException(self: *JSContext) JSValue {
+    pub fn takePendingException(self: *RealmContext) JSValue {
         if (self.hasUnhandledRejection()) {
             const rejection = self.takeUnhandledRejection();
             if (self.hasException()) self.clearException();
@@ -1311,7 +1322,7 @@ pub const JSContext = struct {
     }
 
     /// Bind and bootstrap this Realm explicitly; never select another empty Realm.
-    pub fn installStandardGlobals(self: *JSContext, global: *Object) errors.RuntimeError!void {
+    pub fn installStandardGlobals(self: *RealmContext, global: *Object) errors.RuntimeError!void {
         const rt = self.runtime;
         rt.assertOwnerThread();
         if (!rt.ownsObject(global)) return error.InvalidBuiltinRegistry;
@@ -1332,7 +1343,7 @@ pub const JSContext = struct {
         rt.hooks.install_standard_globals(self, global) catch |err| return @errorCast(err);
     }
 
-    pub fn globalObject(self: *JSContext) !*Object {
+    pub fn globalObject(self: *RealmContext) !*Object {
         if (self.global) |existing| return existing;
         if (self.runtime.materialize_context_global_cb) |cb| {
             return cb(self);
@@ -1341,10 +1352,9 @@ pub const JSContext = struct {
     }
 };
 
-/// Realm identity.  zjs keeps the public `JSContext` spelling for API
-/// compatibility; the two names intentionally denote the same QuickJS-style
-/// GC object, not a wrapper and a separate realm record.
-pub const RealmContext = JSContext;
+/// Compatibility spelling for the core Realm object. `JSContext` remains
+/// accepted by in-tree and embedding-facing APIs; it is exactly this type.
+pub const JSContext = RealmContext;
 
 /// One owning context reference, matching `JS_DupContext` / `JS_FreeContext`.
 /// Runtime context-list membership is deliberately not represented here.

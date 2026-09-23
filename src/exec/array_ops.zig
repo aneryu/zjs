@@ -3873,7 +3873,7 @@ fn fromAsyncStart(
 
     const state = try core.Object.create(rt, core.class.ids.object, null);
     var state_val = state.value();
-    var root_values = [_]core.runtime.ValueRootValue{.{ .value = &state_val }};
+    var root_values = [_]*core.JSValue{&state_val};
     var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
     };
@@ -4009,7 +4009,7 @@ pub fn arrayFromAsyncContinuationCall(
 ) !?core.JSValue {
     const rt = ctx.runtime;
     var state_val = fromAsyncStateGet(rt, function_object, core.atom.ids.state);
-    var root_values = [_]core.runtime.ValueRootValue{.{ .value = &state_val }};
+    var root_values = [_]*core.JSValue{&state_val};
     var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
     };
@@ -6334,16 +6334,8 @@ pub fn arrayPrototypeValuesFromGlobal(rt: *core.JSRuntime, global: *core.Object)
 
 pub fn createArrayFromArgs(rt: *core.JSRuntime, global: *core.Object, args: []const core.JSValue) !core.JSValue {
     var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
-    defer rooted_args_buffer.deinit(rt);
-    const rooted_args = rooted_args_buffer.values;
-    var root_slices = [_]core.runtime.ValueRootSlice{
-        rooted_args_buffer.slice(),
-    };
-    var root_frame = core.runtime.ValueRootFrame{
-        .slices = &root_slices,
-    };
-    root_frame.activate(rt);
-    defer root_frame.deactivate(rt);
+    defer rooted_args_buffer.deinit();
+    const rooted_args = rooted_args_buffer.values();
 
     const array = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
     errdefer core.Object.destroyFromHeader(rt, array.gcHeader());
@@ -6620,10 +6612,10 @@ pub fn objectEntryArrayValue(
     var entry_value = core.JSValue.undefinedValue();
     var key_value = core.JSValue.undefinedValue();
 
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &value },
-        .{ .value = &entry_value },
-        .{ .value = &key_value },
+    var root_values = [_]*core.JSValue{
+        &value,
+        &entry_value,
+        &key_value,
     };
     var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
@@ -7183,17 +7175,17 @@ const HostError = @import("exception_ops.zig").HostError;
 const AppendStringError = core.value_string.AppendStringError;
 const RootedValueCopies = struct {
     values: []core.JSValue,
-    roots: []core.runtime.ValueRootValue,
+    roots: []*core.JSValue,
 
     fn init(rt: *core.JSRuntime, source: []const core.JSValue) !RootedValueCopies {
         const values = try rt.nativeAllocator().alloc(core.JSValue, source.len);
         errdefer rt.nativeAllocator().free(values);
         @memcpy(values, source);
 
-        const roots = try rt.nativeAllocator().alloc(core.runtime.ValueRootValue, source.len);
+        const roots = try rt.nativeAllocator().alloc(*core.JSValue, source.len);
         errdefer rt.nativeAllocator().free(roots);
         for (values, 0..) |*value, index| {
-            roots[index] = .{ .value = value };
+            roots[index] = value;
         }
 
         return .{ .values = values, .roots = roots };

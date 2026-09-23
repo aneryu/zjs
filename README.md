@@ -82,10 +82,9 @@ current debugger/CDP status.
 exclusions. [STATUS.md](STATUS.md) records dated validation results; a passing
 profile does not imply support for every ECMAScript or host feature.
 
-The [bench-v8 snapshot](docs/perf/bench-v8-status.md) records the QuickJS
-comparison with its suite, machine, and binary fingerprints. Ratios are
-specific to that configuration. Local performance investigation is described
-in the [performance workflow](docs/perf/README.md).
+Historical QuickJS comparisons are available in Git history; their ratios
+are specific to the recorded suite, machine, and binaries. For local
+performance investigation, see [GUIDE](GUIDE.md#b8-performance-investigation) and the [verification policy](docs/verification-policy.md).
 
 ## Documentation
 
@@ -94,5 +93,4 @@ in the [performance workflow](docs/perf/README.md).
 - [Architecture](docs/architecture.md): source ownership and layer boundaries.
 - [Contributing](CONTRIBUTING.md): engineering and validation workflow.
 - [Documentation index](docs/README.md): contracts, designs, and planned work.
-- [Roadmap](docs/roadmap.md): planned work and dependencies.
 - [llms.txt](llms.txt): compact retrieval index.

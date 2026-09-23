@@ -15,7 +15,7 @@ Status: 2026-09-23，D1/F1 已完成：A9 前后均完成 c/smp 比较，默认 
 - 明确 Zig 版本、平台/libc、实际经过候选 allocator 的分配范围；内部绕过路径
   需列明，不能把仅替换入口 allocator 的结果当成整个引擎的全量替换结果。
 - 普通原生小分配直接使用候选 allocator，与额外经过 SmallObjectSlab 的方案比较。
-  普通原生默认直接分配，GC 专用 slab 保留；所有权见 [Runtime 设计](runtime-target-design.md#6-为什么保留这些现有机制)。
+  普通原生默认直接分配，GC 专用 slab 保留；所有权见 [Runtime 设计](runtime-target-design.md#分配与预算)。
   比较应保留 GC 所依赖的存储路径，避免将 GC 存储变化混入普通分配的结果。
 
 ## 决策边界
@@ -26,7 +26,9 @@ A9 后复测支持选择 c_allocator 作为默认值，依据是本机长期及�
 
 ## 本轮测量与明确剩余项
 
-完整条件、范围、原始样本及中位数见 [测量记录](runtime-review/allocator-2026-09-22/README.md)。
+原测量目录 `docs/runtime-review/allocator-2026-09-22/` 已移出工作树，
+条件、样本和身份文件需从 Git 历史恢复。下面是当时的决策与剩余项，
+不是当前源码的新测量结果。
 
 - [x] c/smp 的反复创建销毁、长期重复 eval、四 Runtime 并发场景。
 - [x] 记录耗时、采样 RSS 峰值、销毁后 RSS 与二进制/源码身份。

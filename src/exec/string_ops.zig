@@ -1119,12 +1119,12 @@ pub fn regExpSymbolSplitGeneric(
     var rooted_splitter = splitter;
     var rooted_result = core.JSValue.undefinedValue();
     var split_roots = core.runtime.ValueRootFrame{
-        .values = &[_]core.runtime.ValueRootValue{
-            .{ .value = &rooted_string },
-            .{ .value = &rooted_splitter },
-            .{ .value = &rooted_result },
+        .values = &[_]*core.JSValue{
+            &rooted_string,
+            &rooted_splitter,
+            &rooted_result,
         },
-        .objects = &[_]core.runtime.ObjectRootValue{.{ .object = &rooted_out }},
+        .objects = &[_]*?*core.Object{&rooted_out},
     };
     split_roots.activate(ctx.runtime);
     defer split_roots.deactivate(ctx.runtime);
@@ -4634,19 +4634,15 @@ fn thisObject(value: core.JSValue) ?*core.Object {
 
 pub fn constructWithPrototype(rt: *core.JSRuntime, args: []const core.JSValue, prototype: ?*core.Object) !core.JSValue {
     var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
-    defer rooted_args_buffer.deinit(rt);
-    const rooted_args = rooted_args_buffer.values;
+    defer rooted_args_buffer.deinit();
+    const rooted_args = rooted_args_buffer.values();
     var data_value = core.JSValue.undefinedValue();
     var object_value = core.JSValue.undefinedValue();
-    var root_slices = [_]core.runtime.ValueRootSlice{
-        rooted_args_buffer.slice(),
-    };
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &data_value },
-        .{ .value = &object_value },
+    var root_values = [_]*core.JSValue{
+        &data_value,
+        &object_value,
     };
     var root_frame = core.runtime.ValueRootFrame{
-        .slices = &root_slices,
         .values = &root_values,
     };
     root_frame.activate(rt);
@@ -4866,7 +4862,7 @@ fn toWellFormedReceiver(rt: *core.JSRuntime, receiver: core.JSValue) !core.JSVal
     }
     var coerced = try coercedReceiverStringValue(rt, receiver);
     // `toWellFormedString` allocates, so the coerced string must stay rooted.
-    var root_values = [_]core.runtime.ValueRootValue{.{ .value = &coerced }};
+    var root_values = [_]*core.JSValue{&coerced};
     var root_frame = core.runtime.ValueRootFrame{ .values = &root_values };
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
@@ -4916,17 +4912,13 @@ fn toWellFormedString(rt: *core.JSRuntime, string_value: *core.string.String) !c
 
 fn split(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
     var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
-    defer rooted_args_buffer.deinit(rt);
-    const rooted_args = rooted_args_buffer.values;
+    defer rooted_args_buffer.deinit();
+    const rooted_args = rooted_args_buffer.values();
     var out_value = core.JSValue.undefinedValue();
-    var root_slices = [_]core.runtime.ValueRootSlice{
-        rooted_args_buffer.slice(),
-    };
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &out_value },
+    var root_values = [_]*core.JSValue{
+        &out_value,
     };
     var root_frame = core.runtime.ValueRootFrame{
-        .slices = &root_slices,
         .values = &root_values,
     };
     root_frame.activate(rt);
@@ -4979,20 +4971,16 @@ fn split(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !co
 fn splitReceiver(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
     var rooted_receiver = receiver;
     var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
-    defer rooted_args_buffer.deinit(rt);
-    const rooted_args = rooted_args_buffer.values;
+    defer rooted_args_buffer.deinit();
+    const rooted_args = rooted_args_buffer.values();
     var out_value = core.JSValue.undefinedValue();
     var sep_value = core.JSValue.undefinedValue();
-    var root_slices = [_]core.runtime.ValueRootSlice{
-        rooted_args_buffer.slice(),
-    };
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_receiver },
-        .{ .value = &out_value },
-        .{ .value = &sep_value },
+    var root_values = [_]*core.JSValue{
+        &rooted_receiver,
+        &out_value,
+        &sep_value,
     };
     var root_frame = core.runtime.ValueRootFrame{
-        .slices = &root_slices,
         .values = &root_values,
     };
     root_frame.activate(rt);
@@ -5057,19 +5045,15 @@ fn search(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !c
 
 fn matchString(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue) !core.JSValue {
     var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
-    defer rooted_args_buffer.deinit(rt);
-    const rooted_args = rooted_args_buffer.values;
+    defer rooted_args_buffer.deinit();
+    const rooted_args = rooted_args_buffer.values();
     var out_value = core.JSValue.undefinedValue();
     var input = core.JSValue.undefinedValue();
-    var root_slices = [_]core.runtime.ValueRootSlice{
-        rooted_args_buffer.slice(),
-    };
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &out_value },
-        .{ .value = &input },
+    var root_values = [_]*core.JSValue{
+        &out_value,
+        &input,
     };
     var root_frame = core.runtime.ValueRootFrame{
-        .slices = &root_slices,
         .values = &root_values,
     };
     root_frame.activate(rt);
@@ -5125,8 +5109,8 @@ fn replaceAll(rt: *core.JSRuntime, bytes: []const u8, args: []const core.JSValue
 
 fn defineStringElement(rt: *core.JSRuntime, object: *core.Object, index: u32, bytes: []const u8) !void {
     var object_value = object.value();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &object_value },
+    var root_values = [_]*core.JSValue{
+        &object_value,
     };
     var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,

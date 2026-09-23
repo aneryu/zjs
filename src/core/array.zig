@@ -151,7 +151,7 @@ pub fn constructLiteralWithPrototype(rt: *JSRuntime, values: []const JSValue, pr
     // Keep the newly allocated array alive while allocating its element
     // storage. The input slice and the output are independent GC roots.
     var array_value = JSValue.undefinedValue();
-    var root_values = [_]runtime.ValueRootValue{.{ .value = &array_value }};
+    var root_values = [_]*JSValue{&array_value};
     var root_frame = runtime.ValueRootFrame{
         .slices = &root_slices,
         .values = &root_values,

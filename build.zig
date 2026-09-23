@@ -28,16 +28,10 @@ pub fn build(b: *std.Build) void {
     // `zig build test-oom -Dzjs_oom_coverage=true` prints the count.
     const zjs_oom_coverage = b.option(bool, "zjs_oom_coverage", "Record distinct allocation call sites for the OOM corpus coverage report") orelse false;
     const zjs_force_gc = b.option(bool, "zjs_force_gc", "Force a full GC before each runtime heap allocation") orelse false;
-    // Atom-ownership audit instrumentation: a one-slot quarantine on the
-    // atom table's dead-slot free list (core/atom.zig) so a just-freed atom
-    // id cannot be handed straight back by the very next intern. This turns
-    // "borrow an atom out of a token, then use it after the owner released
-    // it" from a silently masked hazard into a `dup` liveness assertion.
-    // This is the ASAN / leak-checker tier: CI, fuzzing and regression runs
-    // only. Default off, comptime erased when off (no field, no code, no
-    // string in the default binary), and never part of the production path.
-    // `zig build test -Dzjs_ownership_audit=true`; see
-    // docs/borrowed_atom_audit.md §6.
+    // Quarantine every dynamic atom slot retired by the last sweep so immediate
+    // reuse cannot mask a stale ID. Debug/ReleaseSafe diagnostic only; disabled
+    // by default and erased at comptime when off. See docs/atom-rooting.md.
+    // `zig build test -Dzjs_ownership_audit=true`.
     const zjs_ownership_audit = b.option(bool, "zjs_ownership_audit", "Quarantine the atom slots retired by the last sweep so borrowed-atom use-after-free trips an assertion instead of being masked by slot reuse (audit tier; never ReleaseFast)") orelse false;
     const engine_option_inputs: config.EngineOptionInputs = .{
         .enable_opcode_profile = zjs_enable_opcode_profile,

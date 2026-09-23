@@ -720,9 +720,9 @@ test "promiseReactionJob roots reaction and value while allocating job" {
     // The holder under test is the native Job struct; its JSValue refs are
     // invisible to a declared-roots tracing sweep, so name the job's slots
     // directly. Deactivated before the death phase.
-    var job_roots_storage = [_]core.runtime.ValueRootValue{
-        .{ .value = &job.payload.promise_reaction.reaction },
-        .{ .value = &job.payload.promise_reaction.value },
+    var job_roots_storage = [_]*core.JSValue{
+        &job.payload.promise_reaction.reaction,
+        &job.payload.promise_reaction.value,
     };
     var job_roots = core.runtime.ValueRootFrame{ .values = &job_roots_storage };
     job_roots.activate(rt);
@@ -811,11 +811,11 @@ test "prepared promise reaction jobs expose direct symbol payloads to an explici
     };
     defer prepared.deinit(rt);
 
-    var root_storage = [_]core.runtime.ValueRootValue{
-        .{ .value = &prepared.jobs[0].payload.promise_reaction.reaction },
-        .{ .value = &prepared.jobs[0].payload.promise_reaction.value },
-        .{ .value = &prepared.jobs[1].payload.promise_reaction.reaction },
-        .{ .value = &prepared.jobs[1].payload.promise_reaction.value },
+    var root_storage = [_]*core.JSValue{
+        &prepared.jobs[0].payload.promise_reaction.reaction,
+        &prepared.jobs[0].payload.promise_reaction.value,
+        &prepared.jobs[1].payload.promise_reaction.reaction,
+        &prepared.jobs[1].payload.promise_reaction.value,
     };
     var roots = core.runtime.ValueRootFrame{ .values = &root_storage };
     roots.activate(rt);

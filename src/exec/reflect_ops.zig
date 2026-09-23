@@ -32,16 +32,8 @@ pub fn proxyRevocable(rt: *core.JSRuntime, global: ?*core.Object, args: []const 
     if (args.len < 2) return error.TypeError;
     const realm_global = global orelse return error.TypeError;
     var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
-    defer rooted_args_buffer.deinit(rt);
-    const rooted_args = rooted_args_buffer.values;
-    var root_slices = [_]core.runtime.ValueRootSlice{
-        rooted_args_buffer.slice(),
-    };
-    var root_frame = core.runtime.ValueRootFrame{
-        .slices = &root_slices,
-    };
-    root_frame.activate(rt);
-    defer root_frame.deactivate(rt);
+    defer rooted_args_buffer.deinit();
+    const rooted_args = rooted_args_buffer.values();
 
     _ = try expectObjectArg(rooted_args[0]);
     _ = try expectObjectArg(rooted_args[1]);

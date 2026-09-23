@@ -1467,22 +1467,18 @@ pub fn iteratorZipCall(
     var keys_val = core.JSValue.undefinedValue();
     var padding_val = core.JSValue.undefinedValue();
 
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &iters_val },
-        .{ .value = &nexts_val },
-        .{ .value = &pads_val },
-        .{ .value = &keys_val },
-        .{ .value = &padding_val },
+    var root_values = [_]*core.JSValue{
+        &iters_val,
+        &nexts_val,
+        &pads_val,
+        &keys_val,
+        &padding_val,
     };
     var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, rooted_args);
-    defer rooted_args_buffer.deinit(rt);
-    rooted_args = rooted_args_buffer.values;
-    var root_slices = [_]core.runtime.ValueRootSlice{
-        rooted_args_buffer.slice(),
-    };
+    defer rooted_args_buffer.deinit();
+    rooted_args = rooted_args_buffer.values();
     var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
-        .slices = &root_slices,
     };
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
@@ -1785,12 +1781,12 @@ pub fn iteratorZipCreateHelper(
     var nexts_value = nexts.value();
     var pads_value = pads.value();
     var keys_value = if (keys) |keys_object| keys_object.value() else core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &helper_value },
-        .{ .value = &iters_value },
-        .{ .value = &nexts_value },
-        .{ .value = &pads_value },
-        .{ .value = &keys_value },
+    var root_values = [_]*core.JSValue{
+        &helper_value,
+        &iters_value,
+        &nexts_value,
+        &pads_value,
+        &keys_value,
     };
     var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,

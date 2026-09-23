@@ -2,9 +2,7 @@
 
 How `src/exec/` is entered, which files own which runtime step, and why a
 complete `@import` DAG does not exist. Current file list is the 40 Zig
-modules after the 2026-09-21 consolidation. Function-level walkthroughs
-stay in [code-walkthrough/11-vm-kernel.md](code-walkthrough/11-vm-kernel.md)
-and [13-calls.md](code-walkthrough/13-calls.md). Layering rules:
+modules after the 2026-09-21 consolidation. Layering rules:
 [architecture.md](architecture.md), [api-boundary.md](api-boundary.md).
 
 Zig allows circular `@import`. **38 of the 40 files form one strongly

@@ -1047,6 +1047,47 @@ pub const CollectionResult = struct {
     duration_ns: u64 = 0,
 };
 
+/// Runtime poll purpose used by the GC driver to choose the collection path.
+pub const PollMode = enum {
+    normal,
+    callback_boundary,
+    idle,
+    safepoint,
+    urgent,
+
+    /// Whether a minor collection alone may satisfy this poll.
+    ///
+    /// A minor only proves young objects dead, so it is progress rather than
+    /// a full collection. Modes that exist to make progress can take it;
+    /// urgent cannot because its caller needs the whole heap examined, and
+    /// normal cannot because it represents the allocation threshold.
+    ///
+    /// This does not decide whether a minor may run; the GC driver applies
+    /// this policy together with the poll's other conditions.
+    pub fn acceptsMinor(self: PollMode) bool {
+        return switch (self) {
+            .idle, .safepoint, .callback_boundary => true,
+            .normal, .urgent => false,
+        };
+    }
+
+    /// Root-scan classification for the trigger. The runtime also uses this
+    /// when deciding whether a minor may run at a poll. Collector's final scan
+    /// uses host quiescence in production and this classification or a test
+    /// override in test builds.
+    pub fn rootScan(self: PollMode) RootScan {
+        return switch (self) {
+            .normal, .safepoint, .callback_boundary => .engine_active,
+            .urgent, .idle => .declared_only,
+        };
+    }
+};
+
+/// Root-scan classification supplied by the poll trigger. Production scanning
+/// is governed by host quiescence; `declared_only` directly controls scanning
+/// only in tests.
+pub const RootScan = enum { engine_active, declared_only };
+
 pub const InvariantError = error{
     CorruptGcList,
     CorruptNonBlockObjectAuthority,

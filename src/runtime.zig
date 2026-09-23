@@ -39,7 +39,7 @@ const errors = @import("core/errors.zig");
 
 pub const default_stack_size = 1024 * 1024;
 pub const default_gc_threshold = 256 * 1024;
-/// Native C-stack budget for the recursion guard, matching QuickJS
+/// Current thread's call-stack budget for the recursion guard, matching QuickJS
 /// `JS_DEFAULT_STACK_SIZE` (quickjs.h). The guard trips once this many
 /// bytes of native stack have been consumed below the outermost eval frame,
 /// turning pathological recursion (parser/JSON tens of thousands deep) into a
@@ -104,23 +104,30 @@ pub const EngineHooks = struct {
     run_microtask: *const fn (*JSRuntime) errors.HostError!job_mod.RunOneStatus,
 };
 
-/// Canonical operand-stack backing policy shared by Runtime and the execution
-/// Stack. Runtime owns the configured limit and precomputes the arena-window
-/// form when that limit changes; frame construction can then publish the one
-/// packed word instead of re-saturating the same immutable limit per call.
-pub const VmStackWindowPolicy = packed struct(u64) {
-    limit: u62,
-    arena_window: bool = false,
-    resident_window: bool = false,
+/// Operand-stack limit and current backing ownership in one machine word.
+/// Runtime caches the frame-window template; each Stack copies it and changes
+/// ownership when installing resident storage or growing onto its own heap buffer.
+pub const VmStackStorage = packed struct(u64) {
+    pub const Ownership = enum(u2) {
+        /// Stack releases this allocation.
+        owned = 0,
+        /// Borrowed from an arena chunk or a Frame-owned heap slab.
+        frame_window = 1,
+        /// Borrowed from a suspended execution's resident storage.
+        resident_window = 2,
+    };
 
-    pub fn forLimit(limit: usize) VmStackWindowPolicy {
+    limit: u62,
+    ownership: Ownership = .owned,
+
+    pub fn forLimit(limit: usize) VmStackStorage {
         return .{ .limit = @intCast(@min(limit, std.math.maxInt(u62))) };
     }
 
-    pub fn arenaForLimit(limit: usize) VmStackWindowPolicy {
-        var policy = forLimit(limit);
-        policy.arena_window = true;
-        return policy;
+    pub fn frameWindowForLimit(limit: usize) VmStackStorage {
+        var storage = forLimit(limit);
+        storage.ownership = .frame_window;
+        return storage;
     }
 };
 
@@ -128,8 +135,8 @@ pub const VmStackWindowPolicy = packed struct(u64) {
 /// `JS_CallInternal` frame layout. Call frames carve LIFO windows for
 /// `[args | locals | operand stack]` instead of per-call heap allocations.
 /// Windows are stable for their lifetime (chunks never move); release is a
-/// watermark restore. Values inside windows are owned by the frames using
-/// them and must be released before the watermark is restored.
+/// watermark restore. Frames manage the live values and all escaping references; their teardown
+/// must finish before the watermark is restored. The arena manages storage only.
 pub const VmStackArena = struct {
     pub const first_chunk_bytes: usize = 4 * 1024;
     pub const first_chunk_slots: usize = first_chunk_bytes / @sizeOf(JSValue);
@@ -151,14 +158,8 @@ pub const VmStackArena = struct {
         window: []JSValue,
     };
 
-    // K4 hot head: `mark`/`carveActiveMarked`/`restore` read chunk_count,
-    // active, and used[active] on every bytecode call and return, and
-    // active == 0 for virtually every frame (deeper chunks are the slow
-    // path). Declared first so the scalar head and the front of `used`
-    // share the arena's first cache line; `chunks[active]` is the only
-    // remaining second-line load. Mirrors QuickJS keeping its hot stack
-    // state (`stack_top`/`stack_limit`, quickjs.c) in the runtime
-    // struct head. Layout verified by @offsetOf probe (K4 dossier).
+    // `active` selects the corresponding entries in `used` and `chunks`;
+    // `chunk_count` bounds the active chunk index.
     chunk_count: usize = 0,
     active: usize = 0,
     used: [max_chunks]usize = @splat(0),
@@ -258,8 +259,8 @@ pub const VmStackArena = struct {
         return std.mem.bytesAsSlice(T, bytes[0..byte_count]);
     }
 
-    /// Restore the watermark taken by `mark`. All values stored in the
-    /// released region must already have been freed by frame/stack teardown.
+    /// Restore a watermark in LIFO order after frame/stack teardown has
+    /// retired the views and preserved any escaping values. Keeps chunks for reuse.
     pub fn restore(self: *VmStackArena, m: Mark) void {
         if (self.chunk_count == 0) return;
         var index = m.chunk + 1;
@@ -317,55 +318,6 @@ pub const MemoryUsage = struct {
     class_record_count: usize,
 };
 
-pub const GCPollMode = enum {
-    normal,
-    callback_boundary,
-    idle,
-    safepoint,
-    urgent,
-
-    /// Whether this poll may be ANSWERED with a minor collection -- that is,
-    /// whether a minor alone may be the whole result the caller receives.
-    ///
-    /// A minor only proves young objects dead, so it is progress rather than
-    /// a full collection. Modes that exist to make progress can take it;
-    /// `urgent` cannot, because its caller is out of headroom and needs the
-    /// whole heap examined. `normal` cannot either: it is the allocation
-    /// threshold, and answering that with a young-only pass would quietly
-    /// weaken what every existing caller of a threshold collection receives.
-    ///
-    /// This is NOT the same question as "may a minor RUN at this poll". A
-    /// crossed threshold runs one first at every non-urgent mode, `normal`
-    /// included, because `pollGC` re-derives the crossing from the account the
-    /// minor leaves behind: the threshold's promise is kept by the second
-    /// reading, not by withholding the young collection. See `pollGC`.
-    pub fn acceptsMinor(self: GCPollMode) bool {
-        return switch (self) {
-            .idle, .safepoint, .callback_boundary => true,
-            .normal, .urgent => false,
-        };
-    }
-
-    /// Root-scan policy for the collection this poll may run. Engine-internal
-    /// triggers fire with mutator native frames live on the stack; those
-    /// frames are entitled to hold rc references without a ValueRootFrame
-    /// (the conservative scanner is the covering mechanism), so they must
-    /// scan conservatively even in test builds. Host-quiescent triggers
-    /// (explicit forceGC, event-loop idle) keep the precise-only test split
-    /// that makes liveness tests deterministic and keeps the missing-root
-    /// forcing function alive.
-    pub fn rootScan(self: GCPollMode) GCRootScan {
-        return switch (self) {
-            .normal, .safepoint, .callback_boundary => .engine_active,
-            .urgent, .idle => .declared_only,
-        };
-    }
-};
-
-/// See `GCPollMode.rootScan`. `declared_only` is only honoured in test
-/// builds; CLI/production collections always add the conservative pass.
-pub const GCRootScan = enum { engine_active, declared_only };
-
 pub const ValueRootSlice = union(enum) {
     mutable: *const []JSValue,
     /// Borrowed values whose backing storage is stable for the root frame's
@@ -390,35 +342,10 @@ pub const ValueRootSlice = union(enum) {
     borrowed_cells: []const *var_ref_mod.VarRef,
 };
 
-pub const ValueRootBuffer = struct {
-    values: []JSValue = &.{},
+pub const ValueRootBuffer = roots_mod.ValueRootBuffer;
 
-    pub fn initCopy(rt: *JSRuntime, source: []const JSValue) !ValueRootBuffer {
-        if (source.len == 0) return .{};
-
-        const values = try mem_ops.alloc(rt, JSValue, source.len);
-        errdefer mem_ops.free(rt, JSValue, values);
-        for (source, 0..) |value, idx| {
-            values[idx] = value;
-        }
-        return .{ .values = values };
-    }
-
-    pub fn deinit(self: *ValueRootBuffer, rt: *JSRuntime) void {
-        const values = self.values;
-        self.values = &.{};
-        if (values.len != 0) mem_ops.free(rt, JSValue, values);
-    }
-
-    pub fn slice(self: *ValueRootBuffer) ValueRootSlice {
-        return .{ .mutable = &self.values };
-    }
-};
-
-/// `ValueRootBuffer` for slot-typed var-ref cell slices (`[]*VarRef`,
-/// VARREFS-SLOT-TYPING-BLUEPRINT phase D): a rooted, refcount-holding copy of
-/// a cell slice, refcount behavior identical to the pre-typed initCopy of the
-/// same cells as JSValues.
+/// Native copy of a typed var-ref cell slice. Unlike ValueRootBuffer, this
+/// storage requires an explicitly activated ValueRootFrame to keep cells live.
 pub const CellRootBuffer = struct {
     cells: []*var_ref_mod.VarRef = &.{},
 
@@ -440,14 +367,6 @@ pub const CellRootBuffer = struct {
     }
 };
 
-pub const ValueRootValue = struct {
-    value: *JSValue,
-};
-
-pub const ObjectRootValue = struct {
-    object: *?*Object,
-};
-
 /// A GC header (Shape, Module, VarRef, FunctionBytecode, realm) named as a
 /// root for a mutation or construction window. Tracing does not treat a Zig
 /// `*Shape` local as a root unless it is named here.
@@ -457,7 +376,7 @@ pub const HeaderRootValue = struct {
 
 /// TGC S3 §4 class B: an atom id held by a native frame.
 ///
-/// An `atom.Atom` is a bare `u32`. Neither a `ValueRootValue` (there is no
+/// An `atom.Atom` is a bare `u32`. Neither a `*JSValue` (there is no
 /// JSValue) nor the conservative stack scan (an integer is not a pointer into
 /// the heap) can report it, so a native frame that holds an id across a point
 /// where JS can run or the allocator can collect must name it here.
@@ -504,8 +423,8 @@ pub threadlocal var value_root_frame_stats: ValueRootFrameStats = .{};
 pub const ValueRootFrame = struct {
     previous: ?*const ValueRootFrame = null,
     slices: []const ValueRootSlice = &.{},
-    values: []const ValueRootValue = &.{},
-    objects: []const ObjectRootValue = &.{},
+    values: []const *JSValue = &.{},
+    objects: []const *?*Object = &.{},
     headers: if (value_root_frames_enabled) []const HeaderRootValue else void =
         if (value_root_frames_enabled) &.{} else {},
     /// TGC S3 §4 class B atom-id roots; see `AtomRootSlot`.
@@ -520,7 +439,7 @@ pub const ValueRootFrame = struct {
     ///
     /// Heap-backed `.values` arrays (`RootedValueCopies`, 3 call sites) stay on
     /// `.values`. They are not a root gap: that helper builds one
-    /// `ValueRootValue` per element, so every value already has its own exact
+    /// `*JSValue` per element, so every value already has its own exact
     /// root pointer and `traceValueRootFrames` visits each one. `.slices`
     /// would describe the same window in one descriptor instead of N pointers
     /// — an efficiency change, not a correctness one — and it moves production
@@ -583,7 +502,7 @@ pub const ValueRootFrame = struct {
 
 /// A `ValueRootFrame` plus the storage it points at, held in one local.
 ///
-/// The manual spelling of this — declare a `[_]ValueRootValue` array, declare
+/// The manual spelling of this — declare a `[_]*JSValue` array, declare
 /// a frame whose `.values` points at it, activate, defer deactivate — was
 /// written out at every rooting site in the tree. `rootValues` collapses the
 /// declarations, leaving the two operations that carry meaning:
@@ -599,7 +518,7 @@ pub fn ValueRootScope(comptime count: usize) type {
     return struct {
         const Self = @This();
 
-        storage: if (value_root_scalar_scopes_enabled) [count]ValueRootValue else void =
+        storage: if (value_root_scalar_scopes_enabled) [count]*JSValue else void =
             if (value_root_scalar_scopes_enabled) undefined else {},
         frame: if (value_root_scalar_scopes_enabled) ValueRootFrame else void =
             if (value_root_scalar_scopes_enabled) .{} else {},
@@ -625,7 +544,7 @@ pub fn ValueRootScope(comptime count: usize) type {
 pub inline fn rootValues(slots: anytype) ValueRootScope(slots.len) {
     if (comptime value_root_scalar_scopes_enabled) {
         var scope: ValueRootScope(slots.len) = .{};
-        inline for (slots, 0..) |slot, index| scope.storage[index] = .{ .value = slot };
+        inline for (slots, 0..) |slot, index| scope.storage[index] = slot;
         return scope;
     }
     return .{};
@@ -638,7 +557,7 @@ pub fn ObjectRootScope(comptime count: usize) type {
     return struct {
         const Self = @This();
 
-        storage: if (value_root_scalar_scopes_enabled) [count]ObjectRootValue else void =
+        storage: if (value_root_scalar_scopes_enabled) [count]*?*Object else void =
             if (value_root_scalar_scopes_enabled) undefined else {},
         frame: if (value_root_scalar_scopes_enabled) ValueRootFrame else void =
             if (value_root_scalar_scopes_enabled) .{} else {},
@@ -659,7 +578,7 @@ pub fn ObjectRootScope(comptime count: usize) type {
 pub inline fn rootObjects(slots: anytype) ObjectRootScope(slots.len) {
     if (comptime value_root_scalar_scopes_enabled) {
         var scope: ObjectRootScope(slots.len) = .{};
-        inline for (slots, 0..) |slot, index| scope.storage[index] = .{ .object = slot };
+        inline for (slots, 0..) |slot, index| scope.storage[index] = slot;
         return scope;
     }
     return .{};
@@ -1038,34 +957,28 @@ pub const Diagnostics = struct {
 
 pub const JSRuntime = struct {
     pub const Options = RuntimeOptions;
+    /// Runtime-shared logical call depth, including zero-byte nested entries.
+    call_depth: usize = 0,
+    /// Limit for both logical depth and accumulated planned VM-frame bytes.
+    stack_size: usize = default_stack_size,
+    /// Planned bytes for active bytecode frames, including tail-call callers
+    /// whose physical Entry storage has been reused.
+    active_bytecode_stack_bytes: usize = 0,
+    /// Lower bound for the current thread's call stack. Zero disables the
+    /// check or means it has not yet been initialized.
+    native_stack_limit: usize = 0,
+    /// Nesting count for calls admitted through `enterCallDepth`; it bounds
+    /// host C-stack recursion independently of inline VM call depth.
+    native_call_depth: usize = 0,
+    /// Address captured in an outermost JS entry frame, not the OS stack's
+    /// allocation start. GC uses it if the OS stack high bound is unavailable.
+    native_stack_top: usize = 0,
+    /// Configured byte budget for descending below `native_stack_top`.
+    native_stack_size: usize = default_native_stack_size,
+    /// Head of the stack-local observable backtrace chain. Native calls and
+    /// synchronous native fences replace it on entry and restore it on return.
+    current_backtrace_frame: ?*context_mod.ActiveBacktraceFrame = null,
 
-    /// Runtime-owned execution accounting and stack guards shared by all
-    /// Contexts in this Runtime. The fields cover distinct limits: logical
-    /// depth, planned VM-frame bytes, and native stack address.
-    pub const HotExecState = extern struct {
-        call_depth: usize = 0,
-        /// Logical depth ceiling and byte ceiling for accumulated VM frames.
-        stack_size: usize = default_stack_size,
-        /// Planned frame bytes for active bytecode calls, including tail-call
-        /// callers whose physical Entry storage has been reused.
-        active_bytecode_stack_bytes: usize = 0,
-        /// Native C-stack recursion guard. `updateNativeStackTop` captures
-        /// the base at an outermost JS entry; zero limit means no limit is
-        /// active, either because it is disabled or has not yet been set.
-        /// Otherwise this is the lower bound (`native_stack_top -
-        /// native_stack_size`); a frame pointer below it is an overflow.
-        /// See `checkNativeStackOverflow`.
-        native_stack_limit: usize = 0,
-        native_call_depth: usize = 0,
-        native_stack_top: usize = 0,
-        native_stack_size: usize = default_native_stack_size,
-        /// Head of the stack-local observable backtrace chain. Native calls
-        /// and synchronous native fences replace it on entry and restore it
-        /// on return.
-        current_backtrace_frame: ?*context_mod.ActiveBacktraceFrame = null,
-    };
-
-    hot: HotExecState align(64) = .{},
     /// Borrowed exec-owned authority for the currently running bytecode
     /// invocation. Core deliberately keeps this opaque: synchronous native
     /// callbacks recover the concrete Machine through exec without creating
@@ -1150,7 +1063,7 @@ pub const JSRuntime = struct {
     /// `.engine_active` policy would conservatively retain their ghosts and
     /// break deterministic reclamation assertions. Production layout is
     /// untouched (void outside test builds).
-    test_root_scan_override: if (builtin.is_test) ?GCRootScan else void =
+    test_root_scan_override: if (builtin.is_test) ?gc.RootScan else void =
         if (builtin.is_test) null else {},
     /// Cross-thread, allocation-free wake signal for host completions that
     /// must be consumed on this Runtime's owner thread. Atomics.waitAsync is
@@ -1212,7 +1125,7 @@ pub const JSRuntime = struct {
     backtrace_frames: []context_mod.BacktraceFrame = &.{},
     backtrace_capacity: usize = 0,
     active_native_call: ?*const anyopaque = null,
-    vm_stack_arena_policy: VmStackWindowPolicy = VmStackWindowPolicy.arenaForLimit(default_stack_size),
+    vm_stack_frame_storage: VmStackStorage = VmStackStorage.frameWindowForLimit(default_stack_size),
     /// Per-runtime VM value-stack arena for bytecode call frames. Its chunk
     /// metadata and the stack-accounting state in `hot` have separate owners.
     vm_stack: VmStackArena align(64) = .{},
@@ -1376,18 +1289,18 @@ pub const JSRuntime = struct {
         rt.borrowed_weak_cleanup_active = false;
         rt.gc_running = false;
         exception_state.clear(rt);
-        rt.hot.call_depth = 0;
-        rt.hot.native_call_depth = 0;
-        rt.hot.active_bytecode_stack_bytes = 0;
+        rt.call_depth = 0;
+        rt.native_call_depth = 0;
+        rt.active_bytecode_stack_bytes = 0;
         rt.formatting_error_stack = false;
         rt.backtrace_frames = &.{};
         rt.backtrace_capacity = 0;
-        rt.hot.current_backtrace_frame = null;
+        rt.current_backtrace_frame = null;
         rt.active_native_call = null;
         rt.active_invocation = null;
-        rt.hot.stack_size = options.stack_size;
-        rt.vm_stack_arena_policy = VmStackWindowPolicy.arenaForLimit(options.stack_size);
-        rt.hot.native_stack_size = options.native_stack_size;
+        rt.stack_size = options.stack_size;
+        rt.vm_stack_frame_storage = VmStackStorage.frameWindowForLimit(options.stack_size);
+        rt.native_stack_size = options.native_stack_size;
         // Arm the native recursion guard at construction, mirroring QuickJS
         // JS_NewRuntime2 -> JS_UpdateStackTop. This covers every
         // entry path (eval / evalScript / ES module graph) even those that do not
@@ -1396,8 +1309,8 @@ pub const JSRuntime = struct {
         // entries additionally re-arm (JS_UpdateStackTop analogue) for a precise
         // per-thread base — required when execution runs on a different thread
         // than construction (conformance worker runtimes).
-        rt.hot.native_stack_top = @frameAddress();
-        rt.hot.native_stack_limit = if (options.native_stack_size == 0) 0 else rt.hot.native_stack_top -| options.native_stack_size;
+        rt.native_stack_top = @frameAddress();
+        rt.native_stack_limit = if (options.native_stack_size == 0) 0 else rt.native_stack_top -| options.native_stack_size;
         rt.vm_stack.initDefault();
         rt.termination_requested = .init(false);
         rt.interrupt_handler = options.interrupt_handler;
@@ -1923,7 +1836,7 @@ pub const JSRuntime = struct {
         var frame = roots;
         while (frame) |current| {
             for (current.objects) |root| {
-                try visitor.optionalObject(root.object);
+                try visitor.optionalObject(root);
             }
             if (comptime value_root_frames_enabled) {
                 for (current.headers) |root| {
@@ -1931,7 +1844,7 @@ pub const JSRuntime = struct {
                 }
             }
             for (current.values) |root| {
-                try visitor.value(root.value);
+                try visitor.value(root);
             }
             if (comptime value_root_frames_enabled) {
                 if (visitor.visit_atom != null) {
@@ -1974,6 +1887,7 @@ pub const JSRuntime = struct {
     /// gone before teardown in every optimization mode; silently continuing
     /// would leave their deferred cleanup pointing into a destroyed Runtime.
     fn assertIdleForTeardown(self: *const JSRuntime) void {
+        self.roots.assertNoOutstandingBuffers();
         const active_job_for_runtime = if (comptime active_job_roots_enabled) blk: {
             var current = active_job_root_head;
             while (current) |root| : (current = root.previous) {
@@ -1981,10 +1895,10 @@ pub const JSRuntime = struct {
             }
             break :blk false;
         } else false;
-        if (self.hot.call_depth != 0 or
-            self.hot.native_call_depth != 0 or
-            self.hot.active_bytecode_stack_bytes != 0 or
-            self.hot.current_backtrace_frame != null or
+        if (self.call_depth != 0 or
+            self.native_call_depth != 0 or
+            self.active_bytecode_stack_bytes != 0 or
+            self.current_backtrace_frame != null or
             self.active_native_call != null or
             self.active_invocation != null or
             self.active_value_roots != null or
@@ -2219,7 +2133,7 @@ pub const JSRuntime = struct {
     pub fn tryRunObjectCycleRemovalWithValueRoots(
         self: *JSRuntime,
         roots: ?*const ValueRootFrame,
-        scan: GCRootScan,
+        scan: gc.RootScan,
     ) gc.CollectionError!gc.CollectionResult {
         self.assertOwnerThread();
         // A deferred plugin callback runs only after its collector is idle,
@@ -2300,7 +2214,7 @@ pub const JSRuntime = struct {
     pub fn pollGC(
         self: *JSRuntime,
         roots: ?*const ValueRootFrame,
-        mode: GCPollMode,
+        mode: gc.PollMode,
     ) gc.CollectionError!gc.CollectionResult {
         self.assertOwnerThread();
         if (self.active_deferred_class_payload_finalizer != null) return .{};
@@ -2324,7 +2238,7 @@ pub const JSRuntime = struct {
     pub fn pollGCChecked(
         self: *JSRuntime,
         roots: ?*const ValueRootFrame,
-        mode: GCPollMode,
+        mode: gc.PollMode,
     ) RuntimeCollectionError!gc.CollectionResult {
         try self.requireOwnerThread();
         return self.pollGC(roots, mode);
@@ -2368,12 +2282,12 @@ pub const JSRuntime = struct {
     /// from an arbitrary allocation boundary is therefore only sound while the
     /// scan covers the Zig locals the interrupted caller is holding -- the
     /// shape `Object.create` acquires before its own boundary, for one. That
-    /// is exactly the promise `GCPollMode.rootScan` makes for the engine
+    /// is exactly the promise `gc.PollMode.rootScan` makes for the engine
     /// triggers, and exactly what `test_root_scan_override` withdraws: pacing
     /// tests declare their frame quiescent so reclamation is deterministic,
     /// which an allocation boundary in the middle of a constructor is not.
     /// Those polls keep the pre-S2-g order (major without a preceding minor).
-    pub fn pollScansConservatively(self: *const JSRuntime, mode: GCPollMode) bool {
+    pub fn pollScansConservatively(self: *const JSRuntime, mode: gc.PollMode) bool {
         const scan = if (comptime builtin.is_test)
             self.test_root_scan_override orelse mode.rootScan()
         else
@@ -2469,7 +2383,7 @@ pub const JSRuntime = struct {
     /// Called by engine execution boundaries after their VM frames unwind.
     pub fn runAutomaticMicrotasks(self: *JSRuntime) errors.HostError!void {
         if (self.microtasks.policy != .auto or self.microtasks.running or self.microtasks.scope_depth != 0 or
-            self.hot.call_depth != 0 or self.hot.native_call_depth != 0 or self.active_invocation != null) return;
+            self.call_depth != 0 or self.native_call_depth != 0 or self.active_invocation != null) return;
         try self.runMicrotasks();
     }
 
@@ -2781,25 +2695,25 @@ pub const JSRuntime = struct {
 
     pub fn setStackSize(self: *JSRuntime, size: usize) void {
         self.assertOwnerThread();
-        self.hot.stack_size = size;
-        self.vm_stack_arena_policy = VmStackWindowPolicy.arenaForLimit(size);
+        self.stack_size = size;
+        self.vm_stack_frame_storage = VmStackStorage.frameWindowForLimit(size);
     }
 
     pub fn stackSize(self: *const JSRuntime) usize {
-        return self.hot.stack_size;
+        return self.stack_size;
     }
 
     pub fn nativeStackSize(self: *const JSRuntime) usize {
-        return self.hot.native_stack_size;
+        return self.native_stack_size;
     }
 
-    pub fn setNativeStackSize(self: *JSRuntime, size: usize) void {
+    pub fn setNativeStackSize(self: *JSRuntime, budget_bytes: usize) void {
         self.assertOwnerThread();
-        self.hot.native_stack_size = size;
-        if (self.hot.call_depth == 0 and self.hot.native_call_depth == 0) {
+        self.native_stack_size = budget_bytes;
+        if (self.call_depth == 0 and self.native_call_depth == 0) {
             self.updateNativeStackTop();
         } else {
-            self.hot.native_stack_limit = if (size == 0) 0 else self.hot.native_stack_top -| size;
+            self.native_stack_limit = if (budget_bytes == 0) 0 else self.native_stack_top -| budget_bytes;
         }
     }
 
@@ -2810,11 +2724,11 @@ pub const JSRuntime = struct {
     /// deeper native frames (parser / JSON / interpreter) measure against a real,
     /// same-stack base. A `native_stack_size` of 0 disables the limit.
     pub fn updateNativeStackTop(self: *JSRuntime) void {
-        self.hot.native_stack_top = @frameAddress();
-        self.hot.native_stack_limit = if (self.hot.native_stack_size == 0)
+        self.native_stack_top = @frameAddress();
+        self.native_stack_limit = if (self.native_stack_size == 0)
             0
         else
-            self.hot.native_stack_top -| self.hot.native_stack_size;
+            self.native_stack_top -| self.native_stack_size;
     }
 
     /// Return true if consuming `alloca_size` more native stack would cross the
@@ -2833,7 +2747,7 @@ pub const JSRuntime = struct {
     /// quickjs.c) and LLVM does not fold it away.
     pub inline fn checkNativeStackOverflow(self: *const JSRuntime, alloca_size: usize) bool {
         const sp = @frameAddress() -| alloca_size;
-        return sp < self.hot.native_stack_limit;
+        return sp < self.native_stack_limit;
     }
 
     pub fn internAtom(self: *JSRuntime, bytes: []const u8) !atom.Atom {
@@ -2879,7 +2793,7 @@ pub const JSRuntime = struct {
     /// Owner-only idle recovery. Requests ordered after this exchange survive.
     pub fn cancelTerminateExecution(self: *JSRuntime) !void {
         try self.requireOwnerThread();
-        if (self.hot.call_depth != 0 or self.hot.native_call_depth != 0 or self.active_invocation != null or self.microtasks.running)
+        if (self.call_depth != 0 or self.native_call_depth != 0 or self.active_invocation != null or self.microtasks.running)
             return error.RuntimeBusy;
         _ = self.termination_requested.swap(false, .acq_rel);
     }
@@ -3384,11 +3298,4 @@ test "runtime and context init-deinit are leak free" {
         ctx1.destroy();
         rt.destroy();
     }
-}
-
-/// Wall-clock microseconds for the Math.random seed (qjs js_random_init,
-/// quickjs.c, gettimeofday-based). Falls back to 1 on clock failure.
-pub fn newRealmRandomSeed() u64 {
-    const seed: u64 = @bitCast(platform_clock.realtimeMicros());
-    return if (seed == 0) 1 else seed;
 }

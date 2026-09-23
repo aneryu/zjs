@@ -134,6 +134,18 @@ The barrier fast path is one 8-byte load of the owner's metadata ANDed with
 
 ## Roots
 
+`ValueRootBuffer` (`src/core/roots.zig`) owns a fixed native value array and
+its root-provider registration. A successful `initCopy` keeps every element
+live until `deinit`; callers do not add a `ValueRootFrame` for this buffer.
+Its temporary root protects the source during backing allocation, then the
+copy during provider registration, including registration-table growth. The
+provider traces slots in the stable backing block, not a pointer into the
+movable wrapper. Ownership
+may be transferred but must not be duplicated; views expire on `deinit`.
+Buffers may be released out of order. Runtime teardown rejects outstanding
+buffers before destroying execution or heap state. Borrowed native windows
+continue to use scoped frames and require stable source storage.
+
 Precise roots: `pin_entries`, value root frames, active jobs, interpreter
 frames and operand stack (`active_invocation_trace.zig`), `runtime.traceRoots`,
 root providers. **In production only container/window value-root frames are

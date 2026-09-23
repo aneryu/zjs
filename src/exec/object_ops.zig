@@ -693,18 +693,14 @@ pub fn aggregateErrorConstructWithPrototype(
 ) !core.JSValue {
     const rt = ctx.runtime;
     var cause_val = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &cause_val },
+    var root_values = [_]*core.JSValue{
+        &cause_val,
     };
     var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
-    defer rooted_args_buffer.deinit(rt);
-    const rooted_args = rooted_args_buffer.values;
-    var root_slices = [_]core.runtime.ValueRootSlice{
-        rooted_args_buffer.slice(),
-    };
+    defer rooted_args_buffer.deinit();
+    const rooted_args = rooted_args_buffer.values();
     var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
-        .slices = &root_slices,
     };
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
@@ -803,16 +799,8 @@ pub fn suppressedErrorConstructWithPrototype(
 ) !core.JSValue {
     const rt = ctx.runtime;
     var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
-    defer rooted_args_buffer.deinit(rt);
-    const rooted_args = rooted_args_buffer.values;
-    var root_slices = [_]core.runtime.ValueRootSlice{
-        rooted_args_buffer.slice(),
-    };
-    var root_frame = core.runtime.ValueRootFrame{
-        .slices = &root_slices,
-    };
-    root_frame.activate(rt);
-    defer root_frame.deactivate(rt);
+    defer rooted_args_buffer.deinit();
+    const rooted_args = rooted_args_buffer.values();
 
     const instance = try core.Object.create(rt, core.class.ids.error_, prototype);
     const instance_value = instance.value();
@@ -897,18 +885,14 @@ pub fn errorConstructWithPrototype(
 ) !core.JSValue {
     const rt = ctx.runtime;
     var cause_val = core.JSValue.undefinedValue();
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &cause_val },
+    var root_values = [_]*core.JSValue{
+        &cause_val,
     };
     var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, args);
-    defer rooted_args_buffer.deinit(rt);
-    const rooted_args = rooted_args_buffer.values;
-    var root_slices = [_]core.runtime.ValueRootSlice{
-        rooted_args_buffer.slice(),
-    };
+    defer rooted_args_buffer.deinit();
+    const rooted_args = rooted_args_buffer.values();
     var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
-        .slices = &root_slices,
     };
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
@@ -1512,8 +1496,8 @@ pub fn constructFinalizationRegistryWithPrototype(
 ) !core.JSValue {
     const rt = ctx.runtime;
     var rooted_cleanup_callback = cleanup_callback;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_cleanup_callback },
+    var root_values = [_]*core.JSValue{
+        &rooted_cleanup_callback,
     };
     var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
@@ -1976,11 +1960,11 @@ pub fn createGeneratorObject(
     var rooted_this = this_value;
     var rooted_boxed_this = core.JSValue.undefinedValue();
 
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_func },
-        .{ .value = &rooted_current },
-        .{ .value = &rooted_this },
-        .{ .value = &rooted_boxed_this },
+    var root_values = [_]*core.JSValue{
+        &rooted_func,
+        &rooted_current,
+        &rooted_this,
+        &rooted_boxed_this,
     };
     if (input_args.len > array_ops.max_apply_arguments) {
         return throwRangeErrorMessage(ctx, global, "too many arguments in function call (only 65534 allowed)");
@@ -2775,8 +2759,8 @@ pub fn getValuePropertyWithReceiver(
 
 pub fn primitiveObjectForAccess(rt: *core.JSRuntime, global: *core.Object, primitive: core.JSValue) !core.JSValue {
     var rooted_primitive = primitive;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &rooted_primitive },
+    var root_values = [_]*core.JSValue{
+        &rooted_primitive,
     };
     var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
@@ -5122,17 +5106,17 @@ const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
 pub const EntriesMode = core.object.EntriesMode;
 const RootedValueCopies = struct {
     values: []core.JSValue,
-    roots: []core.runtime.ValueRootValue,
+    roots: []*core.JSValue,
 
     fn init(rt: *core.JSRuntime, source: []const core.JSValue) !RootedValueCopies {
         const values = try rt.nativeAllocator().alloc(core.JSValue, source.len);
         errdefer rt.nativeAllocator().free(values);
         @memcpy(values, source);
 
-        const roots = try rt.nativeAllocator().alloc(core.runtime.ValueRootValue, source.len);
+        const roots = try rt.nativeAllocator().alloc(*core.JSValue, source.len);
         errdefer rt.nativeAllocator().free(roots);
         for (values, 0..) |*value, index| {
-            roots[index] = .{ .value = value };
+            roots[index] = value;
         }
 
         return .{ .values = values, .roots = roots };

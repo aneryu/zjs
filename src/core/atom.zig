@@ -1242,7 +1242,7 @@ pub const AtomTable = struct {
     ///
     /// `stale_edge` is that reading and must be 0 -- a non-zero one is a
     /// holder that survived the collection naming a recycled slot, which is
-    /// the borrowed-atom failure mode of `docs/borrowed_atom_audit.md` §1.1.
+    /// the borrowed-atom failure mode of `docs/atom-rooting.md`.
     /// `shell_edge` is the informational mirror: an edge reaching a weak
     /// shell, which is legal (the shell exists precisely so a WeakRef can
     /// observe the death) but should be rare.

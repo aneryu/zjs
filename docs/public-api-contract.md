@@ -22,13 +22,18 @@ const zjs = @import("zjs");
 
 The public names are:
 
-- `zjs.Runtime`, `zjs.Context`, `zjs.Value` (core still uses `JSRuntime` /
-  `JSContext` / `JSValue` internally);
+- `zjs.Runtime`, `zjs.Context`, `zjs.Value` (core uses `JSRuntime` /
+  `RealmContext` / `JSValue`; `JSContext` remains its compatibility alias);
 - `zjs.Call` for a host-function invocation;
 - `zjs.EventLoop` for the host event loop (`Options`, `RunResult`,
   `runUntilIdle`);
 - option types nested on their owner: `Runtime.Options`, `Context.Options` /
   `EvalMode` / `EvalOptions` / `EvalTiming` / `FunctionOptions`.
+
+`Context.Options.math_random_seed` optionally fixes the initial state of that
+Context's Realm-local `Math.random` generator. If omitted, Realm construction
+uses the platform wall clock; zero is remapped to one because the xorshift
+generator cannot leave the zero state.
 
 `Context.defineFunction` / `createFunction` take `fn (*Call) E!Value`
 directly. `Context.defineScriptArgs` installs the CLI `scriptArgs` global.
@@ -121,6 +126,17 @@ object to override it; release with `destroy()`. Runtime has no public in-place
 initialization or copied ownership state. The libc default follows the local
 allocator comparison, not a claim of universal throughput superiority.
 
+The engine's call-budget, native-stack guard, and active-backtrace fields are
+internal `JSRuntime` state. They are direct fields; the former
+`Runtime.hot.<field>` paths have moved to `Runtime.<field>`, and no old nested
+container or binary layout is retained. `native_stack_size` is the configured
+byte budget below the captured `native_stack_top`; the derived
+`native_stack_limit` is the lower address bound. Zero disables that bound. The
+operating system owns each thread's call stack; Runtime records its base and
+configured budget but does not allocate the stack. Embedders should configure
+limits through `stackSize` / `setStackSize` and `nativeStackSize` /
+`setNativeStackSize`.
+
 Ordinary native storage uses the selected allocator directly in production.
 GC cells use the GC-owned slab, nursery, block and extent routes; prefixed
 cells must be released through their matching engine helpers. Parser scratch
@@ -157,9 +173,10 @@ creating a Context. `forceGC` propagates collection errors; silent collection
 is restricted to internal teardown and test fixtures.
 
 `stack_size` / `setStackSize` bound active VM frame bytes. The separate
-`native_stack_size` / `setNativeStackSize` bound the native stack; zero disables
-only that native bound. Existing depth safeguards remain in place. Setting a
-native bound while idle refreshes the stack base; setting it during execution
+`native_stack_size` / `setNativeStackSize` bound how many bytes below
+the current thread-stack base execution may descend; zero disables that
+address bound. Existing depth safeguards remain in place. Setting the native
+stack budget while idle refreshes the base; setting it during execution
 preserves the active entry's base.
 
 `terminateExecution` can be called from another thread while the caller keeps
@@ -318,7 +335,7 @@ survive across callbacks or ticks.
 A native function is a plain Zig function wrapped at comptime into a
 `callconv(.c)` thunk; the thunk is the `target` of one immutable
 `NativeEntry`, and the VM dispatches an embedder function exactly like a
-builtin (`docs/perf/native-boundary-design.md` §3, §9). There is no
+builtin (see [API boundary](api-boundary.md)). There is no
 registry lookup, per-call arena, handle scope, or marshalling framework on
 the call path. `src/native.zig` builds that thunk; embedders do not import
 it.

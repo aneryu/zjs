@@ -517,29 +517,18 @@ per-fold boundary records were removed; the shared vocabulary that remains
 input contract of both passes and must not be weakened (every label bound,
 binds ordered, `ref_count` exact under rollback/detach/splice).
 
-## 6. Findings
+## Production layout and phase boundaries
 
-The S0.5 audit opened eight findings. Six are closed and folded into the
-inventory above: F-1 (generator/async resume, §4.24), F-2 (logical
-assignment `&&=`/`||=`/`??=`, now a plain `LabelId` skip-assign lowering in
-`parseLogicalAssignment`), F-3 (aux-label reachability, §4.18), F-4 (`with`
-and module import/export — `parseWith` emits directly; `parseImport` /
-`parseExport` reach bytecode only through shared emitters), F-7
-(optional-call chains, `prepareCallReference` / `emitPreparedCall`), and F-8
-(direct-binding lvalues, §4.19). The mechanical coverage gate that once
-guarded against silent legacy emission was retired together with the legacy
-compiler; with a single emission path, that failure mode no longer exists.
+Production uses `layout=short`; `plain` is a diagnostic configuration.
+Keep the two compiler phase boundaries explicit:
 
-Both findings were **deleted on 2026-08-19**, landed during the
-refactor-policy zoo-gate suspension window: semantic safety rests on this
-contract's own ruling plus the full green suite; the layout effect was
-measured and recorded (stripped-image identity comparison: `.text` −432 B
-from the `BlockEnv` field removal — a QCP-1B-class layout shift accepted
-under the suspension, to be re-priced at the next zoo re-baseline):
+- `compileFunction` in [`src/compiler/root.zig`](../src/compiler/root.zig)
+  remains `noinline`, separating lowering from packed artifact publication.
+- `computeStackSizeForCurrentBytecode` in
+  [`src/compiler/finalize.zig`](../src/compiler/finalize.zig) remains
+  `noinline`, keeping final bytecode verification outside the publication body.
 
-- **F-5**: the never-assigned `BlockEnv.builder_label_finally` field and
-  its dead consuming arm in `emitCrossedControlBlockCleanup` are gone.
-- **F-6**: the four `*NoFinallyCapture` break/continue emitters and the
-  `emitForwardJump*` / `patchForwardJump` machinery they were the last
-  users of are gone. The `break_fixups`/`continue_fixups` lists remain:
-  their length assertions are live guards proving no path grows them.
+Unrelated source or struct-layout changes can alter Zig/LLVM whole-program
+inlining even when emitted JavaScript bytecode is identical. The QCP-1
+investigation is available in Git history; it does not impose an additional
+performance gate. Validation follows [verification policy](verification-policy.md).

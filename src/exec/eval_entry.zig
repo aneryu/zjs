@@ -201,7 +201,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
     // outermost base. Doing it here — on the thread that will run the parser and
     // interpreter — makes the guard correct even when the runtime was
     // constructed on a different thread's stack (test262 worker threads).
-    if (ctx.runtime.hot.call_depth == 0) rt.updateNativeStackTop();
+    if (ctx.runtime.call_depth == 0) rt.updateNativeStackTop();
     // R1-b: the compile and diagnostic phase runs in ITS OWN native frames.
     //
     // R3 ranked this function's frame first in the whole engine (158,240
@@ -759,8 +759,8 @@ pub fn execDirectEval(
 
     var func = try stack.pop();
     var rooted_args = args;
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &func },
+    var root_values = [_]*core.JSValue{
+        &func,
     };
     var root_slices = [_]core.runtime.ValueRootSlice{
         .{ .mutable = &rooted_args },
@@ -808,9 +808,9 @@ pub fn execApplyEval(
 ) !ExecEvalResult {
     var arg_array = try stack.pop();
     var func = try stack.pop();
-    var value_roots = [_]core.runtime.ValueRootValue{
-        .{ .value = &arg_array },
-        .{ .value = &func },
+    var value_roots = [_]*core.JSValue{
+        &arg_array,
+        &func,
     };
     var value_root_frame = core.runtime.ValueRootFrame{
         .values = &value_roots,
@@ -920,8 +920,8 @@ pub fn directEval(
         owned_function,
         .{ .custom = .{ .context = @ptrCast(&resolver_context), .resolve = resolveDirectEvalClosureCell } },
     );
-    var root_values = [_]core.runtime.ValueRootValue{
-        .{ .value = &eval_function_value },
+    var root_values = [_]*core.JSValue{
+        &eval_function_value,
     };
     var root_frame = core.runtime.ValueRootFrame{
         .values = &root_values,
