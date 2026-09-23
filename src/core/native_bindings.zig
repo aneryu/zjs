@@ -7,7 +7,7 @@
 
 const mem_ops = @import("memory.zig");
 const native_entry = @import("native_entry.zig");
-const JSRuntime = @import("runtime.zig").JSRuntime;
+const JSRuntime = @import("../runtime.zig").JSRuntime;
 
 pub fn alloc(rt: *JSRuntime, template: native_entry.NativeEntry) !*const native_entry.NativeEntry {
     const entry = try mem_ops.create(rt, native_entry.NativeEntry);

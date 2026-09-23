@@ -1,133 +1,102 @@
 # Limitations
 
-`zjs` has reached its Production v1 Candidate status. It is designed for
-semantic convergence, validation work, and production-grade Zig-native embedded
-use cases, rather than a broad, general-purpose production JavaScript runtime
-such as a full Node.js or Deno competitor.
+zjs is a JavaScript / TypeScript engine for trusted-code embedding in Zig.
+This page defines product boundaries; dated validation results live in
+[STATUS.md](STATUS.md).
 
 ## Runtime Boundary
 
-- QuickJS remains the semantic reference, but this checkout no longer vendors a
-  local `quickjs/` source tree.
-- Compatibility is scoped to the active `test262.conf` profile and the
-  focused regression tests in this repository.
-- `zjs` is not a Node.js, Deno, browser, or drop-in `libquickjs` C API
-  replacement.
-- The engine-only Production v1 target is trusted-code embedding, not
-  hostile-code sandboxing. See the Security Boundary section below.
+- Compatibility is scoped to [the validation profile](COMPATIBILITY.md) and
+  focused regressions. ECMA-262 governs JavaScript semantics; QuickJS is a
+  comparison reference, with no vendored `quickjs/` source tree.
+- Node.js, Deno, browser APIs, and the `libquickjs` C ABI are outside scope.
+- Each runtime and its values belong to one owner thread.
+
+## TypeScript
+
+The parser accepts `.ts`, `.mts`, and `.cts` directly. It erases type-only
+syntax and lowers supported runtime constructs: enums, namespaces, parameter
+properties, and `import x = A.B` aliases. It does not perform type checking
+or replace `tsc`.
+
+JSX (`.tsx`), decorators, `import x = require()`, and `export =` are outside
+scope. Detailed parsing rules are in the
+[TypeScript parser design](docs/parser-ts-first-class-design.md).
+
+## Debugging
+
+A Chrome DevTools Protocol inspector/debugger is not implemented. Breakpoints,
+stepping, call stacks, and scope inspection remain planned capabilities;
+see the [roadmap](docs/roadmap.md).
 
 ## Security Boundary
 
-Production v1 targets trusted-code embedding. It does not claim hostile-code
-sandboxing.
+Production v1 targets trusted or pre-vetted source, not hostile-code sandboxing.
+The embedder owns OS isolation, process/filesystem/network policy, and
+wall-clock supervision. Native host functions are trusted code.
 
-Supported assumptions:
+Memory limits, stack limits, GC thresholds, and cooperative interrupts improve
+reliability. They do not prevent all CPU starvation, host API misuse, side
+channels, allocator fragmentation, or native-code bugs.
 
-- JavaScript source is trusted or pre-vetted by the embedder.
-- One runtime is used from one thread.
-- The embedder owns OS isolation, process limits, filesystem policy, network
-  policy, and wall-clock supervision.
-- Native host functions are trusted and can compromise the process if written
-  incorrectly.
-
-The engine exposes memory limits, stack size, GC threshold, and cooperative
-interrupt hooks. These controls are required for reliability and runaway-code
-mitigation in trusted embeddings. They are not a complete sandbox because
-they do not prevent all CPU starvation, host API misuse, side channels,
-allocator fragmentation pressure, or bugs in native host code.
-
-Out of scope for v1: running attacker-controlled JavaScript in-process,
-cross-thread runtime use, capability-secure module loading, browser /
-Node.js / Deno permission models, deterministic execution across hosts, and
-hard real-time interruption.
-
-Any Production v1 release notes must state: `zjs` is a production-targeted
-embeddable JavaScript engine for trusted code. It is not an in-process
-sandbox for hostile JavaScript.
+Out of scope: attacker-controlled JavaScript in-process, cross-thread runtime
+use, capability-secure module loading, browser/Node/Deno permission models,
+deterministic execution across hosts, and hard real-time interruption.
+Release notes must state the trusted-code boundary.
 
 ## CLI Lifecycle
 
-The CLI intentionally has two lifecycle modes:
-
-- Normal successful CLI execution lets the operating system reclaim process
-  memory at exit. This keeps large test262 sweeps from being dominated by
-  deinitialization and avoids turning still-maturing cleanup assertions into
-  false conformance failures.
-- `--leak-check` runs the full engine deinitialization path and enables Zig
-  allocator validation. Use it for ownership work and leak investigations.
-
-In-process tests and embedding-style paths should still deinitialize normally
-and should not rely on process exit for cleanup.
+- Successful CLI execution normally leaves process-memory reclamation to the
+  OS. `--leak-check` performs full engine teardown and allocator validation.
+- In-process tests and embedders must deinitialize normally; process exit is
+  not their cleanup mechanism.
 
 ## GC Limitations
 
-- Reference counts are non-atomic. A runtime and its values are thread-affine.
-- The collector is non-moving. Embedders must still treat raw object pointers as
-  runtime-owned and must not keep them without a persistent handle (`rt.createPersistentValue`) or
-  documented native payload ownership.
-- GC safe points are explicit. New VM or host APIs that allocate must root
-  temporaries before polling GC.
-- Changes that touch weak edges, finalizers, descriptors, or object graphs need
-  focused leak/lifetime tests plus the relevant smoke or test262 slice.
+- The tracing collector is non-moving; it does not use heap reference counts.
+- Raw object pointers remain runtime-owned. Host values need local handles
+  while in use and persistent handles across calls/ticks, or the documented
+  native-payload tracing protocol.
+- Allocation-capable VM/host paths must root temporaries before GC safe points.
+- Weak edges, finalizers, descriptors, and object-graph changes need focused
+  lifetime coverage and the verification required for the affected behavior.
+
+See [GC invariants](docs/gc-invariants.md) and the
+[public API contract](docs/public-api-contract.md) for ownership details.
 
 ## Standard Library and Host APIs
 
-- No Node.js or Deno standard modules are provided.
-- There is no QuickJS-style `qjs:std`/`qjs:os` layer; the legacy implementation
-  was removed (git history has it). Host capabilities are added through the
-  external host-function registry instead.
-- There is no stable JavaScript FFI for loading arbitrary C, C++, or Zig
-  libraries.
-- Host APIs such as Fetch, Streams, WebCrypto, DOM, and browser event-loop
-  integration are outside the current core-engine scope.
+No Node.js/Deno modules, `qjs:std`/`qjs:os`, or stable JavaScript FFI for
+arbitrary C/C++/Zig libraries are provided. Host functions supply application
+capabilities. Fetch, Streams, WebCrypto, DOM, and browser event-loop integration
+are outside the core-engine scope.
 
 ## Modules
 
-ECMAScript modules and binary module imports (using `import ... with { type: "bytes" }`)
-are supported within the local validation boundary. CommonJS `require`,
-`node_modules` resolution, package exports/import maps, and hybrid Node-style
-module loading are not supported.
+ECMAScript modules and binary imports (`import ... with { type: "bytes" }`)
+are supported within the validation profile. CommonJS `require`, `node_modules`
+resolution, package exports/import maps, and hybrid Node-style loading are not.
 
 ## Proper Tail Calls
 
-- Proper tail calls are **strict-mode only** (per ES2015 14.6) and cover
-  plain-call tails: `return f(...)` directly, and calls whose control flow
-  provably reaches `return` next (conditional-expression arms and short
-  unconditional-jump joins). Those fold to `tail_call` plus a leftover
-  `return` stub and reuse the caller frame — compat-table direct and mutual
-  recursion (1e6) stay in constant stack, and the reused caller drops off
-  `Error.prototype.stack`. This is a deliberate divergence from the pinned
-  QuickJS, which grows a frame for every call.
-- Sloppy-mode code, method tails (`o.m()` / `this.m()`), constructor
-  completions, calls protected by a live `try`, and L0 host entries all
-  still grow a logical frame, exactly like QuickJS: deep recursion there
-  throws catchable `InternalError: stack overflow`.
-- Infinite strict `return f()` therefore does not overflow; a test that
-  needs a catchable overflow must use sloppy mode or a non-tail shape
-  (`return 1 + f()` or `return this.m()`).
-- `tail-call-optimization` remains skipped in `test262.conf` (method-position
-  tails are not proper tail calls here). Method-position deep tails are
-  guarded by focused Zig fixtures (`tco-member-args.js` is a plain call).
+- Strict-mode plain-call tails reuse the caller frame: direct `return f(...)`
+  and calls whose control flow reaches `return` through conditional arms or
+  short unconditional jumps. The reused caller drops off `Error.prototype.stack`.
+  This differs deliberately from pinned QuickJS's frame growth.
+- Sloppy code, method tails (`o.m()` / `this.m()`), constructors, live-`try`
+  protected calls, and L0 host entries still grow logical frames. Deep recursion
+  there throws catchable `InternalError: stack overflow`.
+- Infinite strict `return f()` therefore does not overflow. Overflow tests need
+  sloppy mode or a non-tail shape such as `return 1 + f()` or `return this.m()`.
+- `tail-call-optimization` remains skipped in `test262.conf` because method tails
+  are not implemented. Focused Zig fixtures cover the boundary;
+  `tco-member-args.js` exercises a plain call.
 
 ## Performance
 
-The public QuickJS comparison is the bench-v8 composite-score ratio in
-[docs/perf/bench-v8-status.md](docs/perf/bench-v8-status.md); the current
-value and its reference binary are recorded there (the Octane-2.0 reading
-has not yet gone through an owner ruling to become the published metric).
-The headline is a composite-score ratio, not every-benchmark parity.
+[bench-v8 status](docs/perf/bench-v8-status.md) is a configuration-specific
+historical comparison. It is neither per-benchmark parity nor a performance
+merge gate. Local measurements are diagnostic.
 
-There is no checked performance gate: benchmark, single-script, and
-runtime-profile artifacts are all diagnostic. Do not treat external-process
-microbench timings as a semantic compatibility signal.
-
-Per-opcode profiling requires the dedicated profiling build
-(`zig build zjs-profile`). The default `zjs` binary does not collect opcode
-counts and fails closed on `--profile-opcodes`.
-
-## Documentation Scope
-
-Historical phase plans, snapshot ledgers, and one-off audits are not active
-documentation. Durable evidence should live with the owning code change, issue,
-or PR. Add a new design document only when it describes an ongoing contract
-that future code must follow.
+Per-opcode counts require `zig build zjs-profile`; the default CLI rejects
+`--profile-opcodes`. See [performance workflow](docs/perf/README.md).

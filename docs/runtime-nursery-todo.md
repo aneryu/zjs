@@ -1,10 +1,11 @@
-# TODO: 评估年轻代 nursery
+# 年轻代 nursery：评估与阻塞项
 
-Status: TODO — 待评估，尚未确定具体方案与默认启用策略
+Status: 2026-09-23 已核对启用路径并执行正确性探针；发现阻塞，性能评估 INCONCLUSIVE，保持默认关闭。
 
-所属讨论：[JSRuntime Review M14](runtime-review/history.md#内存能力已讨论的边界)。
+所属设计：[Runtime 后续工作范围](runtime-target-design.md#711-不随结构重构自动扩展的工作)。
 
-2026-09-21：用户要求将 nursery 评估记录为待办。本次只记录，不实施改造。
+2026-09-21：用户要求将 nursery 评估记录为待办；当时只记录，未实施改造。
+2026-09-23 的核对与探针结果见下文。
 
 ## 评估范围
 
@@ -22,3 +23,17 @@ https://v8.dev/blog/trash-talk#generational-layout
 
 zjs 实现入口：`src/core/gc_nursery.zig`、`src/core/gc.zig`。
 分代方向的讨论不等于已批准当前复制实现或参数；测量遵循现行验证政策。
+
+## 2026-09-23 核对结果与实施顺序
+
+证据、源码路径和复现方法见 [nursery 探针记录](runtime-review/nursery-2026-09-23/README.md)。本轮未修改生产源码。
+
+- [x] N1：核对默认开关、分配对象范围、bootstrap 绕行、页面来源、触发条件和预算归属。
+- [x] N2：隔离工作区显式 on/off 探针；Debug 构建通过，四次运行均失败，原始输出已保留。不能记为性能样本。
+- [ ] N3：先定位默认 off 路径的 Runtime 销毁 outstanding allocations 断言；1 次 eval 即可复现。区分探针宿主用法与引擎释放/诊断问题，补最小回归。
+- [ ] N4：定位 nursery on 的 reduce 对象类型断言，检查复制后的根、槽位更新、对象内部自引用及保守 pin；形成最小反例后修复，不靠禁止断言或放宽 pin 掩盖。
+- [ ] N5：明确启用时 nursery 页、存活对象及晋升的 heap budget/统计口径，验证超限、晋升 OOM 和回滚；同步修正与实际保留页/析构行为不符的注释。
+- [ ] N6：通过短命、高存活率、跨代引用、长期运行、弱引用/终结器及 OOM 的 nursery-on 正确性验证，再执行代表性 ReleaseFast A/B；记录吞吐、暂停、峰值/稳态内存、复制量和保留页成本。
+- [ ] N7：按 N6 证据决定是否采用、默认启用及容量/晋升策略；不能由模块存在或单次分配成功推定可上线。
+
+N3/N4 是已复现失败，N5 是启用前待定契约，N6/N7 尚未执行。默认关闭只保留当前生产行为，不表示这些缺口已解决。

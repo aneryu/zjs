@@ -23,7 +23,7 @@ pub const MutationError = error{WrongRuntimeThread};
 
 /// A definition is meaningful only in its registering Runtime.
 pub const Binding = struct {
-    owner: *@import("runtime.zig").JSRuntime,
+    owner: *@import("../runtime.zig").JSRuntime,
     id: ClassId,
 };
 
@@ -327,7 +327,7 @@ pub const Table = struct {
     };
 
     atoms: *atom.AtomTable,
-    owner: *@import("runtime.zig").JSRuntime,
+    owner: *@import("../runtime.zig").JSRuntime,
     next_dynamic_id: u32 = ids.init_count,
     records: []Record = &.{},
     records_inline: [ids.init_count]Record = @splat(.{}),
@@ -343,7 +343,7 @@ pub const Table = struct {
     /// record view.
     standard_plans: [ids.init_count]DefinitionPlan = undefined,
 
-    pub fn init(self: *Table, owner: *@import("runtime.zig").JSRuntime) !void {
+    pub fn init(self: *Table, owner: *@import("../runtime.zig").JSRuntime) !void {
         self.* = .{
             .atoms = &owner.atoms,
             .owner = owner,

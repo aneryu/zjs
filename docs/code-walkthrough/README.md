@@ -1,6 +1,6 @@
 # zjs 源码逐函数讲解
 
-zjs 是用 Zig 写的可嵌入 JavaScript 引擎，语义权威是 ECMA-262（test262 验证），QuickJS 是对照实现。本系列按分层把 **`src/` 与构建入口的非测试函数** 讲一遍，作为现有 [architecture.md](../architecture.md) 的函数级展开。
+zjs 是用 Zig 编写的可嵌入 JavaScript / TypeScript 引擎。JavaScript 语义遵循 ECMA-262（test262 验证），QuickJS 是对照实现。本系列讲解 **`src/` 与构建入口的非测试函数**，作为 [architecture.md](../architecture.md) 的函数级展开。
 
 先读 [00-overview.md](00-overview.md)，再按一次 `eval` 的数据流往下走。写作规范见 [_spec.md](_spec.md)。函数清单见 [_inventory.tsv](_inventory.tsv)。
 

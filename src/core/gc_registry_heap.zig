@@ -30,7 +30,7 @@ pub const Tokens = struct {
 
     /// Idempotent: a Registry rolled back halfway through construction can
     /// reach this twice.
-    pub fn deinit(self: *Tokens, account: *@import("runtime.zig").JSRuntime) void {
+    pub fn deinit(self: *Tokens, account: *@import("../runtime.zig").JSRuntime) void {
         self.entries.deinit(account.nativeAllocator());
         self.entries = .empty;
     }
@@ -48,7 +48,7 @@ pub const Tokens = struct {
     }
 
     /// Record `bytes` and return the id that discharges them.
-    pub fn add(self: *Tokens, account: *@import("runtime.zig").JSRuntime, bytes: usize) !u64 {
+    pub fn add(self: *Tokens, account: *@import("../runtime.zig").JSRuntime, bytes: usize) !u64 {
         try self.entries.ensureUnusedCapacity(account.nativeAllocator(), 1);
         const id = self.takeId();
         self.entries.appendAssumeCapacity(.{ .id = id, .bytes = bytes });

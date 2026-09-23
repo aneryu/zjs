@@ -1,76 +1,52 @@
 # Production v1 Release Checklist
 
-Use this checklist for an engine-only Production v1 release decision.
+For trusted-code JS/TS embedding releases. [Verification policy](verification-policy.md)
+defines gate obligations; [GUIDE Part B.6](../GUIDE.md#b6-validation-tiers)
+explains commands. Run the release aggregate through `mise run production-gate`
+and the ReleaseSafe suite once. Do not repeat quick/checkpoint subsets as
+prerequisites. Performance tools are diagnostic, not release gates.
 
-`zig build engine-production-gate -Doptimize=ReleaseFast --summary all` is the semantic gate. It is
-required release evidence, but it does not replace the ReleaseSafe, hygiene,
-and performance checks below.
+## API and lifecycle
 
-`mise run quick-gate` and `mise run checkpoint-gate` are iteration and handoff
-shortcuts. Do not rerun them as prerequisites for the aggregate release gate.
+- Public API and ownership match [the contract](public-api-contract.md);
+  removed APIs and error-set changes have migration/release notes.
+- [Embedding examples](../tests/embedding_examples.zig) pass, including native
+  registration failure cleanup and host-owned state preservation.
+- Runtime/context teardown is clean under leak detection. Local/persistent
+  handle lifetimes have regression coverage.
+- Memory-limit/OOM paths return `error.OutOfMemory` without leftover host-owned
+  values; cooperative interrupt behavior has focused coverage.
 
-## API
+## Compatibility and boundaries
 
-- Public Zig API matches `docs/public-api-contract.md`.
-- Public embedding cookbook examples compile and pass through
-  `tests/embedding_examples.zig`.
-- Public native-function registration (`zjs.native`) failure paths preserve
-  host-owned state and leave no half-installed binding.
-- Ownership-bearing values have documented free paths.
-- Error-set changes are recorded in release notes.
-- No public API was removed without a migration note.
-
-## Lifecycle
-
-- Runtime/context init, eval, and deinit run cleanly under Zig leak detection.
-- Public handle lifetime is covered by production tests: local handle scopes
-  release at scope exit, and persistent handles keep host-held values alive
-  across scopes.
-- Memory-limit / OOM paths used by public embedding APIs have focused tests
-  that return `error.OutOfMemory` without leaving pending host-owned values.
-- Interrupt-handler behavior is covered by a production regression test.
-
-## Compatibility
-
-- `zig build engine-production-gate -Doptimize=ReleaseFast --summary all`
-  passes from a clean checkout; it includes the unified ReleaseFast suite,
-  CLI/profile smoke, embedding tests, and the full test262 gate.
-- `zig build test -Doptimize=ReleaseSafe --summary all` passes once as
-  the optimized-loop safety gate.
-- Focused test262 slices were run for every changed semantic area.
-
-## Boundary
-
-- Layering in `docs/architecture.md` still holds: `src/core/` does not
-  depend on CLI, test262 glue, plugin loaders, or the event loop.
-- The Security Boundary section in `LIMITATIONS.md` is accurate for the
-  release.
-- `COMPATIBILITY.md` and `LIMITATIONS.md` do not overclaim.
-- Release notes state that the engine is trusted-code only.
+- `mise run production-gate` passes from a clean checkout: ReleaseFast suite,
+  CLI/profile smoke, embedding tests, and full test262.
+- `zig build test -Doptimize=ReleaseSafe --summary all` passes.
+- Changed semantic areas have focused regression/slice evidence.
+- Core keeps its [layer boundaries](architecture.md); host policy stays outside.
+- [Compatibility](../COMPATIBILITY.md) and [Limitations](../LIMITATIONS.md)
+  accurately describe the release. Release notes state the trusted-code boundary.
 
 ## Artifacts
 
-- Release tarballs carry a **stripped** `zjs`. `.github/workflows/nightly.yml`
-  runs `strip` (plus `codesign -s -` on arm64 macOS, which `strip` invalidates)
-  then `zjs -e 'print(1)'` against the exact bytes shipped, so a broken strip
-  fails the release rather than the user.
-- Stripping is post-link on purpose: it leaves `.text` and the
-  `.text.zjs.op_handlers` island byte-identical to the binary the gates
-  measured. Building with `-fstrip` instead moves `.text` by 40 bytes, which
-  would ship a layout the performance gate never measured.
-- Reproduce a release artifact locally with
-  `zig build zjs -Doptimize=ReleaseFast && strip zig-out/bin/zjs`. Do not
-  strip a binary you intend to profile: `nm`,
-  `addr2line`, and `perf` attribution all need the symbols, which is why no
-  build step strips by default. Current stripped composition:
-  [binary-size.md](binary-size.md).
+- Ship a stripped CLI. [Nightly packaging](../.github/workflows/nightly.yml)
+  strips after linking, re-signs on ARM64 macOS, and checks `zjs -e 'print(1)'`
+  against the final executable before packaging.
+- Keep post-link stripping so the linked code layout matches the tested binary.
+  Preserve an unstripped copy for `nm`, `addr2line`, and `perf` attribution.
+- Reproduce the stripped CLI locally with:
 
-## Hygiene
+  ```sh
+  zig build zjs -Doptimize=ReleaseFast
+  strip zig-out/bin/zjs
+  ```
 
-- `git diff --check` passes.
-- A performance-sensitive release carries local benchmark evidence recorded in
-  the PR or release notes; see `docs/perf/README.md` for the measurement
-  contract. Performance steps never run in CI.
-- No temporary debug output, generated noise, or unrelated refactors are in the
-  release diff.
-- Non-trivial validation evidence is in the PR, issue, or release notes.
+  On ARM64 macOS, also re-sign as the workflow does before executing it.
+  Size evidence lives in [binary composition](binary-size.md).
+
+## Hygiene and evidence
+
+- `git diff --check` passes; no temporary output, generated noise, or unrelated
+  refactors are included.
+- Record actual validation results and any diagnostic performance claims with
+  the release/PR, including configuration and artifact identity.

@@ -47,7 +47,7 @@ const value_semantics = @import("value_semantics.zig");
 const bignum = @import("../libs/bigint.zig");
 
 const JSValue = @import("value.zig").JSValue;
-const JSRuntime = @import("runtime.zig").JSRuntime;
+const JSRuntime = @import("../runtime.zig").JSRuntime;
 const Object = object.Object;
 const Atom = atom.Atom;
 const Descriptor = descriptor.Descriptor;

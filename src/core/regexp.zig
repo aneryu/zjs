@@ -18,7 +18,7 @@ const std = @import("std");
 
 const unicode = @import("../libs/unicode.zig");
 const regexp_lib = @import("../libs/regexp.zig");
-const JSRuntime = @import("runtime.zig").JSRuntime;
+const JSRuntime = @import("../runtime.zig").JSRuntime;
 
 /// The runtime as the regexp library's host: its native-stack guard for the
 /// pattern compiler and its interrupt poll as the executor's timeout check.

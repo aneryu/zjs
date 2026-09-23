@@ -1,96 +1,40 @@
-# zjs — Embeddable JavaScript Engine Written in Zig
+# zjs — JavaScript / TypeScript Engine Written in Zig
 
 [![CI](https://github.com/aneryu/zjs/actions/workflows/ci.yml/badge.svg)](https://github.com/aneryu/zjs/actions/workflows/ci.yml)
 
-**zjs is an embeddable JavaScript engine written in Zig and a rewrite of
-[Bellard QuickJS](https://bellard.org/quickjs/).** It runs JavaScript inside Zig
-applications through a Zig-native API. QuickJS is the semantic and
-implementation reference: zjs follows its JavaScript behavior and core
-mechanisms while exposing explicit runtime, context, value, and ownership
-lifetimes.
+**zjs is an embeddable JavaScript / TypeScript engine written in Zig.**
+It provides a Zig-native embedding API and a standalone CLI for trusted code.
+TypeScript sources run directly through native parsing, type erasure, and
+supported syntax lowering; zjs does not perform type checking.
 
-The canonical project is [`aneryu/zjs`](https://github.com/aneryu/zjs). The
-project targets trusted, embeddable JavaScript execution in Zig. It is not a
-Node.js, Deno, Bun, browser, hostile-code sandbox, or drop-in `libquickjs` C API
-replacement.
+JavaScript semantics follow **ECMA-262**, validated by the repository's
+test262 profile. QuickJS is a comparison reference and performance yardstick.
+The implementation follows Zig's types, explicit lifetimes, and error handling.
 
-## zjs At A Glance
+The canonical project is [aneryu/zjs](https://github.com/aneryu/zjs).
+It requires **Zig 0.16.0** and is MIT licensed, with retained
+[QuickJS attribution](LICENSE).
 
-| Question | Answer |
-| --- | --- |
-| What is it? | An embeddable JavaScript engine, library, and CLI |
-| What is it written in? | Zig 0.16.0 |
-| What defines JavaScript behavior? | ECMA-262 as validated by test262; QuickJS is the comparison reference |
-| How do Zig applications use it? | Through the `zjs` module's Zig-native embedding API |
-| Does it support TypeScript? | Yes: the parser's grammar is TypeScript's, so `.ts` sources run directly (types erased, `enum`/`namespace`/parameter properties lowered). It is not a type checker |
-| What is the compatibility evidence? | The repository's pinned test262 profile and checked results |
-| What is the license? | MIT, including the retained QuickJS attribution in [`LICENSE`](LICENSE) |
-
-Use zjs when a Zig application needs an in-process JavaScript interpreter with
-explicit ownership and runtime control. Choose another runtime when the
-application needs Node.js packages and APIs, browser APIs, a security boundary
-for untrusted code, the QuickJS C ABI, TypeScript type checking, JSX, or
-decorators.
-
-## Performance: bench-v8
-
-The public comparison is the **bench-v8** (Octane 2.0, V8 suite version 9)
-snapshot in
-[docs/perf/bench-v8-status.md](docs/perf/bench-v8-status.md). The current
-cross-engine reading is zjs/QuickJS composite **0.9666** against the GCC
-16.0.1 yardstick. Scores are the suite's self-reported numbers (higher is
-better). Suite scores are not comparable across suite versions or
-reference binaries. The official yardstick was ruled 2026-08-26 (BASE-G0):
-the GCC-16 reference build pinned in
-`reports/evidence/BASE-G0/manifest.json`. The suite itself is no longer
-vendored in-tree; the snapshot is the record. The superseded version-7
-records were removed on 2026-08-25 and live in git history.
-
-This is a single-machine snapshot, not a portable ranking. The detailed
-protocol and reference-binary fingerprints are recorded in
-[docs/perf/bench-v8-status.md](docs/perf/bench-v8-status.md).
-
-## Compatibility
-
-The checked test262 profile records the current validation boundary:
-
-| Prepared | Passed | Failed | Feature-skipped |
-| ---: | ---: | ---: | ---: |
-| 49,778 | **44,584** | **0** | 5,194 |
-
-The feature-skipped set includes Intl, Temporal, ShadowRealm, and the other
-groups listed in `test262.conf`. These numbers describe the configured profile,
-not complete support for every ECMAScript or host feature. See
-[COMPATIBILITY.md](COMPATIBILITY.md) for enabled areas and exact exclusions.
-
-## Try The CLI
-
-Requires [Zig 0.16.0](https://ziglang.org/download/).
-
-Prebuilt nightly CLIs for Linux x86_64, macOS ARM64, and Windows x86_64 are
-published on the [Nightly release](https://github.com/aneryu/zjs/releases/tag/nightly).
-They are development snapshots; verify downloads against the attached
-`SHA256SUMS` file.
+## Try the CLI
 
 ```sh
 git clone https://github.com/aneryu/zjs.git
 cd zjs
-zig build zjs --summary all
-./zig-out/bin/zjs -e "console.log(1 + 2)"
-```
-
-That default is Debug. Build the shipped ReleaseFast CLI with:
-
-```sh
 zig build zjs -Doptimize=ReleaseFast --summary all
 ./zig-out/bin/zjs -e "console.log(1 + 2)"
 ./zig-out/bin/zjs path/to/file.js
+./zig-out/bin/zjs path/to/file.ts
 ```
 
-A file path evaluates as a module. `-e` is a script; `-s` forces script
-mode. Missing or invalid arguments print usage and exit non-zero.
+Omitting `-Doptimize=ReleaseFast` builds Debug. A file path evaluates as a
+module; `-e` evaluates a script, and `-s` forces script mode. Missing or
+invalid arguments print usage and exit non-zero.
 
-## Embed JavaScript In Zig
+[Nightly binaries](https://github.com/aneryu/zjs/releases/tag/nightly) are
+available for Linux x86_64, macOS ARM64, and Windows x86_64. They are
+development snapshots; verify downloads against the attached `SHA256SUMS`.
+
+## Embed in Zig
 
 The public module is imported as `zjs`:
 
@@ -113,58 +57,42 @@ pub fn main(init: std.process.Init) !void {
 }
 ```
 
-See [docs/embedding-cookbook.md](docs/embedding-cookbook.md) for host
-functions, handles, strings and bytes, memory limits, interrupts, and
-modules. The examples are covered by the embedding test target.
+The runtime belongs to one thread. Host values must be rooted for their use:
+local handles cover a call/scope; persistent handles cover callbacks, ticks,
+and host object state. See the [embedding cookbook](docs/embedding-cookbook.md)
+for tested examples and the [public API contract](docs/public-api-contract.md)
+for ownership rules.
 
-## Runtime And Ownership Boundary
+## Supported scope
 
-The runtime is single-threaded. Host-owned `Value`s must remain in a
-handle scope / local handle for the duration of a call, or in a persistent
-handle (`rt.createPersistentValue`) when they cross callbacks, ticks, or host
-object state. Embedders must release owning values with the runtime that
-created them.
+zjs targets in-process execution in Zig applications. It does not provide
+Node.js/Deno packages and APIs, browser APIs, the `libquickjs` C ABI, or a
+security boundary for hostile code. Memory limits and cooperative interrupts
+are reliability controls for trusted embeddings.
 
-Memory and interrupt limits are reliability controls for trusted embeddings;
-they are not a security boundary for untrusted JavaScript. See the Security
-Boundary section in [LIMITATIONS.md](LIMITATIONS.md).
+TypeScript support includes `.ts`, `.mts`, and `.cts`, type erasure, and
+runtime syntax such as enums and namespaces. Type checking, JSX, decorators,
+and CommonJS-style TypeScript imports/exports are outside the current scope.
+The [limitations](LIMITATIONS.md) document defines these boundaries and the
+current debugger/CDP status.
 
-## Vision And Roadmap
+## Validation and performance
 
-zjs aims to remain aligned with QuickJS for JavaScript semantics while making
-JavaScript and TypeScript first-class, inspectable components of Zig
-applications. Two major areas remain on the roadmap:
+[Compatibility](COMPATIBILITY.md) describes the selected test262 profile and
+exclusions. [STATUS.md](STATUS.md) records dated validation results; a passing
+profile does not imply support for every ECMAScript or host feature.
 
-1. **Native TypeScript support — grammar level today.** The parser reads
-   TypeScript directly and treats JavaScript as its subset; `.ts`, `.mts`,
-   and `.cts` sources run without a transpilation step. Type-only syntax is
-   erased, `enum` / `namespace` / parameter properties / `import x = A.B`
-   are lowered. Out of scope: type checking, JSX (`.tsx`), decorators, and
-   `import x = require()` / `export =`. zjs is not intended to replace the
-   TypeScript type checker or `tsc`.
-2. **Chrome DevTools Protocol support — not implemented.** zjs does not
-   currently expose a CDP inspector or debugger. The roadmap begins with
-   runtime evaluation, breakpoints, stepping, call stacks, and scope inspection
-   for DevTools-compatible clients.
-
-These capabilities build around the QuickJS-aligned engine; they do not change
-QuickJS's role as the reference for in-scope JavaScript behavior.
+The [bench-v8 snapshot](docs/perf/bench-v8-status.md) records the QuickJS
+comparison with its suite, machine, and binary fingerprints. Ratios are
+specific to that configuration. Local performance investigation is described
+in the [performance workflow](docs/perf/README.md).
 
 ## Documentation
 
-- [docs/embedding-cookbook.md](docs/embedding-cookbook.md): Zig-native embedding examples.
-- [COMPATIBILITY.md](COMPATIBILITY.md): test262 validation boundary.
-- [LIMITATIONS.md](LIMITATIONS.md): runtime and product boundaries.
-- [docs/public-api-contract.md](docs/public-api-contract.md): public Zig API.
-- [docs/architecture.md](docs/architecture.md): source and subsystem tour.
-- [docs/README.md](docs/README.md): complete documentation map.
-- [llms.txt](llms.txt): compact project facts and authoritative source map for
-  retrieval tools.
-- [CONTRIBUTING.md](CONTRIBUTING.md): contribution workflow.
-- [GUIDE.md](GUIDE.md): engineering rules and validation commands.
-
-The semantic authority is ECMA-262 as validated by test262; QuickJS is the
-comparison reference implementation, not the standard (owner ruling
-2026-08-22). Where the pinned QuickJS deviates from the spec, zjs follows the
-spec and records the divergence. Intentional divergences must be explicit,
-reviewed, and covered by tests.
+- [Embedding cookbook](docs/embedding-cookbook.md): host functions, values,
+  memory limits, interrupts, and modules.
+- [Architecture](docs/architecture.md): source ownership and layer boundaries.
+- [Contributing](CONTRIBUTING.md): engineering and validation workflow.
+- [Documentation index](docs/README.md): contracts, designs, and planned work.
+- [Roadmap](docs/roadmap.md): planned work and dependencies.
+- [llms.txt](llms.txt): compact retrieval index.

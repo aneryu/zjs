@@ -154,7 +154,7 @@ const NoRecordReason = enum {
     name_cascade_debt,
 };
 
-/// Comptime mirror of `JSRuntime.internalBuiltinRecord` (core/runtime.zig:2291).
+/// Comptime mirror of `JSRuntime.internalBuiltinRecord` (runtime.zig:2291).
 /// The record table is a comptime constant, so "will this id dispatch at
 /// runtime?" is answerable while the method tables are still being built.
 fn comptimeInternalRecordExists(comptime encoded_id: i32) bool {

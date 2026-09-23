@@ -11,7 +11,7 @@ const context_mod = @import("context.zig");
 const gc = @import("gc.zig");
 const object_mod = @import("object.zig");
 const shape = @import("shape.zig");
-const JSRuntime = @import("runtime.zig").JSRuntime;
+const JSRuntime = @import("../runtime.zig").JSRuntime;
 const Object = object_mod.Object;
 const JSContext = context_mod.JSContext;
 

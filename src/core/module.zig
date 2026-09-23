@@ -166,7 +166,7 @@ pub const ResolvedExport = union(enum) {
 /// `module_ns` is intentionally absent: a namespace is published only after a
 /// fresh record has been completely installed and linked.
 pub const PendingDefinition = struct {
-    runtime: *@import("runtime.zig").JSRuntime,
+    runtime: *@import("../runtime.zig").JSRuntime,
     atoms: *atom.AtomTable,
     requests: []RequestEntry = &.{},
     imports: []ImportEntry = &.{},
@@ -178,7 +178,7 @@ pub const PendingDefinition = struct {
     synthetic_kind: SyntheticKind = .none,
     has_top_level_await: bool = false,
 
-    pub fn init(account: *@import("runtime.zig").JSRuntime, atoms: *atom.AtomTable) PendingDefinition {
+    pub fn init(account: *@import("../runtime.zig").JSRuntime, atoms: *atom.AtomTable) PendingDefinition {
         return .{ .runtime = account, .atoms = atoms };
     }
 
@@ -350,7 +350,7 @@ pub const ModuleRecord = struct {
     registry_prev: ?*ModuleRecord = null,
     registry_next: ?*ModuleRecord = null,
     registry: ?*Registry = null,
-    runtime: *@import("runtime.zig").JSRuntime,
+    runtime: *@import("../runtime.zig").JSRuntime,
     atoms: *atom.AtomTable,
     module_name: atom.Atom,
     definition_installed: bool = false,
@@ -392,7 +392,7 @@ pub const ModuleRecord = struct {
     /// quickjs.c).
     eval_exception: ?value_mod.JSValue = null,
 
-    fn prepare(self: *ModuleRecord, account: *@import("runtime.zig").JSRuntime, atoms: *atom.AtomTable, name: atom.Atom) void {
+    fn prepare(self: *ModuleRecord, account: *@import("../runtime.zig").JSRuntime, atoms: *atom.AtomTable, name: atom.Atom) void {
         self.* = .{
             .runtime = account,
             .atoms = atoms,
@@ -665,7 +665,7 @@ pub const ModuleRecord = struct {
 };
 
 pub const Registry = struct {
-    runtime: *@import("runtime.zig").JSRuntime,
+    runtime: *@import("../runtime.zig").JSRuntime,
     atoms: *atom.AtomTable,
     gc_registry: *gc.Registry,
     head: ?*ModuleRecord = null,
@@ -702,7 +702,7 @@ pub const Registry = struct {
         }
     };
 
-    pub fn init(account: *@import("runtime.zig").JSRuntime, atoms: *atom.AtomTable, gc_registry: *gc.Registry) Registry {
+    pub fn init(account: *@import("../runtime.zig").JSRuntime, atoms: *atom.AtomTable, gc_registry: *gc.Registry) Registry {
         return .{
             .runtime = account,
             .atoms = atoms,
@@ -924,7 +924,7 @@ fn unresolvedModuleAutoInit(
     return error.InvalidBuiltinRegistry;
 }
 
-inline fn append(account: *@import("runtime.zig").JSRuntime, comptime T: type, slice: *[]T, item: T) !void {
+inline fn append(account: *@import("../runtime.zig").JSRuntime, comptime T: type, slice: *[]T, item: T) !void {
     const old = slice.*;
     const new_count = std.math.add(usize, old.len, 1) catch return error.OutOfMemory;
     const old_ptr: [*]u8 = if (old.len == 0) undefined else @ptrCast(old.ptr);

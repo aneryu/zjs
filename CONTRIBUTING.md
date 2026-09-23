@@ -1,28 +1,25 @@
 # Contributing
 
-Contributions are GitHub pull requests against this repository.
+Submit GitHub pull requests against this repository. zjs is a JavaScript /
+TypeScript engine written in Zig; contributions follow the declared product
+scope in [LIMITATIONS.md](LIMITATIONS.md).
 
-## Semantics
+## Semantics and implementation
 
-The semantic authority is ECMA-262 as validated by test262; QuickJS is a
-reference implementation for comparison, not the standard (owner ruling
-2026-08-22). When Zig behavior and the spec disagree on an in-scope feature,
-treat the difference as a bug. Where the pinned QuickJS deviates from the
-spec, follow the spec and record the divergence.
+ECMA-262 governs JavaScript behavior; test262 validates the configured profile.
+Use pinned QuickJS for differential evidence and performance comparisons.
+Follow the spec when the reference differs, and document the divergence.
+Zig engineering rules are in [GUIDE.md](GUIDE.md) Part A.
 
-## Tests
+## Before submitting
 
-Add or update focused tests for the change. Run the cheapest matching
-validation tier in [GUIDE.md](GUIDE.md) Part B.6. Do not treat “compiles +
-smoke green” as semantic completeness.
+- Keep the change focused and preserve pre-existing work.
+- Add regression coverage for changed behavior or invariants. Never weaken
+  tests or widen excludes to manufacture a pass.
+- Follow [verification policy](docs/verification-policy.md); command details
+  are in GUIDE Part B.6. Report the checks actually completed.
+- Update the owning contract or documentation when behavior changes.
 
-## Hard rules
-
-- Do not widen `test262.conf` skips or excludes to manufacture a pass.
-- Do not skip, delete, weaken, or rewrite tests to make them pass.
-
-## Style and review
-
-Ownership, errors, and Zig style: [GUIDE.md](GUIDE.md) Part A.
-Agent and pre-commit discipline: [AGENTS.md](AGENTS.md).
-Current source map: [docs/architecture.md](docs/architecture.md).
+[AGENTS.md](AGENTS.md) covers execution discipline;
+[architecture](docs/architecture.md) maps source owners;
+[the documentation index](docs/README.md) routes to other contracts.

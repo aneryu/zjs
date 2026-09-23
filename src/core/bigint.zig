@@ -13,7 +13,7 @@ const builtin = @import("builtin");
 const gc = @import("gc.zig");
 const memory = @import("memory.zig");
 const libs = @import("../libs/root.zig");
-const JSRuntime = @import("runtime.zig").JSRuntime;
+const JSRuntime = @import("../runtime.zig").JSRuntime;
 const JSValue = @import("value.zig").JSValue;
 
 const Limb = libs.bigint.Limb;
@@ -413,7 +413,7 @@ pub const BigInt = struct {
         self.destroyReserved(runtime);
     }
 
-    pub fn destroyReserved(self: *BigInt, account: *@import("runtime.zig").JSRuntime) void {
+    pub fn destroyReserved(self: *BigInt, account: *@import("../runtime.zig").JSRuntime) void {
         if (self.flags.inline_storage) {
             // Capacity, not len: an inline result normalized down from
             // `lhs.len + rhs.len` would otherwise be released at the wrong size.

@@ -419,7 +419,7 @@ pub const Job = struct {
 };
 
 pub const Queue = struct {
-    runtime: *@import("runtime.zig").JSRuntime,
+    runtime: *@import("../runtime.zig").JSRuntime,
     /// Live FIFO window inside the backing block. Every reader keeps treating
     /// this as an ordinary slice; `head` records how far the window sits from
     /// the block start so head removal never touches the tail.
@@ -439,7 +439,7 @@ pub const Queue = struct {
     /// the compaction and the empty-window reset must preserve them.
     unlinked_head_slots: usize = 0,
 
-    pub fn init(account: *@import("runtime.zig").JSRuntime) Queue {
+    pub fn init(account: *@import("../runtime.zig").JSRuntime) Queue {
         return .{ .runtime = account };
     }
 

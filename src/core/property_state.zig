@@ -9,7 +9,7 @@
 const std = @import("std");
 const Object = @import("object.zig").Object;
 const property = @import("property.zig");
-const JSRuntime = @import("runtime.zig").JSRuntime;
+const JSRuntime = @import("../runtime.zig").JSRuntime;
 const JSValue = @import("value.zig").JSValue;
 
 pub const CachedIteratorNextEntry = struct {

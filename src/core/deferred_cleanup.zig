@@ -9,7 +9,7 @@ const std = @import("std");
 const class = @import("class.zig");
 const host_function = @import("host_function.zig");
 const Object = @import("object.zig").Object;
-const runtime_mod = @import("runtime.zig");
+const runtime_mod = @import("../runtime.zig");
 const JSRuntime = runtime_mod.JSRuntime;
 
 pub fn enqueueNative(rt: *JSRuntime, finalizer: host_function.ExternalFinalizer, ptr: *anyopaque) !void {

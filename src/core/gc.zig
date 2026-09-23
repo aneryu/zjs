@@ -192,7 +192,7 @@ pub const registry_diagnostics = @import("gc_registry_diagnostics.zig");
 /// barrier only reads them. Mutual import with `gc_trace_stw.zig` is fine --
 /// Zig resolves lazily.
 const gc_trace_stw_reports = @import("gc_trace_stw.zig");
-const JSRuntime = @import("runtime.zig").JSRuntime;
+const JSRuntime = @import("../runtime.zig").JSRuntime;
 pub const generation = @import("gc_generation.zig");
 pub const nursery_mod = @import("gc_nursery.zig");
 
@@ -1553,7 +1553,7 @@ pub const Registry = struct {
     /// no errdefer to write. The rollback obligation is one level up --
     /// `JSRuntime` construction can fail after this returns -- which is why
     /// each sub-structure's `deinit` is idempotent instead.
-    pub fn init(account: *@import("runtime.zig").JSRuntime, policy: Policy) Registry {
+    pub fn init(account: *@import("../runtime.zig").JSRuntime, policy: Policy) Registry {
         forensics.readFromEnv();
         return .{
             .runtime = account,

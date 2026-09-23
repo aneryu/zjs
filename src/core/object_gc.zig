@@ -7,7 +7,7 @@
 //! `gc_trace_stw.traceHeaderEdges`.
 
 const object_mod = @import("object.zig");
-const runtime_mod = @import("runtime.zig");
+const runtime_mod = @import("../runtime.zig");
 const JSRuntime = runtime_mod.JSRuntime;
 const FinalizationRegistryPayload = object_mod.FinalizationRegistryPayload;
 const JSValue = @import("value.zig").JSValue;

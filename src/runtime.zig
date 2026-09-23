@@ -8,35 +8,35 @@
 //! quickjs.c. This is core infrastructure: exec/runtime/binding may
 //! import it, while this module must not import those higher layers.
 
-const mem_ops = @import("memory.zig");
+const mem_ops = @import("core/memory.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
-const platform_memory = @import("../platform_memory.zig");
-const platform_clock = @import("../platform_clock.zig");
+const platform_memory = @import("platform_memory.zig");
+const platform_clock = @import("platform_clock.zig");
 
-const memory = @import("memory.zig");
-const alloc_trace = @import("alloc_trace.zig");
-const atom = @import("atom.zig");
-const class = @import("class.zig");
-const gc = @import("gc.zig");
-const gc_driver = @import("gc_driver.zig");
-const host_function = @import("host_function.zig");
-const native_entry = @import("native_entry.zig");
-const job_mod = @import("jobs.zig");
-const module = @import("module.zig");
-const object_mod = @import("object.zig");
-const shape = @import("shape.zig");
-const string = @import("string.zig");
-const unicode = @import("../libs/unicode.zig");
-const var_ref_mod = @import("var_ref.zig");
-const JSValue = @import("value.zig").JSValue;
+const memory = @import("core/memory.zig");
+const alloc_trace = @import("core/alloc_trace.zig");
+const atom = @import("core/atom.zig");
+const class = @import("core/class.zig");
+const gc = @import("core/gc.zig");
+const gc_driver = @import("core/gc_driver.zig");
+const host_function = @import("core/host_function.zig");
+const native_entry = @import("core/native_entry.zig");
+const job_mod = @import("core/jobs.zig");
+const module = @import("core/module.zig");
+const object_mod = @import("core/object.zig");
+const shape = @import("core/shape.zig");
+const string = @import("core/string.zig");
+const unicode = @import("libs/unicode.zig");
+const var_ref_mod = @import("core/var_ref.zig");
+const JSValue = @import("core/value.zig").JSValue;
 const Object = object_mod.Object;
-const profile = @import("profile.zig");
-const property = @import("property.zig");
-const context_mod = @import("context.zig");
-const context_registry = @import("context_registry.zig");
-const errors = @import("errors.zig");
+const profile = @import("core/profile.zig");
+const property = @import("core/property.zig");
+const context_mod = @import("core/context.zig");
+const context_registry = @import("core/context_registry.zig");
+const errors = @import("core/errors.zig");
 
 extern "c" fn pclose(stream: *std.c.FILE) c_int;
 
@@ -945,14 +945,14 @@ pub var trace_atomics_wait_async: if (value_root_frames_enabled)
 else
     void = if (value_root_frames_enabled) null else {};
 
-const deferred_cleanup = @import("deferred_cleanup.zig");
-const native_bindings = @import("native_bindings.zig");
-const property_state = @import("property_state.zig");
-const string_cache = @import("string_cache.zig");
-const exception_state = @import("exception.zig");
-const execution = @import("execution.zig");
-const gc_weak = @import("gc_weak.zig");
-const roots_mod = @import("roots.zig");
+const deferred_cleanup = @import("core/deferred_cleanup.zig");
+const native_bindings = @import("core/native_bindings.zig");
+const property_state = @import("core/property_state.zig");
+const string_cache = @import("core/string_cache.zig");
+const exception_state = @import("core/exception.zig");
+const execution = @import("core/execution.zig");
+const gc_weak = @import("core/gc_weak.zig");
+const roots_mod = @import("core/roots.zig");
 pub const RootSet = roots_mod.RootSet;
 pub const RootProvider = roots_mod.RootProvider;
 pub const RootSlot = roots_mod.RootSlot;
@@ -1076,7 +1076,7 @@ pub const Diagnostics = struct {
     allocations: memory.AllocationDiagnostics = .{},
     /// Last major's marked-set census. Written only while
     /// `mark_footprint_census` is set.
-    mark_footprint: @import("gc_trace_stw.zig").MarkFootprint = .{},
+    mark_footprint: @import("core/gc_trace_stw.zig").MarkFootprint = .{},
 };
 
 pub const JSRuntime = struct {
@@ -2315,7 +2315,7 @@ pub const JSRuntime = struct {
             // resolved before the STW collector below touches the lists.
             if (self.gc.morgue.pending) {
                 self.gc_running = true;
-                @import("gc_trace_stw.zig").finishPendingDestruction(self);
+                @import("core/gc_trace_stw.zig").finishPendingDestruction(self);
                 self.gc_running = false;
                 _ = self.finishDoomedCompletion(0);
             }
@@ -2339,7 +2339,7 @@ pub const JSRuntime = struct {
         const start_ns = profile.nowNanos();
 
         self.gc.scheduler.beginMajorCycle(self.gc.scheduler.activeMajorReason() orelse .manual);
-        const freed = @import("gc_trace_stw.zig").collectCycles(self, roots, scan) catch |err| {
+        const freed = @import("core/gc_trace_stw.zig").collectCycles(self, roots, scan) catch |err| {
             const mapped: gc.CollectionError = switch (err) {
                 error.OutOfMemory => error.OutOfMemory,
                 error.PayloadMarkFailed => error.PayloadMarkFailed,
@@ -3181,13 +3181,13 @@ pub fn settlePendingDestructionForGateStats(rt: *JSRuntime) void {
     std.debug.assert(rt.gc.hot.phase == .none);
     std.debug.assert(rt.active_deferred_class_payload_finalizer == null);
     if (!rt.gc.morgue.pending) {
-        @import("gc_trace_stw.zig").auditDoomedExitInvariant(rt);
+        @import("core/gc_trace_stw.zig").auditDoomedExitInvariant(rt);
         return;
     }
 
     rt.gc_running = true;
     defer rt.gc_running = false;
-    @import("gc_trace_stw.zig").finishPendingDestruction(rt);
+    @import("core/gc_trace_stw.zig").finishPendingDestruction(rt);
     _ = rt.finishDoomedCompletion(0);
 }
 

@@ -11,7 +11,7 @@ const mem_ops = @import("memory.zig");
 const std = @import("std");
 const atom = @import("atom.zig");
 const context_mod = @import("context.zig");
-const runtime_mod = @import("runtime.zig");
+const runtime_mod = @import("../runtime.zig");
 const JSRuntime = runtime_mod.JSRuntime;
 const JSValue = @import("value.zig").JSValue;
 

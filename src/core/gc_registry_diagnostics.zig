@@ -12,7 +12,7 @@
 //! `rt.gc.verifyX()` call site is unchanged.
 
 const std = @import("std");
-const JSRuntime = @import("runtime.zig").JSRuntime;
+const JSRuntime = @import("../runtime.zig").JSRuntime;
 
 const gc = @import("gc.zig");
 const carrier = @import("gc_carrier.zig");

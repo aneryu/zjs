@@ -1,185 +1,101 @@
 # Performance Workflow
 
-This directory contains performance notes and a historical status snapshot
-for `zjs`. Nothing here is a merge gate. Repeatable timing lives outside
-this repository. Local `perf stat` remains a host diagnostic;
-[verification-policy](../verification-policy.md) is the authority.
+Local diagnostics for the Zig JavaScript / TypeScript engine. There is no
+performance or size merge gate; [verification policy](../verification-policy.md)
+defines required correctness checks. The in-tree benchmark runner is retired.
 
-Current design notes:
+## References
 
-- [bench-v8 status](bench-v8-status.md) — historical snapshot
-- [Shipped binary composition](../binary-size.md) — ReleaseFast size by
-  section, layer, and function (diagnostic, not a gate)
-- [Object and shape implementation](object-shape-design.md)
-- [`exec/call_runtime.zig` candidate domains and move criteria](../backlog.md)
-- Frozen subsystem baseline (historical):
-  `docs/qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md` — removed
-  2026-08-25; recover from git history
+- [bench-v8 status](bench-v8-status.md): historical Octane 2.0 / V8 suite v9
+  results, machine details, and QuickJS reference fingerprints.
+- [Binary composition](../binary-size.md): dated stripped ReleaseFast breakdown.
+- [Object/shape design](object-shape-design.md), [opcode design](opcode-design.md),
+  and [backlog](../backlog.md): mechanisms and scoped work.
 
-## bench-v8 (Octane 2.0, v9)
+Compare ratios only within the same suite and reference-binary identity.
+Earlier QuickJS-ng, zoo, and V8-v7 results are historical and do not establish
+current Bellard-QuickJS performance.
 
-The recorded suite is full Octane 2.0 (since 2026-08-25; all 17 results
-since 2026-09-05, when zlib's shell `read` shim landed). The in-tree
-runner was removed with `tools/perf`; the snapshot is
-[bench-v8-status.md](bench-v8-status.md).
+## Build and freeze the measured binary
 
-Under the v9 suite there is no owner-ruled *published* metric, and
-ratios are only comparable against the same reference-binary fingerprint
-(hash + compiler) — see the 2026-08-25 reference-drift adjudication in
-[bench-v8-status.md](bench-v8-status.md).
-
-## Checked-In Artifacts
-
-No benchmark result JSON is checked in.
-
-The 2026-06-13 QuickJS-ng `*-vs-quickjs*` snapshots were removed from the
-active tree. Do not recover them as a current Bellard-QuickJS comparison.
-The historical snapshot is [bench-v8-status.md](bench-v8-status.md). The
-former standalone-file zoo runner was retired 2026-08-29. As of 2026-08-25,
-no v9-suite number has passed an owner ruling to become a published metric,
-and any quoted ratio is only valid against the named reference-binary
-fingerprint.
-
-## Runtime Profiling
-
-Per-opcode profiling requires the dedicated profiling build:
+Default builds are Debug. For production profiling, build ReleaseFast and
+freeze the executable before another build can replace it:
 
 ```sh
-zig build zjs-profile --summary all
+zig build zjs -Doptimize=ReleaseFast
+mkdir -p .scratch/profile
+cp zig-out/bin/zjs .scratch/profile/zjs
+sha256sum .scratch/profile/zjs
+```
+
+Keep symbols for attribution; stripping is for release artifacts. Record the
+revision/dirty state, compiler, configuration, binary hash, host, workload,
+expected output, measurement window, sample order, and command exit status.
+Controlled paired comparisons help separate a change from drift or layout
+noise; this is evidence guidance, not a mandatory measurement gate.
+
+Do not change frame-pointer settings as a routine profiling step. They can
+alter every handler's prologue/epilogue in the tail-call dispatcher. Historical
+A/B measurements found substantial overhead; confirm the unwinding needed for
+the current question before perturbing the build.
+
+## Runtime profiling
+
+Per-opcode counts require the dedicated profiling binary:
+
+```sh
+zig build zjs-profile -Doptimize=ReleaseFast --summary all
 ./zig-out/bin/zjs-profile --profile-opcodes -e "for(var i=0; i<100000; i++) {}"
 ```
 
-The profiling build (`-Dzjs_enable_opcode_profile=true`) counts and
-delta-times every hot-table dispatch through `vm_profile.noteDispatch`. The
-default `zjs` binary does not collect opcode counts and fails closed on
-`--profile-opcodes` (exit 2).
+It enables `vm_profile.noteDispatch` counts and delta timing. The default
+`zjs` rejects `--profile-opcodes` (exit 2). Profiling instrumentation changes
+execution cost; measure production cost with the uninstrumented binary.
 
-The listing is capped at 40 rows to stay readable. Set `ZJS_PROFILE_ALL=1`
-to print every opcode — required for a census, since the cap silently
-conflates warm-but-not-hot opcodes with cold ones (see
-[`opcode-design.md`](opcode-design.md) appendix B.2 for the reading error
-that produced).
+The listing defaults to 40 rows. Set `ZJS_PROFILE_ALL=1` for a complete census;
+a truncated table cannot distinguish warm paths from unused ones.
 
-### Linux sampling and PMU counters
+## Linux sampling and PMU counters
 
-Measured on this host on 2026-08-07 (aarch64 big.LITTLE, Cortex-X925 +
-Cortex-A725, Zig 0.16.0, perf 6.17.9). The generic advice found in most Zig
-profiling write-ups needs four corrections here; each one below is backed by a
-measurement, not by extrapolation.
-
-**Build: use `zig build zjs` as-is. Do not add profiling flags.**
-
-The shipped `zjs` is already `ReleaseFast` with full symbols
-(`file` reports `with debug_info, not stripped`; `nm` finds 6199 symbols), so
-`-fno-strip` is a no-op here.
-
-`-fno-omit-frame-pointer` is actively harmful. `internal_fast_mod` in
-`build.zig` sets `.omit_frame_pointer = true` deliberately, because the
-tail-call threaded dispatcher has one handler per opcode and a frame pointer
-adds a prologue/epilogue to every one of them. Rebuilding with
-`.omit_frame_pointer = false` and comparing interleaved A/B/B/A on pinned CPU
-19:
-
-| workload | instructions | cycles |
-|---|---|---|
-| VM dispatch loop (`s += i`, 60M iters) | 12.173G → 13.614G (**+11.8%**) | 2.272G → 2.831G (**+24.6%**) |
-| code-load payload (parse-only) | 12.19M → 12.72M (**+4.4%**) | within noise |
-
-A profile taken on such a build describes a program that is 24.6% slower in the
-loop you care about, and the added cost lands *uniformly on every handler*,
-which systematically flattens the relative weights you are trying to read.
-
-The premise behind the flag does not hold either: fp unwinding already works
-with `omit_frame_pointer = true`, because handlers never touch `x29`, so the
-unwinder walks out through the enclosing `runWithCallEnv` frame. A `--call-graph
-fp` record against the shipped binary returns complete stacks
-(`op_dup;runWithCallEnvAfterInterruptPoll;runWithCallEnv;eval;...`).
-
-**Pin to one CPU cluster — there are two PMUs.**
-
-Unpinned `perf stat` splits every event across both PMUs at roughly half
-coverage each and reports two unrelated IPC figures (measured: 3.75 and 5.70);
-neither is the program's IPC, and summing them is meaningless because the
-clusters differ in frequency and width.
-
-```text
-armv8_pmuv3_0 -> CPU 0-4,10-14
-armv8_pmuv3_1 -> CPU 5-9,15-19
-```
+Choose a CPU appropriate to the host. On heterogeneous systems, pin to one
+cluster/PMU; combining different cores' IPC does not describe one execution.
+The following assumes the reproducer is `.scratch/profile/case.js` and CPU 19
+has been selected for this host:
 
 ```sh
-taskset -c 19 perf stat -e cycles,instructions,branches,branch-misses \
-  zig-out/bin/zjs /tmp/case.js
+zjs_profile_cpu=19
+taskset -c "$zjs_profile_cpu" perf stat -e cycles,instructions,branches,branch-misses \
+  .scratch/profile/zjs .scratch/profile/case.js
+taskset -c "$zjs_profile_cpu" perf record -F 4999 -o .scratch/profile/case.data \
+  .scratch/profile/zjs .scratch/profile/case.js
+perf report -i .scratch/profile/case.data --stdio --no-children -q
 ```
 
-Pinned, the counters collapse onto a single PMU and IPC becomes real. The rows
-for the other PMU correctly read `<not counted>`.
+- Check sample coverage on short workloads and record inaccessible kernel work.
+- Tail-call dispatch does not retain handler-to-handler call stacks. A flat
+  profile answers opcode-cost questions; call graphs help locate VM entry paths.
+- Inline functions and shared cold bodies can mislead symbol percentages.
+  Resolve sampled addresses with `addr2line -f -i -e .scratch/profile/zjs <ip>`
+  before attributing a mechanism.
+- Fewer instructions or bytes do not prove lower elapsed cost. Compare
+  time/cycles and account for event frequency, dependencies, and layout.
+- Keep whole-process and benchmark-inner-loop windows separate. Startup,
+  parsing, bootstrap, and teardown can explain a different ratio.
 
-**Prefer a flat profile; `-g` adds little for the dispatch loop.**
+## macOS sampling
 
-Under tail-call threading the handler-to-handler `musttail` transfer leaves no
-stack record, so every opcode appears flat under `runWithCallEnv` and the
-op-to-op sequence is unrecoverable. `-g` also double-counts, so prefer a
-flat profile for the dispatch loop. Use `-g` when the question is about
-the call path *into* the VM, not about the VM loop itself.
-
-```sh
-taskset -c 19 perf record -F 4999 -o /tmp/case.data zig-out/bin/zjs /tmp/case.js
-perf report -i /tmp/case.data --stdio --no-children -q
-```
-
-Raise `-F` for short cases: `-F 999` on a 47ms case yielded 16 samples total.
-
-**Resolve inlining before trusting any symbol row.**
-
-`ReleaseFast` inlines aggressively, so a hot symbol name is usually the
-*outermost* frame of an inline stack and attributing cost to it is wrong. A
-measured example: `perf report` credits 31.32% to
-`parser.lexer.LexerImpl.nextInto`, but the sampled address resolves to
-
-```text
-parser.lexer.LexerImpl.bump      src/parser.zig:604
-parser.lexer.LexerImpl.lexString src/parser.zig:1141
-parser.lexer.LexerImpl.nextInto  src/parser.zig:499
-```
-
-Always expand the address before reading the assembly. `perf report --inline`
-does *not* expand these in flat mode, so use `addr2line`:
-
-```sh
-perf script -i /tmp/case.data -F ip,sym | grep <symbol> | awk '{print $1}' | sort -u
-addr2line -f -i -e zig-out/bin/zjs 0x<ip>
-```
-
-**Known limits on this host.** `perf_event_paranoid` is `1`, so
-`/proc/kallsyms` is unreadable and kernel samples appear as bare
-`[unknown] [k] 0x…` addresses — in the code-load profile above that was 43% of
-all samples, i.e. the single largest row was unattributable. Account for it
-before concluding that the visible user-space rows are the whole picture.
-
-**Before drawing a conclusion from any two builds**, apply the existing
-discipline: interleaved A/B on fixed binaries (build layout alone moves results
-by up to ±2.8%). Independently produced binaries can alternate between two
-distinct code states, which contaminates any cross-build comparison (the
-2026-07 Zig build bistability investigation; report in git history).
-
-macOS sampling:
+Using the frozen executable and reproducer above:
 
 ```sh
 xcrun xctrace record \
   --template "Time Profiler" \
-  --output reports/perf/current/zjs.trace \
-  --launch -- zig-out/bin/zjs /tmp/case.js
+  --output .scratch/profile/zjs.trace \
+  --launch -- .scratch/profile/zjs .scratch/profile/case.js
 ```
 
-## Functional Gates
+## Functional validation
 
-Run semantic checks before accepting performance-sensitive changes:
-
-```sh
-zig build test --summary all
-zig build smoke --summary all
-```
-
-Run a relevant test262 subset when the optimization touches observable
-JavaScript semantics.
+Performance changes follow the same [verification policy](../verification-policy.md)
+and [GUIDE Part B.6](../../GUIDE.md#b6-validation-tiers) as other implementation
+work. Preserve focused semantic coverage; do not add per-edit full-suite or
+historical measurement gates.

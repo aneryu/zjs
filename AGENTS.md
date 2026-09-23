@@ -1,134 +1,85 @@
 # AGENTS.md
 
-## Verification policy (read first)
+## Project
 
-All verification/gating obligations are defined by
-[docs/verification-policy.md](docs/verification-policy.md) — the single
-authority (owner ruling 2026-08-29). Per-change work: `zig build check` for
-iteration, targeted tests, one final `zig build test`. Expensive gates
-(test262) run once per merge batch, not per change. rc-neutrality checks
-are abolished (the rc collector is retired).
+zjs is a **JavaScript / TypeScript engine written in Zig**. ECMA-262 defines
+JavaScript semantics; test262 validates the configured compatibility profile.
+QuickJS is a differential reference and performance yardstick, not an
+implementation constraint. Follow the spec and record reference divergences.
 
-## No shortcuts / No cheating
+TypeScript runs through native parsing, type erasure, and supported syntax
+lowering. Type checking is outside scope; see [LIMITATIONS.md](LIMITATIONS.md).
 
-Do real work. Do not make the code only look correct.
+## Working agreements
 
-When implementing code:
+- Inspect the branch/worktree, `git status`, and relevant diff before editing.
+  Preserve pre-existing changes; keep edits and staging within the task.
+- Complete authorized edits and validation without repeatedly asking for
+  confirmation. Resolve routine implementation choices yourself; clarify
+  ambiguity that materially changes scope, public contracts, or irreversible
+  actions. Review/diagnosis alone does not authorize implementation.
+- Commit, merge, and push only when authorized; one does not imply the others.
+- For bugs, reproduce before editing and identify the owning subsystem. For
+  semantic changes, retain focused differential evidence and the spec basis.
+- Fix the general mechanism and implied edge cases with a focused change.
+  Add regression coverage for new behavior or invariants.
+- Finish with the outcome, relevant validation results, and unresolved work.
+  Distinguish passed, failed, interrupted, and unrun checks.
 
-- Do not use ugly hacks just to pass tests.
-- Do not hardcode answers unless the task clearly asks for constants.
-- Do not skip, delete, weaken, or rewrite tests to make them pass.
-- Do not hide errors with empty `catch`, broad mocks, `any`, `@ts-ignore`, or
-  `eslint-disable` unless there is a strong reason.
-- Do not replace real logic with fake logic.
-- Do not ignore edge cases that are already implied by the code or tests.
-- Do not change public APIs unless the task requires it.
-- Do not remove validation, security checks, or error handling to make code
-  simpler.
-- Do not claim the task is done without checking the relevant build, test, or
-  typecheck when possible.
+## Verification
 
-Prefer:
+Read [verification-policy](docs/verification-policy.md) before implementation.
+It is the sole authority for verification obligations, including exceptions
+and retired gates. Command details live in [GUIDE.md](GUIDE.md) Part B.6.
 
-- Simple code over clever code.
-- Correct code over fast-looking code.
-- Small focused changes over large unrelated rewrites.
-- Fixing the root cause over patching symptoms.
-- Clear errors over silently ignoring failures.
+| Change | Validation scope |
+| --- | --- |
+| Prose-only documentation | Check facts, local links/anchors, and `git diff --check` |
+| Implementation | `zig build check`, targeted tests, then one final `zig build test` |
+| Runner / test262 | Also run the relevant fixture or focused test262 slice |
+| Merge batch / release | Run the policy's aggregate gates once at that boundary |
 
-If the proper solution is hard, do the hard work.
-If you cannot finish it, explain what is missing instead of faking completion.
-If a solution only works for the current test case but not the real problem, it
-is considered wrong.
+Preserve command exit status (`pipefail` for pipelines). Empty selections,
+missing corpus, and partial output do not establish a pass. Debug is the
+iteration default; shipped builds use `-Doptimize=ReleaseFast`, `layout=short`,
+NaN-boxed `JSValue`, and `force_gc` / `ownership_audit` off.
 
-## Project Purpose
+## Engineering constraints
 
-This repository is a **QuickJS C -> Zig** rewrite that has graduated from
-mirror to engine. The semantic authority is ECMA-262 as validated by test262;
-QuickJS is a reference implementation for comparison, not the standard
-(owner ruling 2026-08-22 — it previously was). Where the pinned QuickJS
-deviates from the spec, follow the spec and record the divergence. The
-engineering goal is a first-class Zig project: idiomatic error sets,
-documented modules, and Zig discipline take precedence over preserving
-C-shaped structure. QuickJS remains the performance yardstick (bench-v8).
+- Use Zig 0.16.0 and the ownership, error, and style rules in GUIDE Part A.
+- Preserve public API/ABI unless the task requires a change. Keep host, CLI,
+  test262, and event-loop policy out of `src/core/`.
+- Preserve validation, error handling, security checks, and GC safety nets.
+  Values surviving a host call must follow the public handle contract.
+- Never manufacture a pass with hardcoded answers, fixture/benchmark-specific
+  logic, weakened tests, broader excludes, or altered failure records.
+- Do not hide errors with empty catches, broad mocks, or type/lint suppression.
+  `catch unreachable` requires a proven safety argument.
+- User-visible throws use `throw*Message` helpers; bare `error.XxxError` is
+  allowed only when its message is attached elsewhere or the path is
+  unreachable by user code.
 
-## Source Of Truth
+## Read when relevant
 
-- `GUIDE.md`: engineering rules (Part A) and the validation command ladder
-  (Part B.6). Do not recopy that ladder here.
-- `CONTRIBUTING.md`: human contribution workflow.
-- Root `test262.conf`, the `test262/` submodule, and `tests/fixtures/`:
-  active local validation inputs.
+Read the sections needed for the task; following a link does not require
+loading every document it references.
 
-## Production Configuration
+| Task | Reference |
+| --- | --- |
+| Zig implementation / test commands | [GUIDE.md](GUIDE.md), Parts A / B.6 |
+| Find source owners or change layer boundaries | [Architecture](docs/architecture.md) |
+| Public API, embedding, or host lifetimes | [Public API contract](docs/public-api-contract.md) |
+| GC edges, roots, or finalization | [GC invariants](docs/gc-invariants.md) |
+| Compiler layout | [Compiler contract](docs/compiler-contract.md), [QCP-1](docs/qcp1_switch_decision.md) §9 |
+| Performance investigation | [Performance workflow](docs/perf/README.md) |
+| Recurring diagnosis / worktree issues / local tickets | [Project experience](docs/agents/project-experience.md), relevant section (§11 for tickets) |
+| Other documentation | [Documentation index](docs/README.md) |
 
-Shipped default is `zig build -Doptimize=ReleaseFast` with `layout=short`,
-nan-boxed `JSValue`, and `force_gc` / `ownership_audit` off. A default
-`zig build` / `zig build test` is Debug, like any other Zig project.
-`-Dzjs_compiler_layout=plain` is an A/B diagnostic. See
-`docs/qcp1_switch_decision.md` §9 if a layout-sensitive compiler change is
-in scope.
+Entry points: `src/root.zig` exports `zjs`; `src/parser.zig` parses;
+`src/compiler/` compiles; `src/core/` owns values/runtime/GC; `src/exec/`
+executes. Unit tests live beside the code; integration tests use `tests/`.
 
-## Agent skills
-
-Issues and PRDs live under `.scratch/<feature>/`; conventions and triage
-labels: `docs/agents/project-experience.md` §11.
-Cross-session project lessons, domain-context routing, and evidence rules:
-`docs/agents/project-experience.md`.
-
-## Repository Layout
-
-See `docs/architecture.md`. Short map:
-
-- `src/root.zig`: engine module (`@import("zjs")`).
-- `src/core/`: values, runtime, objects, GC.
-- `src/parser.zig`: lexer, parser, TypeScript erasure.
-- `src/compiler/`: the compiler.
-- `src/bytecode.zig`: bytecode carrier and packing.
-- `src/exec/`: VM, builtins, calls, modules, promises.
-- `src/event_loop.zig`: host event loop (`zjs.EventLoop`).
-- `src/js_context.zig`: public `Context` facade over core + exec.
-- `src/native.zig`: host-function thunks used by `Context.defineFunction`.
-- `src/libs/`, `src/cli/`. Zig unit tests live next to the code they
-  exercise: colocated `test` blocks plus package `tests.zig` for
-  module-internal behavior (`src/parser/tests.zig`,
-  `src/compiler/tests.zig`, `src/bytecode/tests.zig`). Integration
-  tests live under `tests/`: public API, runtime/GC, VM/eval across
-  modules, embedding, CLI smoke, and OOM injection. Integration
-  harness: `tests/harness.zig` and `tests/harness/`.
-
-## Commands
-
-`build.zig` pins the Zig 0.16 build/test seed to `0`; CLI `--seed` is not
-required. The command ladder, `test-fast`, and test262 slices are in
-`GUIDE.md` Part B.6.
-
-CLI contract: `zjs -e "<script>"` and `zjs <file.js>`. Missing or invalid
-arguments print usage and exit non-zero.
-
-## Change Discipline
-
-- Reproduce before changing: run the relevant failing script, slice, or test.
-- Make the smallest necessary change in the existing subsystem.
-- Do not delete, move, skip, weaken, or widen excludes to manufacture a pass.
-- Fix one problem class at a time; do not mix unrelated semantic domains.
-- Differential runs against the pinned QuickJS remain a primary instrument
-  for finding behavior drift; verdicts follow ECMA-262 (spec-first,
-  2026-08-22). Record probe evidence either way.
-- Use the cheapest GUIDE B.6 tier that covers the change. Do not run the full
-  Debug suite after every small edit.
-- Runner or test262 changes require the relevant runner fixture or target slice.
-- New throw sites should use the message-carrying throw*Message helpers; bare
-  `return error.XxxError` is reserved for paths whose message is attached
-  elsewhere or genuinely unreachable by user code.
-- Keep validation evidence with the owning change. Do not add broad status
-  ledgers back to the active tree without an explicit request.
-
-## Pre-Commit Checklist
-
-- The relevant failing case was reproduced and understood.
-- The change is limited to the minimum necessary files.
-- Related docs are updated.
-- The GUIDE B.6 tier that covers the change was run.
-- `git diff --check` passes.
-- No noisy logs or temporary debug output were added.
+Put scratch artifacts, issues, and PRDs in this worktree's `.scratch/<feature>/`,
+not bare `/tmp` filenames. For an empty test262 submodule in a linked worktree,
+use `mise run worktree-init` and keep its corpus symlink out of commits.
+Keep evidence with the owning change; add no broad status ledgers unless asked.

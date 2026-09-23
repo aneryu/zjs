@@ -1,12 +1,8 @@
 # API Boundary
 
-ZJS is a QuickJS C to Zig rewrite. ECMA-262 as validated by test262 is the
-semantic authority; QuickJS is the comparison reference (owner ruling
-2026-08-22). The
-Zig surface should improve embedding ergonomics without moving host/runtime
-policy into the JavaScript engine core.
-
-This document is the active boundary guide for ordinary project documentation.
+zjs is a JavaScript / TypeScript engine written in Zig. ECMA-262 governs
+JavaScript semantics; QuickJS is a comparison reference. The Zig embedding
+surface exposes engine primitives while keeping host policy outside core.
 
 ## Layers
 
@@ -76,7 +72,7 @@ appear in `docs/public-api-contract.md`. JSContext host-reference ownership
 
 ## Performance Shape
 
-QuickJS provides the reference performance shape:
+The engine exposes these primitives and cost boundaries:
 
 - `JSRuntime`, `JSContext`, `JSValue`, atom-like property names, class IDs, and
   opaque payloads are explicit primitives.
@@ -84,12 +80,10 @@ QuickJS provides the reference performance shape:
 - Hot property and callback paths should not compare strings after setup.
 - Host objects use explicit finalizers and GC marking.
 
-ZJS keeps that low-level shape, expressed with Zig types and comptime factories.
-
 Hot paths include property access, callback dispatch, argument conversion,
 string/byte view access, event-loop callbacks, and JS <-> native calls. Hot
 paths should avoid heap allocation, broad dynamic dispatch, extra value
-wrappers, hidden retain/free traffic, and C ABI crossings inside same-build
+wrappers, hidden rooting/allocation work, and C ABI crossings inside same-build
 Zig code.
 
 Cold paths include binding install, name interning, class-id allocation,

@@ -1,122 +1,84 @@
 # Documentation
 
-Active project documentation, organized by audience. Campaign dumps, dated
-accounts, and completed migration specs are not kept as current status;
-recover them from git history when needed.
+zjs is a JavaScript / TypeScript engine written in Zig. Start with the
+[project README](../README.md); use the table below to read only what the task
+needs. Historical measurements and plans are labeled separately from contracts.
 
-## New To The Project? Read In This Order
+## Use and contribute
 
-1. [Project README](../README.md): what zjs is, what it is not, build and CLI.
-2. [Embedding Cookbook](embedding-cookbook.md): run JavaScript from Zig —
-   runtime/context, values, host functions, limits, modules.
-3. [Compatibility](../COMPATIBILITY.md) and [Limitations](../LIMITATIONS.md):
-   what is validated, what is out of scope.
-4. [Architecture](architecture.md): the source tour, when you want to read or
-   change engine code.
+| Need | Document |
+| --- | --- |
+| Build, CLI, minimal embedding | [README](../README.md) |
+| Host functions, handles, strings/bytes, limits, modules | [Embedding cookbook](embedding-cookbook.md) |
+| Supported public Zig API and lifetimes | [Public API contract](public-api-contract.md) |
+| ECMAScript validation profile | [Compatibility](../COMPATIBILITY.md) |
+| TS, host, security, and debugger boundaries | [Limitations](../LIMITATIONS.md) |
+| Contribution workflow | [Contributing](../CONTRIBUTING.md) |
+| Agent task execution and reading triggers | [AGENTS](../AGENTS.md) |
+| Zig engineering and command reference | [GUIDE](../GUIDE.md) |
+| Verification obligations | [Verification policy](verification-policy.md) |
+| Diagnosis, worktrees, local `.scratch/` tickets (§11) | [Project experience](agents/project-experience.md) |
 
-## Using zjs (Embedders)
+## Source and contracts
 
-- [Embedding Cookbook](embedding-cookbook.md): copy-paste examples, covered by
-  the embedding test target.
-- [Public API Contract](public-api-contract.md): the supported Zig API surface
-  and ownership rules.
-- Native functions and native -> JS calls (`zjs.Call`, `Context.defineFunction`):
-  the cookbook's Native Functions / Typed Leaf / Calling JavaScript From The
-  Host / Rooting Rules sections and the contract's Native Functions chapter;
-  the mechanism is the
-  [native boundary design](perf/native-boundary-design.md) (§3, §7, §9).
-- [Limitations — Security Boundary](../LIMITATIONS.md): trusted-code
-  assumptions; zjs is not a sandbox for hostile JavaScript.
+| Area | References |
+| --- | --- |
+| Source ownership and layers | [Architecture](architecture.md), [API boundary](api-boundary.md) |
+| Function-level source tour (Chinese) | [Code walkthrough](code-walkthrough/README.md) |
+| Exec calls and import hubs | [Exec dependency graph](exec-dependency-graph.md) |
+| Test roots and build steps | [Testing graph](testing-graph.md) |
+| Runtime ownership and lifecycle | [Runtime design and implementation record](runtime-target-design.md) |
+| GC and values | [GC invariants](gc-invariants.md), [VM value representation](vm-value-representation-contract.md), [borrowed atoms](borrowed_atom_audit.md) |
+| Compiler and TS parser | [Compiler contract](compiler-contract.md), [TypeScript parser](parser-ts-first-class-design.md) |
+| Native calls and host boundary | [Native boundary design](perf/native-boundary-design.md), public API contract above |
+| Object/shape layouts | [Object and shape implementation](perf/object-shape-design.md) |
+| Opcode design | [Opcode design](perf/opcode-design.md), [engine comparison](perf/opcode-engines.md), [opcode table](perf/opcode-audit-table.md) |
 
-## Understanding And Changing The Engine (Contributors)
+## Evidence and release
 
-- [Contributing](../CONTRIBUTING.md): pull requests, QuickJS semantics, test rules.
-- [Guide](../GUIDE.md): Zig engineering rules and the validation command ladder.
-- [Architecture](architecture.md): current source tour, layer map, and the
-  Stack Bytecode VM Status chapter. Evolution scope lives in the
-  [Engine Evolution Plan](engine-evolution-plan.md). Exec runtime call
-  flow and import hubs: [exec-dependency-graph.md](exec-dependency-graph.md).
-- [源码逐函数讲解](code-walkthrough/README.md): Chinese function-level
-  walkthrough of `src/` and the build/test entry points.
-- [GC invariants](gc-invariants.md): rules the production tracing collector
-  holds. There is no reference-counting collector in the tree.
-- [VM value representation contract](vm-value-representation-contract.md):
-  normative `JSValue` / slot / barrier / root protocol.
-- [API Boundary](api-boundary.md): layering rules between public API, core,
-  runtime, host facade, and CLI.
-- [Testing Graph](testing-graph.md): compile-root chain, shell classes, step names.
-- [Verification Policy](verification-policy.md): per-change and batch gates.
-- [Compiler Contract](compiler-contract.md): normative compiler identity rules.
-- [Parser: TypeScript as the grammar](parser-ts-first-class-design.md): one
-  grammar for `.js` and `.ts`, the emission-free type parser, the three
-  tsc-resolved ambiguities, and the `zjs --bytecode-fingerprint` identity check.
-- [Borrowed Atom Audit](borrowed_atom_audit.md): atom-rooting contract and
-  the `-Dzjs_ownership_audit` build.
+- [STATUS](../STATUS.md): dated validation and milestone records.
+- [Changelog](../CHANGELOG.md): release history.
+- [Release checklist](release-checklist.md): API, lifecycle, and artifact checks.
+- [Performance workflow](perf/README.md): diagnostic tools and evidence guidance.
+- [bench-v8 snapshot](perf/bench-v8-status.md): historical performance results.
+- [Runtime allocator comparison](runtime-allocator-todo.md): default allocator decision and remaining experiments.
+- [Binary composition](binary-size.md): dated ReleaseFast size breakdown.
+- [Refactor policy](refactor-policy.md): hot-path layout risk and validation.
+- [Retrieval index](../llms.txt): compact project facts for retrieval tools.
 
-## Performance
+`reports/test262-latest/` contains gitignored local output. Existing
+`reports/evidence/` artifacts are historical evidence, not new gate requirements.
 
-- [bench-v8 status](perf/bench-v8-status.md): historical public performance
-  snapshot (Octane 2.0, V8 suite v9).
-- [Shipped binary composition](binary-size.md): current stripped
-  ReleaseFast size and functional breakdown.
-- [Performance Workflow](perf/README.md): local diagnostic benches and
-  profiling notes. No merge-time performance gate.
-- [Object And Shape Implementation](perf/object-shape-design.md): fixed
-  layouts and invariants.
-- [Opcode design](perf/opcode-design.md): the single current opcode-space text;
-  engines comparison and the per-opcode table sit beside it.
-- [Refactor Tax Policy](refactor-policy.md): hot-path splits have a layout
-  tax; the merge authority is the ordinary validation ladder.
-- [Backlog](backlog.md): the priced work queue.
+## Planned work
 
-## Status And Release
+Plans describe work to evaluate or implement, not shipped capabilities:
 
-- [STATUS](../STATUS.md): the single authoritative status snapshot.
-- [Changelog](../CHANGELOG.md): released and development changes.
-- [Release Checklist](release-checklist.md): Production v1 release decision.
-- [Roadmap](roadmap.md): approved execution baseline; machine-readable
-  registry is [roadmap/work-items.yaml](roadmap/work-items.yaml).
-- [Retrieval index](../llms.txt): compact project facts for automated
-  retrieval tools.
+- [Roadmap](roadmap.md) and [work-item registry](roadmap/work-items.yaml): scope,
+  dependencies, and recorded decisions.
+- [Backlog](backlog.md): dated implementation/refactoring queue; recheck open items against source.
+- [Nursery evaluation](runtime-nursery-todo.md): current correctness blockers and evaluation sequence; disabled by default.
+- [Engine evolution](engine-evolution-plan.md),
+  [type-directed optimization](type-directed-optimization-plan.md), and
+  [process model](process-model-design.md): design proposals and contracts
+  for the corresponding planned work.
 
-## Planned Work (authority for gated items)
+## Historical decisions
 
-These documents define how gated roadmap items are done when they start.
-They are not a description of the shipped engine.
+- [GC target review](gc-target-design-review.md): target constraints and migration rationale; current nursery blockers live in the evaluation above.
+- [QCP-1 switch](qcp1_switch_decision.md): compiler switch and layout lessons (§9).
+- [QuickJS charter transition](qjs_alignment_charter_transition.md): retirement
+  of implementation-faithfulness constraints.
 
-- [Engine Evolution Plan](engine-evolution-plan.md)
-- [Type-Directed Optimization Plan](type-directed-optimization-plan.md)
-- [Process Model design](process-model-design.md)
+Recover completed campaign logs and older revisions from Git history when
+investigating those versions. Do not apply retired procedures as current gates.
 
-## Reports (gate snapshots)
+## Maintaining documentation
 
-These paths are build-graph inputs or local write-outs, not under `docs/`.
+Give each fact or rule one owning document and link to it elsewhere. Record
+new evidence with the change that owns it; add design documents for durable
+contracts, not routine progress reports.
 
-- `reports/test262-latest/`: local test262-check write-out (gitignored).
-- `reports/evidence/`: preregistered measurement evidence.
-
-## Agent Workflow
-
-- [Project experience](agents/project-experience.md): domain-context routing,
-  cross-session lessons, and the local `.scratch/` issue conventions and
-  triage labels (§11).
-
-## Historical (frozen — read for provenance, not current status)
-
-- [QCP-1 Switch Decision](qcp1_switch_decision.md): close-out record — shipped
-  compiler configuration, final verdicts, and the layout-sensitivity rulings
-  (§9); full evidence lives in this file's git history.
-- [qjs-alignment charter transition](qjs_alignment_charter_transition.md):
-  the 2026-08-24 succession regime (what retired, what stayed).
-
-Completed GC campaign specs, dated pause/splay accounts, RC-retirement
-ledgers, and raw TGC run dumps were removed from the active tree; recover
-them from git history.
-
-## Documentation Rules
-
-- Keep durable architecture decisions in the relevant current document.
-- If a document conflicts with `test262.conf`, the build graph, or source,
-  treat the executable repository state as the authority and fix the document.
-- Historical process evidence (measurements, gate ledgers, campaign scorecards)
-  lives in git history, commits, and PRs — not in the active tree.
+Source, tests, and the build graph establish implementation facts. ECMA-262
+and current contracts define intended behavior; an implementation mismatch
+may be a bug. Verification obligations come only from verification policy.
+Mark snapshots and plans explicitly, and check local links when editing.

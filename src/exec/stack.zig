@@ -8,7 +8,7 @@ const mem_ops = @import("../core/memory.zig");
 const std = @import("std");
 
 const memory = @import("../core/memory.zig");
-const runtime = @import("../core/runtime.zig");
+const runtime = @import("../runtime.zig");
 const JSValue = @import("../core/value.zig").JSValue;
 
 /// Operand slots a call site has retreated `top_ptr` past but has not yet
@@ -59,7 +59,7 @@ pub const Stack = struct {
 
     /// Explicit owner, kept pointer-sized so inline_calls.Entry stays compact.
     /// No allocator-vtable introspection is needed for growth or release.
-    runtime: *@import("../core/runtime.zig").JSRuntime,
+    runtime: *@import("../runtime.zig").JSRuntime,
     /// Base of the operand-stack backing allocation. `top_ptr` is the
     /// authoritative end of the live prefix; keeping both as raw pointers
     /// avoids rebuilding a slice at every VM/cold-helper seam.

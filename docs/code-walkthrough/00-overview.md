@@ -4,12 +4,13 @@
 
 ## 1. 这是什么项目
 
-zjs 是 **QuickJS 的 Zig 重写**，已经从「对照镜像」变成独立引擎：
+zjs 是**用 Zig 编写的 JavaScript / TypeScript 引擎**：
 
 - **语义权威**：ECMA-262，用仓库内 `test262/` 与 `test262.conf` 验证。
 - **对照实现**：pinned QuickJS。行为与 spec 冲突时跟 spec，并记录分叉。
-- **工程目标**：Zig 习惯（显式 error set、显式所有权、模块边界），而不是保留 C 形状。
-- **性能标尺**：vendored bench-v8 / Octane。
+- **TypeScript**：原生解析、类型擦除和支持的运行时语法降级，不做类型检查。
+- **工程目标**：Zig 习惯、显式 error set、清晰生命周期与模块边界。
+- **性能标尺**：QuickJS；bench-v8 / Octane 历史结果见 [性能快照](../perf/bench-v8-status.md)。
 - **不是**：Node/Deno/Bun、浏览器、敌意代码沙箱、libquickjs C ABI 的 drop-in。
 
 发货：`zig build -Doptimize=ReleaseFast`，`layout=short`。`plain` 只是 A/B 诊断。

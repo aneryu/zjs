@@ -1,10 +1,10 @@
 # JSRuntime 目标设计与详细实施计划
 
-日期：2026-09-23（计划始于 2026-09-22）。初始审查基线：14baded4；实施状态核对：945b8a6b 加当前工作区变更，src/core/runtime.zig。
+日期：2026-09-23（计划始于 2026-09-22）。初始审查基线：14baded4；实施状态核对：945b8a6b 加当前工作区变更，src/runtime.zig（由 src/runtime.zig 搬迁）。
 状态：**45 个任务已交付**；后续对抗性审查修复与最终验证见 §13。修复后全量 1936 个引擎测试 + 59 个 CLI 测试通过；batch-gate-profile（含 ReleaseFast test262）通过。A9 后 allocator 复测完成，默认 c_allocator 已落地；详情集中于 §12。
 
 本文是唯一活动设计入口，保留详细任务、最终所有权及验收边界。
-原逐项裁决和六批审计见 [历史记录](runtime-review/history.md)；旧阶段验证不是当前源码的最终验证。
+原逐项讨论和六批审计已由本文收敛；需要追溯旧讨论时查 Git 历史。旧阶段验证不是当前源码的最终验证。
 测量依据见 [allocator TODO](runtime-allocator-todo.md) 与 [nursery TODO](runtime-nursery-todo.md)。
 
 执行索引：§1–6 为最终设计与迁移矩阵，§7 保留 45 张任务卡及依赖，§8 为类型绑定契约，
@@ -205,7 +205,7 @@ GC 与原生清理按依赖完成 → 释放类型/atom/辅助存储 → 用保�
 ### 7.1 使用规则与交付范围
 
 每个任务有唯一 ID、前置任务、文件范围、具体动作、完成条件和定向验证。
-完整路径均相对仓库根；runtime.zig、memory.zig、gc.zig 等未写目录的 core 文件均在 src/core，
+完整路径均相对仓库根；除 `runtime.zig`（位于 `src/`）外，memory.zig、gc.zig 等未写目录的 core 文件均在 src/core，
 其他省略目录的文件由条目中的子系统限定。标注“拟新增”的文件尚不存在，实施时可复用相邻模块，但不能遗漏责任。
 任务是可 review 的最小工作单元，不强制每项一个提交；同一任务若无法保持可编译，必须连同直接消费者迁移。
 P1/P2 静态核对完成。L1、L2、B1、L3、A1、A2、A4、O1、O2、A5、A6、A7、A8、S1–S9、G1、J1 已按完成记录落地。A3 只记录了口径，没有改分配器。G2/G3、B2/B3、T1–T4、E1/J0、J2–J4 已完成本组验证，下一项是 A9。通过编译本身不算任务完成，验证范围以各任务完成记录为准。
@@ -281,10 +281,10 @@ B1 应在 P1 后、L3 对公开入口定形前完成，避免先迁移全部调�
 
 - [x] **已落地**：create 先初始化 diagnostics（包括 mark footprint），initInPlace 显式写 host_completion_event = .unset；预填内存测试覆盖默认值，不依赖 struct 默认初始化。
 
-- 前置：P2。文件：src/core/runtime.zig、tests/core.zig；参考 R04 probes。
+- 前置：P2。文件：src/runtime.zig、tests/core.zig。
 - 动作：明确 host_completion_event、gc_mark_footprint 等全部字段的初始值；在最终地址初始化带自引用成员，不覆盖已经构造的 allocator/GC 状态。
 - 完成：不会读到未初始化事件或诊断状态。L1 当时不改公开入口；该入口随后由 L3 收成 create/destroy。
-- 验证：R04 的两项失败已复现并修复。正式测试覆盖预填充本体、到期等待和显式 reset。探针目录只保留修复前输出。
+- 验证：R04 的两项失败已复现并修复。正式测试覆盖预填充本体、到期等待和显式 reset。原诊断探针及输出已不在当前检出中，回归以正式测试为准。
 
 #### L2 — 建立可回滚的稳定地址构造
 
@@ -644,7 +644,7 @@ A3 核对时生产计数器仍是 `allocated_bytes`；A5 已按上表替换为 `
 
 - [x] **已落地**。FIFO 仍是 `jobs.zig` 的 `Queue`，顺序未改。WeakRef [[KeptAlive]] 的 `keepAliveWeakRef` 和 `clearKeptAlive` 收到同一模块，仍在 job 结束时清空，分配失败仍丢弃保活。列表字段留在 Runtime。JS finalization job 仍在这条队列，原生 cleanup 在 S3 的另一条队列。与 S3 同一轮 `zig build test` 1915 引擎 + 59 CLI 通过。最终 test262 结果见 §12。
 
-- 前置：S1、S3。文件：src/core/runtime.zig、src/core/jobs.zig、src/exec/zjs_vm.zig、src/exec/module.zig。
+- 前置：S1、S3。文件：src/runtime.zig、src/core/jobs.zig、src/exec/zjs_vm.zig、src/exec/module.zig。
 - 动作：收拢 queue 与 kept-alive 状态，不改 FIFO；明确每个 job Realm 和活动 job 的根，JS finalization job 与 native cleanup 分离。
 - 完成：取出任务后到执行结束始终有根；所有原有失败路径保持已有所有权协议。
 - 验证：job queue symbol roots、enqueue allocator failure、Realm 释放后任务仍可执行、FIFO/追加任务。
@@ -789,7 +789,7 @@ MemoryAccount 已删除。生产普通分配直接使用宿主 allocator；GC �
 §7.11 明确列出的扩展能力，以及 allocator/nursery TODO 中的额外策略与跨平台测量，保持后续范围，不能冒充本次已交付。
 最终命令、通过数量、已修复的验收失败和 allocator 证据统一见 §12。
 
-R04 已由 L1 修复；[R04 探针](runtime-review/probes/README.md) 保留修复前证据，不代表当前仍失败。
+R04 初始化缺陷已由 L1 修复；正式回归覆盖预填充内存、到期等待和显式 reset。
 
 ## 10. 与 QuickJS JSRuntime 对照
 

@@ -1,15 +1,14 @@
 # Current source tour
 
-This is a map of the tree as it exists now. QuickJS remains the semantic
-reference. Validation commands live in [GUIDE.md](../GUIDE.md) Part B.6; this
-page does not repeat them. Function-level Chinese walkthrough of every
+Source map for the Zig JavaScript / TypeScript engine. ECMA-262 governs
+JavaScript semantics; QuickJS is a comparison reference. Validation commands
+live in [GUIDE.md](../GUIDE.md) Part B.6. Function-level Chinese walkthrough of every
 `src/` function: [code-walkthrough/README.md](code-walkthrough/README.md).
 Shipped ReleaseFast binary size by layer and function:
 [binary-size.md](binary-size.md).
 
-Start from the layer you are changing. Do not read `parser.zig` or `object.zig`
-from the first line to the last — those files are large
-reference shapes, matching QuickJS’s own monoliths.
+Start from the layer and symbols relevant to the change; the tables below
+identify entry points without requiring a full read of large modules.
 
 ## Layers
 
@@ -51,12 +50,12 @@ native-function install). `src/native.zig` builds comptime thunks over
 
 ## Core — `src/core/`
 
-Values, atoms, strings, objects, shapes, properties, arrays, GC, and
-runtime/context storage.
+Values, atoms, strings, objects, shapes, properties, arrays, and GC.
+`src/runtime.zig` coordinates per-runtime state across the core modules.
 
 | Enter here | Owns |
 | --- | --- |
-| `runtime.zig` / `context.zig` | `JSRuntime`, `JSContext`, roots, GC scheduling |
+| `context.zig` | `JSContext` and per-realm state |
 | `value.zig` | `JSValue` representation, tagging and coercion entry |
 | `object.zig` / `shape.zig` / `property.zig` | objects, shapes, properties |
 | `gc.zig` | registry, policy, external-memory accounting |
@@ -82,9 +81,8 @@ container/window value-root frames are linked
 Promises through `trace_atomics_wait_async`. Host values that outlive a call
 must use public handles, not a raw `JSValue`.
 
-`JSValue` has a single representation: an 8-byte NaN-boxed word. The
-alignment with QuickJS is semantic and ownership-level, not a bit-level ABI
-match.
+`JSValue` has a single representation: an 8-byte NaN-boxed word. Its layout
+and lifetime follow zjs contracts; there is no QuickJS ABI compatibility.
 
 `object.zig` is the large object-model file. For property behavior start at
 `shape.zig` and `property.zig`, then the call site in `src/exec/`.
@@ -328,7 +326,7 @@ Main entry points:
 
 - `src/exec/frame.zig`: `Frame`, `FrameSlab`, and frame-owned windows;
 - `src/exec/stack.zig`: operand stack;
-- `src/core/runtime.zig`: per-runtime `VmStackArena`;
+- `src/runtime.zig`: `JSRuntime` and per-runtime `VmStackArena`;
 - `src/exec/inline_calls.zig`: same-loop `Machine` frame push/pop;
 - `src/exec/tailcall_dispatch.zig`: threaded/tail-called opcode handlers;
 - `src/exec/call_runtime.zig`: call/eval/generator/Atomics shared runtime
@@ -337,10 +335,10 @@ Main entry points:
 The tail-call handler split is a current code-generation constraint, not a
 file-organization preference: each opcode handler ends in a tail dispatch,
 the hot arm completes inside the handler, and cold work that might emit an
-ordinary call is outlined into `vm_opcodes.zig` / `vm_property.zig` first. Folding those handlers
-back into one large switch would grow the shared stack frame again; do not
-merge them without a frozen binary, disassembly, and multi-build PMU
-evidence.
+ordinary call is outlined into `vm_opcodes.zig` / `vm_property.zig` first.
+Folding handlers into a large switch risks growing the shared stack frame.
+Use generated-code inspection and relevant diagnostics to assess that risk;
+the verification policy defines the merge checks.
 
 Ordinary synchronous bytecode frames are preferentially carved from the
 runtime arena as `[args | locals | operand | var-ref metadata]`.
@@ -395,22 +393,12 @@ To shrink the Zig frame/dispatch fixed cost, `FunctionBytecode` and
 - narrow leaf frame constructors and return epilogues;
 - simple-field constructor body bypass and runtime memo.
 
-These are not a property IC, but several of them also have no pinned
-QuickJS counterpart. Until 2026-08-24 they were audit subjects under the
-QuickJS-faithful policy, whose rule 1 was "a matching QuickJS mechanism" —
-that rule is retired clause R1 of the
-[charter transition](qjs_alignment_charter_transition.md) (its original
-trigger was the simple-field constructor bypass listed above). Under the
-succession regime (2026-08-25 rewrite of this section), the list stays an
-accurate inventory, and keep-or-delete decisions are reviewed with:
-
-1. the generality principle (K2): no shape-special-casing; generic
-   mechanisms go through the PERF-MECHANISM-LEDGER audit;
-2. observable / exception / OOM / interrupt / realm boundaries;
-3. controlled instructions / allocations / time A/B;
-4. focused + checkpoint / production gates.
-
-They still must not keep expanding on microbenchmark results alone.
+Review these as general mechanisms against observable behavior, exceptions,
+OOM, interrupts, realms, and the relevant lifetime contracts. A QuickJS
+counterpart is not required. Benchmark-specific recognition is prohibited;
+microbenchmark results alone do not establish general benefit. Verification
+follows [verification policy](verification-policy.md); performance evidence
+supports claims without adding a separate merge gate.
 
 ### 7. Current Capabilities
 
@@ -456,10 +444,8 @@ Not implemented:
 
 Keep stack bytecode. Prioritize:
 
-- decompose call admission, frame publication, and return
-  (the pinned qjs serves as the K3 correctness oracle and regression
-  sentinel for this work, not as the performance target — see the
-  [charter transition](qjs_alignment_charter_transition.md) §4);
+- decompose call admission, frame publication, and return while preserving
+  language semantics and using focused differential probes;
 - audit zjs-only leaf / body-bypass machinery;
 - converge the direct-eval binding mechanism;
 - strengthen generator / async / module exception and OOM ownership
@@ -468,7 +454,7 @@ Keep stack bytecode. Prioritize:
 - keep shrinking `call_runtime.zig` by ownership domain, without
   forcibly splitting shared state to hit a line-count target.
 
-Re-evaluate the bytecode architecture only when the semantic gates are
-stable, hot spots in call / property / array / string have been
-converged with qjs mechanisms, and PMU evidence shows operand traffic /
-dispatch as the main bottleneck.
+Re-evaluate bytecode architecture with stable semantic coverage and evidence
+that operand traffic or dispatch is the bottleneck, after investigating the
+call/property/array/string paths. Internal convergence with QuickJS is not a
+prerequisite; existing contracts and the verification policy still apply.

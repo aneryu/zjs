@@ -1,387 +1,183 @@
 # Project experience for agents
 
-This field guide condenses recurring lessons from Claude Code, Codex, and Grok
-project sessions. It records durable ways of working, not campaign status or
-benchmark history. Current source, `AGENTS.md`, `GUIDE.md`, and the contracts
-linked below always override a historical session or memory.
-
-Use this guide to avoid repeating expensive mistakes. Keep new task-specific
-evidence with the code change, issue, PR, or report that owns it; do not turn
-this file into a running ledger.
+Read the sections relevant to the task. These are durable investigation
+lessons, not a task checklist or status ledger. [AGENTS.md](../../AGENTS.md)
+defines execution, [verification policy](../verification-policy.md) defines
+gates, and current domain contracts govern implementation.
 
 ## 0. Where the domain context lives
 
-This repository uses a single domain-documentation context:
-[architecture.md](../architecture.md) is the current source tour and layer
-map; this file records the working methods. There is no root `CONTEXT.md` and
-no `docs/adr/` tree. Use the terms already established in
-`docs/architecture.md`, `AGENTS.md`, and `GUIDE.md` in issue titles, tests,
-implementation notes, and refactoring proposals; if a needed concept is
-absent, first check whether the repository already uses a different term.
-Surface any conflict with an existing architecture or process decision
-explicitly instead of silently overriding it.
+Use [architecture.md](../architecture.md) for source owners and layer boundaries,
+and [the documentation index](../README.md) for contracts. Reuse established
+terms. Surface conflicts with an existing decision instead of silently
+changing it; historical sessions and memory cannot override current contracts.
 
 ## 1. Evidence before narrative
 
-Use this order of authority:
+Separate intended behavior from implementation facts. ECMA-262 governs
+JavaScript semantics; TypeScript support is scoped in [LIMITATIONS.md](../../LIMITATIONS.md).
+Current source, tests, build configuration, and reproducible results establish
+what the checked-out engine actually does. A source implementation can still
+violate its specification. QuickJS is a comparison reference.
 
-1. Current zjs source and the exact checked-out QuickJS source.
-2. Current tests, `test262.conf`, build configuration, and generated binary.
-3. Reproducible behavior, disassembly, counters, and raw measurement artifacts.
-4. Current reviewed project documentation.
-5. Historical reports, session summaries, and agent memory.
-
-History is useful for finding symbols, failed ideas, and missing checks. It is
-not proof about current `HEAD`. Recheck a historical claim when the source,
-binary, compiler, benchmark, hardware, or measurement protocol could have
-changed.
-
-Match the evidence to the claim:
-
-| Claim | Minimum useful evidence |
+| Claim | Useful evidence |
 | --- | --- |
-| Semantic parity | QuickJS owner, zjs owner, same focused probe, and a regression test |
-| Performance cause | Frozen binaries, equal-work output, paired A/B, and an isolated mechanism change |
-| Architecture or lifetime rule | Ownership/edge walk, relevant QuickJS mechanism, and stress coverage |
-| Validation success | Original command exit status, complete expected output, and artifact coverage |
-| Task completion | Intended diff, required gates, deliverables present, and final git topology |
-| Blocked work | A minimal environment-independent probe and an explicit list of work not performed |
+| Semantic correctness | Spec basis, focused reproducer, regression test; differential result where applicable |
+| Performance cause | Fixed binaries, equal work, controlled comparison, isolated mechanism change |
+| Lifetime rule | Ownership/root/edge walk and focused lifetime coverage |
+| Validation success | Original exit status, complete expected output, actual case coverage |
+| Completion | Intended diff, required checks, deliverables, and requested repository actions |
+| Blocked work | Minimal probe, concrete blocker, and work not performed |
 
-Do not promote a hypothesis to a result because it sounds plausible or because
-several agents repeated it. Repeated claims can share the same bad premise.
+Recheck old claims when source, compiler, binary, workload, or host changes.
+Repeated claims are not independent evidence. Keep raw evidence with the change.
 
 ## 2. Start every task from a frozen question
 
-Before editing:
+Apply the task boundaries in AGENTS. For an investigation, capture the exact
+command and identify the zjs owner before editing. Form a falsifiable
+hypothesis and name the observation that would disprove it. Consult the
+reference implementation where it helps explain the behavior.
 
-1. Read the request literally, including write, commit, merge, and push
-   boundaries.
-2. Inspect `git status`, branch/worktree identity, and the intended diff. Treat
-   pre-existing changes as user-owned.
-3. Read the current subsystem entry points from
-   [architecture.md](../architecture.md), not a stale session path.
-4. Capture the exact failing command, script, benchmark, or test slice.
-5. Identify both the QuickJS owner and the zjs owner of the behavior.
-6. State one falsifiable mechanism hypothesis and the observation that would
-   disprove it.
+Keep the question narrow enough to test. A review inspects and reports;
+a diagnosis reproduces and explains; a fix includes the responsible edit
+and validation. Commit, merge, and push are separate authorization boundaries.
 
-Keep the question narrow. “Why is this benchmark slow?” is not yet actionable;
-“does mapped-arguments indexed access leave the QuickJS class arm and enter the
-generic property path?” is.
+## 3. Language semantics and implementation
 
-Respect task verbs:
+When engines disagree, compare lookup order, coercion, exceptions, user-code
+calls, side effects, and lifetime/re-entry behavior under equivalent runner
+conditions. A shared failure still needs a spec verdict; a reference match
+alone does not prove correctness.
 
-- **Review** means inspect and report; it does not authorize edits, commits, or
-  pushes.
-- **Diagnose** means reproduce and explain; do not silently turn it into an
-  implementation campaign.
-- **Fix/build** includes the smallest responsible edit and proportional
-  validation.
-- **Commit** means stage only the intended validated scope. It does not mean
-  push.
-- **Close out** means finish validation, integration, and honest residual
-  reporting; do not open unrelated optimization lines.
+Use general mechanisms that preserve observable behavior. QuickJS's internal
+layout or algorithm is not a requirement. Never land benchmark-name checks,
+fixture recognition, or a shortcut that skips required user code.
 
-## 3. QuickJS faithfulness is mechanism-level
-
-QuickJS is not merely an output oracle. Compare the mechanism that produces the
-output:
-
-- lookup order and observable property operations;
-- coercion and exception timing;
-- ownership of returned values;
-- object/shape/prototype mutation rules;
-- GC edges, weak edges, finalization, and re-entry;
-- frame creation, argument materialization, and callback dispatch;
-- parser, emitter, and opcode ordering.
-
-A zjs path being faster in one case is not evidence that a QuickJS-absent path
-should exist. Treat it as a warning until it is shown to be either:
-
-- the Zig expression of the same QuickJS mechanism, or
-- an explicitly reviewed, general mechanism with unchanged observable
-  semantics and no shape-specific cliff.
-
-Never land benchmark-name checks, source-pattern recognition, or a shortcut
-that skips user code. A minimized benchmark is a diagnostic instrument, not a
-new engine semantic.
-
-When QuickJS and zjs disagree, first check whether pinned QuickJS also fails the
-same test under the same runner and configuration. A shared failure is still
-compatibility debt, but it is not demonstrated zjs-to-QuickJS regression.
-
-Some stable architecture constraints follow from this project rather than from
-any one campaign:
-
-- `src/core/` does not absorb CLI, test262, plugin, or event-loop policy.
-- Standard globals are engine bootstrap using QuickJS-style native records;
-  they are not a generic descriptor-registry layer.
-- VM values are governed by the tracing collector. Values that
-  outlive a call cross the public handle boundary.
-- `src/compiler/` (the v2 compiler) is the only compiler and `layout=short` is production. Treat
-  `plain` as a diagnostic configuration, not a second product.
-- A large file that mirrors a QuickJS monolith is not by itself an architecture
-  defect. Find an ownership, dependency, testability, or change-coupling
-  problem before proposing a split.
+Preserve project architecture: core contains no host policy; standard globals
+use engine bootstrap/native records; values crossing host calls use handles;
+`layout=short` is production and `plain` is diagnostic. Split a large module
+for an ownership, dependency, or testability problem, not its size alone.
 
 ## 4. Diagnose by narrowing the owner
 
-Use a reproduce-minimize-hypothesize-instrument loop:
+1. Reproduce on the current tree; retain stdout, stderr, and exit status.
+2. Minimize while preserving the failure or the parent workload's behavior.
+3. Check equal work: result, exceptions, side effects, checksum, iteration count.
+4. Separate parsing, emission, VM execution, builtins, runner, and teardown.
+5. Instrument the boundary that distinguishes the hypotheses.
+6. Remove diagnostic instrumentation before assessing production cost.
 
-1. Reproduce on the current tree and retain exact stdout, stderr, and exit code.
-2. Reduce to the smallest case that preserves the failure or performance ratio.
-3. Check equal work: checksum, result, exception, side effects, and iteration
-   count must agree across variants and engines.
-4. Separate parser acceptance, emitted bytecode, VM execution, builtin glue,
-   runner behavior, and teardown.
-5. Instrument only the boundary needed to choose between hypotheses.
-6. Remove or disable the instrumentation before judging production cost.
-
-For performance cases, a good reduction retains the parent workload's ratio or
-explains exactly where it changes. Deletion steps that change the ratio are
-information; do not keep deleting until only a fast but unrelated microbenchmark
-remains.
-
-Before declaring a residual “architectural”, “diffuse”, or a “floor”, close the
-accounting from several directions:
-
-- equal-work instruction reconciliation;
-- dynamic frequency multiplied by per-event cost;
-- hot-footprint and reachable-code density, not only section size;
-- frontend/backend stall conservation against total cycle excess;
-- process-window versus benchmark-inner-window alignment.
-
-Several long investigations were reopened because a residual label was applied
-before this accounting closed.
+A performance reduction that changes the parent's ratio is evidence about the
+mechanism, not a replacement benchmark. Before calling a cost architectural,
+account for event frequency, per-event cost, reachable code, and the timing
+window. State what remains unexplained.
 
 ## 5. Performance evidence must fail closed
 
-The active workflow is documented in [Performance Workflow](../perf/README.md)
-and the historical snapshot in
-[bench-v8 status](../perf/bench-v8-status.md). Read those files
-before using a remembered command.
+[Performance workflow](../perf/README.md) describes available diagnostics;
+[bench-v8 status](../perf/bench-v8-status.md) is a historical snapshot.
+There is no mandatory measurement protocol or performance merge gate.
 
-For any decision-relevant result, retain:
+For a performance claim, retain source revisions and dirty state, build
+configuration, immutable binaries and hashes, host/compiler, workload and
+output checksum, sample order/window, child exit status, and raw results.
+Record affinity and PMU selection if used. Never measure a mutable
+`zig-out/bin/zjs` that another build can replace.
 
-- zjs and QuickJS source revisions;
-- clean/dirty state and exact production configuration signature;
-- immutable binary paths and SHA-256 hashes;
-- compiler, target, host, CPU affinity, and serving PMU;
-- workload source hash and deterministic output/checksum;
-- warmup, sample count, order log, and measurement window;
-- every child exit status and complete case/sample coverage;
-- the raw machine-readable artifact.
+Match the experiment to the claim:
 
-Do not measure a mutable `zig-out/bin/zjs` while another build can replace it.
-Zig 0.16 has produced materially different code from independent builds of the
-same source in this repository (the 2026-07 build-bistability record, in git
-history). Freeze the exact binary first. A historical number tied to another binary is a
-snapshot, not a current baseline.
+- Use controlled paired comparisons to separate a change from drift/noise.
+  Shared-cache or bandwidth interference can invalidate causal attribution.
+- Fewer instructions or fewer code bytes do not establish a speedup. Check
+  time/cycles and whether an extra call, dependency, or layout change explains
+  the difference. A costly cold path may not matter to the workload.
+- Inline stacks and shared bodies can misattribute symbol/line percentages.
+  Use call-chain/address evidence and controls when investigating a mechanism.
+- Whole-process and inner-loop measurements include different work. Record
+  startup, parse, bootstrap, warmup, and teardown boundaries.
 
-Use balanced paired order with an even sample count. Keep fast parallel macro
-screening separate from strict attribution: shared-cache and bandwidth effects
-can be acceptable for a calibrated headline protocol while still invalidating
-a cycle/cache explanation. Recheck a boundary decision with the protocol that
-matches the claim.
-
-Measure instructions and cycles/time together:
-
-- fewer instructions with unchanged time can mean out-of-order execution hid
-  the removed work;
-- fewer instructions with worse cycles can mean an added dependency, branch,
-  call boundary, or code-layout cost;
-- equal instructions with different cycles can be a layout or microarchitecture
-  effect;
-- a high per-event cost is irrelevant when the path is dynamically cold.
-
-When instructions and cycles disagree, collect the smallest useful stall,
-branch, cache, or call-chain evidence. Do not infer the answer from one `perf`
-percentage. Inlining and shared cold bodies make `file:line` and symbol buckets
-leak across mechanisms; use scoped call chains, IP-to-inline-stack mapping, and
-both positive and zero controls.
-
-Keep measurement windows comparable. Whole-process counters include startup,
-parse/compile, bootstrap, and teardown; many benchmark scores time only an
-inner loop. A ratio difference between those windows is not automatically a GC
-or warmup effect.
-
-Treat these outcomes as valid results:
-
-- **unresolved**: effect is below noise or changes direction;
-- **rejected**: focused case improves but macro workloads regress;
-- **diagnostic-only**: a never-merge spike establishes an upper bound;
-- **no production change**: code size or cache-set geometry improved without a
-  causal cycle/score improvement.
-
-Reducing handler bytes is not sufficient. Moving a hot leaf behind another
-call, prologue, or tail hop can shrink the resident island and still slow the
-program. Validate reachable hot work, frame size, dispatch discipline, and
-macro sentinels.
+`unresolved`, `rejected`, `diagnostic-only`, and `no production change` are
+valid outcomes. A local improvement needs evidence from the workload it is
+claimed to improve; a microbenchmark does not establish general benefit.
 
 ## 6. Validation is part of the implementation
 
-Follow [GUIDE.md](../../GUIDE.md) Part B.6: focused reproducer first, then the
-cheapest covering tier, then the appropriate handoff or phase-close gates. Do
-not duplicate the command ladder into task notes.
+Use the [verification policy](../verification-policy.md) and
+[GUIDE Part B.6](../../GUIDE.md#b6-validation-tiers), without copying their gates
+into task notes.
 
-Recurring traps:
-
-- Debug success can hide ReleaseSafe/ReleaseFast lifetime, layout, or undefined
-  behavior failures.
-- `zig build zjs` does not prove a separately built runner is fresh. Prefer the
-  owning build step over invoking an old artifact from `zig-out/bin`.
-- A new worktree may have an uninitialized `test262` submodule. Zero tests,
-  missing corpus, or a runner startup failure is not a green gate.
-- Piping a build through `grep` can hide the original non-zero exit. Preserve
-  the command status with `pipefail` or capture and check it separately.
-- Validation can update generated reports. Do not stage them unless they are
-  part of the requested deliverable.
-- Counters and probes can perturb the path they measure. Use them for frequency
-  or classification, then price the uninstrumented build.
-
-Green broad gates do not prove the target behavior if there is no focused
-regression, if the relevant feature is excluded by `test262.conf`, or if a
-source-shaped shortcut bypasses the real path. Conversely, a failing broad gate
-is not automatically caused by the current diff: reproduce it on the baseline
-before attributing it as pre-existing.
-
-Use the extra GUIDE gates when their invariant is touched: alternate value
-representation, OOM cleanup, forced-GC timing, or ownership audit. New user-
-visible throw paths must retain a message through the message-carrying helpers.
-
-Never repair a gate by editing excludes, expected-failure ledgers, reports, or
-tests unless the task is specifically a reviewed runner/configuration change.
+- Debug can hide optimized-build lifetime/layout failures.
+- Build the owning runner before using it; building the CLI does not refresh
+  test262. Missing corpus, zero tests, and startup failure are not green gates.
+- Preserve pipeline exit status. Check complete output and case coverage.
+- Generated reports are not automatically part of the requested diff.
+- Broad green gates need focused evidence for the behavior being changed.
+- Reproduce a broad failure on the baseline before calling it pre-existing.
+- Do not repair a gate through excludes, failure ledgers, or weakened tests.
+  Legitimate runner/configuration changes still need their own regression.
 
 ## 7. Worktrees and multiple agents
 
-Isolation is necessary but incomplete:
+Worktrees share Git objects, refs, reflogs, and the stash stack; build outputs,
+corpora, and measurement resources may also be shared. Concurrent edits to the
+same file need separate worktrees and a planned integration order. Concurrent
+builds must not replace a measured binary. Keep scratch in each worktree.
 
-- Worktrees isolate checked-out files, but share the Git object database,
-  refs, reflogs, and stash stack.
-- Build caches, `zig-out`, `/tmp` locks, PMU CPUs, and benchmark corpora can also
-  be shared.
-- Concurrent edits to the same file need separate worktrees and an explicit
-  integration order.
-- Concurrent builds must not overwrite a binary that another lane is measuring.
+When work is delegated, state the baseline/worktree, objective, allowed files,
+Git permissions, reproducer, known disproved hypotheses, required checks, and
+completion criteria. Keep dependent work from overlapping an unvalidated
+predecessor. The integrating agent verifies the diff, merge-base, artifacts,
+and results directly; an agent summary or existing commit is not completion.
 
-A useful delegated brief names:
-
-- baseline commit and worktree;
-- exact objective and non-objectives;
-- allowed files and git-write policy;
-- QuickJS anchors and current reproducer;
-- required output/checksum and measurement protocol;
-- focused and final gates;
-- stop/reject conditions;
-- concrete completion marker, such as a named report plus commit.
-
-Make briefs self-contained. Include known disproved hypotheses so another agent
-does not spend hours rediscovering them. For a strict dependency chain, allow at
-most one speculative successor and only when its files do not overlap the
-unvalidated predecessor.
-
-The integrating agent retains final judgment. Verify the candidate diff,
-merge-base, binary identity, raw artifacts, gate output, and report claims
-directly. A pane marked done, an agent summary, or a commit existing somewhere
-is not completion.
-
-Do not use shared `git stash` as a casual transfer mechanism. Prefer a named
-commit or patch and verify the exact files before applying it. Stage only the
-intended scope. Merge locally only when requested; push requires separate
-authorization.
-
-If every command fails before process creation, use one minimal probe outside
-the repository. A command-independent sandbox startup error is infrastructure
-evidence, not source, test, or performance evidence. Stop retrying shell
-variants and report precisely what was not run.
+Use named commits or patches for transfer, not shared `git stash`. Stage only
+intended files. If commands fail before process creation, try one minimal
+probe outside the repository, then report the infrastructure blocker and
+unrun work instead of repeatedly changing shell syntax.
 
 ## 8. Recurring failed approaches
 
-| Temptation | What repeatedly went wrong | Better move |
-| --- | --- | --- |
-| Add a benchmark-specific fast path | Local score improved while the engine diverged from QuickJS | Map and implement the QuickJS mechanism |
-| Trust a historical ratio | Source, binary, protocol, or build state had changed | Remeasure current frozen binaries |
-| Trust a symbol or line percentage | Inlining/shared bodies attributed unrelated work | Use scoped call chains and differential builds |
-| Optimize the highest per-event cost | The path was dynamically cold | Count exits first; price frequency times cost |
-| Accept instruction reduction as speed | Cycles were neutral or worse | Measure cycles/time and dependency/stall effects |
-| Shrink or relocate handler code | Extra hop/prologue or reachable footprint erased the win | Measure the uninstrumented macro sentinels |
-| Generalize one green microbenchmark | The parent workload did not exercise the same mechanism | Preserve the parent ratio and return to macro A/B |
-| Treat broad green gates as proof | Focused semantics were absent or excluded | Add a direct regression and check the config boundary |
-| Trust a runner-generated table | Child failure or missing output was silently skipped | Validate exits, stdout, hashes, and coverage independently |
-| Let a lane “fix” the ledger | A regression was hidden rather than fixed | Protect configs/reports and rerun the canonical gate |
-| Call a residual a permanent floor | Another accounting axis later exposed a fixable mechanism | Close conservation and state the remaining uncertainty |
-| Keep failed experimental code | Future agents mistook it for a candidate | Revert product code; retain a clearly labeled report if useful |
+| Temptation | Better move |
+| --- | --- |
+| Add a benchmark-specific fast path | Implement the general mechanism and preserve language semantics |
+| Trust a historical ratio or symbol percentage | Verify binary identity, current evidence, and inline/call context |
+| Optimize a large per-event cost | Count its actual frequency first |
+| Accept fewer instructions or bytes as a speedup | Check elapsed cost and the parent workload |
+| Trust broad green gates or generated tables | Verify focused coverage, child exits, and missing results |
+| Keep failed experimental code | Remove the task's failed experiment; preserve useful findings with the task |
 
 ## 9. Handoff format
 
-Lead with the actual outcome: `validated`, `partial`, `rejected`, `unresolved`,
-or `blocked`. Then record:
-
-1. **Scope:** baseline, changed files, and explicit non-scope.
-2. **Mechanism:** QuickJS owner, zjs owner, and why the change is faithful.
-3. **Behavior:** reproducer, expected output, and focused regression.
-4. **Performance:** immutable binaries, protocol, raw artifact, and whether the
-   result is screening or attribution evidence.
-5. **Validation:** exact completed gates plus interrupted/not-run gates.
-6. **Residual:** what remains, what was disproved, and the next evidence needed.
-7. **Repository state:** branch/head, dirty files, local merge state, and whether
-   anything was pushed.
-
-Use explicit negative statements: “direct parity was not reached”, “the full
-gate was not run”, or “the effect was below the measurement resolution”. Honest
-partial evidence is more useful than a polished but unsupported success claim.
+Lead with the outcome, then explain the change/mechanism, relevant completed
+checks, and residual work. Include reproducer and performance artifacts when
+they support the claim. State interrupted or unrun checks explicitly. Report
+commit/merge/push state when those actions are part of the task; do not attach
+an unrelated repository inventory to every small edit.
 
 ## 10. Current references
 
-- Engineering and validation: [GUIDE.md](../../GUIDE.md)
-- Source ownership and layering: [architecture.md](../architecture.md)
-- Contribution scope: [CONTRIBUTING.md](../../CONTRIBUTING.md)
-- Performance contracts: [Performance Workflow](../perf/README.md)
-- Current public performance snapshot: [bench-v8 status](../perf/bench-v8-status.md) (historical; no screening instrument)
-- Historical subsystem baseline and evidence vocabulary: the frozen
-  2026-07-27 subsystem difference baseline
-  (`docs/qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md`, removed
-  2026-08-25; recover from git history)
-- Local issue/PRD workflow and triage labels: §11 below
-- Domain vocabulary and context routing: §0 above
+[Documentation index](../README.md) routes to engineering, architecture,
+contracts, and performance evidence. Local ticket conventions follow below.
 
 ## 11. Issue tracker: local Markdown
 
-Issues and PRDs for this repository live as Markdown files in `.scratch/`.
-`.scratch/` is a gitignored local mechanism (by design); it is not a
-cross-machine collaboration surface.
+Issues and PRDs live in gitignored `.scratch/`, scoped to this worktree; they
+are not a cross-machine collaboration surface.
 
-### Conventions
+- Feature directory: `.scratch/<feature-slug>/`.
+- PRD: `PRD.md` within that directory.
+- Issues: `issues/<NN>-<slug>.md`, numbered from `01`.
+- Put a `Status:` line near the top; append discussion under `## Comments`.
+- To publish a local ticket, create the file; to fetch it, read the referenced
+  file. No external issue-tracker action is implied.
 
-- One feature per directory: `.scratch/<feature-slug>/`.
-- The PRD is `.scratch/<feature-slug>/PRD.md`.
-- Implementation issues are
-  `.scratch/<feature-slug>/issues/<NN>-<slug>.md`, numbered from `01`.
-- Triage state is recorded as a `Status:` line near the top of each issue file,
-  using the labels below.
-- Comments and conversation history are appended under a `## Comments`
-  heading at the bottom of the file.
+Use these canonical triage labels (implementation progress is separate,
+see GUIDE Part B.3):
 
-### Publishing to the issue tracker
-
-Create a new file under `.scratch/<feature-slug>/`, creating the directory when
-needed.
-
-### Fetching a ticket
-
-Read the referenced Markdown file. The user will normally provide its path or
-issue number directly.
-
-### Triage labels
-
-Engineering skills use five canonical triage roles. Local issue files record
-the corresponding string in their `Status:` line. When a skill names a
-canonical role, use the matching local status from this table.
-
-| Canonical role | Local status | Meaning |
-|---|---|---|
-| `needs-triage` | `needs-triage` | A maintainer needs to evaluate the issue |
-| `needs-info` | `needs-info` | Waiting for more information from the reporter |
-| `ready-for-agent` | `ready-for-agent` | Fully specified and ready for an AFK agent |
-| `ready-for-human` | `ready-for-human` | Requires human implementation |
-| `wontfix` | `wontfix` | Will not be actioned |
+| Status | Meaning |
+| --- | --- |
+| `needs-triage` | Maintainer evaluation needed |
+| `needs-info` | Reporter information needed |
+| `ready-for-agent` | Fully specified for autonomous implementation |
+| `ready-for-human` | Requires human implementation |
+| `wontfix` | Will not be actioned |

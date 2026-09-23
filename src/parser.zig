@@ -108,7 +108,7 @@ pub const compile_entry = struct {
     const platform_clock = @import("platform_clock.zig");
 
     const atom = @import("core/atom.zig");
-    const JSRuntime = @import("core/runtime.zig").JSRuntime;
+    const JSRuntime = @import("runtime.zig").JSRuntime;
     const JSValue = @import("core/value.zig").JSValue;
     const bytecode = @import("bytecode.zig");
     const compiler = @import("compiler/root.zig");

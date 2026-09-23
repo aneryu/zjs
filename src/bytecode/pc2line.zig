@@ -33,7 +33,7 @@ const mem_ops = @import("../core/memory.zig");
 const std = @import("std");
 const bytecode = @import("../bytecode.zig");
 const memory = @import("../core/memory.zig");
-const runtime = @import("../core/runtime.zig");
+const runtime = @import("../runtime.zig");
 
 /// PC2LINE encoding constants (mirror `quickjs.c`).
 pub const PC2LINE_BASE: i32 = -1;

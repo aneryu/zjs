@@ -19,7 +19,7 @@ const property = @import("property.zig");
 const JSValue = @import("value.zig").JSValue;
 const class = @import("class.zig");
 const descriptor = @import("descriptor.zig");
-const JSRuntime = @import("runtime.zig").JSRuntime;
+const JSRuntime = @import("../runtime.zig").JSRuntime;
 
 /// qjs `JS_PROP_INITIAL_SIZE`.
 pub const initial_prop_size = 2;

@@ -13,7 +13,7 @@ const gc = @import("gc.zig");
 const gc_visit = @import("gc_visit.zig");
 const gc_block_heap = @import("gc_block_heap.zig");
 const unicode = @import("../libs/unicode.zig");
-const JSRuntime = @import("runtime.zig").JSRuntime;
+const JSRuntime = @import("../runtime.zig").JSRuntime;
 const JSValue = @import("value.zig").JSValue;
 const ValueTag = @import("value.zig").Tag;
 

@@ -1,6 +1,10 @@
 # Backlog
 
-The single priced work queue. Merged 2026-08-25 from the former
+Dated implementation/refactoring queue; open labels and size estimates are
+not a fresh source audit. Recheck an item before scheduling it. Cross-project
+dependencies live in the [roadmap registry](roadmap/work-items.yaml).
+
+Merged 2026-08-25 from the former
 `impl-quality-backlog.md`, `maintainability-backlog.md`, `code-volume.md`,
 and `perf/shared-vm-decomposition.md`; the closed records of all four live in
 their git history (see "Closed record" below). Merge authority is
@@ -53,10 +57,9 @@ times. Remaining:
   original qjs-parity justification retired with charter clauses R1–R3
   ([qjs_alignment_charter_transition.md](qjs_alignment_charter_transition.md));
   the representation contract is the standing authority.
-- Gate: every tranche **AB** + pad lineage (`--pads 0 3 7`); data layout is
-  comptime-pinned but `.text` placement is not, and pure-placement swings of
-  ±0.4–2.7% are on record. The hot mark arms' `align(16)` pins are
-  function-entry pins and travel with the functions.
+- Validation follows [verification policy](verification-policy.md). The former
+  AB/pad-lineage gate is retired. Historical placement swings remain a layout
+  risk to investigate when relevant, not an extra acceptance requirement.
 
 ### Q12 — parked `BuiltinCallEnv` pilot
 
@@ -74,7 +77,7 @@ current-frame collapse without a new requirement.
 The one parked increment: a gated `*const BuiltinCallEnv` pilot in the
 disposable/reflect cold domains (~409 cold sites upper bound), two-track —
 cold builtins take the bundled env struct, the hot call chain keeps explicit
-args. Sequenced after Q11/Q13; every step **AB**-gated.
+args. Sequenced after Q11/Q13; validation follows the current verification policy.
 
 ### Q13 — parser file split (unblocked, not yet scheduled)
 
@@ -118,11 +121,9 @@ Move criteria (standing rules):
   not create a new shard for a single unrelated helper; leave nearby code in
   place until there is a stable domain boundary.
 
-Minimum validation for a small move: `zig build zjs --summary all` +
-`git diff --check`. For multi-domain moves or any observable behavior risk:
-`zig build test --summary all` + `zig build smoke --summary all`, plus a
-relevant test262 slice when the moved code handles visible JavaScript
-semantics.
+Use [verification policy](verification-policy.md) for implementation and batch
+checks. Semantic changes also need focused differential evidence and their
+spec basis; this queue does not define a separate validation ladder.
 
 ## Code volume
 
@@ -136,7 +137,7 @@ diagnostic snapshot, not a new ruling. This section records **what was
 ruled unrecoverable and why** as much as what is left; three of the
 categories below look like obvious duplication and are load-bearing.
 
-### Current composition
+### Composition snapshot (2026-08-25)
 
 Measured 2026-08-25 (the tree of the 2026-08-25 consolidation commit).
 
@@ -191,7 +192,7 @@ About 500–700 lines, all requiring judgement rather than a script.
 |---|---|---|
 | `bigIntParts` / `compareBigIntValues` / `valuesEqual` in three copies (`array_builtin_ops`, `value_ops`, `core.value`) | ~60 → save ~40 | Sink to core. Direct; no known divergence |
 | `appendValueString`, 8 copies in 6 shapes | ~50 | Number formatting has diverged (`std.fmt "{d}"` vs ES `dtoa`); latent, needs per-site rulings |
-| `unicode.zig` range builder vs point lookup: the same table format decoded twice (`unicodeGeneralCategory1` / `matchGeneralCategory`, `unicodeProp1` / `matchPropTable`, `unicodeCase1` / `matchCaseMask`, `unicodePropOps` / `matchPropOps`) | 335 → save ~150 | One yields a RangeSet, the other does point lookup. Needs a shared traversal iterator and touches the RegExp hot path — bench-v8 A/B |
+| `unicode.zig` range builder vs point lookup: the same table format decoded twice (`unicodeGeneralCategory1` / `matchGeneralCategory`, `unicodeProp1` / `matchPropTable`, `unicodeCase1` / `matchCaseMask`, `unicodePropOps` / `matchPropOps`) | 335 → save ~150 | One yields a RangeSet, the other does point lookup. Needs a shared traversal iterator and touches the RegExp hot path; ordinary validation policy applies |
 | `parseArrowFunction` inlines a copy of `parseFunctionParameters` | ~150 | See "Ruled unrecoverable" — code volume only |
 
 ### Ruled unrecoverable
@@ -217,8 +218,8 @@ About 500–700 lines, all requiring judgement rather than a script.
   2026-08-21 sweep read 0.9956 on bench-v8, stable across two independent
   runs — and the pad lineage ruled it LAYOUT: instructions moved ±0.04%
   while cycles flipped sign across pads. Near-zero instruction delta plus a
-  moving cycle delta is placement, not mechanism. Always pair a deletion
-  A/B with pad-lineage / placement evidence, not an instruction ratio alone.
+  moving cycle delta can indicate placement effects; it does not establish a
+  mechanism improvement. The historical pad-lineage procedure is retired.
 - **The gates are blind to protocol observability.** Two
   collection-iteration defects have shipped green under test262 0/49778. A
   change that narrows or widens a fast-path guard needs a differential run

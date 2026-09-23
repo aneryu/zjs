@@ -16,7 +16,7 @@ const builtin = @import("builtin");
 
 const gc = @import("gc.zig");
 const AddressRegistry = @import("gc_address_registry.zig");
-const runtime_mod = @import("runtime.zig");
+const runtime_mod = @import("../runtime.zig");
 const object_mod = @import("object.zig");
 const JSRuntime = runtime_mod.JSRuntime;
 

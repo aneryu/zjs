@@ -15,7 +15,7 @@
 const std = @import("std");
 const object_mod = @import("object.zig");
 const Object = object_mod.Object;
-const JSRuntime = @import("runtime.zig").JSRuntime;
+const JSRuntime = @import("../runtime.zig").JSRuntime;
 
 /// Link a weak-capable payload for its lifetime. Allocation-free. The weak
 /// pass walks the chain without splicing it.

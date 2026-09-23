@@ -1,151 +1,80 @@
 # Compatibility and Validation
 
-`zjs` does not claim general ECMAScript completeness beyond the repository-local
-validation profile. The compatibility boundary is the root `test262.conf`
-configuration plus focused Zig and smoke tests.
+JavaScript behavior follows ECMA-262. The validated scope is the repository's
+`test262.conf`, pinned `test262/` submodule, and focused Zig/CLI tests;
+it is not a claim of complete ECMAScript or host-platform support.
+TypeScript and host boundaries are listed in [LIMITATIONS.md](LIMITATIONS.md).
 
 ## Test262 Gate
 
-Active configuration:
+Inputs are `test262.conf`, `test262/harness`, `test262/test`, and
+`test262_errors.txt`. The known-error file is empty: the configured gate
+allows no failures. Dated counts and the corpus pin live in
+[STATUS.md](STATUS.md#test262); they do not validate an untested checkout.
 
-- Config: `test262.conf`
-- Harness: `test262/harness`
-- Tests: `test262/test`
-- Known-error file: `test262_errors.txt`
-
-Run the gate through Zig:
-
-```sh
-zig build test262-check --summary all
-```
-
-Or invoke the runner directly:
-
-```sh
-zig build run-test262 --summary all
-./zig-out/bin/run-test262 -t 8 -c test262.conf -d test262/test 0 100000
-```
-
-The checked 2026-08-22 report has 44,584 passes, 0 checked-in known failures,
-0 unexpected failures, and 5,194 feature skips, out of 49,778 prepared cases.
-It was recorded under the production default
-(`zjs-config-v2:compiler=v2,layout=short,repr=tagged,optimize=ReleaseFast,force_gc=off,ownership_audit=off`).
-Live default is in `AGENTS.md`. `zig build test262-check -Doptimize=ReleaseFast` writes local
-bucket, per-directory, feature-skip, and failure reports under
-`reports/test262-latest/` (gitignored).
-
-`test262_errors.txt` is empty: there is no remaining checked-in known-failure
-set, so the gate has no tolerated-failure surface at all and any non-zero error
-count is a regression. The historical 25-file known-failure set and its
-zjs-to-pinned-QuickJS classification are recorded in the frozen 2026-07-27
-subsystem difference baseline
-(`docs/qjs-align/SUBSYSTEM-DIFFERENCE-BASELINE-2026-07-27.md`, removed
-2026-08-25; recover it from git history).
+Gate timing and commands have one authority:
+[verification policy](docs/verification-policy.md), with command details in
+[GUIDE Part B.6](GUIDE.md#b6-validation-tiers). Full test262 runs at the merge
+batch/CI boundary. Use a focused file or directory for local diagnosis.
+The runner writes local reports to `reports/test262-latest/` (gitignored).
 
 ## Configured Skips and Excludes
 
-The following are intentionally outside the active gate unless the config is
-changed with a concrete implementation plan:
+`test262.conf` is the exact selection. Its major exclusions include:
 
-- `test262/test/intl402/` is excluded. Intl requires data and API surface that
-  are outside the current core-engine target.
-- Test262 features marked `=skip` include `Temporal`, `ShadowRealm`,
-  `decorators`, `import-defer`, source-phase imports,
-  canonical time zone data, and the Intl feature groups listed in
-  `test262.conf`.
-- Most `test262/test/staging/` tests are excluded by default, with selected
-  locally useful staging slices re-included. Known SpiderMonkey staging
-  divergences remain explicitly excluded or tracked in `test262_errors.txt`
-  when the selected path stays useful in the gate.
+- `intl402/` and related Intl data/API features.
+- Temporal, ShadowRealm, decorators, deferred/source-phase imports, and
+  the other feature groups marked `=skip`.
+- Most staging tests, with selected useful slices re-included and explicit
+  exclusions for incompatible SpiderMonkey-specific expectations.
+- `tail-call-optimization`; current tail-call scope is documented in
+  [Limitations](LIMITATIONS.md#proper-tail-calls).
 
-Do not broaden skips or excludes to manufacture a green gate. Any change to the
-compatibility boundary needs a failing scenario, QuickJS reference evidence,
-and an exit criterion.
+Never broaden skips or excludes to manufacture a pass. A deliberate boundary
+change needs a concrete implementation plan, reproducer, spec basis, relevant
+reference evidence, and an exit criterion.
 
 ## Local Test262 Overrides
 
-The runner checks `tests/fixtures/test262-overrides/` before reading a selected
-file from the `test262/` submodule. Overrides are allowed only for narrow
-upstream source contradictions where the selected test path should stay in the
-gate but the checked-in upstream source is internally inconsistent with another
-enabled upstream harness or feature.
+The runner checks `tests/fixtures/test262-overrides/` before the selected
+submodule file. An override is permitted only for a narrow upstream source
+contradiction with another enabled test/harness feature.
 
-Overrides must not be used for engine failures. They must keep the original
-test path selected, avoid changes to `test262_errors.txt`, and be removed when
-the upstream test262 source is corrected.
+Keep the original path selected, do not change `test262_errors.txt`, and
+remove the override when upstream is corrected. Overrides must never hide
+an engine failure.
 
 ## Supported Areas Under Active Validation
 
-The local gate currently enables and validates broad ES language coverage,
-including modules, async functions, async iteration, BigInt, typed arrays,
-Proxy/Reflect, classes and private fields, iterator helpers, explicit resource
-management, JSON parse source context, promise combinators, Set methods,
-RegExp match indices/modifiers/escape/property escapes, and modern Array,
-String, Object, and Promise additions listed in `test262.conf`.
+The configured profile covers modules, async functions/iteration, BigInt,
+typed arrays, Proxy/Reflect, classes/private fields, iterator helpers,
+explicit resource management, JSON source context, promise combinators,
+Set methods, RegExp indices/modifiers/escape/property escapes, and modern
+Array/String/Object/Promise additions listed in `test262.conf`.
 
-Additional smoke fixtures in `tests/smoke_test.zig` cover CLI behavior,
-QuickJS parity markers, host module behavior, and targeted regressions that are
-faster to run than the full test262 gate.
+[CLI smoke tests](tests/smoke_test.zig) and focused engine regressions cover
+host integration and behaviors outside the full test262 selection.
 
 ## Comparison With Upstream QuickJS
 
-While `zjs` targets semantic parity with QuickJS, its local validation profile
-enables and validates several features that are skipped or unsupported in
-upstream QuickJS:
+QuickJS is a differential reference, not the compatibility definition.
+When it disagrees with ECMA-262, follow the spec and record the divergence.
+Compare equivalent runner configurations before attributing a difference.
 
-- **Atomics.waitAsync**: enabled and validated in `zjs` (including engine-deinit
-  cleanup validation), while the pinned QuickJS config skips it.
-- **Other Enabled Features**: the pinned QuickJS config skips
-  `arbitrary-module-namespace-names`, `Array.fromAsync`, `await-dictionary`,
-  `explicit-resource-management`, `immutable-arraybuffer`, `import-text`,
-  `joint-iteration`, `legacy-regexp`, and
-  `nonextensible-applies-to-private`, while the zjs profile enables them.
-- **Import Bytes**: The local profile enables and validates binary module
-  imports (`import-bytes`), while the pinned QuickJS config skips them.
+The pinned QuickJS profile skips several features selected locally, including
+`Atomics.waitAsync`, `arbitrary-module-namespace-names`, `Array.fromAsync`,
+`await-dictionary`, `explicit-resource-management`, `immutable-arraybuffer`,
+`import-text`, `import-bytes`, `joint-iteration`, `legacy-regexp`, and
+`nonextensible-applies-to-private`.
 
-The local profile now also enables `host-gc-required`; all 15 selected staging
-cases pass, covering generator lifetime, WeakMap, detached buffers, dictionary
-properties, and `for-in` iteration across explicit GC. The two profiles still
-select different staging tests, so raw pass counts are not a direct completeness
-comparison.
-
-## Validation Commands
-
-Common checks:
-
-```sh
-zig build test --summary all
-zig build smoke --summary all
-git diff --check
-```
-
-For execution, parser, runner, or semantic compatibility work, add the relevant
-test262 slice. Examples:
-
-```sh
-./zig-out/bin/run-test262 -t 8 -c test262.conf -d test262/test/built-ins/RegExp
-./zig-out/bin/run-test262 -t 8 -c test262.conf -d test262/test/language/expressions
-```
-
-For behavior parity outside test262, add a focused Zig or smoke regression and
-record the QuickJS reference evidence with the owning change.
+The local profile also enables `host-gc-required`. Its selected staging cases
+cover generator lifetime, WeakMap, detached buffers, dictionary properties,
+and `for-in` across explicit GC. Different staging selections make raw
+cross-engine pass counts unsuitable as a completeness comparison.
 
 ## Production v1
 
-The engine-only Production v1 compatibility target is QuickJS parity within the
-repository validation profile. Required gates from a clean checkout:
-
-```sh
-zig build test --summary all
-zig build test -Doptimize=ReleaseSafe --summary all
-zig build test262-check -Doptimize=ReleaseFast --summary all
-zig build engine-production-gate -Doptimize=ReleaseFast --summary all
-git diff --check
-```
-
-The `engine-production-gate` build step is the engine semantic gate and must
-pass before cutting a Production v1 release. Its sub-gates include semantic
-tests, smoke coverage, and test262; a failure in any sub-gate is
-release-blocking.
-The complete release decision also requires the other commands listed above,
-including ReleaseSafe testing and diff hygiene.
+The release target is spec-correct trusted-code embedding within the declared
+profile and public API. Use the [release checklist](docs/release-checklist.md)
+for release evidence and [verification policy](docs/verification-policy.md)
+for gate obligations. A failed semantic sub-gate blocks release.

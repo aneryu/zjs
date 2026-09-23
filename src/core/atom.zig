@@ -15,7 +15,7 @@ const build_options = @import("build_options");
 const gc = @import("gc.zig");
 const memory = @import("memory.zig");
 const string = @import("string.zig");
-const JSRuntime = @import("runtime.zig").JSRuntime;
+const JSRuntime = @import("../runtime.zig").JSRuntime;
 const JSValue = @import("value.zig").JSValue;
 
 /// `-Dzjs_ownership_audit`. Audit tier (ASAN / leak-checker class): CI,
@@ -1065,7 +1065,7 @@ pub const DynamicAtom = struct {
     }
 };
 
-const runtime_mod = @import("runtime.zig");
+const runtime_mod = @import("../runtime.zig");
 
 /// Index in `AtomTable.entries`, used as the secondary lookup key for the
 /// hash maps below.
@@ -1313,7 +1313,7 @@ pub const AtomTable = struct {
         self.young_symbol_atoms.clearRetainingCapacity();
     }
 
-    pub fn init(account: *@import("runtime.zig").JSRuntime) AtomTable {
+    pub fn init(account: *@import("../runtime.zig").JSRuntime) AtomTable {
         return .{ .owner = account };
     }
 
@@ -2710,7 +2710,7 @@ test "atom table interns predefined dynamic and integer atoms" {
     // TGC S3-c: an entry lives while a root names it and dies at the first
     // major that cannot reach it.
     {
-        var roots = @import("runtime.zig").rootAtoms(.{&first});
+        var roots = @import("../runtime.zig").rootAtoms(.{&first});
         roots.activate(rt);
         defer roots.deactivate(rt);
         _ = rt.collectForTest();
@@ -2739,7 +2739,7 @@ test "registered symbol index ignores unique symbols and private names" {
     var unique = try rt.atoms.newSymbol(registry_name, .symbol);
     var private = try rt.atoms.newSymbol(registry_name, .private);
     // TGC S3-c: bare ids need a declared root to survive a major.
-    var keep_roots = @import("runtime.zig").rootAtoms(.{ &unique, &private });
+    var keep_roots = @import("../runtime.zig").rootAtoms(.{ &unique, &private });
     keep_roots.activate(rt);
     defer keep_roots.deactivate(rt);
 
@@ -2753,7 +2753,7 @@ test "registered symbol index ignores unique symbols and private names" {
     try std.testing.expect(rt.atoms.isRegisteredSymbol(registered));
 
     {
-        var registry_roots = @import("runtime.zig").rootAtoms(.{&registered});
+        var registry_roots = @import("../runtime.zig").rootAtoms(.{&registered});
         registry_roots.activate(rt);
         defer registry_roots.deactivate(rt);
         _ = rt.collectForTest();
@@ -2805,7 +2805,7 @@ test "atom table retains its cached string until the atom dies" {
     try std.testing.expectEqual(predefined_allocations, rt.diagnostics.allocations.allocation_count);
 
     var atom_id = try rt.internAtom("ownedAtomName");
-    var atom_roots = @import("runtime.zig").rootAtoms(.{&atom_id});
+    var atom_roots = @import("../runtime.zig").rootAtoms(.{&atom_id});
     atom_roots.activate(rt);
     defer atom_roots.deactivate(rt);
     const atom_string = try @import("string.zig").String.createAtomBacked(rt, atom_id);

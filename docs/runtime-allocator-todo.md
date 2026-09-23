@@ -1,11 +1,11 @@
-# TODO: 比较 Runtime 默认 allocator
+# Runtime 默认 allocator：决策与剩余实验
 
-Status: 本轮 D1/F1 已完成：A9 前后均完成 c/smp 比较，默认 c_allocator 已落地；额外实验保留 TODO
+Status: 2026-09-23，D1/F1 已完成：A9 前后均完成 c/smp 比较，默认 c_allocator 已落地；额外实验保留 TODO
 
-所属讨论：[JSRuntime Review M03](runtime-review/history.md#内存能力已讨论的边界)。
+所属设计：[Runtime 内存职责与交付边界](runtime-target-design.md)。
 
 用户于 2026-09-21 要求记录待办，后续对比 `std.heap.c_allocator` 与
-`std.heap.smp_allocator` 的性能。本次继续实施已授权开展测量，结果见下文。
+`std.heap.smp_allocator` 的性能。随后已开展测量，结果见下文。
 
 ## 比较范围
 
@@ -15,7 +15,7 @@ Status: 本轮 D1/F1 已完成：A9 前后均完成 c/smp 比较，默认 c_allo
 - 明确 Zig 版本、平台/libc、实际经过候选 allocator 的分配范围；内部绕过路径
   需列明，不能把仅替换入口 allocator 的结果当成整个引擎的全量替换结果。
 - 普通原生小分配直接使用候选 allocator，与额外经过 SmallObjectSlab 的方案比较。
-  默认直接分配的设计方向已确定，见 [Review R07](runtime-review/history.md#r07普通小对象是否还需要引擎自建-slab)。
+  普通原生默认直接分配，GC 专用 slab 保留；所有权见 [Runtime 设计](runtime-target-design.md#6-为什么保留这些现有机制)。
   比较应保留 GC 所依赖的存储路径，避免将 GC 存储变化混入普通分配的结果。
 
 ## 决策边界

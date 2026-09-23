@@ -35,7 +35,7 @@ pub const Ledger = struct {
     /// Idempotent: a Registry rolled back halfway through construction can
     /// reach this twice, and a second call has to be a no-op rather than a
     /// double free.
-    pub fn deinit(self: *Ledger, account: *@import("runtime.zig").JSRuntime) void {
+    pub fn deinit(self: *Ledger, account: *@import("../runtime.zig").JSRuntime) void {
         self.counts.deinit(account.nativeAllocator());
         self.counts = .empty;
     }
@@ -59,7 +59,7 @@ pub const Ledger = struct {
         return self.counts.values();
     }
 
-    pub fn pin(self: *Ledger, account: *@import("runtime.zig").JSRuntime, header: *Header) !void {
+    pub fn pin(self: *Ledger, account: *@import("../runtime.zig").JSRuntime, header: *Header) !void {
         if (self.counts.getPtr(header)) |existing| {
             std.debug.assert(existing.* != gc.construction_pin_count);
             existing.* +|= 1;
@@ -80,7 +80,7 @@ pub const Ledger = struct {
 
     /// Reserve the existing pin ledger before taking a block cell, so adding
     /// the construction pin after initialization is a no-fail scalar publish.
-    pub fn prepareConstructionRoot(self: *Ledger, account: *@import("runtime.zig").JSRuntime) !void {
+    pub fn prepareConstructionRoot(self: *Ledger, account: *@import("../runtime.zig").JSRuntime) !void {
         try self.counts.ensureUnusedCapacity(account.nativeAllocator(), 1);
     }
 

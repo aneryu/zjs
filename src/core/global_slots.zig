@@ -9,7 +9,7 @@
 //! it imports core only and never parser/exec/runtime/binding.
 
 const atom = @import("atom.zig");
-const runtime = @import("runtime.zig");
+const runtime = @import("../runtime.zig");
 const value = @import("value.zig");
 
 pub const Slot = struct {

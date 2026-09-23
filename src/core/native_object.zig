@@ -15,7 +15,7 @@ const mem_ops = @import("memory.zig");
 const std = @import("std");
 const class = @import("class.zig");
 const object_mod = @import("object.zig");
-const runtime_mod = @import("runtime.zig");
+const runtime_mod = @import("../runtime.zig");
 const value = @import("value.zig");
 const value_semantics = @import("value_semantics.zig");
 

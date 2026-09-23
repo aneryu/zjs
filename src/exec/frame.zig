@@ -12,7 +12,7 @@ const builtin = @import("builtin");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const memory = @import("../core/memory.zig");
-const runtime = @import("../core/runtime.zig");
+const runtime = @import("../runtime.zig");
 const JSRuntime = runtime.JSRuntime;
 const JSValue = @import("../core/value.zig").JSValue;
 

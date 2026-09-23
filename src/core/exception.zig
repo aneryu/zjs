@@ -7,7 +7,7 @@
 //! to core context state and may not depend on higher engine layers.
 
 const JSValue = @import("value.zig").JSValue;
-const JSRuntime = @import("runtime.zig").JSRuntime;
+const JSRuntime = @import("../runtime.zig").JSRuntime;
 
 /// Install `value` and clear both the uncatchable and out-of-memory flags.
 /// Every ordinary throw goes through here so a previous termination or OOM

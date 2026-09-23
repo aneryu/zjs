@@ -1,36 +1,31 @@
 # zjs
 
-> zjs is an embeddable JavaScript engine written in Zig and a semantic and
-> mechanism-level rewrite of Bellard QuickJS. It runs JavaScript inside trusted
-> Zig applications through a Zig-native API with explicit runtime, context,
-> value, and ownership lifetimes.
+> zjs is a JavaScript / TypeScript engine written in Zig, with a Zig-native
+> embedding API and CLI for trusted code. It parses TypeScript directly,
+> erases types, and lowers supported runtime syntax; it is not a type checker.
 
 Canonical source: https://github.com/aneryu/zjs
 
-zjs is not Node.js, Deno, Bun, a browser, a hostile-code sandbox, or a drop-in
-replacement for the libquickjs C API. TypeScript syntax erasure is partial; zjs
-is not a TypeScript type checker or a replacement for tsc.
+JavaScript semantics follow ECMA-262, validated by the configured test262
+profile. QuickJS is a differential reference and performance yardstick.
+zjs does not provide Node.js/Deno/browser APIs, hostile-code sandboxing, or
+the libquickjs C ABI. It requires Zig 0.16.0; the MIT license retains QuickJS
+attribution.
 
-## Start Here
+## Use and scope
 
-- [Project overview](https://github.com/aneryu/zjs/blob/main/README.md): identity, use cases, build instructions, embedding example, and roadmap.
-- [Current status](https://github.com/aneryu/zjs/blob/main/STATUS.md): authoritative checked status and validation snapshots.
-- [Embedding cookbook](https://github.com/aneryu/zjs/blob/main/docs/embedding-cookbook.md): runtime, context, values, host functions, limits, and modules.
-- [Compatibility](https://github.com/aneryu/zjs/blob/main/COMPATIBILITY.md): test262 profile, supported features, and explicit exclusions.
-- [Limitations](https://github.com/aneryu/zjs/blob/main/LIMITATIONS.md): product boundaries, unsupported capabilities, and the trusted-code security boundary.
+- [Overview](https://github.com/aneryu/zjs/blob/main/README.md): build, CLI, and embedding example.
+- [Embedding cookbook](https://github.com/aneryu/zjs/blob/main/docs/embedding-cookbook.md): host functions, handles, limits, and modules.
+- [Public API contract](https://github.com/aneryu/zjs/blob/main/docs/public-api-contract.md): supported Zig API and lifetimes.
+- [Compatibility](https://github.com/aneryu/zjs/blob/main/COMPATIBILITY.md): test262 profile and exclusions.
+- [Limitations](https://github.com/aneryu/zjs/blob/main/LIMITATIONS.md): TypeScript, host APIs, and security boundaries.
 
-## Technical Reference
+## Development and evidence
 
-- [Public API contract](https://github.com/aneryu/zjs/blob/main/docs/public-api-contract.md): supported Zig API surface and ownership rules.
-- [Architecture](https://github.com/aneryu/zjs/blob/main/docs/architecture.md): parser, compiler, bytecode, VM, runtime, and binding layout.
-- [Shipped binary composition](https://github.com/aneryu/zjs/blob/main/docs/binary-size.md): ReleaseFast size by ELF section, architecture layer, and function.
-- [Exec call graph](https://github.com/aneryu/zjs/blob/main/docs/exec-dependency-graph.md): runtime control flow, role layers, and import hubs in `src/exec/`.
-- [Performance vs QuickJS](https://github.com/aneryu/zjs/blob/main/docs/perf/bench-v8-status.md): current measured comparison, provenance, and caveats.
-- [Documentation map](https://github.com/aneryu/zjs/blob/main/docs/README.md): index of active project documentation.
-
-## Project And Contribution
-
-- [Changelog](https://github.com/aneryu/zjs/blob/main/CHANGELOG.md): released and development changes.
-- [Contributing](https://github.com/aneryu/zjs/blob/main/CONTRIBUTING.md): contribution workflow; ECMA-262/test262 is the semantic authority, with QuickJS as the comparison reference.
-- [Engineering guide](https://github.com/aneryu/zjs/blob/main/GUIDE.md): implementation rules and validation tiers.
-- [License](https://github.com/aneryu/zjs/blob/main/LICENSE): MIT license and retained QuickJS attribution.
+- [Agent instructions](https://github.com/aneryu/zjs/blob/main/AGENTS.md): task scope and document routing.
+- [Engineering guide](https://github.com/aneryu/zjs/blob/main/GUIDE.md): Zig rules and validation commands.
+- [Verification policy](https://github.com/aneryu/zjs/blob/main/docs/verification-policy.md): authoritative verification obligations.
+- [Architecture](https://github.com/aneryu/zjs/blob/main/docs/architecture.md): source owners and layers.
+- [Status](https://github.com/aneryu/zjs/blob/main/STATUS.md): dated validation snapshots.
+- [Performance snapshot](https://github.com/aneryu/zjs/blob/main/docs/perf/bench-v8-status.md): historical measurements and provenance.
+- [Documentation index](https://github.com/aneryu/zjs/blob/main/docs/README.md): remaining contracts and plans.

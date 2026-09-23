@@ -5332,7 +5332,7 @@ test "no-suspend async overflow allocation failure leaves published roots intact
 //
 // Core only sees `ActiveInvocationTrace` at offset 0 of the published record.
 // `value_root_frames_enabled` is now constant
-// true (core/runtime.zig), so this module is always compiled in.
+// true (runtime.zig), so this module is always compiled in.
 //
 // Live windows only: typed Frame slices, Stack `top_ptr` prefix, VarRef
 // cells that are present, and Entry.native_caller when that slot is a

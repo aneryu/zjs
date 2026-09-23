@@ -16,7 +16,7 @@ const std = @import("std");
 const bytecode_mod = @import("../bytecode.zig");
 const atom = @import("../core/atom.zig");
 const bulk_memory = @import("../core/bulk_memory.zig");
-const runtime = @import("../core/runtime.zig");
+const runtime = @import("../runtime.zig");
 const pipeline = bytecode_mod.pipeline;
 const opcode = bytecode_mod.opcode;
 

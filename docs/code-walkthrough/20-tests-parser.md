@@ -1676,7 +1676,7 @@
 ### `test "F4: indexed call obj[k](x) uses get_array_el2 + call_method"` (`src/tests/parser.zig:2993`)
 
 - **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「F4: indexed call obj[k](x) uses get_array_el2 + call_method」。
+- **作用**：钉住场景 `F4: indexed call obj[k](x) uses get_array_el2 + call_method`。
 - **实现**：断言 1 处 `std.testing.expect*`。约 1 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
@@ -1970,7 +1970,7 @@
 ### `test "F4: indexed-call-on-opt-chain obj?.[k](x) uses get_array_el2 + call_method"` (`src/tests/parser.zig:3499`)
 
 - **签名**：无参数测试块，返回 `!void`。
-- **作用**：钉住场景「F4: indexed-call-on-opt-chain obj?.[k](x) uses get_array_el2 + call_method」。
+- **作用**：钉住场景 `F4: indexed-call-on-opt-chain obj?.[k](x) uses get_array_el2 + call_method`。
 - **实现**：断言 1 处 `std.testing.expect*`。约 1 个 Zig expect、0 个 JS `assert.*`。
 - **所有权 / 错误 / 调用**：无跨测试状态；失败即测试失败，不把 JS 异常漏到下一例。
 
