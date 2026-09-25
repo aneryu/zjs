@@ -6969,6 +6969,9 @@ test "arg aliases reject missing open-ref storage without cellifying the slot" {
     try std.testing.expectEqual(@as(?i32, 41), args[0].as(.int));
     try std.testing.expect(core.VarRef.fromValue(args[0]) == null);
 
+    // The two alias-consistency checks below exist only in safety builds;
+    // like qjs get_var_ref, production trusts the compiler's slot layout.
+    if (!std.debug.runtime_safety) return;
     var occupied_value = core.JSValue.int32(7);
     const occupied_ref = try core.VarRef.createOpen(js.runtime, &occupied_value);
     var full_open_refs = [_]?*core.VarRef{occupied_ref};
