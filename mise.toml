@@ -59,6 +59,19 @@ zig build run-test262 -Doptimize=ReleaseFast
 ZJS_GC_STRESS=1 ./zig-out/bin/run-test262 -c test262.conf -d test262/test 0 100000 -R reports/test262-stress "$@"
 """
 
+# Collector audit sweep: full test262 with the collector at every safepoint
+# and the minor audit fatal, once in the default configuration and once with
+# the copying nursery (ZJS_GC_NURSERY=1). ReleaseSafe keeps the audit arms
+# (they need runtime safety) at ~20x Debug speed. Built into its own prefix so
+# zig-out keeps whatever optimize mode it had.
+[tasks.test262-gc-audit]
+description = "Full test262 under GC stress + fatal minor audit, default and nursery mode"
+run = """
+zig build run-test262 -Doptimize=ReleaseSafe --prefix zig-out/gc-audit
+ZJS_GC_STRESS=64 ZJS_GC_AUDIT=fatal ./zig-out/gc-audit/bin/run-test262 -c test262.conf -d test262/test -R reports/test262-gc-audit/default "$@"
+ZJS_GC_NURSERY=1 ZJS_GC_STRESS=64 ZJS_GC_AUDIT=fatal ./zig-out/gc-audit/bin/run-test262 -c test262.conf -d test262/test -R reports/test262-gc-audit/nursery "$@"
+"""
+
 # Local one-shot of the same steps CI linux-arm64 already runs:
 # Debug checkpoint, then shipped-mode test262.
 [tasks.batch-gate]

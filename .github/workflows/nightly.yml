@@ -39,6 +39,25 @@ jobs:
       - run: zig build test-leak-census --summary all
       - run: zig build test -Dzjs_ownership_audit=true --summary all
 
+  # Collector audit: the missed-barrier and root defects this finds pass the
+  # ordinary suites. Runs both collector configurations separately so a
+  # moving-mode regression is reported as such. Does not gate publishing.
+  gc-audit-test262:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          submodules: true
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2
+        with:
+          version: "0.16.0"
+      - run: zig build run-test262 -Doptimize=ReleaseSafe --prefix zig-out/gc-audit --summary all
+      - name: test262, default collector, stress + fatal audit
+        run: ZJS_GC_STRESS=64 ZJS_GC_AUDIT=fatal ./zig-out/gc-audit/bin/run-test262 -c test262.conf -d test262/test
+      - name: test262, copying nursery, stress + fatal audit
+        run: ZJS_GC_NURSERY=1 ZJS_GC_STRESS=64 ZJS_GC_AUDIT=fatal ./zig-out/gc-audit/bin/run-test262 -c test262.conf -d test262/test
+
   linux-x86_64:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
@@ -192,7 +211,7 @@ jobs:
   # long-lived issue: the first failure opens it, later ones comment, and a
   # human closes it when the cause is fixed.
   notify-failure:
-    needs: [linux-arm64, linux-x86_64, macos-release, windows-release, release]
+    needs: [linux-arm64, gc-audit-test262, linux-x86_64, macos-release, windows-release, release]
     if: failure()
     runs-on: ubuntu-24.04
     timeout-minutes: 10

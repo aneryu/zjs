@@ -23,6 +23,8 @@ reports/test262-latest/
 # output dirs from gate work use the same prefix
 reports/test262-stress/
 reports/test262-stress-*/
+# `mise run test262-gc-audit` writes its -R products here
+reports/test262-gc-audit/
 reports/test262-s0-*/
 reports/test262-s[2-9]*/
 reports/test262-abl/
