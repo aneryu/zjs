@@ -5149,26 +5149,20 @@ const iteratorForValue = iterator_ops.iteratorForValue;
 const closeIteratorForFromEntriesAbrupt = iterator_ops.closeIteratorForFromEntriesAbrupt;
 const callValueOrBytecodeRoot = call_runtime.callValueOrBytecodeRoot;
 pub const EntriesMode = core.object.EntriesMode;
+/// A native copy of borrowed values, rooted as one `.mutable` slice window.
+/// A frame of per-element `.values` pointers would not link in production
+/// (scalar frames are left to the stack scan, which cannot see this heap
+/// copy).
 const RootedValueCopies = struct {
     values: []core.JSValue,
-    roots: []*core.JSValue,
 
     fn init(rt: *core.JSRuntime, source: []const core.JSValue) !RootedValueCopies {
         const values = try rt.nativeAllocator().alloc(core.JSValue, source.len);
-        errdefer rt.nativeAllocator().free(values);
         @memcpy(values, source);
-
-        const roots = try rt.nativeAllocator().alloc(*core.JSValue, source.len);
-        errdefer rt.nativeAllocator().free(roots);
-        for (values, 0..) |*value, index| {
-            roots[index] = value;
-        }
-
-        return .{ .values = values, .roots = roots };
+        return .{ .values = values };
     }
 
     fn deinit(self: RootedValueCopies, rt: *core.JSRuntime) void {
-        rt.nativeAllocator().free(self.roots);
         rt.nativeAllocator().free(self.values);
     }
 };
@@ -5440,8 +5434,9 @@ pub fn literal(rt: *core.JSRuntime, names: []const core.Atom, values: []const co
     if (names.len != values.len) return error.TypeError;
     const rooted = try RootedValueCopies.init(rt, values);
     defer rooted.deinit(rt);
+    const root_slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &rooted.values }};
     var root_frame = core.runtime.ValueRootFrame{
-        .values = rooted.roots,
+        .slices = &root_slices,
     };
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);

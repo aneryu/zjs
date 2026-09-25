@@ -6176,3 +6176,34 @@ test "nursery evacuation moves self-referencing owners with inline and external 
         for (0..extra) |i| try std.testing.expect((try moved.getProperty(core.Atom.taggedInt(@intCast(i)))).same(moved.value()));
     }
 }
+
+test "dense array in-capacity append remembers an old array" {
+    const saved_forensics = core.gc.forensics;
+    defer core.gc.forensics = saved_forensics;
+    core.gc.forensics.audit = .fatal;
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    var values = [_]core.JSValue{core.JSValue.undefinedValue()} ** 2;
+    const live: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &live }};
+    var frame = core.runtime.ValueRootFrame{ .slices = &slices };
+    frame.activate(rt);
+    defer frame.deactivate(rt);
+    const array = try core.Object.createArray(rt, null);
+    values[0] = array.value();
+    try array.appendFastArrayPushValues(rt, &.{ core.JSValue.int32(1), core.JSValue.int32(2), core.JSValue.int32(3), core.JSValue.int32(4) });
+    // Spare capacity past the count, then age the array.
+    array.truncateArrayElements(rt, 2);
+    array.setArrayLength(2);
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(!array.gcHeader().metaConst().flags.young);
+    const child = try core.Object.createPlainObject(rt, null);
+    try std.testing.expectEqual(
+        engine.exec.array_ops.DenseArrayOverwriteFastResult.handled,
+        engine.exec.array_ops.putDenseArrayElementOverwriteOwnedFast(rt, array.value(), core.JSValue.int32(2), child.value()),
+    );
+    const child_header = child.gcHeader();
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(rt.gc.containsHeader(child_header));
+    try std.testing.expect(array.arrayElements()[2].same(child.value()));
+}

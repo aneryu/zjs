@@ -674,8 +674,17 @@ pub fn ensureVarRefsCapacity(ctx: *core.JSContext, frame: *Frame, idx: usize) !v
     // frame keeps its old `var_refs` until the whole growth succeeds). Freeing
     // them by hand here would double-free them at the next sweep. Same
     // discipline as `vm_call.initFrameVarRefs`'s creation loop.
+    // Cells already created live only in `next`, native memory until it is
+    // installed; creating the next one may collect where cell allocation is a
+    // GC point. Root the filled prefix.
+    var filled_cells: []*core.VarRef = next[0..old_len];
+    const cell_slices = [_]core.runtime.ValueRootSlice{.{ .cells = &filled_cells }};
+    var cell_roots = core.runtime.ValueRootFrame{ .slices = &cell_slices };
+    cell_roots.activate(ctx.runtime);
+    defer cell_roots.deactivate(ctx.runtime);
     for (old_len..next_len) |filled| {
         next[filled] = try core.VarRef.createClosed(ctx.runtime, core.JSValue.undefinedValue());
+        filled_cells = next[0 .. filled + 1];
     }
     frame.var_refs = next;
     frame.ownership.var_refs = .owned;

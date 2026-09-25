@@ -4815,6 +4815,37 @@ const SortEntryRootWindow = struct {
     }
 };
 
+/// Roots values a sort gathers before its entry window exists. The entry
+/// list is native memory the stack scan cannot see, and gathering runs user
+/// getters, proxy traps and heap allocations (BigInt reads). The frame names
+/// the list's `items` header, so growth is followed; capacity is reserved
+/// before each read so the value is appended without another allocation.
+const SortGatherRoots = struct {
+    values: std.ArrayListUnmanaged(core.JSValue) = .empty,
+    slices: [1]core.runtime.ValueRootSlice = undefined,
+    frame: core.runtime.ValueRootFrame = .{},
+
+    /// Call on the final address; the frame points into `self`.
+    fn activate(self: *@This(), rt: *core.JSRuntime) void {
+        self.slices[0] = .{ .mutable = &self.values.items };
+        self.frame.slices = &self.slices;
+        self.frame.activate(rt);
+    }
+
+    fn deactivate(self: *@This(), rt: *core.JSRuntime) void {
+        self.frame.deactivate(rt);
+        self.values.deinit(rt.nativeAllocator());
+    }
+
+    fn reserve(self: *@This(), rt: *core.JSRuntime) !void {
+        try self.values.ensureUnusedCapacity(rt.nativeAllocator(), 1);
+    }
+
+    fn keep(self: *@This(), value: core.JSValue) void {
+        self.values.appendAssumeCapacity(value);
+    }
+};
+
 pub fn arraySortCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -4877,6 +4908,9 @@ pub fn arraySortCall(
 
     var undefined_count: usize = 0;
     var index: usize = 0;
+    var gather: SortGatherRoots = .{};
+    var gather_active = false;
+    defer if (gather_active) gather.deactivate(rt);
     if (dense_receiver) {
         // Dense elements are plain writable data properties (any define on an
         // index demotes the array to sparse first), so [[HasProperty]] is true
@@ -4894,15 +4928,19 @@ pub fn arraySortCall(
         }
         entries = entries_scratch.items[0..filled];
     } else {
+        gather.activate(rt);
+        gather_active = true;
         while (index < length) : (index += 1) {
             const key = try propertyAtomFromLengthIndex(rt, index);
             defer key.deinit(rt);
             if (!try hasValueProperty(ctx, output, global, receiver_object_value, object, key.atom, null, null)) continue;
+            try gather.reserve(rt);
             const value = try getValueProperty(ctx, output, global, receiver_object_value, key.atom, caller_function, caller_frame);
             if (value.is(.undefined_value)) {
                 undefined_count += 1;
                 continue;
             }
+            gather.keep(value);
             try array_list_erased.append(&entries_list, rt.nativeAllocator(), .{ .value = value, .order = index });
         }
         entries = entries_list.items;
@@ -5184,7 +5222,14 @@ pub fn arrayByCopyCall(
 
     if (mode == .to_sorted) {
         const comparator = if (args.len >= 1 and !args[0].is(.undefined_value)) args[0] else core.JSValue.undefinedValue();
-        const out = try createArrayByCopyOutput(ctx.runtime, global, length);
+        // The output array is the first gathered root: getters run before it
+        // is filled.
+        var gather: SortGatherRoots = .{};
+        gather.activate(ctx.runtime);
+        defer gather.deactivate(ctx.runtime);
+        try gather.reserve(ctx.runtime);
+        const out_value = (try createArrayByCopyOutput(ctx.runtime, global, length)).value();
+        gather.keep(out_value);
         // The root window below takes its rooted copy from the VM stack arena.
         const scratch_mark = ctx.runtime.vm_stack.mark();
         defer ctx.runtime.vm_stack.restore(scratch_mark);
@@ -5197,10 +5242,12 @@ pub fn arrayByCopyCall(
         for (0..length) |index| {
             const key = try propertyAtomFromLengthIndex(ctx.runtime, index);
             defer key.deinit(ctx.runtime);
+            try gather.reserve(ctx.runtime);
             const item = try getValueProperty(ctx, output, global, receiver_object_value, key.atom, caller_function, caller_frame);
             if (item.is(.undefined_value)) {
                 undefined_count += 1;
             } else {
+                gather.keep(item);
                 try array_list_erased.append(&entries, ctx.runtime.nativeAllocator(), .{ .value = item, .order = @intCast(index) });
             }
         }
@@ -5208,13 +5255,15 @@ pub fn arrayByCopyCall(
         try sort_window.activate(ctx.runtime, entries.items);
         defer sort_window.deactivate(ctx.runtime);
         try stableArraySortEntries(ctx, output, global, false, comparator, entries.items, caller_function, caller_frame);
+        // Re-read the output from its root at every step: the comparator and
+        // element definition can collect.
         for (entries.items, 0..) |entry, sorted_index| {
-            try defineArrayByCopyElement(ctx.runtime, out, sorted_index, entry.value);
+            try defineArrayByCopyElement(ctx.runtime, objectFromValue(gather.values.items[0]).?, sorted_index, entry.value);
         }
         for (entries.items.len..entries.items.len + undefined_count) |index| {
-            try defineArrayByCopyElement(ctx.runtime, out, index, core.JSValue.undefinedValue());
+            try defineArrayByCopyElement(ctx.runtime, objectFromValue(gather.values.items[0]).?, index, core.JSValue.undefinedValue());
         }
-        return out.value();
+        return gather.values.items[0];
     }
 
     if (mode == .with_) {
@@ -5306,9 +5355,16 @@ pub fn typedArrayByCopyCall(
             for (entries.items) |entry| entry.freeEntry(ctx);
             entries.deinit(ctx.runtime.nativeAllocator());
         }
+        // BigInt element reads allocate, and the comparator and the result
+        // allocation below can collect: keep every read value rooted.
+        var gather: SortGatherRoots = .{};
+        gather.activate(ctx.runtime);
+        defer gather.deactivate(ctx.runtime);
 
         for (0..length) |index| {
+            try gather.reserve(ctx.runtime);
             const item = try core.typed_array.typedArrayGetIndex(ctx.runtime, object, @intCast(index));
+            gather.keep(item);
             try array_list_erased.append(&entries, ctx.runtime.nativeAllocator(), .{ .value = item, .order = @intCast(index) });
         }
         try stableArraySortEntries(ctx, output, global, true, comparator, entries.items, caller_function, caller_frame);
@@ -7201,26 +7257,20 @@ const bignum = @import("../libs/bigint.zig");
 const iterator_slots = @import("iterator_ops.zig");
 const HostError = @import("exception_ops.zig").HostError;
 const AppendStringError = core.value_string.AppendStringError;
+/// A native copy of borrowed values, rooted as one `.mutable` slice window.
+/// A frame of per-element `.values` pointers would not link in production
+/// (scalar frames are left to the stack scan, which cannot see this heap
+/// copy).
 const RootedValueCopies = struct {
     values: []core.JSValue,
-    roots: []*core.JSValue,
 
     fn init(rt: *core.JSRuntime, source: []const core.JSValue) !RootedValueCopies {
         const values = try rt.nativeAllocator().alloc(core.JSValue, source.len);
-        errdefer rt.nativeAllocator().free(values);
         @memcpy(values, source);
-
-        const roots = try rt.nativeAllocator().alloc(*core.JSValue, source.len);
-        errdefer rt.nativeAllocator().free(roots);
-        for (values, 0..) |*value, index| {
-            roots[index] = value;
-        }
-
-        return .{ .values = values, .roots = roots };
+        return .{ .values = values };
     }
 
     fn deinit(self: RootedValueCopies, rt: *core.JSRuntime) void {
-        rt.nativeAllocator().free(self.roots);
         rt.nativeAllocator().free(self.values);
     }
 };
@@ -7699,8 +7749,9 @@ pub fn constructConstructorWithPrototype(rt: *core.JSRuntime, args: []const core
 pub fn constructWithPrototype(rt: *core.JSRuntime, values: []const core.JSValue, prototype: ?*core.Object) !core.JSValue {
     const rooted = try RootedValueCopies.init(rt, values);
     defer rooted.deinit(rt);
+    const root_slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &rooted.values }};
     var root_frame = core.runtime.ValueRootFrame{
-        .values = rooted.roots,
+        .slices = &root_slices,
     };
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
@@ -8346,15 +8397,13 @@ fn rewriteSortedArrayRooted(rt: *core.JSRuntime, array: *core.Object, entries: [
 /// for ordinary arrays: create a fresh array, then
 /// append `this` and each array argument element-by-element.
 fn concat(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValue) !core.JSValue {
-    var rooted_receiver = receiver;
+    var receiver_slot = [_]core.JSValue{receiver};
+    const rooted_receiver_window: []core.JSValue = &receiver_slot;
     const rooted_args = try RootedValueCopies.init(rt, args);
     defer rooted_args.deinit(rt);
-    var receiver_root_frame = core.runtime.rootValues(.{&rooted_receiver});
-    receiver_root_frame.activate(rt);
-    defer receiver_root_frame.deactivate(rt);
-
+    const args_root_slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &rooted_receiver_window }, .{ .mutable = &rooted_args.values } };
     var args_root_frame = core.runtime.ValueRootFrame{
-        .values = rooted_args.roots,
+        .slices = &args_root_slices,
     };
     args_root_frame.activate(rt);
     defer args_root_frame.deactivate(rt);
@@ -8363,7 +8412,7 @@ fn concat(rt: *core.JSRuntime, receiver: core.JSValue, args: []const core.JSValu
     errdefer core.Object.destroyFromHeader(rt, out.gcHeader());
 
     var next_index: u32 = 0;
-    try concatAppend(rt, out, &next_index, rooted_receiver);
+    try concatAppend(rt, out, &next_index, receiver_slot[0]);
     for (rooted_args.values) |arg| {
         try concatAppend(rt, out, &next_index, arg);
     }

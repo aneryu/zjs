@@ -319,9 +319,11 @@ fn forEachNurseryCandidateAt(
             gc.Registry.heapByteSizeFromHeader(rt, header);
         const end = cursor + gc.metadata_prefix_size + body_bytes;
         // A husk is not an object. The pre-evacuation pass retains every page
-        // a native word names, so a named object is never forwarded. An
-        // unpublished cell is still being constructed under its own pin; like
-        // the registry arms, offer only published cells.
+        // a native word names, so a named object is never forwarded. Like the
+        // registry arms, offer only published cells: an unpublished one is a
+        // tombstoned corpse or an object between allocation and publication,
+        // and the nursery constructors (plain, slots2, array) collect and
+        // allocate storage before the cell, so no collection sees the latter.
         if (addr <= end and !forwarded and header.metaConst().alloc_info.heap_accounted) shade(shade_ctx, header);
         cursor += std.mem.alignForward(usize, gc.metadata_prefix_size + body_bytes, 8);
     }

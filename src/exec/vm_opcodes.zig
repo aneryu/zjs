@@ -1512,7 +1512,18 @@ pub noinline fn constructor(
         }
     else
         top;
-    const result = call_runtime.constructValueOrBytecodeWithNewTargetInternal(ctx, output, global, func, args_buf, function, frame, new_target) catch |err| {
+    // Popped operands are off the traced stack, and past four arguments the
+    // buffer is native heap the stack scan cannot see. The construct path
+    // polls for interrupts (and so may collect) before anything below roots
+    // them.
+    var operands = [_]core.JSValue{ func, new_target };
+    var args_root: []core.JSValue = args_buf;
+    const operand_slice: []core.JSValue = &operands;
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &args_root }, .{ .mutable = &operand_slice } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    const result = call_runtime.constructValueOrBytecodeWithNewTargetInternal(ctx, output, global, operands[0], args_root, function, frame, operands[1]) catch |err| {
         if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return .continue_loop;
         return err;
     };

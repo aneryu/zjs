@@ -30297,3 +30297,191 @@ test "a retired frame's pending call window is not traced after its Stack slot i
         };
     }
 }
+
+test "unhandled rejection entries of an aged child realm survive minors" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const saved_forensics = core.gc.forensics;
+    defer core.gc.forensics = saved_forensics;
+    core.gc.forensics.audit = .fatal;
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    _ = try js.evalWithOptions("globalThis.otherGlobal = $262.createRealm().global;", .{ .filename = "<repl>" });
+    const other_global = helpers.objectFromValue(try global.getProperty(try js.runtime.internAtom("otherGlobal")));
+    const other = js.runtime.contextForGlobalIncludingConstructing(other_global).?;
+    other.setTrackUnhandledRejections(true);
+    _ = try core.gc_trace_stw.collectMinor(js.runtime, null, .declared_only);
+    // The promise slot is held only by the realm's rejection list.
+    const promise = try core.Object.createPlainObject(js.runtime, null);
+    const promise_header = promise.gcHeader();
+    other.recordUnhandledPromiseRejection(promise.value(), core.JSValue.int32(1));
+    other.clearException();
+    _ = try core.gc_trace_stw.collectMinor(js.runtime, null, .declared_only);
+    try std.testing.expect(js.runtime.gc.containsHeader(promise_header));
+    other.clearUnhandledRejection();
+}
+
+test "constructor slow path keeps five or more popped arguments rooted across its interrupt poll" {
+    const saved_forensics = core.gc.forensics;
+    defer core.gc.forensics = saved_forensics;
+    // Past four arguments the popped operands live in a native heap buffer
+    // the stack scan cannot see; the construct path polls (and, under stress,
+    // collects) before the callee roots them. Poisoned valueOf must surface
+    // its own error, not a TypeError from a reclaimed argument.
+    for ([_]i32{ 2, 3, 4, 5, 6, 8 }) |cadence| {
+        core.gc.forensics.stress_cadence = cadence;
+        var js = try helpers.TestEngine.init(std.testing.allocator);
+        defer js.deinit();
+        const result = try js.evalWithOptions(
+            \\(function () {
+            \\    function P(v) { this.value = v; this.valueOf = function () { throw new RangeError("poison"); }; this.toString = function () {}; }
+            \\    let out = "";
+            \\    for (let n = 0; n < 7; n++) {
+            \\        try {
+            \\            if (n === 0) new Date(new P(1), new P(2), new P(3), new P(4), new P(5), new P(6), new P(7));
+            \\            if (n === 1) new Date(1, new P(2), new P(3), new P(4), new P(5), new P(6), new P(7));
+            \\            if (n === 2) new Date(1, 2, new P(3), new P(4), new P(5), new P(6), new P(7));
+            \\            if (n === 3) new Date(1, 2, 3, new P(4), new P(5), new P(6), new P(7));
+            \\            if (n === 4) new Date(1, 2, 3, 4, new P(5), new P(6), new P(7));
+            \\            if (n === 5) new Date(1, 2, 3, 4, 5, new P(6), new P(7));
+            \\            if (n === 6) new Date(1, 2, 3, 4, 5, 6, new P(7));
+            \\        } catch (e) { out += e instanceof RangeError ? "r" : "x"; }
+            \\    }
+            \\    return out;
+            \\})()
+        , .{ .filename = "<repl>" });
+        try helpers.expectStringValueBytes(result, "rrrrrrr");
+    }
+}
+
+test "sort gather phases keep read values rooted across getters traps and BigInt reads" {
+    const saved_forensics = core.gc.forensics;
+    defer core.gc.forensics = saved_forensics;
+    // `null` runs without stress: the generic sort already lost values to an
+    // ordinary allocation-triggered collection.
+    for ([_]?i32{ null, 2, 16 }) |cadence| {
+        core.gc.forensics.stress_cadence = cadence;
+        var js = try helpers.TestEngine.init(std.testing.allocator);
+        defer js.deinit();
+        const result = try js.evalWithOptions(
+            \\(function () {
+            \\    function check(arr, n, key) { for (let i = 0; i < n; i++) if (key(arr[i]) !== i) return "bad" + i; return "ok"; }
+            \\    const t = new BigInt64Array(256).map((_, i) => BigInt(255 - i) << 52n);
+            \\    const typed = check(t.toSorted((a, b) => { new Array(16); return a < b ? -1 : a > b ? 1 : 0; }), 256, (v) => Number(v >> 52n));
+            \\    function source() {
+            \\        const store = [];
+            \\        return { store, proxy: new Proxy({ length: 200 }, {
+            \\            get(t, k) { if (k === "length") return 200; const i = +k; return store[i] !== undefined ? store[i] : { v: 199 - i, pad: new Array(8) }; },
+            \\            set(t, k, v) { store[+k] = v; return true; },
+            \\            has() { return true; },
+            \\        }) };
+            \\    }
+            \\    const s = source();
+            \\    Array.prototype.sort.call(s.proxy, (a, b) => a.v - b.v);
+            \\    const generic = check(s.store, 200, (o) => o.v);
+            \\    const copied = check(Array.prototype.toSorted.call(source().proxy, (a, b) => a.v - b.v), 200, (o) => o.v);
+            \\    return typed + "," + generic + "," + copied;
+            \\})()
+        , .{ .filename = "<repl>" });
+        try helpers.expectStringValueBytes(result, "ok,ok,ok");
+    }
+}
+
+/// Runs exactly one major collection at the `target`-th allocation charged
+/// after installation. Sweeping `target` over a code path puts a lone
+/// collection at every point of it, so an owner ages right before each store
+/// while nothing afterwards re-marks the young children; a minor at the end
+/// then finds any store that skipped its barrier.
+const SingleMajorProbe = struct {
+    rt: *core.JSRuntime,
+    target: usize,
+    count: usize = 0,
+    fired: bool = false,
+
+    fn trigger(context: ?*anyopaque, size: usize) void {
+        _ = size;
+        const self: *@This() = @ptrCast(@alignCast(context.?));
+        self.count += 1;
+        if (self.count != self.target) return;
+        const saved_fn = self.rt.gc.heap_budget.probe;
+        const saved_ctx = self.rt.gc.heap_budget.probe_ctx;
+        self.rt.gc.heap_budget.probe = null;
+        self.rt.gc.heap_budget.probe_ctx = null;
+        defer {
+            self.rt.gc.heap_budget.probe = saved_fn;
+            self.rt.gc.heap_budget.probe_ctx = saved_ctx;
+        }
+        _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .engine_active) catch {};
+        self.fired = true;
+    }
+};
+
+/// Evaluate `source` once per allocation index (every `stride`-th) with a
+/// single major at that index and the minor audit fatal. `source` must call
+/// `minorGc()` last and store `expected` in `globalThis.sweepResult`. Stops
+/// once an index lies past the path.
+fn sweepSingleMajor(source: []const u8, mode: core.EvalMode, expected: i32, stride: usize) !void {
+    const saved_forensics = core.gc.forensics;
+    defer core.gc.forensics = saved_forensics;
+    core.gc.forensics.audit = .fatal;
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+    const global = try engine.exec.zjs_vm.contextGlobal(js.context);
+    const minor = try testNativeCallback(js.context, "minorGc", nativeMinorGc);
+    try global.defineOwnProperty(js.runtime, try js.runtime.internAtom("minorGc"), core.Descriptor.data(minor, .all));
+    var target: usize = 1;
+    while (true) : (target += stride) {
+        var probe = SingleMajorProbe{ .rt = js.runtime, .target = target };
+        const saved_fn = js.runtime.gc.heap_budget.probe;
+        const saved_ctx = js.runtime.gc.heap_budget.probe_ctx;
+        js.runtime.gc.heap_budget.probe = SingleMajorProbe.trigger;
+        js.runtime.gc.heap_budget.probe_ctx = &probe;
+        const filename = try std.fmt.allocPrint(std.testing.allocator, "sweep-{d}.mjs", .{target});
+        defer std.testing.allocator.free(filename);
+        const evaluated = js.evalWithOptions(source, .{ .filename = filename, .mode = mode });
+        js.runtime.gc.heap_budget.probe = saved_fn;
+        js.runtime.gc.heap_budget.probe_ctx = saved_ctx;
+        const completion = evaluated catch |err| {
+            std.debug.print("sweep target {d}: eval error {s} exc={}\n", .{ target, @errorName(err), js.context.hasException() });
+            return err;
+        };
+        _ = completion;
+        const value = try js.evalWithOptions("globalThis.sweepResult", .{ .filename = "<repl>" });
+        errdefer std.debug.print("sweep target {d}: sweepResult bits {x} number {?d}\n", .{ target, value.bits, value.asNumber() });
+        try std.testing.expectEqual(@as(?i32, expected), value.as(.int));
+        if (!probe.fired) break;
+    }
+}
+
+test "closure capture fill remembers its function when a collection lands inside the fill" {
+    try sweepSingleMajor(
+        \\(function () {
+        \\    function outer() {
+        \\        let a = {v: 1}, b = {v: 2}, c = {v: 3}, d = {v: 4}, e = {v: 5}, f = {v: 6}, g = {v: 7}, h = {v: 8};
+        \\        return function () { return a.v + b.v + c.v + d.v + e.v + f.v + g.v + h.v; };
+        \\    }
+        \\    const closure = outer();
+        \\    minorGc();
+        \\    globalThis.sweepResult = closure();
+        \\})();
+    , .script, 36, 1);
+}
+
+test "module capture and export cells linked after the module function aged survive a minor" {
+    try sweepSingleMajor(
+        \\let a = { v: 1 };
+        \\export let b = { v: 2 };
+        \\function sum() { return a.v + b.v; }
+        \\minorGc();
+        \\globalThis.sweepResult = sum();
+    , .module, 3, 1);
+}
+
+test "child realm bootstrap fields survive a collection at any point of the bootstrap" {
+    try sweepSingleMajor(
+        \\(function () {
+        \\    const other = $262.createRealm();
+        \\    minorGc();
+        \\    globalThis.sweepResult = other.evalScript("typeof eval === 'function' && typeof Object === 'function' ? 1 : 0");
+        \\})();
+    , .script, 1, 16);
+}

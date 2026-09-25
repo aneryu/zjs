@@ -441,13 +441,9 @@ pub const ValueRootFrame = struct {
     /// `.values` / `.objects` slots that point at Zig locals can wait for a
     /// register/stack scanner (design §7.1).
     ///
-    /// Heap-backed `.values` arrays (`RootedValueCopies`, 3 call sites) stay on
-    /// `.values`. They are not a root gap: that helper builds one
-    /// `*JSValue` per element, so every value already has its own exact
-    /// root pointer and `traceValueRootFrames` visits each one. `.slices`
-    /// would describe the same window in one descriptor instead of N pointers
-    /// — an efficiency change, not a correctness one — and it moves production
-    /// codegen, so it stays unconverted until something needs the density.
+    /// A frame without any window is not linked in production, whatever its
+    /// `.values` pointers name, so heap-backed values must be rooted through
+    /// `.slices` (see `RootedValueCopies`).
     pub inline fn hasNativeWindow(self: *const ValueRootFrame) bool {
         return self.slices.len != 0;
     }

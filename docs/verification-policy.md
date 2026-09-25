@@ -57,8 +57,8 @@ GC safety net。每合并批仍只跑一轮批门禁。
    只有 `核数−1` 个 runner 线程,超出的初始步骤会在主线程内联执行;
 3. 批内触碰 GC、根、写屏障或对象存储布局时,另跑一次
    `mise run test262-gc-audit`(ReleaseSafe 全量 test262,`ZJS_GC_STRESS=64`
-   + `ZJS_GC_AUDIT=fatal`,默认与 `ZJS_GC_NURSERY=1` 两种模式分别报告;
-   20 核本机约 12 分钟)。普通套件全绿时漏屏障与缺根仍会潜伏,这一门在
+   + `ZJS_GC_AUDIT=fatal`,默认与 `ZJS_GC_NURSERY=1` 两种模式分别报告,
+   默认模式另跑一轮 `ZJS_GC_STRESS=16`;20 核本机约 21 分钟)。普通套件全绿时漏屏障与缺根仍会潜伏,这一门在
    2026-09-25 抓到过默认配置下的多处此类缺陷。Nightly 的
    `gc-audit-test262` job 每晚跑同一组步骤;
 4. 失败 → 按批内 commit bisect,只对肇事 commit 追加验证。

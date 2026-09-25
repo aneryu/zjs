@@ -4754,7 +4754,15 @@ pub const Machine = struct {
         @memcpy(moved, caller_stack.values[region_base..][0..total]);
         caller_stack.setLen(region_base);
         // `moved` now owns the call region (the receiver and callable plus any
-        // args not yet transferred into the new frame).
+        // args not yet transferred into the new frame). It is off the traced
+        // stack, and past ten values it is native heap. Frame setup allocates
+        // no GC object in production, but where native allocation may collect
+        // (test and force-GC builds) the window must be a root.
+        const moved_window: []core.JSValue = moved;
+        const moved_slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &moved_window }};
+        var moved_roots = core.runtime.ValueRootFrame{ .slices = &moved_slices };
+        if (comptime core.runtime.native_allocation.allocation_gc_trigger_enabled) moved_roots.activate(rt);
+        defer if (comptime core.runtime.native_allocation.allocation_gc_trigger_enabled) moved_roots.deactivate(rt);
 
         // Keep inherited logical units occupied while replacing the physical
         // Entry. The prepared target temporarily occupies the next slot, but

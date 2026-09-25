@@ -55,6 +55,9 @@ jobs:
       - run: zig build run-test262 -Doptimize=ReleaseSafe --prefix zig-out/gc-audit --summary all
       - name: test262, default collector, stress + fatal audit
         run: ZJS_GC_STRESS=64 ZJS_GC_AUDIT=fatal ./zig-out/gc-audit/bin/run-test262 -c test262.conf -d test262/test
+      # A denser cadence opens windows the default one misses.
+      - name: test262, default collector, stress 16 + fatal audit
+        run: ZJS_GC_STRESS=16 ZJS_GC_AUDIT=fatal ./zig-out/gc-audit/bin/run-test262 -c test262.conf -d test262/test
       - name: test262, copying nursery, stress + fatal audit
         run: ZJS_GC_NURSERY=1 ZJS_GC_STRESS=64 ZJS_GC_AUDIT=fatal ./zig-out/gc-audit/bin/run-test262 -c test262.conf -d test262/test
 

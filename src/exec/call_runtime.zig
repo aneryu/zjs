@@ -1864,6 +1864,14 @@ fn constructDateBuiltinNativeInScope(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!?core.JSValue {
+    // Every later argument is read after earlier ones ran JS (the prototype
+    // getter, valueOf/toString) that may collect. The caller's slice is not
+    // necessarily a root: keep it, the constructor and new.target alive.
+    const operands = [_]core.JSValue{ function_object.value(), new_target };
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .borrowed = &operands }, .{ .borrowed = args } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
     var prototype = try object_ops.reflectConstructPrototypeVm(ctx, output, global, "Date", new_target, caller_function, caller_frame);
     defer prototype.deinit(ctx.runtime);
     var coerced_storage: [7]core.JSValue = undefined;

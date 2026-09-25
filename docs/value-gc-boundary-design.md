@@ -37,7 +37,7 @@ Runtime 继续拥有根集合、GC 和安全点策略。JSValue 不拥有 Runtim
 | asInt64 / asUint64 读取堆 BigInt，无分配 | 属于借用读取，不因读堆就要求 Runtime 参数 |
 | asStringBody 经 flattenInfallible 物化 rope | 已分离 flat 投影与可失败物化；引擎内无调用者（`tools/check_string_boundaries.py` 门禁），仅作为公开 `Value.asString()` 的兼容实现保留 |
 | appendValueUtf8 已按叶片流式编码；ToNumber 的字符串分支已去掉 stringObject 物化 | 保留 UTF-16 跨叶片配对和孤立代理项编码；原生输出分配可 OOM，不触发 GC |
-| [string.zig](../src/core/string.zig)：flattenInfallible 在 OOM 时尝试 GC，重试失败 panic | 显式物化路径传播错误；迁移调用者时保留语言语义与 OOM 处理责任 |
+| [string.zig](../src/core/string.zig)：flattenInfallible 在 OOM 时尝试 GC，重试失败 panic | 引擎调用者已全部迁移到传播错误的显式物化；它只剩公开兼容入口一个调用路径 |
 | [gc.zig](../src/core/gc.zig)：Header 别名 TraceHeader，载体并不都能读链接字段 | 引入轻量 HeapRef 表示；具体字段访问留在布局层 |
 | [gc_roots.zig](../src/core/gc_roots.zig)：value 接收实际槽位；constValue 区分 observe 与 pinned | 生产收集器在搬迁前枚举只读根并保留其所在页；局部副本仅供 observe 诊断使用 |
 | stringSlot / stringField 装箱后写回原字段 | 保留回写适配，前提是底层字段在访问期间有效 |
@@ -206,7 +206,7 @@ V0 四项全量审计及其缺陷修复、写屏障缺口、按地址旁表与�
 
 本节记录设计所需的源码证据，不是运行正确性证明。方法分类覆盖当前 JSValue 的全部 51 个公开方法；
 根分支与 GC 入口已定位。provider 生命周期、全部业务调用的传递副作用和移动失败恢复尚未逐路径验证，
-因此 **V0 整体仍未完成**。不得仅凭以下名称覆盖进入“移动安全已成立”的结论。
+因此当时 **V0 整体仍未完成**；收口见 §8.34。不得仅凭以下名称覆盖进入“移动安全已成立”的结论。
 
 ### 8.1 JSValue 方法全集
 
@@ -222,7 +222,7 @@ P 返回的是临时借用地址，不建立根。分类依据方法体及其直
 | E：引用编码与表示比较 | refHeader、refHeaderAssumeObject、stringHeader、stringHeaderAssumeStringLike、functionBytecodeHeader、cycleMarkHeader、withTracedHeader、isTracerOwned、same | 提取或替换编码，不读目标体；same 不是所有 JS 值的内容相等 |
 | P | asSymbolBody、asStringBodyRaw、ropeBody | 纯指针投影，但绑定具体类型布局，应与通用编码区分 |
 | R | asSymbolAtom、asInt64、asUint64、asBytes、sameValue、sameValueZero | 读 atom_id／limbs／buffer 状态／字符串内容；不得跨潜在 GC 点缓存其借用数据 |
-| M | asString、asStringBody | asString → JSString.fromValue → asStringBody → rope.flattenInfallible；可发生 GC，不因返回 optional 而成为纯投影 |
+| M | asString、asStringBody | asString → JSString.fromValue → asStringBody → rope.flattenInfallible；可发生 GC，不因返回 optional 而成为纯投影。引擎内已无调用者，由字符串边界门禁固定 |
 
 附属 isZeroBigInt 是 R；bigIntParts / compareBigIntValues 只借用 limbs。
 compareStringValues 使用 [StringValueIterator](../src/core/string.zig) 的固定栈迭代，不物化 rope；
@@ -292,7 +292,7 @@ V3-B 的新增职责是生产 visitor 完整性与 manual 边语义，不重写�
 | afterCallbackBoundaryGC / beforeEventLoopIdleGC | poll 后还有预算化 cleanup／finalizer | 不能仅检查 poll 返回前的借用状态 |
 | tryRunObjectCycleRemovalWithValueRoots | 处理未完成 destruction、abort 旧 cycle、collectCycles | guard 防递归不等于通用禁止 GC 契约 |
 | collectCycles / collectMinor | 直接进入 Collector；minor 有代状态门槛 | 禁止 GC 检查需要覆盖底层入口，避免直接调用绕过 |
-| StringRope.flattenInfallible | OOM 后尝试显式 GC、重试、再次失败 panic | M 类隐藏入口；需迁移错误传播 |
+| StringRope.flattenInfallible | OOM 后尝试显式 GC、重试、再次失败 panic | M 类隐藏入口；引擎调用已迁移（§8.12–8.32），仅余公开兼容入口 |
 | collectForTest | 调用收集，错误时返回 0 | 测试辅助，不把 0 当作 GC 成功的证据 |
 
 gc_trace_stw 的 visitValue 经 value_heap_layout.relocate 回写实际值槽；visitObject 回写实际对象槽。
@@ -317,6 +317,10 @@ nursery_enabled 仍为 false；这些显式启用 nursery 的用例不授权改�
 
 第一项可实施的接口拆分仍是 V1-B 的字符串投影／物化，但必须先完成它涉及的 V0 调用闭包及 V4-A 根交接前置；
 当前文档更新不授权直接删除兼容 API 或修改 OOM 语义。
+
+收口状态：第 1 项由 §8.12–8.33 的逐调用迁移与字符串边界门禁关闭；第 2、3 项由 §8.34 的全量审计
+关闭（ActiveInvocation 各字段、全部 provider、全部 manual 边与稳定载体清单）；第 4 项按
+§8.35–8.37 执行，每个修复均先有复现。
 
 ### 8.6 调用与 provider 时序复核（基线 1e4fa6ff）
 
@@ -1215,3 +1219,34 @@ V1-B 的隐式物化调用已全部迁移并由门禁固定；V4-A 见 §8.11；
    补 pin，因为那会产生“保留页上已有转发残骸”的新状态，回收路径未为此设计。
 6. 生产构建的原生局部仍由保守扫描覆盖（现已包括 nursery 页）；本计划没有把所有内置的
    原生局部改成精确根，host 声明 quiescent 时的纯精确收集只对已迁移路径有逐项证据。
+
+### 8.39 复查：堆上的值缓冲区与门禁节奏
+
+复查确认了四处“声称覆盖、实际未守护”的地方，并按“先复现、再修复、再以消融确认测试能抓到”补齐：
+
+- 逐个去掉 §8.35 的屏障后，`test-gc-stress` 仍全绿：stress 只在解释器 tick 收集，碰不到这些
+  原生窗口。新增 `sweepSingleMajor`：对一段代码的每个（或每第 N 个）分配点各执行一次 major，
+  之后没有收集会重新标记年轻子对象，末尾的 minor 在致命审计下检查。闭包 capture 填充、
+  稠密数组冷路径追加、子 realm unhandled rejection、bootstrap 字段组（global／OOM／`eval`）
+  均由此或直接构造的回归守护，并经消融确认；bootstrap 三处单独去掉任一处会被相邻屏障掩盖
+  （记忆集按 owner 记录），三处同时去掉才失败。模块 capture 槽与导出 cell 的屏障在单模块
+  链接中没有可达窗口（槽位分配先批量记住 owner，其后逐个创建 cell 在生产构建中不是 GC 点），
+  保留为 import 绑定与合成模块路径的防御，没有专门回归。
+- 门禁固定 `ZJS_GC_STRESS=64` 会错过只在更密节奏出现的窗口。`stress=16` 的全量扫描随即
+  发现一个默认配置下的缺陷：解释器的 `constructor` 慢路径把超过四个参数弹到原生堆缓冲区，
+  构造路径先做中断轮询（可收集）才由被调用方根化参数，保守扫描看不到这个缓冲区。修复在
+  弹栈后立即以 slice 根持有参数、构造函数与 new.target。`test262-gc-audit` 与 nightly 为
+  默认模式增加一轮 `stress=16`。
+- 对全部堆上 JSValue 缓冲区（36 处 native 分配及 ArrayList／原生结构字段）的审计另发现三个
+  生产缺陷：`Array.prototype.sort` 通用路径、`Array.prototype.toSorted`、
+  `TypedArray.prototype.toSorted` 在收集阶段把读到的值只放在原生列表里，用户 getter／trap、
+  BigInt 元素读取和比较函数都可能收集。通用 `sort` 不开 stress 也会因普通分配触发的收集
+  得到错误结果。三处改用 `SortGatherRoots`（根指向列表的 `items`，先预留容量再读取）；
+  `toSorted` 的结果数组也经根重新读取。
+- `RootedValueCopies` 以逐元素 `.values` 指针建帧，没有窗口的帧在生产构建中不登记，
+  runtime.zig 的注释误称其“不是根缺口”。改为 `.mutable` slice 并更正注释。另在测试／force-GC
+  构建中根化尾调用复用的参数窗口，以及 `ensureVarRefsCapacity` 已创建的 cell 前缀；这两处在
+  生产构建中不存在 GC 点。遗留的 Set 组合方法（方法编号 15–21）只有测试可达，未修改。
+
+保守扫描在 nursery 中跳过未发布对象的依据也已核实：三个 nursery 构造器都先收集、先分配附属
+存储，再分配对象单元并立即发布，中间没有 GC 点；原注释所称“由自身 pin 保护”不准确，已更正。
