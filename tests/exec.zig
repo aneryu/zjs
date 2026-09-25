@@ -30282,3 +30282,18 @@ test "array length shrink survives shape compaction mid-deletion" {
     , .{ .filename = "<repl>" });
     try helpers.expectStringValueBytes(result, "2:0,1,length");
 }
+
+test "a retired frame's pending call window is not traced after its Stack slot is reused" {
+    const saved_forensics = core.gc.forensics;
+    defer core.gc.forensics = saved_forensics;
+    for ([_]i32{ 4, 8, 16 }) |cadence| {
+        core.gc.forensics.stress_cadence = cadence;
+        var js = try helpers.TestEngine.init(std.testing.allocator);
+        defer js.deinit();
+        // The minimized script ends by throwing; only the collector's walk
+        // over the interpreter state is under test.
+        _ = js.evalWithOptions(@embedFile("fixtures/gc/pending-call-window.js"), .{ .filename = "pending-call-window.js" }) catch |err| {
+            if (err != error.JSException) return err;
+        };
+    }
+}

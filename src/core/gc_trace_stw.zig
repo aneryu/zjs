@@ -2051,6 +2051,13 @@ const Collector = struct {
                 const adaptor: *@This() = @ptrCast(@alignCast(context));
                 if (gc.headerForwarded(@constCast(header)))
                     @panic("gc: readonly root discovered after evacuation");
+                // The pre-evacuation pass retains the page of every readonly
+                // root it sees. A young one on an unretained page was not
+                // reported then, so a writable slot may still move it: the
+                // RootProvider contract (same roots on every walk) is broken.
+                if (adaptor.collector.rt.gc.nursery.pageOf(@intFromPtr(header))) |page| {
+                    if (!page.retained) @panic("gc: readonly root missing from the pre-evacuation pass");
+                }
                 adaptor.collector.shadeExact(@constCast(header));
                 if (adaptor.collector.err) |err| return err;
             }
