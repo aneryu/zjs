@@ -396,6 +396,7 @@ pub fn throwInterrupted(ctx: *core.JSContext, global: *core.Object) !void {
 /// RealmContext; error construction stays in exec because it needs that
 /// Realm's InternalError intrinsic.
 pub inline fn pollInterrupt(ctx: *core.JSContext, global: *core.Object) !void {
+    ctx.runtime.assertExecutionAllowed();
     if (!ctx.pollInterrupt()) return;
     return throwInterrupted(ctx, global);
 }
@@ -532,6 +533,9 @@ pub fn pendingExceptionMatchesError(ctx: *core.JSContext, err: anyerror) bool {
     if (@as(anyerror, err) == error.JSException) return true;
     const expected = errorNameForRuntimeError(err) orelse return false;
     const object = objectFromValue(ctx.runtime.current_exception) orelse return false;
+    var borrow = core.runtime.NoGcScope{};
+    borrow.activate(ctx.runtime);
+    defer borrow.deactivate();
     return objectDataStringPropertyMatches(object, core.atom.ids.name, expected);
 }
 
@@ -553,23 +557,17 @@ fn objectDataStringPropertyMatches(object: *core.Object, atom_id: core.Atom, exp
             },
             .accessor => return false,
         };
-        const string = value.asStringBody() orelse return false;
-        return stringBodyEqualsAscii(string, expected);
+        return stringValueEqualsAscii(value, expected);
     }
     return false;
 }
 
-fn stringBodyEqualsAscii(string: *core.string.String, expected: []const u8) bool {
-    switch (string.resolveData()) {
-        .latin1 => |bytes| return std.mem.eql(u8, bytes, expected),
-        .utf16 => |units| {
-            if (units.len != expected.len) return false;
-            for (units, expected) |unit, byte| {
-                if (unit != byte) return false;
-            }
-            return true;
-        },
+fn stringValueEqualsAscii(value: core.JSValue, expected: []const u8) bool {
+    if (!value.isString() or core.string.stringValueLenUnchecked(value) != expected.len) return false;
+    for (expected, 0..) |byte, index| {
+        if (core.string.stringValueCodeUnitAtUnchecked(value, index) != byte) return false;
     }
+    return true;
 }
 
 // Fallback messages for sentinel errors that reach the catch machinery with

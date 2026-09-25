@@ -12,6 +12,7 @@ const builtin = @import("builtin");
 
 const object = @import("object.zig");
 const value_mod = @import("value.zig");
+const string = @import("string.zig");
 
 const JSValue = value_mod.JSValue;
 
@@ -63,10 +64,7 @@ pub fn toBoolean(value: JSValue) bool {
     if (value.isBigInt()) {
         return !(value_mod.isZeroBigInt(value) orelse return true);
     }
-    if (value.isString()) {
-        const string_value = value.asStringBody() orelse return false;
-        return string_value.len() != 0;
-    }
+    if (value.isString()) return string.stringValueLenUnchecked(value) != 0;
     return true;
 }
 

@@ -124,12 +124,44 @@ pub fn addTestGraph(ctx: build_config.Ctx, artifacts: artifacts_mod.Artifacts) T
     cli_tests.root_module.strip = test_strip;
 
     const test_step = b.step("test", "Run engine and CLI Zig tests (defaults to Debug optimization unless overridden)");
+    const string_boundaries = b.addSystemCommand(&.{"python3"});
+    string_boundaries.addFileArg(b.path("tools/check_string_boundaries.py"));
+    b.step("check-string-boundaries", "Reject implicit string materialization outside compatibility owners").dependOn(&string_boundaries.step);
+    test_step.dependOn(&string_boundaries.step);
     const run_unified = runEngineTests(ctx, unified_tests, false);
     if (test_filter) |f| run_unified.setEnvironmentVariable("ZJS_TEST_FILTER", f);
     test_step.dependOn(&run_unified.step);
     if (test_filter == null) {
         test_step.dependOn(&b.addRunArtifact(cli_tests).step);
     }
+
+    // `zig test` cannot exercise builtin.is_test == false. This executable
+    // guards the always-registered exact-root contract in production builds.
+    const exact_root_exe = b.addExecutable(.{
+        .name = "exact-roots-contract",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tests/exact_roots_executable.zig"),
+            .target = ctx.target,
+            .optimize = ctx.optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "zjs", .module = host_engine }},
+        }),
+    });
+    build_config.forceLlvmBackendOnDebug(exact_root_exe);
+    const run_exact_roots = b.addRunArtifact(exact_root_exe);
+    b.step("test-exact-roots", "Verify exact roots in a non-test executable").dependOn(&run_exact_roots.step);
+    if (test_filter == null) test_step.dependOn(&run_exact_roots.step);
+
+    const incomplete_visitor = addZjsTest(ctx, "gc-visitor-negative", b.createModule(.{
+        .root_source_file = b.path("tests/gc_visitor_incomplete.zig"),
+        .target = ctx.target,
+        .optimize = ctx.optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "zjs", .module = host_engine }},
+    }), &.{});
+    incomplete_visitor.expect_errors = .{ .contains = "incomplete GC visitor gc_visitor_incomplete.Incomplete: missing visitAtom" };
+    b.step("test-gc-visitor-contract", "Verify incomplete GC visitors fail compilation").dependOn(&incomplete_visitor.step);
+    if (test_filter == null) test_step.dependOn(&incomplete_visitor.step);
 
     const fast_test_step = b.step("test-fast", "Run engine tests whose names contain a required substring: test-fast -- <substring>");
     const missing_fast_filter = "test-fast requires a nonempty substring: zig build test-fast -- '<name>'";

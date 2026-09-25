@@ -9,11 +9,18 @@
 const std = @import("std");
 const js_context = @import("js_context.zig");
 
-pub const native = @import("native.zig");
-/// Monotonic/wall clocks. The CLI roots are their own modules and cannot
-/// reach `src/platform_clock.zig` directly, which is how `zjs.zig` ended up
-/// with an inlined copy of `monotonicNanos`.
-pub const platform_clock = @import("platform_clock.zig");
+/// Compatibility namespace for host-function registration.
+/// Implementation lives with the public Context facade.
+pub const native = struct {
+    pub const JSContext = js_context.JSContext;
+    pub const JSValue = core.JSValue;
+    pub const NativeEntry = core.NativeEntry;
+    pub const Exception = js_context.Exception;
+    pub const Call = js_context.Call;
+    pub const Spec = js_context.NativeSpec;
+    pub const Options = js_context.NativeOptions;
+    pub const managed = js_context.managed;
+};
 pub const core = @import("core/root.zig");
 /// Internal type-erased heap. Not part of the public embedder API.
 pub const sort_erased = @import("core/sort_erased.zig");
@@ -26,7 +33,7 @@ pub const compiler = @import("compiler/root.zig");
 pub const Runtime = core.JSRuntime;
 pub const Context = js_context.JSContext;
 pub const Value = core.JSValue;
-pub const Call = native.Call;
+pub const Call = js_context.Call;
 
 pub const GCStats = core.GCStats;
 pub const GCDetailedStats = core.GCDetailedStats;

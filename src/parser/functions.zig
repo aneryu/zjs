@@ -1297,7 +1297,7 @@ const PatternTarget = union(enum) {
 };
 
 const PatternTopology = struct {
-    following: tok.TokenKind,
+    following: tok.Kind,
     has_top_level_rest: bool,
 };
 
@@ -1312,7 +1312,7 @@ pub fn scanPatternTopology(s: *State) Error!PatternTopology {
         return s.failExpectedDescription("binding pattern");
     }
 
-    const expected_close: tok.TokenKind = if (s.peekKind() == .lbracket) .rbracket else .rbrace;
+    const expected_close: tok.Kind = if (s.peekKind() == .lbracket) .rbracket else .rbrace;
     const balanced = try lookahead.scanBalancedToken(s, false);
     if (!balanced.closed) {
         const failure = balanced.failure orelse return s.failExpectedToken(expected_close);
@@ -1329,7 +1329,7 @@ pub fn scanPatternTopology(s: *State) Error!PatternTopology {
     };
 }
 
-fn tokenStartsNestedPattern(s: *State, enclosing_close: tok.TokenKind) Error!bool {
+fn tokenStartsNestedPattern(s: *State, enclosing_close: tok.Kind) Error!bool {
     if (s.peekKind() != .lbracket and
         s.peekKind() != .lbrace)
     {

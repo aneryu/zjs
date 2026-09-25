@@ -12,13 +12,40 @@ const gc = @import("gc.zig");
 const gc_visit = @import("gc_visit.zig");
 const gc_block_heap = @import("gc_block_heap.zig");
 const unicode = @import("../libs/unicode.zig");
-const JSRuntime = @import("../runtime.zig").JSRuntime;
+const runtime_owner = @import("../runtime.zig");
+const JSRuntime = runtime_owner.JSRuntime;
+const roots_mod = @import("roots.zig");
 const JSValue = @import("value.zig").JSValue;
 const ValueTag = @import("value.zig").Tag;
 
 pub const StringError = error{
     InvalidUtf8,
 };
+
+/// Pure flat projection: no allocation, collection, or rope cache mutation.
+/// A linearized rope still has a rope tag and is not a flat value.
+pub fn asFlat(value: JSValue) ?*String {
+    return value.asStringBodyRaw();
+}
+
+/// Explicit materialization boundary. Both slots must remain registered for
+/// the call. Failure preserves the output and the input's value; successful
+/// materialization may cache a flat body inside the input rope. Aliasing is
+/// supported. The result belongs to the output root, not a borrowed pointer.
+pub fn ensureFlat(rt: *JSRuntime, input: roots_mod.RootedValueRef, output: roots_mod.MutableRootedValueRef) !void {
+    const source = try input.get(rt);
+    try output.validate(rt);
+    const flat = asFlat(source) orelse blk: {
+        const rope = source.ropeBody() orelse return error.ExpectedString;
+        if (rope.rt != rt) return error.WrongRuntime;
+        // Ropes, flat strings and tail buffers are currently stable-address
+        // carriers. The registered input keeps the complete graph alive
+        // across flatten's allocation; Object-only nursery movement does not
+        // invalidate this borrowed rope body.
+        break :blk try rope.flatten();
+    };
+    try output.set(rt, flat.value());
+}
 
 /// Maximum string length in code units, mirroring QuickJS `JS_STRING_LEN_MAX`
 /// ((1 << 30) - 1, quickjs.c). Every creation/concat path enforces it
@@ -154,24 +181,11 @@ pub const StringRope = struct {
         if (self.flatString()) |flat| return flat;
         const rt = self.rt;
         const total_len: usize = @intCast(self.len);
-        // TGC S2-i: a dependent view materializes by copying its prefix out
-        // of the shared buffer. It cannot hand the buffer itself out as the
-        // flat body: a `String` keeps its units in its own FAM immediately
-        // after a twelve-byte header, and the buffer has neither that header
-        // nor exclusive ownership of the bytes (older views still name the
-        // same prefix).
-        const flat = if (self.buffer) |buf| blk: {
-            std.debug.assert(buf.is_wide == self.wide);
-            if (buf.is_wide) {
-                const s = try String.createUninitialized(rt, .utf16, total_len);
-                @memcpy(s.utf16Mut(), buf.utf16Const()[0..total_len]);
-                break :blk s;
-            }
-            const s = try String.createUninitialized(rt, .latin1, total_len);
-            @memcpy(s.latin1Mut(), buf.latin1Const()[0..total_len]);
-            writeLatin1Terminator(s.latin1Mut());
-            break :blk s;
-        } else if (self.wide) blk: {
+        // Allocation can reenter materialization and replace a tail-buffer
+        // edge with a cached flat body. Acquire backing storage only AFTER
+        // allocation: copyRopeContent observes the current representation.
+        // The source must be rooted by the caller throughout this operation.
+        const flat = if (self.wide) blk: {
             const s = try String.createUninitialized(rt, .utf16, total_len);
             errdefer String.destroyFlat(rt, s);
             copyRopeContent(u16, self, s.utf16Mut());
@@ -548,9 +562,63 @@ pub const String = struct {
         return self;
     }
 
+    /// Create a flat concat result from strings and already-unboxed int32
+    /// values (the primitive concat fast path). No user coercion or rope
+    /// materialization occurs. Registers the actual writable slots before
+    /// allocation; their storage must stay valid for the call. GC may repair
+    /// the slots even on OOM. The returned string belongs to the Runtime.
+    pub fn createConcatParts(rt: *JSRuntime, parts: []JSValue) !*String {
+        const runtime_mod = @import("../runtime.zig");
+        const number_format = @import("../libs/number_format.zig");
+        const slots = parts;
+        const slices = [_]runtime_mod.ValueRootSlice{.{ .mutable = &slots }};
+        var frame = runtime_mod.ValueRootFrame{ .slices = &slices };
+        frame.activate(rt);
+        defer frame.deactivate(rt);
+
+        var total: usize = 0;
+        var wide = false;
+        var digits: [12]u8 = undefined;
+        for (parts) |part| {
+            const part_len = if (part.as(.int)) |integer|
+                number_format.formatInt32(&digits, integer).len
+            else blk: {
+                if (!part.isString()) return error.ExpectedString;
+                wide = wide or if (part.ropeBody()) |rope| rope.isWide() else asFlat(part).?.isWide();
+                break :blk stringValueLenUnchecked(part);
+            };
+            total = std.math.add(usize, total, part_len) catch return error.StringTooLong;
+            if (total > max_length) return error.StringTooLong;
+        }
+        if (total == 0) return rt.emptyString();
+        const self = if (wide)
+            try createUninitialized(rt, .utf16, total)
+        else
+            try createUninitialized(rt, .latin1, total);
+        // Allocation above may collect or reenter. Derive all views from
+        // updated slots now, including a rope's current cache/tail buffer.
+        var borrow = runtime_mod.NoGcScope{};
+        borrow.activate(rt);
+        defer borrow.deactivate();
+        var offset: usize = 0;
+        for (parts) |part| {
+            if (part.as(.int)) |integer| {
+                const data: ResolvedData = .{ .latin1 = number_format.formatInt32(&digits, integer) };
+                offset += if (wide) copyResolvedUnits(u16, self.utf16Mut()[offset..], data) else copyResolvedUnits(u8, self.latin1Mut()[offset..], data);
+            } else {
+                if (wide) copyRopeValueContent(u16, part, self.utf16Mut(), &offset) else copyRopeValueContent(u8, part, self.latin1Mut(), &offset);
+            }
+        }
+        std.debug.assert(offset == total);
+        if (!wide) writeLatin1Terminator(self.latin1Mut());
+        return self;
+    }
+
     /// Concatenate already-measured latin1 pieces into one freshly allocated
     /// latin1 string. Mirrors qjs `JS_ConcatString1`: one
     /// `js_alloc_string`, then each source memcpy lands in the result payload.
+    /// Compatibility entry for owned native or explicitly pinned storage.
+    /// Bare heap borrows must use createConcatParts to rederive after GC.
     pub fn createLatin1Parts(rt: *JSRuntime, parts: []const []const u8, total: usize) !*String {
         const self = try createUninitialized(rt, .latin1, total);
         errdefer destroyFlat(rt, self);
@@ -574,6 +642,8 @@ pub const String = struct {
     /// code unit into a wide result. `wide` must be the OR of the part widths
     /// and `total` the sum of their unit lengths (both from the caller's
     /// measure pass).
+    /// Compatibility entry: every source slice must have owned native or
+    /// explicitly pinned backing across allocation; prefer createConcatParts.
     pub fn createResolvedParts(rt: *JSRuntime, parts: []const ResolvedData, total: usize, wide: bool) !*String {
         if (!wide) {
             const self = try createUninitialized(rt, .latin1, total);
@@ -631,6 +701,40 @@ pub const String = struct {
     /// `JS_ConcatString3(ctx, "", value, suffix)`: a narrow input stays
     /// narrow, while a wide input remains wide and receives widened ASCII code
     /// units directly in its inline payload.
+    /// Append caller-owned native ASCII storage without borrowing heap data
+    /// across allocation. The source may be flat, cached, or a rope tree.
+    pub fn createValueAsciiSuffix(rt: *JSRuntime, input: JSValue, suffix: []const u8) !*String {
+        if (!input.isString()) return error.TypeError;
+        std.debug.assert(isAsciiBytes(suffix));
+        const runtime_mod = @import("../runtime.zig");
+        var values = [_]JSValue{input};
+        const slots: []JSValue = &values;
+        const slices = [_]runtime_mod.ValueRootSlice{.{ .mutable = &slots }};
+        var roots = runtime_mod.ValueRootFrame{ .slices = &slices };
+        roots.activate(rt);
+        defer roots.deactivate(rt);
+        const source_len = stringValueLenUnchecked(input);
+        const total = std.math.add(usize, source_len, suffix.len) catch return error.StringTooLong;
+        const wide = if (input.ropeBody()) |rope| rope.isWide() else asFlat(input).?.isWide();
+        const self = if (wide) try createUninitialized(rt, .utf16, total) else try createUninitialized(rt, .latin1, total);
+        var borrow = runtime_mod.NoGcScope{};
+        borrow.activate(rt);
+        defer borrow.deactivate();
+        var offset: usize = 0;
+        if (wide) {
+            copyRopeValueContent(u16, values[0], self.utf16Mut(), &offset);
+            for (suffix, source_len..) |byte, index| self.utf16Mut()[index] = byte;
+        } else {
+            copyRopeValueContent(u8, values[0], self.latin1Mut(), &offset);
+            @memcpy(self.latin1Mut()[source_len..], suffix);
+            writeLatin1Terminator(self.latin1Mut());
+        }
+        std.debug.assert(offset == source_len);
+        return self;
+    }
+
+    /// Compatibility entry for caller-owned or explicitly pinned backing.
+    /// Heap values should use createValueAsciiSuffix to rederive after GC.
     pub fn createAsciiSuffix(rt: *JSRuntime, source: ResolvedData, suffix: []const u8) !*String {
         std.debug.assert(isAsciiBytes(suffix));
         return switch (source) {
@@ -655,6 +759,51 @@ pub const String = struct {
         return self;
     }
 
+    /// Case-map an ASCII string value directly into the final narrow result.
+    /// Registers the source and rederives its leaves after allocation; ropes
+    /// need not materialize. Non-ASCII input returns null without allocating.
+    pub fn createValueAsciiCaseMapped(rt: *JSRuntime, input: JSValue, to_lower: bool) !?*String {
+        if (!input.isString()) return error.TypeError;
+        const runtime_mod = @import("../runtime.zig");
+        var values = [_]JSValue{input};
+        const slots: []JSValue = &values;
+        const slices = [_]runtime_mod.ValueRootSlice{.{ .mutable = &slots }};
+        var roots = runtime_mod.ValueRootFrame{ .slices = &slices };
+        roots.activate(rt);
+        defer roots.deactivate(rt);
+        const length = stringValueLenUnchecked(input);
+        {
+            var borrow = runtime_mod.NoGcScope{};
+            borrow.activate(rt);
+            defer borrow.deactivate();
+            var iterator = StringRangeIterator.init(values[0], 0, length);
+            while (iterator.next()) |data| switch (data) {
+                inline else => |units| for (units) |unit| {
+                    if (unit >= 0x80) return null;
+                },
+            };
+        }
+        const self = try createUninitialized(rt, .latin1, length);
+        var borrow = runtime_mod.NoGcScope{};
+        borrow.activate(rt);
+        defer borrow.deactivate();
+        var iterator = StringRangeIterator.init(values[0], 0, length);
+        const out = self.latin1Mut();
+        var offset: usize = 0;
+        while (iterator.next()) |data| switch (data) {
+            inline else => |units| for (units) |unit| {
+                const byte: u8 = @intCast(unit);
+                out[offset] = if (to_lower) unicode.toLowerAscii(byte) else unicode.toUpperAscii(byte);
+                offset += 1;
+            },
+        };
+        std.debug.assert(offset == length);
+        writeLatin1Terminator(out);
+        return self;
+    }
+
+    /// Compatibility entry for caller-owned or explicitly pinned backing.
+    /// Heap values should use createValueAsciiCaseMapped to rederive after GC.
     /// If `bytes` is ASCII, allocate the final narrow string and case-map the
     /// source directly into its inline payload. A non-ASCII source returns null
     /// without allocating so the caller can use the full Unicode converter.
@@ -734,18 +883,9 @@ pub const String = struct {
         return balanced;
     }
 
-    /// Consumes two owned operands and applies the same depth cap/rebalance as
-    /// `createBalancedRope`. This is the ownership contract of QJS's concat
-    /// helper and is the hot path used by direct `OP_add`.
+    /// Legacy spelling; tracing construction neither consumes nor releases inputs.
     pub fn createBalancedRopeOwned(rt: *JSRuntime, left: JSValue, right: JSValue) !JSValue {
-        const node = try createRopeOwned(rt, left, right);
-        const rope_value = node.value();
-        if (node.depth <= rope_max_depth) return rope_value;
-
-        const balanced = rebalanceRope(rt, rope_value) catch |err| {
-            return err;
-        };
-        return balanced;
+        return createBalancedRope(rt, left, right);
     }
 
     /// Content hash accessor (qjs `JSString.hash`). Computes on first demand;
@@ -864,11 +1004,71 @@ pub const String = struct {
     /// is no zero-copy view anymore, so the parent is never retained by the
     /// result.
     pub fn createSlice(rt: *JSRuntime, parent: *String, start: usize, slice_len: usize) !*String {
-        if (slice_len == 0) return try createAscii(rt, "");
-        return switch (parent.resolveData()) {
-            .latin1 => |bytes| createLatin1(rt, bytes[start .. start + slice_len]),
-            .utf16 => |units| createUtf16(rt, units[start .. start + slice_len]),
-        };
+        return createValueSlice(rt, parent.value(), start, slice_len);
+    }
+
+    /// Eager flat copy from a string-or-rope value. The range must be within
+    /// the input's code-unit length. Registers its own mutable source slot;
+    /// no leaf borrow crosses result allocation. Does not materialize ropes.
+    pub fn createValueSlice(rt: *JSRuntime, source_value: JSValue, start: usize, slice_len: usize) !*String {
+        const runtime_mod = @import("../runtime.zig");
+        std.debug.assert(source_value.isString());
+        std.debug.assert(start <= stringValueLenUnchecked(source_value));
+        std.debug.assert(slice_len <= stringValueLenUnchecked(source_value) - start);
+        var source = [_]JSValue{source_value};
+        const slots: []JSValue = &source;
+        const slices = [_]runtime_mod.ValueRootSlice{.{ .mutable = &slots }};
+        var frame = runtime_mod.ValueRootFrame{ .slices = &slices };
+        frame.activate(rt);
+        defer frame.deactivate(rt);
+
+        var wide = false;
+        {
+            var borrow = runtime_mod.NoGcScope{};
+            borrow.activate(rt);
+            defer borrow.deactivate();
+            const may_be_wide = if (source[0].ropeBody()) |rope| rope.isWide() else asFlat(source[0]).?.isWide();
+            if (may_be_wide) {
+                var iterator = StringRangeIterator.init(source[0], start, slice_len);
+                scan: while (iterator.next()) |data| switch (data) {
+                    .latin1 => {},
+                    .utf16 => |units| for (units) |unit| {
+                        if (unit > 0xff) {
+                            wide = true;
+                            break :scan;
+                        }
+                    },
+                };
+            }
+        }
+        const self = if (wide)
+            try createUninitialized(rt, .utf16, slice_len)
+        else
+            try createUninitialized(rt, .latin1, slice_len);
+        var borrow = runtime_mod.NoGcScope{};
+        borrow.activate(rt);
+        defer borrow.deactivate();
+        var iterator = StringRangeIterator.init(source[0], start, slice_len);
+        var offset: usize = 0;
+        while (iterator.next()) |data| {
+            if (wide) {
+                offset += copyResolvedUnits(u16, self.utf16Mut()[offset..], data);
+            } else {
+                const out = self.latin1Mut()[offset..];
+                switch (data) {
+                    .latin1 => |bytes| @memcpy(out[0..bytes.len], bytes),
+                    .utf16 => |units| for (units, 0..) |unit, index| {
+                        // The pre-allocation scan proved this immutable range
+                        // fits Latin1, even when the parent has wide leaves.
+                        out[index] = @intCast(unit);
+                    },
+                }
+                offset += data.len();
+            }
+        }
+        std.debug.assert(offset == slice_len);
+        if (!wide) writeLatin1Terminator(self.latin1Mut());
+        return self;
     }
 
     const StorageTag = enum { latin1, utf16 };
@@ -1078,6 +1278,37 @@ pub const StringValueIterator = struct {
 
 const rope_iterator_stack_capacity: usize = String.rope_max_depth;
 
+/// Borrowed chunks restricted to a valid code-unit range. Consume entirely
+/// inside a no-GC window; restart from the rooted value after allocation.
+const StringRangeIterator = struct {
+    iterator: StringValueIterator,
+    skip: usize,
+    remaining: usize,
+
+    fn init(value: JSValue, start: usize, count: usize) StringRangeIterator {
+        return .{ .iterator = StringValueIterator.init(value), .skip = start, .remaining = count };
+    }
+
+    fn next(self: *StringRangeIterator) ?String.ResolvedData {
+        if (self.remaining == 0) return null;
+        while (self.iterator.next()) |data| {
+            if (self.skip >= data.len()) {
+                self.skip -= data.len();
+                continue;
+            }
+            const start = self.skip;
+            const count = @min(self.remaining, data.len() - start);
+            self.skip = 0;
+            self.remaining -= count;
+            return switch (data) {
+                .latin1 => |bytes| .{ .latin1 = bytes[start..][0..count] },
+                .utf16 => |units| .{ .utf16 = units[start..][0..count] },
+            };
+        }
+        unreachable; // The caller supplied a range within the immutable value.
+    }
+};
+
 /// QJS `string_rope_get`: return one UTF-16 code unit without flattening.
 pub fn stringValueCodeUnitAt(value: JSValue, index: usize) ?u16 {
     if (!value.isString() or index >= stringValueLen(value)) return null;
@@ -1219,14 +1450,128 @@ pub fn compareStringValues(a: JSValue, b: JSValue, eq_only: bool) ?i32 {
 /// encode per unit (the CESU-8 form, which cannot byte-match an astral needle
 /// encoded the canonical way). It lives in core because two of the copies are
 /// core files, which cannot import exec.
-pub fn appendValueUtf8(rt: *JSRuntime, buffer: *std.ArrayList(u8), value: JSValue) !void {
-    const string_value = value.asStringBody() orelse return;
-    switch (string_value.resolveData()) {
+/// May grow the native output buffer, but never materializes a GC string or
+/// invokes a GC/probe. Borrowed leaf views are consumed within this window.
+pub fn appendValueUtf8(rt: *JSRuntime, buffer: *std.ArrayList(u8), value: JSValue) std.mem.Allocator.Error!void {
+    if (!value.isString()) return;
+    var borrow = @import("gc_scope.zig").NoGcScope{};
+    borrow.activate(rt);
+    defer borrow.deactivate();
+    const allocator = rt.nativeAllocator();
+    if (asFlat(value)) |flat| return appendResolvedUtf8(allocator, buffer, flat.resolveData());
+
+    var iterator = StringValueIterator.init(value);
+    var pending_high: ?u16 = null;
+    while (iterator.next()) |chunk| {
+        switch (chunk) {
+            .latin1 => {
+                // No Latin1 unit can complete a pending surrogate pair.
+                if (pending_high) |high| try unicode.appendUtf8CodePoint(allocator, buffer, high);
+                pending_high = null;
+                try appendResolvedUtf8(allocator, buffer, chunk);
+            },
+            .utf16 => |units| {
+                if (units.len == 0) continue;
+                var start: usize = 0;
+                if (pending_high) |high| {
+                    if (unicode.isLowSurrogateUnit(units[0])) {
+                        try unicode.appendUtf8CodePoint(allocator, buffer, unicode.codePointFromSurrogatePair(high, units[0]));
+                        start = 1;
+                    } else try unicode.appendUtf8CodePoint(allocator, buffer, high);
+                    pending_high = null;
+                }
+                var end = units.len;
+                if (end > start and unicode.isHighSurrogateUnit(units[end - 1])) {
+                    end -= 1;
+                    pending_high = units[end];
+                }
+                try unicode.appendUtf16UnitsAsUtf8(allocator, buffer, units[start..end]);
+            },
+        }
+    }
+    if (pending_high) |high| try unicode.appendUtf8CodePoint(allocator, buffer, high);
+}
+
+fn appendResolvedUtf8(allocator: std.mem.Allocator, buffer: *std.ArrayList(u8), data: String.ResolvedData) std.mem.Allocator.Error!void {
+    switch (data) {
         .latin1 => |bytes| {
-            if (isAsciiBytes(bytes)) return buffer.appendSlice(rt.nativeAllocator(), bytes);
-            for (bytes) |byte| try unicode.appendUtf8CodePoint(rt.nativeAllocator(), buffer, byte);
+            if (isAsciiBytes(bytes)) return buffer.appendSlice(allocator, bytes);
+            for (bytes) |byte| try unicode.appendUtf8CodePoint(allocator, buffer, byte);
         },
-        .utf16 => |units| try unicode.appendUtf16UnitsAsUtf8(rt.nativeAllocator(), buffer, units),
+        .utf16 => |units| try unicode.appendUtf16UnitsAsUtf8(allocator, buffer, units),
+    }
+}
+
+test "string boundary UTF8 streaming does not flatten ropes" {
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    var roots = roots_mod.ExactValueRoots(3){};
+    try roots.activate(rt);
+    defer roots.deactivate();
+    const left = try roots.ref(0);
+    const right = try roots.ref(1);
+    const input = try roots.ref(2);
+    try left.set(rt, (try String.createUtf16(rt, &.{ 0xe9, 0xd83d })).value());
+    try right.set(rt, (try String.createUtf16(rt, &.{ 0xde00, 'z', 0xd800 })).value());
+    const rope = try String.createRope(rt, try left.get(rt), try right.get(rt));
+    try input.set(rt, rope.value());
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(rt.nativeAllocator());
+    try bytes.ensureTotalCapacity(rt.nativeAllocator(), 64);
+    const before = rt.diagnostics.allocations.allocation_count;
+    const epoch = rt.gc.collection_epoch;
+    try appendValueUtf8(rt, &bytes, try input.get(rt));
+    try std.testing.expectEqualStrings("\xc3\xa9\xf0\x9f\x98\x80z\xed\xa0\x80", bytes.items);
+    try std.testing.expect(!rope.isLinearized());
+    try std.testing.expectEqual(before, rt.diagnostics.allocations.allocation_count);
+    try std.testing.expectEqual(epoch, rt.gc.collection_epoch);
+    bytes.clearAndFree(rt.nativeAllocator());
+    rt.setNativeBytesLimitForTest(rt.diagnostics.allocations.allocated_bytes);
+    defer rt.setNativeBytesLimitForTest(null);
+    try std.testing.expectError(error.OutOfMemory, appendValueUtf8(rt, &bytes, try input.get(rt)));
+    try std.testing.expect(!rope.isLinearized());
+    try std.testing.expectEqual(epoch, rt.gc.collection_epoch);
+}
+
+test "string boundary UTF8 streaming matches flat encoding across leaf forms" {
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    var roots = roots_mod.ExactValueRoots(4){};
+    try roots.activate(rt);
+    defer roots.deactivate();
+    const left = try roots.ref(0);
+    const right = try roots.ref(1);
+    const input = try roots.ref(2);
+    const cached = try roots.ref(3);
+    var expected = std.ArrayList(u8).empty;
+    defer expected.deinit(rt.nativeAllocator());
+    var actual = std.ArrayList(u8).empty;
+    defer actual.deinit(rt.nativeAllocator());
+    try actual.ensureTotalCapacity(rt.nativeAllocator(), 64);
+    const units = [_]u16{ 'A', 0xe9, 0x100, 0xd800, 0xdbff, 0xdc00, 0xdfff };
+    for (units) |first| {
+        for (units) |second| {
+            for (0..3) |kind| {
+                try left.set(rt, (try String.createUtf16(rt, &.{ 'a', first })).value());
+                try right.set(rt, (try String.createUtf16(rt, &.{ second, 0xd800 })).value());
+                const rope = if (kind == 1)
+                    try createTailBufferRope(rt, asFlat(try left.get(rt)).?, asFlat(try right.get(rt)).?)
+                else
+                    try String.createRope(rt, try left.get(rt), try right.get(rt));
+                try input.set(rt, rope.value());
+                if (kind == 2) try ensureFlat(rt, input.readOnly(), cached);
+                expected.clearRetainingCapacity();
+                try unicode.appendUtf16UnitsAsUtf8(rt.nativeAllocator(), &expected, &.{ 'a', first, second, 0xd800 });
+                actual.clearRetainingCapacity();
+                const allocations = rt.diagnostics.allocations.allocation_count;
+                const epoch = rt.gc.collection_epoch;
+                try appendValueUtf8(rt, &actual, try input.get(rt));
+                try std.testing.expectEqualSlices(u8, expected.items, actual.items);
+                try std.testing.expectEqual(kind == 2, rope.isLinearized());
+                try std.testing.expectEqual(allocations, rt.diagnostics.allocations.allocation_count);
+                try std.testing.expectEqual(epoch, rt.gc.collection_epoch);
+            }
+        }
     }
 }
 
@@ -1284,13 +1629,19 @@ fn createRopeNode(
     left_info: StringValueInfo,
     right_info: StringValueInfo,
 ) !*StringRope {
+    var values = [_]JSValue{ left, right };
+    const slots: []JSValue = &values;
+    const slices = [_]runtime_owner.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = runtime_owner.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
     const total = try std.math.add(usize, left_info.len, right_info.len);
     // Rope-concat length cap (qjs JS_ConcatString rope path, quickjs.c).
     if (total > max_length) return error.StringTooLong;
     const node = try allocRopeNode(rt);
     node.* = .{
-        .left = left,
-        .right = right,
+        .left = values[0],
+        .right = values[1],
         .len = @intCast(total),
         .depth = @max(left_info.depth, right_info.depth) +| 1,
         .wide = left_info.wide or right_info.wide,
@@ -1315,7 +1666,7 @@ const rope_bucket_len = [_]usize{
     267914296, 433494437, 701408733, 1134903170,
 };
 
-const RopeBuckets = [rope_bucket_len.len]?JSValue;
+const RopeBuckets = [rope_bucket_len.len]JSValue;
 
 /// Builds one raw rope value over two string values -- the value-typed
 /// spelling of `createRope`, matching QJS's `js_new_string_rope`. No ownership
@@ -1332,41 +1683,40 @@ fn addRopeRebalanceLeaf(rt: *JSRuntime, buckets: *RopeBuckets, owned_leaf: JSVal
         return;
     }
 
-    var leaf: ?JSValue = owned_leaf;
-    var accumulated: ?JSValue = null;
+    var values = [_]JSValue{ owned_leaf, JSValue.undefinedValue() };
+    const slots: []JSValue = &values;
+    const slices = [_]runtime_owner.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = runtime_owner.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
 
     var bucket_index: usize = 0;
     while (leaf_len >= rope_bucket_len[bucket_index + 1]) : (bucket_index += 1) {
-        if (buckets[bucket_index]) |bucket| {
-            buckets[bucket_index] = null;
-            if (accumulated) |current| {
-                accumulated = null;
-                accumulated = try createOwnedRope(rt, bucket, current);
+        const bucket = buckets[bucket_index];
+        if (!bucket.is(.undefined_value)) {
+            buckets[bucket_index] = JSValue.undefinedValue();
+            if (!values[1].is(.undefined_value)) {
+                values[1] = try createOwnedRope(rt, bucket, values[1]);
             } else {
-                accumulated = bucket;
+                values[1] = bucket;
             }
         }
     }
 
-    if (accumulated) |prefix| {
-        accumulated = null;
-        const suffix = leaf.?;
-        leaf = null;
-        accumulated = try createOwnedRope(rt, prefix, suffix);
+    if (!values[1].is(.undefined_value)) {
+        values[1] = try createOwnedRope(rt, values[1], values[0]);
     } else {
-        accumulated = leaf;
-        leaf = null;
+        values[1] = values[0];
     }
+    values[0] = JSValue.undefinedValue();
 
-    while (buckets[bucket_index]) |bucket| : (bucket_index += 1) {
-        buckets[bucket_index] = null;
-        const current = accumulated.?;
-        accumulated = null;
-        accumulated = try createOwnedRope(rt, bucket, current);
+    while (!buckets[bucket_index].is(.undefined_value)) : (bucket_index += 1) {
+        const bucket = buckets[bucket_index];
+        buckets[bucket_index] = JSValue.undefinedValue();
+        values[1] = try createOwnedRope(rt, bucket, values[1]);
     }
     std.debug.assert(bucket_index < buckets.len);
-    buckets[bucket_index] = accumulated;
-    accumulated = null;
+    buckets[bucket_index] = values[1];
 }
 
 fn collectRopeRebalanceLeaves(rt: *JSRuntime, buckets: *RopeBuckets, value: JSValue) !void {
@@ -1382,30 +1732,44 @@ fn collectRopeRebalanceLeaves(rt: *JSRuntime, buckets: *RopeBuckets, value: JSVa
         return addRopeRebalanceLeaf(rt, buckets, value);
     }
 
-    try collectRopeRebalanceLeaves(rt, buckets, node.left);
-    try collectRopeRebalanceLeaves(rt, buckets, node.right);
+    // A collection during the left traversal may materialize the parent and
+    // replace its child slots. Preserve both original children before recursing.
+    var children = [_]JSValue{ node.left, node.right };
+    const slots: []JSValue = &children;
+    const slices = [_]runtime_owner.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = runtime_owner.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    try collectRopeRebalanceLeaves(rt, buckets, children[0]);
+    try collectRopeRebalanceLeaves(rt, buckets, children[1]);
 }
 
 /// Returns a new balanced value without consuming `rope`. This is the Boehm,
 /// Atkinson and Plass Fibonacci-bucket algorithm used by QuickJS
 /// `js_rebalancee_string_rope`.
 fn rebalanceRope(rt: *JSRuntime, rope: JSValue) !JSValue {
-    var buckets: RopeBuckets = @splat(null);
+    var buckets: RopeBuckets = @splat(JSValue.undefinedValue());
+    var values = [_]JSValue{ rope, JSValue.undefinedValue() };
+    const slots: []JSValue = &values;
+    const bucket_slots: []JSValue = &buckets;
+    const slices = [_]runtime_owner.ValueRootSlice{ .{ .mutable = &slots }, .{ .mutable = &bucket_slots } };
+    var roots = runtime_owner.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
 
-    try collectRopeRebalanceLeaves(rt, &buckets, rope);
+    try collectRopeRebalanceLeaves(rt, &buckets, values[0]);
 
-    var result: ?JSValue = null;
     for (&buckets) |*entry| {
-        const bucket = entry.* orelse continue;
-        entry.* = null;
-        if (result) |current| {
-            result = null;
-            result = try createOwnedRope(rt, bucket, current);
+        const bucket = entry.*;
+        if (bucket.is(.undefined_value)) continue;
+        entry.* = JSValue.undefinedValue();
+        if (!values[1].is(.undefined_value)) {
+            values[1] = try createOwnedRope(rt, bucket, values[1]);
         } else {
-            result = bucket;
+            values[1] = bucket;
         }
     }
-    if (result) |balanced| return balanced;
+    if (!values[1].is(.undefined_value)) return values[1];
     return (try String.createLatin1(rt, "")).value();
 }
 
@@ -1470,15 +1834,23 @@ fn tailBufferCapacityFor(total: usize) usize {
 /// dependent view node. This still copies `a` once -- the amortization starts
 /// with the next append, which writes only `b`'s units.
 pub fn createTailBufferRope(rt: *JSRuntime, a: *String, b: *String) !*StringRope {
+    var values = [_]JSValue{ a.value(), b.value() };
+    const slots: []JSValue = &values;
+    const slices = [_]runtime_owner.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = runtime_owner.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
     const a_len = a.len();
     const total = try std.math.add(usize, a_len, b.len());
     if (total > max_length) return error.StringTooLong;
     const wide = a.isWide() or b.isWide();
-    // Allocation may collect. `a`/`b` are native locals resolved by the
-    // conservative scan, and nothing published names the buffer yet.
     const buf = try createStringBuffer(rt, wide, tailBufferSeedCapacityFor(total));
-    writeTailUnits(buf, 0, a.resolveData());
-    writeTailUnits(buf, @intCast(a_len), b.resolveData());
+    const headers = [_]runtime_owner.HeaderRootValue{.{ .header = buf.header() }};
+    var buffer_root = runtime_owner.ValueRootFrame{ .headers = &headers };
+    buffer_root.activate(rt);
+    defer buffer_root.deactivate(rt);
+    writeTailUnits(buf, 0, asFlat(values[0]).?.resolveData());
+    writeTailUnits(buf, @intCast(a_len), asFlat(values[1]).?.resolveData());
     const node = try allocRopeNode(rt);
     node.* = .{
         .left = JSValue.undefinedValue(),
@@ -1502,6 +1874,12 @@ pub fn createTailBufferRope(rt: *JSRuntime, a: *String, b: *String) !*StringRope
 /// leaves `view` untouched, which is what makes `r1 = s + x; r2 = s + y`
 /// correct without a refcount.
 pub fn appendTailBufferRope(rt: *JSRuntime, view: *StringRope, b: *String) !*StringRope {
+    var values = [_]JSValue{ view.value(), b.value() };
+    const slots: []JSValue = &values;
+    const slices = [_]runtime_owner.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = runtime_owner.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
     const buf = view.buffer.?;
     const used = view.len;
     const total = try std.math.add(usize, @as(usize, used), b.len());
@@ -1512,12 +1890,22 @@ pub fn appendTailBufferRope(rt: *JSRuntime, view: *StringRope, b: *String) !*Str
         // Allocate first: a collection here still sees `view` extensible over
         // an unmodified buffer, so the operation is all-or-nothing.
         const node = try allocRopeNode(rt);
-        // The allocation may have collected. Nothing the collector does may
-        // move a view off its buffer, shorten it, or spend its append right:
-        // those are mutator-only writes, and this is the one place that makes
-        // them.
-        std.debug.assert(view.buffer == buf and view.len == used and view.extensible);
-        writeTailUnits(buf, used, b.resolveData());
+        const current = values[0].ropeBody().?;
+        // Reentrant materialization or append can change the representation
+        // or spend the append right. Publish this node as an ordinary rope
+        // instead of writing through the stale buffer borrow.
+        if (current.buffer != buf or !current.extensible) {
+            node.* = .{
+                .left = values[0],
+                .right = values[1],
+                .rt = rt,
+                .len = @intCast(total),
+                .depth = current.depth +| 1,
+                .wide = wide,
+            };
+            return node;
+        }
+        writeTailUnits(buf, used, asFlat(values[1]).?.resolveData());
         node.* = .{
             .left = JSValue.undefinedValue(),
             .right = JSValue.undefinedValue(),
@@ -1528,13 +1916,20 @@ pub fn appendTailBufferRope(rt: *JSRuntime, view: *StringRope, b: *String) !*Str
             .wide = buf.is_wide,
             .extensible = true,
         };
-        view.extensible = false;
+        current.extensible = false;
         return node;
     }
 
     const next = try createStringBuffer(rt, wide, tailBufferCapacityFor(total));
-    writeTailUnits(next, 0, buf.prefix(used));
-    writeTailUnits(next, used, b.resolveData());
+    const headers = [_]runtime_owner.HeaderRootValue{.{ .header = next.header() }};
+    var buffer_root = runtime_owner.ValueRootFrame{ .headers = &headers };
+    buffer_root.activate(rt);
+    defer buffer_root.deactivate(rt);
+    // The source may now be flat. Read its current representation after GC.
+    var offset: usize = 0;
+    if (wide) copyRopeValueContent(u16, values[0], next.utf16(), &offset) else copyRopeValueContent(u8, values[0], next.latin1(), &offset);
+    std.debug.assert(offset == used);
+    writeTailUnits(next, used, asFlat(values[1]).?.resolveData());
     const node = try allocRopeNode(rt);
     node.* = .{
         .left = JSValue.undefinedValue(),
@@ -2175,6 +2570,285 @@ test "flat strings store characters inline in a single fixed-size allocation" {
     const growable = try String.createLatin1Concat(rt, "ab", "c");
     try std.testing.expect(growable.eqlBytes("abc"));
     try std.testing.expectEqual(growable_allocations + 1, rt.diagnostics.allocations.allocation_count);
+}
+
+test "string materialization flat rope wide and tail views support aliases and cached reads" {
+    for (0..5) |kind| {
+        const rt = try JSRuntime.create(std.testing.allocator, .{});
+        defer rt.destroy();
+        var roots = roots_mod.ExactValueRoots(4){};
+        try roots.activate(rt);
+        defer roots.deactivate();
+        const left = try roots.ref(0);
+        const right = try roots.ref(1);
+        const input = try roots.ref(2);
+        const output = try roots.ref(3);
+        try left.set(rt, if (kind == 2 or kind == 4)
+            (try String.createUtf16(rt, &.{ 0x100, 'x' })).value()
+        else
+            (try String.createAscii(rt, "left")).value());
+        try right.set(rt, (try String.createAscii(rt, "right")).value());
+        const value = switch (kind) {
+            0 => try left.get(rt),
+            3, 4 => (try createTailBufferRope(rt, asFlat(try left.get(rt)).?, asFlat(try right.get(rt)).?)).value(),
+            else => (try String.createRope(rt, try left.get(rt), try right.get(rt))).value(),
+        };
+        try input.set(rt, value);
+        try output.set(rt, JSValue.int32(99));
+        try std.testing.expectEqual(kind == 0, asFlat(value) != null);
+        try ensureFlat(rt, input.readOnly(), output);
+        try std.testing.expectEqual(value.bits, (try input.get(rt)).bits);
+        const flat = asFlat(try output.get(rt)).?;
+        if (kind == 2 or kind == 4) {
+            try std.testing.expect(flat.isWide());
+            try std.testing.expectEqual(@as(u16, 0x100), flat.codeUnitAt(0));
+            try std.testing.expectEqual(@as(usize, 7), flat.len());
+        } else try std.testing.expect(flat.eqlBytes(if (kind == 0) "left" else "leftright"));
+        const allocations = rt.diagnostics.allocations.allocation_count;
+        // Cached ropes still do not satisfy a pure flat-value projection.
+        try std.testing.expectEqual(kind == 0, asFlat(try input.get(rt)) != null);
+        try ensureFlat(rt, input.readOnly(), input);
+        try std.testing.expectEqual(flat, asFlat(try input.get(rt)).?);
+        try ensureFlat(rt, input.readOnly(), input);
+        try std.testing.expectEqual(allocations, rt.diagnostics.allocations.allocation_count);
+    }
+}
+
+test "string materialization OOM preserves input output and alias" {
+    for (0..3) |kind| {
+        const rt = try JSRuntime.create(std.testing.allocator, .{});
+        defer rt.destroy();
+        rt.forcePreciseRootScanForTest();
+        defer rt.restoreDefaultRootScanForTest();
+        var roots = roots_mod.ExactValueRoots(4){};
+        try roots.activate(rt);
+        defer roots.deactivate();
+        const left = try roots.ref(0);
+        const right = try roots.ref(1);
+        const input = try roots.ref(2);
+        const output = try roots.ref(3);
+        try left.set(rt, if (kind == 1)
+            (try String.createUtf16(rt, &.{ 0x100, 0x200 })).value()
+        else
+            (try String.createAscii(rt, "left")).value());
+        try right.set(rt, (try String.createAscii(rt, "right")).value());
+        const rope = if (kind == 2)
+            try createTailBufferRope(rt, asFlat(try left.get(rt)).?, asFlat(try right.get(rt)).?)
+        else
+            try String.createRope(rt, try left.get(rt), try right.get(rt));
+        try input.set(rt, rope.value());
+        try output.set(rt, (try String.createAscii(rt, "unchanged")).value());
+        const source_bits = (try input.get(rt)).bits;
+        const output_bits = (try output.get(rt)).bits;
+        rt.setMemoryLimit(0);
+        defer rt.setMemoryLimit(null);
+        try std.testing.expectError(error.OutOfMemory, ensureFlat(rt, input.readOnly(), output));
+        try std.testing.expectError(error.OutOfMemory, ensureFlat(rt, input.readOnly(), input));
+        try std.testing.expectEqual(source_bits, (try input.get(rt)).bits);
+        try std.testing.expectEqual(output_bits, (try output.get(rt)).bits);
+        try std.testing.expect(!rope.isLinearized());
+        try std.testing.expect(asFlat(try output.get(rt)).?.eqlBytes("unchanged"));
+        rt.setMemoryLimit(null);
+        try ensureFlat(rt, input.readOnly(), output);
+        try std.testing.expect(rope.isLinearized());
+    }
+}
+
+test "string materialization keeps graph alive across allocation probe collection" {
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    var roots = roots_mod.ExactValueRoots(3){};
+    try roots.activate(rt);
+    defer roots.deactivate();
+    const input = try roots.ref(0);
+    const right = try roots.ref(1);
+    const output = try roots.ref(2);
+    try input.set(rt, (try String.createAscii(rt, "collected-")).value());
+    try right.set(rt, (try String.createAscii(rt, "rope")).value());
+    try input.set(rt, (try String.createRope(rt, try input.get(rt), try right.get(rt))).value());
+    try right.set(rt, JSValue.undefinedValue());
+    const Probe = struct {
+        rt: *JSRuntime,
+        calls: usize = 0,
+        failure: ?gc.CollectionError = null,
+        fn collect(raw: ?*anyopaque, _: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.calls += 1;
+            _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch |err| {
+                self.failure = err;
+            };
+        }
+    };
+    var probe = Probe{ .rt = rt };
+    const saved_fn = rt.gc.heap_budget.probe;
+    const saved_ctx = rt.gc.heap_budget.probe_ctx;
+    rt.gc.heap_budget.probe = Probe.collect;
+    rt.gc.heap_budget.probe_ctx = &probe;
+    defer {
+        rt.gc.heap_budget.probe = saved_fn;
+        rt.gc.heap_budget.probe_ctx = saved_ctx;
+    }
+    try ensureFlat(rt, input.readOnly(), output);
+    if (probe.failure) |err| return err;
+    try std.testing.expect(probe.calls > 0);
+    try std.testing.expect(asFlat(try output.get(rt)).?.eqlBytes("collected-rope"));
+}
+
+test "string materialization rejects invalid input and output before mutation" {
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const other = try JSRuntime.create(std.testing.allocator, .{});
+    defer other.destroy();
+    var roots = roots_mod.ExactValueRoots(2){};
+    try roots.activate(rt);
+    defer roots.deactivate();
+    var foreign = roots_mod.ExactValueRoots(1){};
+    try foreign.activate(other);
+    defer foreign.deactivate();
+    const input = try roots.ref(0);
+    const output = try roots.ref(1);
+    try output.set(rt, JSValue.int32(23));
+    try std.testing.expectError(error.ExpectedString, ensureFlat(rt, input.readOnly(), output));
+    try input.set(rt, (try String.createAscii(rt, "flat")).value());
+    try std.testing.expectError(error.WrongRuntime, ensureFlat(rt, input.readOnly(), try foreign.ref(0)));
+    const expired = try foreign.ref(0);
+    foreign.deactivate();
+    try std.testing.expectError(error.WrongRuntime, ensureFlat(rt, input.readOnly(), expired));
+    var local = roots_mod.ExactValueRoots(1){};
+    try local.activate(rt);
+    const expired_local = try local.ref(0);
+    local.deactivate();
+    try std.testing.expectError(error.InactiveRoot, ensureFlat(rt, input.readOnly(), expired_local));
+    try std.testing.expectEqual(@as(?i32, 23), (try output.get(rt)).as(.int));
+}
+
+test "string materialization reentrant flatten refreshes tail backing" {
+    try testReentrantTailCopy(.flatten);
+}
+
+test "string boundary concat allocation rederives tail backing after reentry" {
+    try testReentrantTailCopy(.concat);
+}
+
+test "string boundary slice allocation rederives tail backing after reentry" {
+    try testReentrantTailCopy(.slice);
+}
+
+test "string boundary ASCII suffix rederives a reused tail buffer" {
+    try testReentrantTailCopy(.suffix);
+}
+
+test "string boundary ASCII case mapping rederives a reused tail buffer" {
+    try testReentrantTailCopy(.lower);
+    try testReentrantTailCopy(.upper);
+}
+
+test "string boundary tail append rechecks reentrant materialization" {
+    try testReentrantTailCopy(.append);
+    try testReentrantTailCopy(.append_wide);
+}
+
+fn testReentrantTailCopy(mode: enum { flatten, concat, slice, suffix, lower, upper, append, append_wide }) !void {
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    var roots = roots_mod.ExactValueRoots(4){};
+    try roots.activate(rt);
+    defer roots.deactivate();
+    const input = try roots.ref(0);
+    const right = try roots.ref(1);
+    const nested_output = try roots.ref(2);
+    const output = try roots.ref(3);
+    try input.set(rt, (try String.createAscii(rt, "reentrant-")).value());
+    try right.set(rt, (try String.createAscii(rt, "tail")).value());
+    try input.set(rt, (try createTailBufferRope(rt, asFlat(try input.get(rt)).?, asFlat(try right.get(rt)).?)).value());
+    const old_buffer = (try input.get(rt)).ropeBody().?.buffer.?;
+    if (mode == .append or mode == .append_wide) try right.set(rt, (try String.createUtf16(rt, if (mode == .append) &.{'y'} else &.{0x100})).value());
+    const Probe = struct {
+        rt: *JSRuntime,
+        input: roots_mod.RootedValueRef,
+        output: roots_mod.MutableRootedValueRef,
+        old_buffer_address: usize,
+        buffer_capacity: usize,
+        reused: bool = false,
+        calls: usize = 0,
+        once: bool,
+        failure: ?anyerror = null,
+        fn run(raw: ?*anyopaque, _: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            if (self.once and self.calls != 0) return;
+            self.calls += 1;
+            const saved = self.rt.gc.heap_budget.probe;
+            self.rt.gc.heap_budget.probe = null;
+            defer self.rt.gc.heap_budget.probe = saved;
+            ensureFlat(self.rt, self.input, self.output) catch |err| {
+                self.failure = err;
+                return;
+            };
+            // Linearization dropped the old buffer edge. Reclaim it before
+            // the outer materialization resumes its copy.
+            _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch |err| {
+                self.failure = err;
+                return;
+            };
+            // Reuse reclaimed storage through the real allocator. Poisoning
+            // a live replacement buffer makes a stale borrow observable
+            // without dereferencing freed memory in the test itself.
+            for (0..8192) |_| {
+                const buffer = createStringBuffer(self.rt, false, self.buffer_capacity) catch |err| {
+                    self.failure = err;
+                    return;
+                };
+                @memset(buffer.latin1(), 'Z');
+                if (@intFromPtr(buffer) == self.old_buffer_address) {
+                    self.reused = true;
+                    break;
+                }
+            }
+        }
+    };
+    var probe = Probe{
+        .rt = rt,
+        .input = input.readOnly(),
+        .output = nested_output,
+        .old_buffer_address = @intFromPtr(old_buffer),
+        .buffer_capacity = old_buffer.capacity,
+        .once = mode == .append or mode == .append_wide,
+    };
+    const saved_fn = rt.gc.heap_budget.probe;
+    const saved_ctx = rt.gc.heap_budget.probe_ctx;
+    rt.gc.heap_budget.probe = Probe.run;
+    rt.gc.heap_budget.probe_ctx = &probe;
+    defer {
+        rt.gc.heap_budget.probe = saved_fn;
+        rt.gc.heap_budget.probe_ctx = saved_ctx;
+    }
+    switch (mode) {
+        .concat => {
+            var parts = [_]JSValue{ try input.get(rt), try input.get(rt), JSValue.int32(123) };
+            try output.set(rt, (try String.createConcatParts(rt, &parts)).value());
+        },
+        .slice => try output.set(rt, (try String.createValueSlice(rt, try input.get(rt), 9, 5)).value()),
+        .suffix => try output.set(rt, (try String.createValueAsciiSuffix(rt, try input.get(rt), "y")).value()),
+        .lower, .upper => try output.set(rt, (try String.createValueAsciiCaseMapped(rt, try input.get(rt), mode == .lower)).?.value()),
+        .flatten => try ensureFlat(rt, input.readOnly(), output),
+        .append, .append_wide => try output.set(rt, (try appendTailBufferRope(rt, (try input.get(rt)).ropeBody().?, asFlat(try right.get(rt)).?)).value()),
+    }
+    if (probe.failure) |err| return err;
+    try std.testing.expect(probe.calls > 0);
+    try std.testing.expect(probe.reused);
+    if (mode != .append and mode != .append_wide) try std.testing.expect(asFlat(try output.get(rt)) != null);
+    var bytes = std.ArrayList(u8).empty;
+    defer bytes.deinit(rt.nativeAllocator());
+    try appendValueUtf8(rt, &bytes, try output.get(rt));
+    try std.testing.expectEqualStrings(switch (mode) {
+        .concat => "reentrant-tailreentrant-tail123",
+        .slice => "-tail",
+        .suffix => "reentrant-taily",
+        .flatten, .lower => "reentrant-tail",
+        .upper => "REENTRANT-TAIL",
+        .append => "reentrant-taily",
+        .append_wide => "reentrant-tail\xc4\x80",
+    }, bytes.items);
 }
 
 test "rope nodes keep the compact tree-only layout" {

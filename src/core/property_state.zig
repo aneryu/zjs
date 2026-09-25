@@ -37,8 +37,19 @@ pub fn iteratorNextSlot(rt: *JSRuntime, object: *Object) !*?JSValue {
     if (iteratorNextSlotIfPresent(rt, object)) |slot| return slot;
     const entry = try rt.cached_iterator_next_entries.addOne(rt.nativeAllocator());
     entry.* = .{ .object = object };
+    object.flags.has_iterator_next = true;
     object.markNeedsFinalizer(rt);
     return &entry.value;
+}
+
+/// Rebind the entry of an object the collector moved, or moved back during
+/// evacuation rollback. `previous` may be a forwarding husk; only its address
+/// is compared. Does not allocate.
+pub fn relocateIteratorNext(rt: *JSRuntime, previous: *const Object, current: *Object) void {
+    if (!current.flags.has_iterator_next) return;
+    const index = iteratorNextIndex(rt, previous) orelse
+        @panic("gc: relocating object missing iterator-next entry");
+    rt.cached_iterator_next_entries.items[index].object = current;
 }
 
 pub fn iteratorNext(rt: *JSRuntime, object: *const Object) ?JSValue {
@@ -51,6 +62,7 @@ pub fn clearIteratorNext(rt: *JSRuntime, object: *Object) void {
     const index = iteratorNextIndex(rt, object) orelse return;
     rt.cached_iterator_next_entries.items[index].value = null;
     removeIteratorNextAt(rt, index);
+    object.flags.has_iterator_next = false;
 }
 
 pub fn iteratorNextSlotIfPresent(rt: *JSRuntime, object: *const Object) ?*?JSValue {

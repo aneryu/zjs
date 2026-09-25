@@ -32,6 +32,7 @@ const weak_index_threshold: usize = 8;
 // === Strong-entry lookup ===
 
 pub fn findStrongEntry(object: *core.Object, key: core.JSValue) ?usize {
+    refreshStrongIndex(object);
     const hash = strongEntryHash(key);
     const heads = object.collectionBucketHeads();
     if (heads.len != 0) {
@@ -54,6 +55,7 @@ pub fn findStrongEntry(object: *core.Object, key: core.JSValue) ?usize {
 }
 
 pub fn findStrongEntryLatin1Concat(object: *core.Object, prefix: []const u8, digits: []const u8, hash: u64) ?usize {
+    refreshStrongIndex(object);
     const heads = object.collectionBucketHeads();
     if (heads.len != 0) {
         var cursor = heads[bucketIndex(hash, heads.len)];
@@ -117,13 +119,25 @@ pub fn strongEntryHashLatin1ConcatWithSeed(prefix: []const u8, digits: []const u
 }
 
 fn stringValueEqlLatin1Concat(value: core.JSValue, prefix: []const u8, digits: []const u8) bool {
-    const string = stringFromValue(value) orelse return false;
+    if (!value.isString()) return false;
     const len = prefix.len + digits.len;
-    if (string.len() != len) return false;
-    return switch (string.resolveData()) {
+    if (core.string.stringValueLenUnchecked(value) != len) return false;
+    if (core.string.asFlat(value)) |string| return switch (string.resolveData()) {
         .latin1 => |bytes| std.mem.eql(u8, bytes[0..prefix.len], prefix) and std.mem.eql(u8, bytes[prefix.len..], digits),
         .utf16 => |units| utf16EqlLatin1Concat(units, prefix, digits),
     };
+    // The collection entry and caller's prefix stay borrowed throughout this
+    // allocation-free comparison; looking up a rope key must never collect.
+    var iterator = core.string.StringValueIterator.init(value);
+    var offset: usize = 0;
+    while (iterator.next()) |chunk| switch (chunk) {
+        inline else => |units| for (units) |unit| {
+            const expected = if (offset < prefix.len) prefix[offset] else digits[offset - prefix.len];
+            if (unit != expected) return false;
+            offset += 1;
+        },
+    };
+    return true;
 }
 
 fn utf16EqlLatin1Concat(units: []const u16, prefix: []const u8, digits: []const u8) bool {
@@ -273,6 +287,25 @@ fn rebuildStrongIndex(rt: *core.JSRuntime, object: *core.Object, bucket_count: u
     const heads = object.collectionBucketHeadsSlot();
     if (heads.*.len != 0) rt.freeNative(usize, heads.*);
     heads.* = next;
+}
+
+/// Rehash after the collector relocated object keys. Reuses the existing
+/// bucket array, so lookups stay allocation-free and cannot fail.
+fn refreshStrongIndex(object: *core.Object) void {
+    const stale = object.collectionIndexStaleSlot() orelse return;
+    if (!stale.*) return;
+    stale.* = false;
+    const heads = object.collectionBucketHeadsSlot();
+    if (heads.*.len == 0) return;
+    @memset(heads.*, strong_no_entry);
+    for (object.collectionEntriesSlot().items, 0..) |*entry, index| {
+        entry.hash_next = strong_no_entry;
+        if (!entry.active) continue;
+        entry.hash = strongEntryHash(entry.key);
+        const bucket = bucketIndex(entry.hash, heads.*.len);
+        entry.hash_next = heads.*[bucket];
+        heads.*[bucket] = index;
+    }
 }
 
 fn linkStrongEntry(object: *core.Object, index: usize) void {
@@ -734,10 +767,4 @@ pub fn mapSetLatin1PrefixInt32Range(
         _ = try appendStrongEntryWithHash(rt, object, entry, hash);
         inserted = true;
     }
-}
-
-// === Shared helpers ===
-
-fn stringFromValue(value: core.JSValue) ?*core.string.String {
-    return value.asStringBody();
 }

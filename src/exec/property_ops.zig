@@ -1,9 +1,9 @@
 //! Shared object-property wrappers, property-key conversion, and object checks.
 //!
-//! Object/value inputs are borrowed; getters and value-based reads return one
-//! owned JSValue, while successful definitions duplicate or transfer only as
-//! the core Object contract states. Property-key conversion owns its temporary
-//! atom and byte buffer locally. Observable VM/proxy dispatch remains in the
+//! Object/value inputs are borrowed; values surviving allocation need traced
+//! slots, and property writes follow the core Object barrier contract.
+//! Property-key conversion roots materialized strings and owns its temporary
+//! byte buffer locally. Observable VM/proxy dispatch remains in the
 //! higher property modules; these helpers map to QuickJS's generic property
 //! operations around quickjs.c.
 
@@ -42,8 +42,15 @@ pub fn optionalGetPropertyValue(rt: *core.JSRuntime, value: core.JSValue, atom_i
 }
 
 pub fn propertyIn(rt: *core.JSRuntime, object_value: core.JSValue, key_value: core.JSValue) !core.JSValue {
-    const object = try expectObject(object_value);
-    const key = try propertyKeyAtom(rt, key_value);
+    var values = [_]core.JSValue{ object_value, key_value };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    _ = try expectObject(values[0]);
+    const key = try propertyKeyAtom(rt, values[1]);
+    const object = try expectObject(values[0]);
     var found = object.hasProperty(key);
     if (!found and value_ops.atomNameEql(rt, key, "toString")) found = true;
     return core.JSValue.boolean(found);
@@ -55,7 +62,8 @@ pub fn propertyIn(rt: *core.JSRuntime, object_value: core.JSValue, key_value: co
 /// caller takes `propertyKeyAtom`. Keep the arms in lockstep with it.
 pub fn propertyKeyAtomIfReady(value: core.JSValue) ?core.Atom {
     if (value.asSymbolAtom()) |atom_id| return atom_id;
-    if (value.asStringBody()) |string_value| {
+    const flat = core.string.asFlat(value) orelse if (value.ropeBody()) |rope| rope.flatString() else null;
+    if (flat) |string_value| {
         if (string_value.atom_id != core.string.String.no_atom_id) return string_value.atom_id;
         return null;
     }
@@ -66,18 +74,30 @@ pub fn propertyKeyAtomIfReady(value: core.JSValue) ?core.Atom {
 }
 
 pub fn propertyKeyAtom(rt: *core.JSRuntime, value: core.JSValue) !core.Atom {
-    if (value.asSymbolAtom()) |atom_id| return atom_id;
+    if (propertyKeyAtomIfReady(value)) |atom_id| return atom_id;
     if (value.isString()) {
-        const string_value = value.asStringBody().?;
-        return string_value.internAtom(rt);
-    }
-    if (value.as(.int)) |index| {
-        if (index >= 0) return core.Atom.taggedInt(@intCast(index));
+        return stringPropertyKeyAtom(rt, value) catch |err| switch (err) {
+            error.RootGenerationExhausted => error.OutOfMemory,
+            error.RootAlreadyActive, error.RootMutationDuringCollection, error.WrongRuntime, error.InactiveRoot, error.InvalidRootIndex, error.ExpectedString => std.debug.panic("property key root contract: {s}", .{@errorName(err)}),
+            else => |other| other,
+        };
     }
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.nativeAllocator());
     try value_ops.appendValueString(rt, &bytes, value);
     return rt.internAtom(bytes.items);
+}
+
+fn stringPropertyKeyAtom(rt: *core.JSRuntime, value: core.JSValue) !core.Atom {
+    var roots = core.runtime.ExactValueRoots(1){};
+    try roots.activate(rt);
+    defer roots.deactivate();
+    const source = try roots.ref(0);
+    try source.set(rt, value);
+    try core.string.ensureFlat(rt, source.readOnly(), source);
+    // Flat string carriers have stable addresses. Keep the owning value live
+    // across interning and publication of its cached atom.
+    return core.string.asFlat(try source.get(rt)).?.internAtom(rt);
 }
 
 pub const expectObject = core.value_semantics.expectObject;

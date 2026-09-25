@@ -1,11 +1,11 @@
 //! The tracer visitor protocol, in one place.
 //!
-//! A visitor is any value whose type declares some of `visitValue`,
+//! A complete visitor declares `visitValue`,
 //! `visitObject`, `visitShape`, `visitRealm`, `visitAtom`, `visitModule`, `storageCell`,
 //! `visitWeakCollectionEntry` and `visitFinalizationCell`.  Each method may
-//! return `void` or an error union, and a visitor that does not declare a
-//! method simply does not see that edge kind (the root adaptors, for example,
-//! never enumerate heap edges, so `storageCell` compiles away for them).
+//! return `void` or an error union. A missing method is a compile error.
+//! Diagnostic or restricted adaptors must explicitly declare the partial
+//! policy; only those visitors may deliberately ignore an edge category.
 //!
 //! Every `traceChildEdges` body in core/ walks its edges through the typed
 //! helpers below instead of open-coding the "declared? fallible?" dance.
@@ -21,10 +21,27 @@ const string = @import("string.zig");
 const JSValue = @import("value.zig").JSValue;
 const Object = @import("object.zig").Object;
 
+pub const Policy = enum { complete, partial };
+const required_methods = .{ "visitValue", "visitObject", "visitShape", "visitRealm", "visitAtom", "visitModule", "storageCell", "visitWeakCollectionEntry", "visitFinalizationCell" };
+
+pub fn assertComplete(comptime Visitor: type) void {
+    const Vis = visitorType(Visitor);
+    inline for (required_methods) |method| {
+        if (!@hasDecl(Vis, method)) @compileError("incomplete GC visitor " ++ @typeName(Vis) ++ ": missing " ++ method);
+    }
+}
+
+pub fn assertVisitor(comptime Visitor: type) void {
+    const Vis = visitorType(Visitor);
+    const policy: Policy = if (@hasDecl(Vis, "gc_visit_policy")) Vis.gc_visit_policy else .complete;
+    if (policy == .complete) assertComplete(Vis);
+}
+
 /// Invoke `method` on the visitor with `arg` when the visitor declares it.
 /// Void-returning methods are called directly; fallible ones are `try`ed.
 pub inline fn call(vis: anytype, comptime method: []const u8, arg: anytype) !void {
     const Vis = comptime visitorType(@TypeOf(vis));
+    comptime assertVisitor(Vis);
     if (comptime !@hasDecl(Vis, method)) return;
     const f = @field(Vis, method);
     const info = @typeInfo(@TypeOf(f)).@"fn";
@@ -65,9 +82,8 @@ pub inline fn realm(vis: anytype, slot: *?*context_mod.RealmContext) !void {
     return call(vis, "visitRealm", slot);
 }
 
-/// TGC S3 §2.2: a holder of an atom id names the atom.  Visitors without a
-/// `visitAtom` decl (the cycle visitor, the census walkers, the minor audit)
-/// skip the edge silently, exactly like `shape` does.
+/// A holder of an atom id names the atom. Only explicitly partial visitors
+/// may omit `visitAtom` and skip this edge category.
 pub inline fn atom(vis: anytype, id: atom_mod.Atom) !void {
     return call(vis, "visitAtom", id);
 }
@@ -126,8 +142,9 @@ pub inline fn stringBody(vis: anytype, slot: *?*string.String) !void {
     slot.* = boxed.asStringBodyRaw();
 }
 
-test "call skips undeclared methods and adapts to void or fallible ones" {
+test "explicit partial visitor skips undeclared methods and adapts returns" {
     const Counting = struct {
+        pub const gc_visit_policy: Policy = .partial;
         values: usize = 0,
         objects: usize = 0,
 
@@ -151,6 +168,7 @@ test "call skips undeclared methods and adapts to void or fallible ones" {
     try std.testing.expectEqual(@as(usize, 2), counting.objects);
 
     const ByValue = struct {
+        pub const gc_visit_policy: Policy = .partial;
         sink: *usize,
         pub fn visitValue(self: @This(), _: *JSValue) void {
             self.sink.* += 1;
@@ -288,6 +306,7 @@ test "traceDeclared walks strong slots and nested aggregates in manifest order" 
         }
     };
     const Recorder = struct {
+        pub const gc_visit_policy: Policy = .partial;
         slots: std.ArrayListUnmanaged(usize) = .empty,
         pub fn visitValue(self: *@This(), slot: *JSValue) !void {
             try self.slots.append(std.testing.allocator, @intFromPtr(slot));

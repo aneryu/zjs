@@ -906,8 +906,8 @@ fn expectedValue(ctx: *zjs.JSContext, object: zjs.JSValue, name: []const u8) !zj
 }
 
 fn stringBytes(ctx: *zjs.JSContext, value: zjs.JSValue) ![]u8 {
-    const string = value.asString() orelse return error.TypeError;
-    return string.toOwnedUtf8(ctx.runtimePtr().nativeAllocator());
+    const rt = ctx.runtimePtr();
+    return zjs.JSValue.String.valueToOwnedUtf8(rt, rt.nativeAllocator(), value, false);
 }
 
 fn test262Int64Arg(ctx: *zjs.JSContext, args: []const zjs.JSValue, index: usize) !i64 {

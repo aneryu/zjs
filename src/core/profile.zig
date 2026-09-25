@@ -7,8 +7,6 @@
 //! has no QuickJS ownership counterpart and may be consumed by exec/binding;
 //! as core it cannot import parser/exec/runtime/binding.
 
-const platform_clock = @import("../platform_clock.zig");
-
 pub const max_opcode_count = 256;
 pub const OpcodeNameProvider = *const fn (u8) []const u8;
 
@@ -55,10 +53,11 @@ pub const OpcodeProfile = struct {
         self.ext0_sub_count[sub] +|= 1;
     }
 
-    /// Close the final open interval; must run before any dump or detach.
-    pub fn flushPendingDispatch(self: *OpcodeProfile) void {
+    /// Close the final open interval with a timestamp from the owning Runtime's
+    /// diagnostic hook; must run before any dump or detach.
+    pub fn flushPendingDispatch(self: *OpcodeProfile, now_ns: u64) void {
         if (self.pending_op == no_pending_op) return;
-        self.recordOpcode(@intCast(self.pending_op), nowNanos() -| self.pending_start_ns);
+        self.recordOpcode(@intCast(self.pending_op), now_ns -| self.pending_start_ns);
         self.pending_op = no_pending_op;
     }
 
@@ -127,8 +126,4 @@ pub fn recordPropLookup(is_global: bool) void {
 
 pub fn recordGlobalLookup() void {
     if (active_profile) |profile| profile.recordGlobalLookup();
-}
-
-pub fn nowNanos() u64 {
-    return platform_clock.monotonicNanos();
 }

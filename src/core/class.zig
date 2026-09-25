@@ -677,6 +677,9 @@ pub const Table = struct {
         self.assertOwnerThread();
         const generation = self.pinCallback(id) orelse return false;
         defer self.releaseCallback(id, generation);
+        const rt: *@import("../runtime.zig").JSRuntime = @ptrCast(@alignCast(runtime));
+        rt.roots.beginTrace();
+        defer rt.roots.endTrace();
         mark(runtime, object, payload, visitor);
         return true;
     }

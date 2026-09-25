@@ -255,6 +255,7 @@ fn execute(init: std.process.Init, command: *Command) !void {
     initOpcodeProfile(&opcode_profile);
 
     const rt = zjs.Runtime.create(allocator, .{
+        .diagnostic_clock = if (runtime_options.gc_stats or runtime_options.profile_opcodes) host.clock.diagnostic_clock else null,
         .memory_limit = runtime_options.memory_limit,
         .gc_threshold = zjs.default_gc_threshold,
         .stack_size = runtime_options.stack_size orelse zjs.default_stack_size,
@@ -713,7 +714,7 @@ fn dumpRequested(
         try stdout.flush();
     }
     if (zjs.opcode_profile_build_enabled and runtime_options.profile_opcodes) {
-        opcode_profile.flushPendingDispatch();
+        opcode_profile.flushPendingDispatch(runtime.diagnosticNanos());
         try dumpOpcodeProfile(stdout, runtime.opcode_profile.?);
         try stdout.flush();
     }

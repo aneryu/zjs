@@ -15,7 +15,7 @@ const builtin = @import("builtin");
 const zjs = @import("zjs");
 const core = zjs.core;
 const exec = zjs.exec;
-const platform_clock = zjs.platform_clock;
+const clock = @import("clock.zig");
 const js_context = zjs;
 
 const libc = if (builtin.os.tag == .windows)
@@ -554,7 +554,7 @@ fn osSignalHandler(sig: c_int) callconv(.c) void {
 }
 
 fn nowMs() u64 {
-    return platform_clock.monotonicNanos() / std.time.ns_per_ms;
+    return clock.monotonicNanos() / std.time.ns_per_ms;
 }
 
 fn hostTimerIo() std.Io {
@@ -782,6 +782,7 @@ pub const tests = if (@import("builtin").is_test) struct {
         };
         var counter = Counter{};
         var visitor = core.runtime.RootVisitor{
+            .readonly = .observe,
             .context = &counter,
             .visit_value = Counter.visitValue,
             .visit_object = Counter.visitObject,

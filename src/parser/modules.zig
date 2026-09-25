@@ -282,8 +282,8 @@ fn moduleStringAtom(s: *State) Error!Atom {
     return try s.atoms.internString(s.token.payload.str.bytes);
 }
 
-pub fn isModuleNameToken(kind: tok.TokenKind) bool {
-    return kind == .ident or kind == .string or tok.isKeyword(kind);
+pub fn isModuleNameToken(kind: tok.Kind) bool {
+    return kind == .ident or kind == .string or kind.isKeyword();
 }
 
 /// The current module import/export name. Identifier tokens hand back their
@@ -292,7 +292,7 @@ pub fn isModuleNameToken(kind: tok.TokenKind) bool {
 fn moduleImportNameAtom(s: *State) Error!Atom {
     const kind = s.peekKind();
     if (kind == .ident) return s.token.payload.ident.atom;
-    if (tok.isKeyword(kind)) return tok.keywordAtom(kind);
+    if (kind.isKeyword()) return kind.keywordAtom();
     return try moduleStringAtom(s);
 }
 
@@ -573,13 +573,13 @@ fn exportDefaultFunctionName(s: *State) ?Atom {
     defer lookahead.restoreLexerCursorSnapshot(s, saved_cursor);
     var first = s.lex.next() catch return null;
     defer s.lex.freeToken(&first);
-    if (first.val == .star) {
+    if (first.kind == .star) {
         var second = s.lex.next() catch return null;
         defer s.lex.freeToken(&second);
-        if (second.val == .ident) return second.payload.ident.atom;
+        if (second.kind == .ident) return second.payload.ident.atom;
         return null;
     }
-    if (first.val == .ident) return first.payload.ident.atom;
+    if (first.kind == .ident) return first.payload.ident.atom;
     return null;
 }
 
@@ -592,7 +592,7 @@ fn hasExportDefaultClassName(s: *State) bool {
     defer lookahead.restoreLexerCursorSnapshot(s, saved_cursor);
     var name = s.lex.next() catch return false;
     defer s.lex.freeToken(&name);
-    return name.val == .ident;
+    return name.kind == .ident;
 }
 
 /// Parse from clause: from 'module'

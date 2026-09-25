@@ -105,7 +105,6 @@ pub const parser_core = struct {
 };
 pub const compile_entry = struct {
     const std = @import("std");
-    const platform_clock = @import("platform_clock.zig");
 
     const atom = @import("core/atom.zig");
     const JSRuntime = @import("runtime.zig").JSRuntime;
@@ -372,11 +371,6 @@ pub const compile_entry = struct {
         if (restored_any) state.class.in_body = true;
     }
 
-    fn elapsedNanosSince(start: u64) u64 {
-        const end = platform_clock.monotonicNanos();
-        return if (end > start) end - start else 0;
-    }
-
     pub fn compile(compile_context: bytecode.CompileContext, source: []const u8, options: OptionsImpl) !ResultImpl {
         const rt = compile_context.realm.runtime;
         var arena = std.heap.ArenaAllocator.init(rt.nativeAllocator());
@@ -489,7 +483,7 @@ pub const compile_entry = struct {
         features: *std.EnumSet(FeatureImpl),
         pending_diagnostic: *?parser_impl.PendingDiagnostic,
     ) !*bytecode.FunctionBytecode {
-        const frontend_start = if (compile_context.timing != null) platform_clock.monotonicNanos() else 0;
+        const frontend_start = if (compile_context.timing != null) rt.diagnosticNanos() else 0;
         const effective_strict = options.strict;
         var lex = lexer_mod.Lexer.init(scratch, rt.atoms, source);
         defer lex.deinit();
@@ -600,13 +594,13 @@ pub const compile_entry = struct {
             if (needs_return) try state.emitReturnUndefined();
         }
         if (compile_context.timing) |timing| {
-            timing.frontend_ns += elapsedNanosSince(frontend_start);
+            timing.frontend_ns += rt.diagnosticElapsedSince(frontend_start);
         }
 
         // Parser lists and the lexer use `scratch` (the compile arena).
         // FunctionDef buffers, module metadata, and published bytecode use
         // the runtime account directly, so the facade is not redirected.
-        const finalize_start = if (compile_context.timing != null) platform_clock.monotonicNanos() else 0;
+        const finalize_start = if (compile_context.timing != null) rt.diagnosticNanos() else 0;
         const root_slice = try (if (options.mode == .module) blk: {
             const record = if (state.module_record) |*owned| owned else return error.InvalidBytecode;
             break :blk bytecode.pipeline.finalize.createModuleFunctionBytecode(
@@ -616,7 +610,7 @@ pub const compile_entry = struct {
             );
         } else bytecode.pipeline.finalize.createFunctionBytecode(&state.function_def, compile_context));
         if (compile_context.timing) |timing| {
-            timing.finalize_ns += elapsedNanosSince(finalize_start);
+            timing.finalize_ns += rt.diagnosticElapsedSince(finalize_start);
         }
         features.* = state.features;
         module_record_out.* = state.takeModuleRecord();
@@ -693,7 +687,7 @@ pub const compile_entry = struct {
     ) !void {
         var lex = lexer_mod.Lexer.init(scratch, rt.atoms, source);
         var pos = diagnostics_mod.Position{ .line = 1, .column = 1, .offset = 0 };
-        var previous_token_kind: ?token_mod.TokenKind = null;
+        var previous_token_kind: ?token_mod.Kind = null;
         while (true) {
             var tok: token_mod.Token = undefined;
             nextFallbackSyntaxTokenInto(&lex, &tok, previous_token_kind) catch |err| switch (err) {
@@ -711,22 +705,22 @@ pub const compile_entry = struct {
                 },
             };
             pos = .{ .line = lex.line, .column = lex.col, .offset = lex.pos };
-            if (tok.val == .eof) {
+            if (tok.kind == .eof) {
                 lex.freeToken(&tok);
                 break;
             }
-            previous_token_kind = tok.val;
+            previous_token_kind = tok.kind;
             lex.freeToken(&tok);
         }
         result.syntax_error = try diagnostics_mod.SyntaxError.create(rt.nativeAllocator(), rt.atoms, filename_atom, pos, message);
         result.parse_path = .syntax_error_guard;
     }
 
-    fn nextFallbackSyntaxTokenInto(lex: *lexer_mod.Lexer, out: *token_mod.Token, previous_token_kind: ?token_mod.TokenKind) lexer_mod.Error!void {
+    fn nextFallbackSyntaxTokenInto(lex: *lexer_mod.Lexer, out: *token_mod.Token, previous_token_kind: ?token_mod.Kind) lexer_mod.Error!void {
         try lex.nextInto(out);
         errdefer lex.freeToken(out);
 
-        if ((out.val == .slash or out.val == .div_assign) and
+        if ((out.kind == .slash or out.kind == .div_assign) and
             fallbackSlashStartsRegexp(previous_token_kind))
         {
             const slash_offset = lex.mark_pos;
@@ -735,7 +729,7 @@ pub const compile_entry = struct {
         }
     }
 
-    fn fallbackSlashStartsRegexp(previous_token_kind: ?token_mod.TokenKind) bool {
+    fn fallbackSlashStartsRegexp(previous_token_kind: ?token_mod.Kind) bool {
         const previous = previous_token_kind orelse return true;
         return switch (previous) {
             .lparen,
@@ -815,8 +809,6 @@ pub const compile_entry = struct {
     pub const CompilePolicy = bytecode.CompilePolicy;
 };
 pub const Lexer = lexer.Lexer;
-pub const Token = token.Token;
-pub const TokenKind = token.TokenKind;
 pub const ParseState = parser_core.ParseState;
 pub const Parser = parser_core;
 pub const Mode = compile_entry.Mode;

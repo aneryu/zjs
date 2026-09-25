@@ -10,7 +10,6 @@
 
 const engine_services = @import("../engine_services.zig");
 const std = @import("std");
-const platform_clock = @import("../platform_clock.zig");
 
 const atom = @import("atom.zig");
 const errors = @import("errors.zig");
@@ -141,7 +140,11 @@ pub const DynamicImportCallback = *const fn (
 /// microseconds. Keep the default at Realm construction; callers may provide
 /// a non-zero state explicitly for deterministic runs.
 fn realmMathRandomSeed(configured_seed: ?u64) u64 {
-    const seed = configured_seed orelse @as(u64, @bitCast(platform_clock.realtimeMicros()));
+    const seed = configured_seed orelse blk: {
+        const io = std.Io.Threaded.global_single_threaded.io();
+        const micros = std.Io.Clock.Timestamp.now(io, .real).raw.toMicroseconds();
+        break :blk @as(u64, @bitCast(micros));
+    };
     return if (seed == 0) 1 else seed;
 }
 
@@ -154,6 +157,8 @@ pub const ContextOptions = struct {
 
 pub const Options = ContextOptions;
 
+/// Durations require Runtime.Options.diagnostic_clock; absent hooks contribute
+/// zero. Supplying this sink opts the evaluation into timestamp sampling.
 pub const ContextEvalTiming = struct {
     /// Complete parser.compile boundary, retained under the historical name for
     /// callers that already consume it.
@@ -580,13 +585,20 @@ pub const RealmContext = struct {
     }
 
     pub fn setHostScheduler(self: *RealmContext, host_scheduler: HostScheduler) void {
+        self.runtime.roots.assertMutable();
+        // Replacing another scheduler would silently drop its roots.
+        if (self.host_scheduler) |current| std.debug.assert(current.ptr == host_scheduler.ptr);
         self.host_scheduler = host_scheduler;
     }
 
     pub fn clearHostScheduler(self: *RealmContext, ptr: *anyopaque) void {
-        if (self.host_scheduler) |host_scheduler| {
-            if (host_scheduler.ptr == ptr) self.host_scheduler = null;
-        }
+        self.runtime.roots.assertMutable();
+        const host_scheduler = self.host_scheduler orelse return;
+        if (host_scheduler.ptr != ptr) return;
+        self.host_scheduler = null;
+        // The host already released the realm; the scheduler was its last
+        // host-held root (see `traceRootProvider`).
+        if (self.host_api_release_consumed) self.dropHostRootProvider();
     }
 
     pub fn hostScheduler(self: *RealmContext) ?HostScheduler {
@@ -839,8 +851,9 @@ pub const RealmContext = struct {
         std.debug.assert(!self.host_api_release_consumed);
         self.host_api_release_consumed = true;
         // Drop the host create-ref root. Heap RealmRef edges remain and are
-        // traced as child edges, not as membership on `context_head`.
-        self.dropHostRootProvider();
+        // traced as child edges, not as membership on `context_head`. An
+        // installed host scheduler keeps the provider until it is cleared.
+        if (self.host_scheduler == null) self.dropHostRootProvider();
     }
 
     fn dropHostRootProvider(self: *RealmContext) void {
@@ -883,16 +896,10 @@ pub const RealmContext = struct {
         if (self.preallocated_oom_error) |*value| try visitor.value(value);
         try visitor.values(self.class_prototypes);
         try visitor.values(&self.native_error_prototypes);
-        if (self.cached_function_proto) |prototype| {
-            var rooted: ?*Object = prototype;
-            try visitor.optionalObject(&rooted);
-            self.cached_function_proto = rooted;
-        }
-        if (self.cached_promise_proto) |prototype| {
-            var rooted: ?*Object = prototype;
-            try visitor.optionalObject(&rooted);
-            self.cached_promise_proto = rooted;
-        }
+        if (self.cached_function_proto != null)
+            try visitor.optionalObject(&self.cached_function_proto);
+        if (self.cached_promise_proto != null)
+            try visitor.optionalObject(&self.cached_promise_proto);
         if (comptime runtime_mod.value_root_frames_enabled) {
             if (self.array_shape) |owned| try visitor.shapeRoot(owned);
             if (self.arguments_shape) |owned| try visitor.shapeRoot(owned);
@@ -911,9 +918,15 @@ pub const RealmContext = struct {
         }
         try visitor.optionalObject(&self.global);
         try visitor.optionalObject(&self.lexicals);
-        if (self.host_scheduler) |host_scheduler| {
-            try host_scheduler.traceRoots(host_scheduler.ptr, visitor);
-        }
+        try self.traceHostScheduler(visitor);
+    }
+
+    fn traceHostScheduler(self: *RealmContext, visitor: *runtime_mod.RootVisitor) runtime_mod.RootTraceError!void {
+        const host_scheduler = self.host_scheduler orelse return;
+        self.runtime.assertOwnerThread();
+        self.runtime.roots.beginTrace();
+        defer self.runtime.roots.endTrace();
+        try host_scheduler.traceRoots(host_scheduler.ptr, visitor);
     }
 
     /// Infallible owned-edge enumeration used by the RC cycle collector.  The
@@ -966,7 +979,15 @@ pub const RealmContext = struct {
         // Membership on `context_head` is not a root (gc-invariants.md). This
         // provider is the host create-ref; once that ref is consumed the
         // realm stays alive only through heap RealmRef edges.
-        if (self.host_api_release_consumed) return;
+        if (self.host_api_release_consumed) {
+            // An installed host scheduler (event loop) is itself host-held:
+            // its callbacks, and this realm, stay alive until it is cleared,
+            // even after the host released its context reference.
+            if (self.host_scheduler == null) return;
+            try visitor.constHeader(&self.header);
+            try self.traceHostScheduler(visitor);
+            return;
+        }
         try visitor.constHeader(&self.header);
         try self.traceRoots(visitor);
     }
@@ -1031,6 +1052,14 @@ pub const RealmContext = struct {
         }
     }
 
+    /// A realm is a traced owner that can be old (child realms are not
+    /// roots), so installing a fresh environment object is an old-to-young
+    /// store like any other realm field.
+    pub fn setLexicals(self: *RealmContext, env: ?*Object) void {
+        self.lexicals = env;
+        if (env) |object| self.runtime.gc.generationalBarrier(&self.header, object.gcHeader());
+    }
+
     fn appendUnhandledRejection(self: *RealmContext, promise: ?JSValue, value: JSValue) !void {
         const index = self.unhandled_rejections.len;
         if (index + 1 > self.unhandled_rejections_capacity) {
@@ -1049,6 +1078,8 @@ pub const RealmContext = struct {
             .promise = if (promise) |promise_value| promise_value else JSValue.undefinedValue(),
             .reason = value,
         };
+        self.runtime.gc.generationalBarrier(&self.header, self.unhandled_rejections[index].promise.cycleMarkHeader());
+        self.runtime.gc.generationalBarrier(&self.header, value.cycleMarkHeader());
     }
 
     /// Mirrors the tracker's is_handled branch (js_std_promise_rejection_tracker
@@ -1268,6 +1299,7 @@ pub const RealmContext = struct {
         }
         const adopted = self.global == null;
         self.global = global;
+        self.runtime.gc.generationalBarrier(&self.header, global.gcHeader());
         errdefer if (adopted) {
             self.rollbackIntrinsicBootstrap();
             self.global = null;

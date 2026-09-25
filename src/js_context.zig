@@ -9,17 +9,171 @@
 
 const std = @import("std");
 const core = @import("core/root.zig");
-const native = @import("native.zig");
 const exec = @import("exec/root.zig");
-const platform_clock = @import("platform_clock.zig");
 
 const JSRuntime = core.JSRuntime;
 const Object = core.Object;
 const JSValue = core.JSValue;
+const NativeEntry = core.NativeEntry;
 const Descriptor = core.Descriptor;
 const class = core.class;
 const atom = core.atom;
 const string = core.string;
+
+// Host-function registration: a comptime `callconv(.c)` thunk over a plain
+// Zig function becomes the `NativeEntry.target`, so a host function is
+// dispatched exactly like a builtin. The public `Context.defineFunction`
+// path wraps the function through `managed`; CLI, test262, and in-repo
+// tests may still call `managed` directly. There is no per-call arena,
+// handle scope, marshalling framework, or registry lookup.
+//
+// Rooting: every `JSValue` in `argv` stays alive for the duration of the
+// call (the machine's operand window); values the function creates are
+// covered by the conservative native-stack scan while they live in locals.
+// Only cross-call retention needs a persistent handle.
+
+/// The error a managed function returns after it already installed a JS
+/// exception (`ctx.throwValue` / `ctx.throwError`).
+pub const Exception = error{JSException};
+
+/// One managed call. Built on the C stack by the thunk; never outlives
+/// the call.
+pub const Call = struct {
+    /// Non-owning facade for the callee realm.
+    ctx: JSContext,
+    this: JSValue,
+    argv: [*]const JSValue,
+    argc: u32,
+    entry: *const NativeEntry,
+    /// The callee function object (null only for engine-internal synthetic
+    /// invocations, which never reach a host function).
+    func_obj: ?*core.Object,
+
+    /// Positional argument; `undefined` past `argc` (JS semantics).
+    pub inline fn arg(self: *const Call, index: usize) JSValue {
+        return if (index < self.argc) self.argv[index] else JSValue.undefinedValue();
+    }
+
+    /// The argument window as a slice (borrowed for this call).
+    pub inline fn args(self: *const Call) []const JSValue {
+        return self.argv[0..self.argc];
+    }
+
+    /// Typed access to the state pointer given at registration.
+    pub inline fn state(self: *const Call, comptime T: type) *T {
+        return @ptrCast(@alignCast(self.entry.state.?));
+    }
+
+    pub inline fn runtime(self: *const Call) *core.JSRuntime {
+        return self.ctx.core.runtime;
+    }
+
+    /// The realm's global object.
+    pub inline fn global(self: *const Call) ?*core.Object {
+        return self.ctx.core.global;
+    }
+
+    /// The host output writer of the current VM invocation (the `output`
+    /// passed to eval / callFunction), if any.
+    pub inline fn output(self: *const Call) ?*std.Io.Writer {
+        return exec.builtin_dispatch.vmCallerView(self.ctx.core).output;
+    }
+
+    /// Install a JS error of class `name` (TypeError, RangeError, ...) with
+    /// `message` and return the error the function must propagate.
+    pub fn throwError(self: *const Call, name: []const u8, message: []const u8) Exception {
+        var ctx = self.ctx;
+        _ = ctx.throwError(name, message, .{}) catch {};
+        return error.JSException;
+    }
+
+    pub fn throwTypeError(self: *const Call, message: []const u8) Exception {
+        return self.throwError("TypeError", message);
+    }
+
+    pub fn throwRangeError(self: *const Call, message: []const u8) Exception {
+        return self.throwError("RangeError", message);
+    }
+};
+
+/// Registration-side description produced by `managed` and consumed by
+/// `JSContext.defineFunction` / `createFunction`. Comptime constant;
+/// `state` / `finalize` are per-registration options.
+pub const NativeSpec = struct {
+    template: NativeEntry,
+};
+
+pub const NativeOptions = struct {
+    /// JS `length` (arity). Defaults to the Zig function's declared arity
+    /// where a generator can infer it, else 0.
+    length: ?u8 = null,
+    /// Opaque state handed back through `Call.state`.
+    state: ?*anyopaque = null,
+    /// Runs on the runtime thread when the runtime is destroyed (ownership
+    /// registration for `state`).
+    finalize: ?*const fn (*anyopaque) void = null,
+    /// Also create a `prototype` object with a back-pointing `constructor`.
+    with_prototype: bool = false,
+    /// Realm to create the function in (defaults to the context's realm).
+    realm_global: ?JSValue = null,
+};
+
+/// Build a managed native function from `f: fn (*Call) E!JSValue`. Any
+/// error set is accepted: `error.JSException` means "already thrown",
+/// engine sentinels (`error.TypeError`, `error.RangeError`, `OutOfMemory`,
+/// `Interrupted`, ...) are materialized by the engine, and every other
+/// error name becomes `Error: <name>`.
+pub fn managed(comptime f: anytype) NativeSpec {
+    const F = @TypeOf(f);
+    const info = @typeInfo(F);
+    if (info != .@"fn") @compileError("native.managed expects a function");
+    const params = info.@"fn".params;
+    if (params.len != 1 or params[0].type != *Call) @compileError("native.managed expects fn (*Call) E!Value");
+    const Thunk = struct {
+        fn thunk(
+            ctx: *core.JSContext,
+            this: JSValue,
+            argv: [*]const JSValue,
+            argc: u32,
+            entry: *const NativeEntry,
+            func_obj: ?*core.Object,
+        ) callconv(.c) JSValue {
+            var call = Call{
+                .ctx = borrowCore(ctx),
+                .this = this,
+                .argv = argv,
+                .argc = argc,
+                .entry = entry,
+                .func_obj = func_obj,
+            };
+            const Ret = info.@"fn".return_type.?;
+            if (@typeInfo(Ret) == .error_union) {
+                const value = f(&call) catch |err| return exec.builtin_dispatch.embedderErrorToValue(ctx, err);
+                return value;
+            } else {
+                return f(&call);
+            }
+        }
+    };
+    return .{ .template = .{
+        .target = NativeEntry.code(&Thunk.thunk),
+        .kind = .managed,
+        .flags = .{},
+        .arity = 0,
+    } };
+}
+
+test "managed produces a managed entry template" {
+    const Probe = struct {
+        fn f(call: *Call) error{ JSException, TypeError }!JSValue {
+            if (call.argc == 0) return error.TypeError;
+            return call.arg(0);
+        }
+    };
+    const spec = managed(Probe.f);
+    try std.testing.expectEqual(core.native_entry.Kind.managed, spec.template.kind);
+    try std.testing.expect(!spec.template.flags.needs_env);
+}
 
 /// Exact window for raw JSValues borrowed by a public embedding call.  This
 /// deliberately lives at the binding seam: internal VM calls already have
@@ -56,6 +210,7 @@ fn PublicValueRootWindow(comptime count: usize) type {
 /// Internal diagnostics for the two stable sub-phases inside public
 /// `JSContext.create`. The complete public-ready boundary remains
 /// the caller's outer measurement around `createMeasured`.
+/// Requires Runtime.Options.diagnostic_clock for nonzero durations.
 pub const ContextCreateTiming = struct {
     raw_create_ns: u64 = 0,
     bootstrap_ns: u64 = 0,
@@ -68,14 +223,14 @@ fn initWithOptionsImpl(
     options: core.ContextOptions,
     timing: if (measure) *ContextCreateTiming else void,
 ) !void {
-    const raw_create_start = if (measure) platform_clock.monotonicNanos() else {};
+    const raw_create_start = if (measure) rt.diagnosticNanos() else {};
     self.* = .{ .core = try core.JSContext.createConstructingWithOptions(rt, options) };
     errdefer self.core.destroy();
-    if (measure) timing.raw_create_ns += platform_clock.elapsedNanosSince(raw_create_start);
+    if (measure) timing.raw_create_ns += rt.diagnosticElapsedSince(raw_create_start);
 
-    const bootstrap_start = if (measure) platform_clock.monotonicNanos() else {};
+    const bootstrap_start = if (measure) rt.diagnosticNanos() else {};
     _ = try self.core.globalObject();
-    if (measure) timing.bootstrap_ns += platform_clock.elapsedNanosSince(bootstrap_start);
+    if (measure) timing.bootstrap_ns += rt.diagnosticElapsedSince(bootstrap_start);
 }
 
 fn createImpl(
@@ -116,7 +271,7 @@ pub const JSContext = struct {
     pub const EvalMode = core.EvalMode;
     pub const EvalOptions = core.EvalOptions;
     pub const EvalTiming = core.EvalTiming;
-    pub const FunctionOptions = native.Options;
+    pub const FunctionOptions = NativeOptions;
 
     /// Stable heap identity; this pointer owns the initial RealmRef returned by
     /// `core.JSContext.createConstructingWithOptions` until `deinit`/`destroy`.
@@ -347,14 +502,16 @@ pub const JSContext = struct {
     }
 
     pub fn toString(self: *JSContext, val: JSValue) !JSValue {
+        var roots = PublicValueRootWindow(1).init(.{val});
+        roots.activate(self.core.runtime);
+        defer roots.deactivate(self.core.runtime);
         const global = try self.globalPtr();
-        return exec.string_ops.toStringForAnnexB(self.core, null, global, val, null, null);
+        return exec.string_ops.toStringForAnnexB(self.core, null, global, roots.values[0], null, null);
     }
 
     pub fn toOwnedUtf8(self: *JSContext, val: JSValue, allocator: std.mem.Allocator) ![]u8 {
         const string_value = try self.toString(val);
-        const string_view = string_value.asString() orelse return error.TypeError;
-        return string_view.toOwnedUtf8(allocator);
+        return JSValue.String.valueToOwnedUtf8(self.core.runtime, allocator, string_value, false);
     }
 
     pub fn toNumber(self: *JSContext, val: JSValue) !f64 {
@@ -577,7 +734,7 @@ pub const JSContext = struct {
     }
 
     /// Install a host function as a writable, non-enumerable, configurable
-    /// global. `spec_or_fn` is `fn (*Call) E!Value` or a `native.Spec`.
+    /// global. `spec_or_fn` is `fn (*Call) E!Value` or a `NativeSpec`.
     pub fn defineFunction(self: *JSContext, name: []const u8, spec_or_fn: anytype, options: FunctionOptions) !JSValue {
         const rt = self.core.runtime;
         const global_object = try self.globalPtr();
@@ -695,9 +852,9 @@ pub const JSContext = struct {
     }
 };
 
-fn specFrom(spec_or_fn: anytype) native.Spec {
-    if (@TypeOf(spec_or_fn) == native.Spec) return spec_or_fn;
-    return native.managed(spec_or_fn);
+fn specFrom(spec_or_fn: anytype) NativeSpec {
+    if (@TypeOf(spec_or_fn) == NativeSpec) return spec_or_fn;
+    return managed(spec_or_fn);
 }
 
 fn cachedArrayPrototype(rt: *JSRuntime, global: *Object) ?*Object {

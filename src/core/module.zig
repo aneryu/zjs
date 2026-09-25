@@ -631,6 +631,7 @@ pub const ModuleRecord = struct {
     /// this export entry until it is cleared or the record is destroyed.
     pub fn publishRetainedExportCellNoFail(
         self: *ModuleRecord,
+        rt: *@import("../runtime.zig").JSRuntime,
         export_index: u32,
         owned_cell: value_mod.JSValue,
     ) void {
@@ -638,6 +639,8 @@ pub const ModuleRecord = struct {
         std.debug.assert(entry.retained_cell == null);
         std.debug.assert(VarRef.fromValue(owned_cell) != null);
         entry.retained_cell = owned_cell;
+        // The record may be old; a synthetic module's cell is held only here.
+        rt.gc.generationalBarrier(&self.header, owned_cell.cycleMarkHeader());
     }
 
     /// Borrow a retained local-export cell.

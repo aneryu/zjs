@@ -676,7 +676,7 @@ pub fn parseCoalesceExpr(s: *State, flags: ParseFlags) Error!void {
 }
 
 /// `js_parse_logical_and_or`. `a && b` / `a || b`.
-pub fn parseLogicalAndOr(s: *State, op_kind: tok.TokenKind, flags: ParseFlags) Error!void {
+pub fn parseLogicalAndOr(s: *State, op_kind: tok.Kind, flags: ParseFlags) Error!void {
     if (op_kind == .lor) {
         try parseLogicalAndOr(s, .land, flags);
         if (s.peekKind() == .lor) {
@@ -864,7 +864,7 @@ pub fn parseUnary(s: *State, flags: ParseFlags) align(16) Error!void {
 }
 
 /// `++x` / `--x` (qjs js_parse_unary TOK_INC/TOK_DEC, quickjs.c).
-fn parsePrefixUpdate(s: *State, flags: ParseFlags, k: tok.TokenKind) Error!void {
+fn parsePrefixUpdate(s: *State, flags: ParseFlags, k: tok.Kind) Error!void {
     const update_op: u8 = if (k == .inc) opcode.op.inc else opcode.op.dec;
     const operator_source = s.currentSourcePosition();
     try s.advance();
@@ -1767,8 +1767,8 @@ fn parseNewCalleeMemberAccess(s: *State) Error!void {
             const private_name = s.peekKind() == .private_name;
             const raw_name = if (s.peekKind() == .ident or private_name)
                 s.token.payload.ident.atom
-            else if (tok.isKeyword(s.peekKind()))
-                tok.keywordAtom(s.peekKind())
+            else if (s.peekKind().isKeyword())
+                s.peekKind().keywordAtom()
             else if (s.peekKind() == .kw_delete)
                 Atom.fromRaw(9)
             else if (s.peekKind() == .kw_catch)
@@ -1816,8 +1816,8 @@ fn parseMemberChain(s: *State, flags: ParseFlags, optional_chain_label: *?Option
             const private_name = s.peekKind() == .private_name;
             const raw_name = if (s.peekKind() == .ident or private_name)
                 s.token.payload.ident.atom
-            else if (tok.isKeyword(s.peekKind()))
-                tok.keywordAtom(s.peekKind())
+            else if (s.peekKind().isKeyword())
+                s.peekKind().keywordAtom()
             else if (s.peekKind() == .kw_delete)
                 Atom.fromRaw(9)
             else if (s.peekKind() == .kw_catch)
@@ -1872,7 +1872,7 @@ fn parseMemberChain(s: *State, flags: ParseFlags, optional_chain_label: *?Option
                 try s.expectToken(.rbracket);
                 try emitter.emitGrammarSource(s, optional_source);
                 try Emitter.op(s, opcode.op.get_array_el);
-            } else if (next == .ident or next == .private_name or tok.isKeyword(next) or next == .kw_delete or next == .kw_catch) {
+            } else if (next == .ident or next == .private_name or next.isKeyword() or next == .kw_delete or next == .kw_catch) {
                 // qjs parse_property emits the `?.` source before the
                 // optional-chain test and the selected getter.
                 try emitter.emitGrammarSource(s, optional_source);
@@ -1880,8 +1880,8 @@ fn parseMemberChain(s: *State, flags: ParseFlags, optional_chain_label: *?Option
                 const private_name = next == .private_name;
                 const raw_name = if (next == .ident or private_name)
                     s.token.payload.ident.atom
-                else if (tok.isKeyword(next))
-                    tok.keywordAtom(next)
+                else if (next.isKeyword())
+                    next.keywordAtom()
                 else if (next == .kw_delete)
                     Atom.fromRaw(9)
                 else if (next == .kw_catch)
@@ -2315,7 +2315,7 @@ fn parsePrimary(s: *State, flags: ParseFlags) Error!void {
         .kw_let => {
             if (s.is_strict or s.curFunc().is_strict_mode) return s.failUnexpectedToken();
             try emitter.emitGrammarSource(s, s.currentSourcePosition());
-            try s.emitScopeGetVar(tok.keywordAtom(.kw_let));
+            try s.emitScopeGetVar(tok.Kind.kw_let.keywordAtom());
             try s.advance();
             s.last_was_super = false;
         },
@@ -2852,12 +2852,12 @@ pub fn parseObjectPropertyName(s: *State) Error!?ObjectPropertyName {
         atom_id = if (k == .ident)
             s.token.payload.ident.atom
         else
-            tok.keywordAtom(k);
+            k.keywordAtom();
         has_escape = k == .ident and s.token.payload.ident.has_escape;
         allow_shorthand = k == .kw_await or !identifiers.escapedIdentifierIsReservedWordForShorthandBinding(s, atom_id, has_escape);
         try s.advance();
-    } else if (tok.isKeyword(k)) {
-        atom_id = tok.keywordAtom(k);
+    } else if (k.isKeyword()) {
+        atom_id = k.keywordAtom();
         allow_shorthand = (k == .kw_yield and !s.ctx.in_generator and !(s.is_strict or s.curFunc().is_strict_mode)) or
             (k == .kw_let and !(s.is_strict or s.curFunc().is_strict_mode));
         try s.advance();
@@ -2901,7 +2901,7 @@ fn parseObjectMethodFunction(s: *State, name: ?Atom, func_kind: ParseFunctionKin
 
 /// Map an assignment-operator token to its compound-arithmetic opcode.
 /// Returns `null` for plain `=` and non-assignment tokens.
-pub fn compoundAssignOpcode(k: tok.TokenKind) ?u8 {
+pub fn compoundAssignOpcode(k: tok.Kind) ?u8 {
     return switch (k) {
         .mul_assign => opcode.op.mul,
         .div_assign => opcode.op.div,
@@ -2919,7 +2919,7 @@ pub fn compoundAssignOpcode(k: tok.TokenKind) ?u8 {
     };
 }
 
-pub fn logicalAssignKind(k: tok.TokenKind) ?LogicalAssignKind {
+pub fn logicalAssignKind(k: tok.Kind) ?LogicalAssignKind {
     return switch (k) {
         .land_assign => .land,
         .lor_assign => .lor,
@@ -2929,7 +2929,7 @@ pub fn logicalAssignKind(k: tok.TokenKind) ?LogicalAssignKind {
 }
 
 /// Mirror `quickjs.c` — token-to-opcode level table.
-fn matchBinaryOp(k: tok.TokenKind, level: u32, flags: ParseFlags) u8 {
+fn matchBinaryOp(k: tok.Kind, level: u32, flags: ParseFlags) u8 {
     return switch (level) {
         1 => switch (k) {
             .star => opcode.op.mul,

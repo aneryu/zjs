@@ -1,8 +1,8 @@
 //! Public call entry, engine-global installation, and native builtin dispatch.
 //!
-//! Callee, receiver, and argument values are borrowed for a call; returned
-//! JSValues are owned, while records or object fields that retain a value must
-//! duplicate it. The import/alias wall preserves the established dispatch and
+//! Callee, receiver, and arguments are value snapshots; call paths must root
+//! live inputs across GC and publish returned values before the next GC point.
+//! Heap owners trace retained values. The import/alias wall preserves dispatch and
 //! ownership seams across extracted builtin domains. The explicit
 //! `ctx`/`output`/`global`/caller-function/caller-frame tuple is a measured call
 //! ABI: do not republish it through shared context state, and keep hot dispatch
@@ -54,7 +54,7 @@ pub fn restoreEvalGlobalLexicals(
 ) !void {
     const active_lexicals = ctx.lexicals;
     try global.setGlobalLexicals(ctx.runtime, active_lexicals);
-    ctx.lexicals = if (keep_active_lexicals) active_lexicals else saved_lexicals;
+    ctx.setLexicals(if (keep_active_lexicals) active_lexicals else saved_lexicals);
 }
 
 /// QuickJS source map: JS_CallInternal() dispatches callable objects after the
@@ -128,6 +128,7 @@ fn installTestStandardRealm(ctx: *core.JSContext) !*core.Object {
     const global = try core.Object.create(rt, core.class.ids.global_object, null);
     _ = try global.ensureGlobalPayload(rt);
     ctx.global = global;
+    rt.gc.generationalBarrier(&ctx.header, global.gcHeader());
     errdefer {
         ctx.rollbackIntrinsicBootstrap();
         ctx.global = null;
@@ -780,22 +781,25 @@ pub fn isCallableObjectValue(value: core.JSValue) bool {
 
 pub fn primitiveWrapper(ctx: *core.JSContext, class_id: core.class.ClassId, primitive: core.JSValue, prototype: ?*core.Object) !core.JSValue {
     const rt = ctx.runtime;
+    var values = [_]core.JSValue{ primitive, if (prototype) |object| object.value() else core.JSValue.nullValue(), core.JSValue.undefinedValue() };
+    const slots: []core.JSValue = &values;
+    // The construct-record adapter also holds a raw prototype snapshot.
+    // Its borrowed input window pins that snapshot through record dispatch.
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = values[0..2] } };
+    var root_frame = core.runtime.ValueRootFrame{ .slices = &slices };
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
     if (class_id == core.class.ids.string) {
         // Route `new String(primitive)` / `Object(stringPrimitive)` boxing
         // through the String construct record (Phase 6b-3 STEP 6) instead of
         // naming `string_builtin_ops.constructWithPrototype`: the record's
         // construct branch forwards `args`/`new_target` straight to that body.
-        return (try builtin_dispatch.callConstructRecord(ctx, null, null, &.{}, null, string_construct_ref, prototype, &.{primitive}, null, null)) orelse error.TypeError;
+        return (try builtin_dispatch.callConstructRecord(ctx, null, null, &.{}, null, string_construct_ref, thisObject(values[1]), values[0..1], null, null)) orelse error.TypeError;
     }
-    var rooted_primitive = primitive;
-    var root_frame = core.runtime.rootValues(.{&rooted_primitive});
-    root_frame.activate(rt);
-    defer root_frame.deactivate(rt);
-
-    const object = try core.Object.create(rt, class_id, prototype);
-    errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
-    try object.setOptionalValueSlot(rt, object.objectDataSlot(), rooted_primitive);
-    return object.value();
+    values[2] = (try core.Object.create(rt, class_id, thisObject(values[1]))).value();
+    const object = thisObject(values[2]).?;
+    try object.setOptionalValueSlot(rt, object.objectDataSlot(), values[0]);
+    return values[2];
 }
 
 test "primitiveWrapper roots direct symbol while creating call wrapper" {
@@ -1214,16 +1218,12 @@ pub fn nativeFunctionNameForVm(rt: *core.JSRuntime, function_object: *core.Objec
     return nativeFunctionDispatchName(rt, function_object);
 }
 
-/// Borrowed-bytes result of `nativeFunctionNameForVmBorrowed`. `name` holds
-/// exactly the bytes `nativeFunctionNameForVm` would have returned. `owned`
-/// is non-null only when the fallback had to materialize them, so
-/// `deinit` is unconditionally correct.
-///
-/// `name` borrows the runtime atom table on the fast path, so it stays valid
-/// only until the next atom-table mutation. Every dispatch probe compares it
-/// immediately and drops it, which is a strictly shorter borrow than the one
-/// `nativeFunctionDispatchNameRef` already holds across the whole
-/// `callNativeCallableByName` chain.
+/// Dispatch bytes with optional native ownership. Always call `deinit`.
+/// A borrowed result references a string atom's immutable bytes. Immediate
+/// probes need no extra root; callers crossing GC or reentrant calls must
+/// root the original dispatch atom for the entire use, even if a callback
+/// changes the function's metadata. Symbol descriptions and visible names
+/// are copied: materializing a Symbol can replace its description storage.
 pub const VmDispatchName = struct {
     name: []const u8,
     owned: ?[]u8,
@@ -1243,15 +1243,12 @@ pub const VmDispatchName = struct {
 /// borrows the interned dispatch atom's bytes instead, which is the closest
 /// zjs equivalent of reading that pre-resolved identity.
 ///
-/// The fallback deliberately calls the exact allocating path, so callables
-/// with no interned dispatch atom keep every observable behavior: utf16 and
-/// accessor (`get x` / `set x`) names, `.bind` wrappers, anonymous and
-/// symbol-derived names, the `name` property getter's side effects, and the
-/// `error.TypeError` a non-string `name` raises. Failing open to the old path
-/// (never "assume not equal") is what keeps this a pure cost removal.
+/// The fallback preserves `nativeFunctionNameForVm`'s core property-read
+/// behavior, UTF-8 encoding and errors. Core property reads can materialize
+/// AUTOINIT properties; this helper does not invoke JavaScript getters.
 pub fn nativeFunctionNameForVmBorrowed(rt: *core.JSRuntime, function_object: *core.Object) !VmDispatchName {
     const dispatch_atom = function_object.nativeDispatchName();
-    if (dispatch_atom != core.atom.null_atom) {
+    if (rt.atoms.kind(dispatch_atom) == .string) {
         if (rt.atoms.name(dispatch_atom)) |bytes| return .{ .name = bytes, .owned = null };
     }
     const owned = try nativeFunctionDispatchName(rt, function_object);
@@ -1299,17 +1296,12 @@ pub fn functionToStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSV
     return error.TypeError;
 }
 
-/// Borrowed-bytes counterpart to `nativeFunctionNameForVm`. Returns the
-/// internal dispatch-name bytes when available; otherwise falls back to
-/// the visible `name` property and returns that string value as the owner.
-/// Callers may always `free(name_value, rt)` after the slice is no longer
-/// needed. Returns `null` if the fallback visible name is absent or stored
-/// as utf16 (in which case callers fall back to the allocating path).
-///
-/// The hot dispatch loop in `qjs_vm.zig` calls this many millions of times
-/// in tight builtin-dispatch loops; avoiding the per-call `ArrayList(u8)` alloc and
-/// `toOwnedSlice` here removes ~5µs from every native-function call on
-/// the latin1 fast path.
+/// Pure short-lived projection: borrow internal atom bytes or the flat
+/// Latin1 own data `name`. Ropes (including cached ropes), UTF-16, missing
+/// and non-string names return null. No allocation or property resolution.
+/// `name_value` is only an owner snapshot, not a root. Consume the borrow
+/// before GC, callbacks, or atom storage changes; dispatch across callbacks
+/// uses `nativeFunctionDispatchNameForCall` or `nativeFunctionNameForVmBorrowed`.
 pub fn nativeFunctionDispatchNameRef(
     rt: *core.JSRuntime,
     function_object: *core.Object,
@@ -1334,11 +1326,47 @@ pub fn nativeFunctionDispatchNameRef(
 /// `null` if the value is not a latin1 string (utf16 strings carry no
 /// usable byte slice for ASCII-only dispatch comparisons).
 fn stringLatin1BytesRef(value: core.JSValue) ?[]const u8 {
-    const string_value = value.asStringBody() orelse return null;
+    const string_value = core.string.asFlat(value) orelse return null;
     return switch (string_value.resolveData()) {
         .latin1 => |bytes| bytes,
         .utf16 => null,
     };
+}
+
+/// Legacy callable-name dispatch reads only own data, without resolving
+/// properties or invoking getters. Missing/non-string/wide names have no
+/// dispatch. Keep internal string atoms borrowed; copy all other usable
+/// names into native storage before callbacks can delete their owners.
+/// Native allocation can fail, but this function cannot collect or flatten.
+/// The caller roots the original dispatch atom before crossing a GC point.
+pub fn nativeFunctionDispatchNameForCall(rt: *core.JSRuntime, function_object: *core.Object) !?VmDispatchName {
+    var borrow = core.runtime.NoGcScope{};
+    borrow.activate(rt);
+    defer borrow.deactivate();
+    const dispatch_atom = function_object.nativeDispatchName();
+    if (rt.atoms.name(dispatch_atom)) |bytes| {
+        if (rt.atoms.kind(dispatch_atom) == .string) return .{ .name = bytes, .owned = null };
+        const owned = try rt.nativeAllocator().dupe(u8, bytes);
+        return .{ .name = owned, .owned = owned };
+    }
+    const value = function_object.getOwnDataPropertyValue(core.atom.ids.name) orelse return null;
+    if (!value.isString()) return null;
+    const wide = if (value.ropeBody()) |rope| rope.isWide() else core.string.asFlat(value).?.isWide();
+    if (wide) return null;
+    const owned = try rt.nativeAllocator().alloc(u8, core.string.stringValueLenUnchecked(value));
+    errdefer rt.nativeAllocator().free(owned);
+    var iterator = core.string.StringValueIterator.init(value);
+    var offset: usize = 0;
+    while (iterator.next()) |leaf| {
+        const bytes = switch (leaf) {
+            .latin1 => |bytes| bytes,
+            .utf16 => unreachable, // The string's width metadata covers every leaf.
+        };
+        @memcpy(owned[offset..][0..bytes.len], bytes);
+        offset += bytes.len;
+    }
+    std.debug.assert(offset == owned.len);
+    return .{ .name = owned, .owned = owned };
 }
 
 fn nativeFunctionDispatchName(rt: *core.JSRuntime, function_object: *core.Object) ![]u8 {
@@ -1700,7 +1728,7 @@ pub fn evalGlobalScriptSource(
     const use_global_lexicals = context_global == null or context_global.? != global;
     const keep_active_lexicals = context_global == null;
     const saved_lexicals = ctx.lexicals;
-    if (use_global_lexicals) ctx.lexicals = global.globalLexicals(ctx.runtime);
+    if (use_global_lexicals) ctx.setLexicals(global.globalLexicals(ctx.runtime));
 
     const EvalResult = @typeInfo(@TypeOf(evalGlobalScriptSource)).@"fn".return_type.?;
     const result: EvalResult = blk: {

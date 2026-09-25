@@ -1,6 +1,7 @@
 //! Bundled host capabilities for zjs CLI, run-test262, and their tests.
 //! Depends on the consumer's engine module; never imported by the engine.
 pub const globals = @import("globals.zig");
+pub const clock = @import("clock.zig");
 pub const output = @import("output.zig");
 pub const EventLoop = @import("event_loop.zig").EventLoop;
 pub const file_modules = @import("file_module_loader.zig");

@@ -178,20 +178,27 @@ pub fn globalParseInt(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const string_value = if (input.isString())
-        input
-    else
-        try toStringForAnnexB(ctx, output, global, input, caller_function, caller_frame);
+    var values = [_]core.JSValue{
+        global.value(),
+        if (args.len >= 1) args[0] else core.JSValue.undefinedValue(),
+        if (args.len >= 2) args[1] else core.JSValue.undefinedValue(),
+    };
+    const live: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &live }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+
+    if (!values[1].isString()) values[1] = try toStringForAnnexB(ctx, output, objectFromValue(values[0]).?, values[1], caller_function, caller_frame);
 
     const radix_value: ?core.JSValue = if (args.len >= 2) blk: {
-        const radix_input = args[1];
+        const radix_input = values[2];
         if (!radix_input.is(.object) and !radix_input.is(.symbol) and !radix_input.isBigInt()) break :blk radix_input;
-        const primitive = try toPrimitiveForNumber(ctx, output, global, radix_input);
-        const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
+        values[2] = try toPrimitiveForNumber(ctx, output, objectFromValue(values[0]).?, radix_input);
+        const number_value = try value_ops.toNumberValue(ctx.runtime, values[2]);
         break :blk value_ops.numberToValue(value_ops.numberValue(number_value) orelse std.math.nan(f64));
     } else null;
-    return value_ops.numberToValue(try core.number.parseIntValue(ctx.runtime, string_value, radix_value));
+    return value_ops.numberToValue(try core.number.parseIntValue(ctx.runtime, values[1], radix_value));
 }
 
 pub fn globalParseFloat(
@@ -674,12 +681,19 @@ noinline fn defineNativeDataMethodMaybeId(
     length: i32,
     native_builtin_id: ?i32,
 ) !void {
-    const method = try core.function.nativeFunctionForGlobal(rt, global, core.atom.predefinedName(atom_id), length);
+    var values = [_]core.JSValue{ object.value(), core.JSValue.undefinedValue() };
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    values[1] = try core.function.nativeFunctionForGlobal(rt, global, core.atom.predefinedName(atom_id), length);
     if (native_builtin_id) |id| {
-        const method_object = try property_ops.expectObject(method);
+        const method_object = try property_ops.expectObject(values[1]);
         method_object.setNativeBuiltinIdAndRecord(rt, id);
     }
-    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, .method));
+    try (try property_ops.expectObject(values[0])).defineOwnProperty(rt, atom_id, core.Descriptor.data(values[1], .method));
 }
 
 /// Rare-payload stamp after minting a native data method. This is a
@@ -699,8 +713,15 @@ pub noinline fn defineStampedNativeDataMethod(
     stamp: NativeDataMethodRareStamp,
     helper_id: i32,
 ) !void {
-    const method = try core.function.nativeFunctionForGlobal(rt, global, core.atom.predefinedName(atom_id), length);
-    const method_object = try property_ops.expectObject(method);
+    const borrowed = [_]core.JSValue{ global.value(), object.value() };
+    var values = [_]core.JSValue{core.JSValue.undefinedValue()};
+    var slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .borrowed = &borrowed }, .{ .mutable = &slots } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    values[0] = try core.function.nativeFunctionForGlobal(rt, global, core.atom.predefinedName(atom_id), length);
+    const method_object = try property_ops.expectObject(values[0]);
     switch (stamp) {
         .async_generator => {
             if (!try method_object.addAsyncGeneratorPrototypeMethod(rt)) return error.TypeError;
@@ -710,12 +731,19 @@ pub noinline fn defineStampedNativeDataMethod(
             if (!try method_object.addIteratorHelperMethod(rt, @intCast(helper_id))) return error.TypeError;
         },
     }
-    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, .method));
+    try object.defineOwnProperty(rt, atom_id, core.Descriptor.data(values[0], .method));
 }
 
 /// Bytes-taking form for the one caller whose method name comes out of a table
 /// rather than a predefined-atom constant (`object_ops` CallSite prototype).
 pub fn defineNativeDataMethodNamedWithNativeId(rt: *core.JSRuntime, global: *core.Object, object: *core.Object, name: []const u8, length: i32, native_builtin_id: i32) !void {
+    var values = [_]core.JSValue{ object.value(), core.JSValue.undefinedValue() };
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
     // Same protocol as `standard_globals.temporaryStringAtom` (TGC S3 §4
     // class B): a name outside `predefined_atoms` interns to a bare id that
     // the tracer cannot see, and it has to survive the two allocating calls
@@ -724,17 +752,10 @@ pub fn defineNativeDataMethodNamedWithNativeId(rt: *core.JSRuntime, global: *cor
     const atom_id = try rt.internAtom(name);
     rt.atoms.pinForHost(atom_id);
     defer rt.atoms.unpinForHost(atom_id);
-    // The receiver has to survive the function-object construction below,
-    // which allocates. It arrives as a bare pointer, so root it here rather
-    // than requiring every caller to.
-    var rooted_object: ?*core.Object = object;
-    var object_roots = core.runtime.rootObjects(.{&rooted_object});
-    object_roots.activate(rt);
-    defer object_roots.deactivate(rt);
-    const method = try core.function.nativeFunctionForGlobal(rt, global, name, length);
-    const method_object = try property_ops.expectObject(method);
+    values[1] = try core.function.nativeFunctionForGlobal(rt, global, name, length);
+    const method_object = try property_ops.expectObject(values[1]);
     method_object.setNativeBuiltinIdAndRecord(rt, native_builtin_id);
-    try rooted_object.?.defineOwnProperty(rt, atom_id, core.Descriptor.data(method, .method));
+    try (try property_ops.expectObject(values[0])).defineOwnProperty(rt, atom_id, core.Descriptor.data(values[1], .method));
 }
 
 // --- Primitive coercion moved to coercion_ops.zig ---

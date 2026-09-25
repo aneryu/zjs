@@ -88,7 +88,7 @@ pub fn argumentsIdentifierIsForbidden(s: *State) bool {
     return !s.curFunc().arguments_allowed;
 }
 
-fn tokenStartsPrimaryExpression(k: tok.TokenKind) bool {
+fn tokenStartsPrimaryExpression(k: tok.Kind) bool {
     return k == .number or
         k == .string or
         k == .template or
@@ -109,11 +109,11 @@ fn tokenStartsPrimaryExpression(k: tok.TokenKind) bool {
         k == .div_assign;
 }
 
-pub fn tokenStartsYieldExpressionOperand(k: tok.TokenKind) bool {
+pub fn tokenStartsYieldExpressionOperand(k: tok.Kind) bool {
     return tokenStartsPrimaryExpression(k) and !tokenCanStartSlashRegexp(k);
 }
 
-pub fn tokenCanStartSlashRegexp(k: tok.TokenKind) bool {
+pub fn tokenCanStartSlashRegexp(k: tok.Kind) bool {
     return k == .slash or k == .div_assign;
 }
 
@@ -225,7 +225,7 @@ pub fn isSloppyFutureReservedBindingToken(s: *State) bool {
     return !(s.is_strict or s.curFunc().is_strict_mode) and isSloppyFutureReservedToken(s.peekKind());
 }
 
-pub fn isSloppyFutureReservedToken(kind: tok.TokenKind) bool {
+pub fn isSloppyFutureReservedToken(kind: tok.Kind) bool {
     return switch (kind) {
         .kw_implements,
         .kw_interface,
@@ -238,7 +238,7 @@ pub fn isSloppyFutureReservedToken(kind: tok.TokenKind) bool {
     };
 }
 
-pub fn tokenCanStartExpression(kind: tok.TokenKind) bool {
+pub fn tokenCanStartExpression(kind: tok.Kind) bool {
     return kind == .ident or
         kind == .kw_await or
         kind == .kw_yield or
@@ -258,7 +258,7 @@ pub fn tokenCanStartExpression(kind: tok.TokenKind) bool {
 pub fn identifierLikeAtom(s: *State) Atom {
     // Borrowed id: interning is rooted by the enclosing CompileAtomScope, so
     // the value stays valid past `advance()` without any retain.
-    return if (s.peekKind() == .ident) s.token.payload.ident.atom else tok.keywordAtom(s.peekKind());
+    return if (s.peekKind() == .ident) s.token.payload.ident.atom else s.peekKind().keywordAtom();
 }
 
 pub fn identifierLikeHasInvalidEscapeForBinding(s: *State) bool {

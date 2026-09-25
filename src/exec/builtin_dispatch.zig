@@ -778,6 +778,10 @@ noinline fn callTypedInternalRecordDirect(
     // that made this concrete; TGC R1-c re-confirmed nothing further is
     // needed). The VM-window terminal does not need it: the operand window
     // is already a `traceStack` root.
+    // The receiver root is writable, so a copying collector may move it; a
+    // builtin that uses its receiver after a GC point copies it into its own
+    // root and re-reads it (the parameter is then stale). Production also
+    // pins it through the native-stack scan.
     var receiver = this_value;
     var call_roots = core.runtime.ValueRootFrame{
         .values = &[_]*core.JSValue{&receiver},

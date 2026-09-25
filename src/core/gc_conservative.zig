@@ -262,6 +262,7 @@ fn scanWords(
     shade: *const fn (*anyopaque, *gc.Header) void,
     shade_ctx: *anyopaque,
 ) void {
+    const nursery_enabled = rt.gc.nursery.enabled and rt.gc.nursery.pages.items.len != 0;
     var addr = std.mem.alignForward(usize, lo, @sizeOf(usize));
     // Account the fixed word range once rather than updating the metric for
     // every native-stack word.
@@ -277,6 +278,7 @@ fn scanWords(
         // plus the `shade` callback's business: this loop forwards every
         // candidate and never filters by kind itself.
         _ = rt.gc.address_registry.forEachTraceCandidateAt(word, scan_filter, shade_ctx, shade);
+        if (nursery_enabled) forEachNurseryCandidateAt(rt, word, shade_ctx, shade);
         // NaN-boxed JSValues store pointers in the low 48 bits with a prefix
         // 0xFFF1..0xFFFF (`0xFFF0 + dense Kind index` in value.zig). Keep the
         // constants here so this leaf does not import the value module. The
@@ -288,8 +290,40 @@ fn scanWords(
             const unboxed = word & nanbox_payload_mask;
             if (unboxed != 0 and unboxed != word) {
                 _ = rt.gc.address_registry.forEachTraceCandidateAt(unboxed, scan_filter, shade_ctx, shade);
+                if (nursery_enabled) forEachNurseryCandidateAt(rt, unboxed, shade_ctx, shade);
             }
         }
+    }
+}
+
+/// Nursery pages come from their own allocator, so the address registry
+/// cannot resolve them. A bump page stores objects back to back, each behind
+/// its metadata prefix, so walk the page to the object(s) the word lands in.
+/// One-past-end counts, exactly as in the registry arms: a native pointer
+/// past object A is a reference to A.
+fn forEachNurseryCandidateAt(
+    rt: *JSRuntime,
+    addr: usize,
+    shade_ctx: *anyopaque,
+    shade: *const fn (*anyopaque, *gc.Header) void,
+) void {
+    const nursery = &rt.gc.nursery;
+    const page = nursery.pageOf(addr) orelse nursery.pageOf(addr -% 1) orelse return;
+    var cursor = page.base;
+    while (cursor < page.top and cursor <= addr) {
+        const header: *gc.Header = @ptrFromInt(cursor + gc.metadata_prefix_size);
+        const forwarded = gc.headerForwarded(header);
+        const body_bytes = if (forwarded)
+            gc.forwardedBodyBytes(header)
+        else
+            gc.Registry.heapByteSizeFromHeader(rt, header);
+        const end = cursor + gc.metadata_prefix_size + body_bytes;
+        // A husk is not an object. The pre-evacuation pass retains every page
+        // a native word names, so a named object is never forwarded. An
+        // unpublished cell is still being constructed under its own pin; like
+        // the registry arms, offer only published cells.
+        if (addr <= end and !forwarded and header.metaConst().alloc_info.heap_accounted) shade(shade_ctx, header);
+        cursor += std.mem.alignForward(usize, gc.metadata_prefix_size + body_bytes, 8);
     }
 }
 

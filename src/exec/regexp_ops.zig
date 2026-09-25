@@ -461,40 +461,40 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, pattern: core.JSValue, flags:
 }
 
 fn constructWithPrototypeInRealm(rt: *core.JSRuntime, realm_global: ?*core.Object, pattern: core.JSValue, flags: core.JSValue, prototype: ?*core.Object) !core.JSValue {
-    if (flags.is(.undefined_value)) {
-        if (regexpObjectFromValue(pattern)) |regexp_object| {
+    var values = [_]core.JSValue{ pattern, flags, if (realm_global) |object| object.value() else core.JSValue.nullValue(), if (prototype) |object| object.value() else core.JSValue.nullValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var root_frame = core.runtime.ValueRootFrame{ .slices = &slices };
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
+    if (values[1].is(.undefined_value)) {
+        if (regexpObjectFromValue(values[0])) |regexp_object| {
             const source_val = try getInternalSource(regexp_object);
             const bytecode = regexp_object.regexpCompiledBytecode();
             if (bytecode.len == 0) return error.TypeError;
-            return constructCompiled(rt, realm_global, source_val, bytecode, prototype);
+            return constructCompiled(rt, objectFromValue(values[2]), source_val, bytecode, objectFromValue(values[3]));
         }
     }
 
-    var source_val = core.JSValue.undefinedValue();
-    var flags_val = core.JSValue.undefinedValue();
-    var root_frame = core.runtime.rootValues(.{ &source_val, &flags_val });
-    root_frame.activate(rt);
-    defer root_frame.deactivate(rt);
-
-    const pattern_object = regexpObjectFromValue(pattern);
-    source_val = if (pattern_object) |regexp_object|
+    values[4] = if (regexpObjectFromValue(values[0])) |regexp_object|
         try getInternalSource(regexp_object)
-    else if (pattern.is(.undefined_value))
+    else if (values[0].is(.undefined_value))
         try createStringValue(rt, "")
     else
-        try regExpStringValue(rt, pattern);
+        try regExpStringValue(rt, values[0]);
 
-    flags_val = if (flags.is(.undefined_value) and pattern_object != null)
+    const pattern_object = regexpObjectFromValue(values[0]);
+    values[5] = if (values[1].is(.undefined_value) and pattern_object != null)
         try getInternalFlags(rt, pattern_object.?)
-    else if (flags.is(.undefined_value))
+    else if (values[1].is(.undefined_value))
         try createStringValue(rt, "")
     else
-        try regExpStringValue(rt, flags);
+        try regExpStringValue(rt, values[1]);
 
-    var compiled = try compileSourceAndFlags(rt, realm_global, source_val, flags_val);
+    var compiled = try compileSourceAndFlags(rt, objectFromValue(values[2]), values[4], values[5]);
     defer compiled.deinit(rt.nativeAllocator());
 
-    return constructCompiled(rt, realm_global, source_val, compiled.bytecode, prototype);
+    return constructCompiled(rt, objectFromValue(values[2]), values[4], compiled.bytecode, objectFromValue(values[3]));
 }
 
 fn regExpStringValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
@@ -572,24 +572,28 @@ fn createRegExpObject(rt: *core.JSRuntime, realm_global: ?*core.Object, prototyp
     // Custom/null prototypes do not use the realm's intrinsic shape in QJS
     // either (`js_create_from_ctor` followed by defining lastIndex). Reserve the
     // slot and let the ordinary transition cache build the corresponding shape.
-    const object = try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.regexp, prototype, 1);
-    errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
-    try object.initializeRegExpLastIndex(rt);
-    return object;
+    var values = [_]core.JSValue{if (prototype) |object| object.value() else core.JSValue.nullValue()};
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    values[0] = (try core.Object.createWithOwnPropertyCapacity(rt, core.class.ids.regexp, objectFromValue(values[0]), 1)).value();
+    try objectFromValue(values[0]).?.initializeRegExpLastIndex(rt);
+    return objectFromValue(values[0]).?;
 }
 
 fn constructCompiled(rt: *core.JSRuntime, realm_global: ?*core.Object, source: core.JSValue, bytecode: []const u8, prototype: ?*core.Object) !core.JSValue {
-    var source_val = source;
-    var root_frame = core.runtime.rootValues(.{&source_val});
+    var values = [_]core.JSValue{ source, if (realm_global) |object| object.value() else core.JSValue.nullValue(), if (prototype) |object| object.value() else core.JSValue.nullValue(), core.JSValue.undefinedValue() };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var root_frame = core.runtime.ValueRootFrame{ .slices = &slices };
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    const object = try createRegExpObject(rt, realm_global, prototype);
-    errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
-
-    try object.setRegexpSource(rt, source_val);
-    try object.setRegexpCompiledBytecode(rt, bytecode);
-    return object.value();
+    values[3] = (try createRegExpObject(rt, objectFromValue(values[1]), objectFromValue(values[2]))).value();
+    try objectFromValue(values[3]).?.setRegexpProgram(rt, values[0], bytecode);
+    return values[3];
 }
 
 test "constructCompiled roots string source while creating regexp object" {
@@ -684,11 +688,12 @@ fn escapedSource(rt: *core.JSRuntime, source: core.JSValue) !core.JSValue {
 }
 
 fn regexpSourceCanReturnRaw(source: core.JSValue) bool {
-    const string_value = source.asStringBody() orelse return false;
-    if (string_value.len() == 0) return false;
+    if (!source.isString()) return false;
+    const length = core.string.stringValueLenUnchecked(source);
+    if (length == 0) return false;
     var in_class = false;
-    for (0..string_value.len()) |index| {
-        const unit = string_value.codeUnitAt(index);
+    for (0..length) |index| {
+        const unit = core.string.stringValueCodeUnitAtUnchecked(source, index);
         switch (unit) {
             '[' => in_class = true,
             ']' => in_class = false,
@@ -699,39 +704,67 @@ fn regexpSourceCanReturnRaw(source: core.JSValue) bool {
     return true;
 }
 
+test "regexp source raw probe does not materialize ropes" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    var roots = core.runtime.ExactValueRoots(3){};
+    try roots.activate(rt);
+    defer roots.deactivate();
+    const left = try roots.ref(0);
+    const right = try roots.ref(1);
+    const source = try roots.ref(2);
+    for ([_][]const u8{ "abc", "[/", "abc/", "abc\n" }, [_]bool{ true, true, false, false }) |prefix, expected| {
+        try left.set(rt, (try core.string.String.createAscii(rt, prefix)).value());
+        try right.set(rt, (try core.string.String.createAscii(rt, "]")).value());
+        const rope = try core.string.String.createRope(rt, try left.get(rt), try right.get(rt));
+        try source.set(rt, rope.value());
+        const epoch = rt.gc.collection_epoch;
+        rt.setMemoryLimit(0);
+        defer rt.setMemoryLimit(null);
+        try std.testing.expectEqual(expected, regexpSourceCanReturnRaw(try source.get(rt)));
+        try std.testing.expect(!rope.isLinearized());
+        try std.testing.expectEqual(epoch, rt.gc.collection_epoch);
+    }
+}
+
 pub fn escape(rt: *core.JSRuntime, args: []const core.JSValue) !core.JSValue {
     if (args.len < 1 or !args[0].isString()) return error.TypeError;
 
-    const input = try expectString(args[0]);
+    const input = args[0];
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(rt.nativeAllocator());
-
-    switch (input.resolveData()) {
-        .latin1 => |bytes| {
-            for (bytes, 0..) |byte, index| try appendEscapedCodeUnit(rt, &buffer, byte, index == 0);
-        },
-        .utf16 => |units| {
-            var index: usize = 0;
-            while (index < units.len) {
-                const unit = units[index];
-                if (unicode.isHighSurrogateUnit(unit)) {
-                    if (index + 1 < units.len and unicode.isLowSurrogateUnit(units[index + 1])) {
-                        const cp = surrogateCodePoint(unit, units[index + 1]);
-                        try unicode.appendUtf8CodePoint(rt.nativeAllocator(), &buffer, cp);
+    var borrow = core.runtime.NoGcScope{};
+    borrow.activate(rt);
+    defer borrow.deactivate();
+    const flat = core.string.asFlat(input);
+    if (flat != null and !flat.?.isWide()) {
+        for (flat.?.latin1(), 0..) |byte, index| try appendEscapedCodeUnit(rt, &buffer, byte, index == 0);
+    } else {
+        const length = core.string.stringValueLenUnchecked(input);
+        var index: usize = 0;
+        while (index < length) {
+            const unit = core.string.stringValueCodeUnitAtUnchecked(input, index);
+            if (unicode.isHighSurrogateUnit(unit)) {
+                if (index + 1 < length) {
+                    const next = core.string.stringValueCodeUnitAtUnchecked(input, index + 1);
+                    if (unicode.isLowSurrogateUnit(next)) {
+                        try unicode.appendUtf8CodePoint(rt.nativeAllocator(), &buffer, surrogateCodePoint(unit, next));
                         index += 2;
                         continue;
                     }
-                    try appendUnicodeEscape(rt, &buffer, unit);
-                } else if (unicode.isLowSurrogateUnit(unit)) {
-                    try appendUnicodeEscape(rt, &buffer, unit);
-                } else {
-                    try appendEscapedCodeUnit(rt, &buffer, unit, index == 0);
                 }
-                index += 1;
+                try appendUnicodeEscape(rt, &buffer, unit);
+            } else if (unicode.isLowSurrogateUnit(unit)) {
+                try appendUnicodeEscape(rt, &buffer, unit);
+            } else {
+                try appendEscapedCodeUnit(rt, &buffer, unit, index == 0);
             }
-        },
+            index += 1;
+        }
     }
 
+    // The output bytes now own everything needed for result allocation.
+    borrow.deactivate();
     const output = try core.string.String.createUtf8(rt, buffer.items);
     return output.value();
 }
@@ -764,10 +797,6 @@ fn expectRegExpObject(value: core.JSValue) !*core.Object {
     const object = core.Object.fromHeader(header);
     if (object.class_id != core.class.ids.regexp) return error.TypeError;
     return object;
-}
-
-fn expectString(value: core.JSValue) !*core.string.String {
-    return value.asStringBody() orelse return error.TypeError;
 }
 
 // Leftover empty + ascii/utf8 mint. Same walk as `value_ops.createStringValue`
@@ -925,8 +954,36 @@ pub fn groupName(bytecode: []const u8, one_based_capture_index: usize) ?[]const 
     return regexp_bytecode.groupName(bytecode, one_based_capture_index);
 }
 
+fn flatRegExpInput(rt: *core.JSRuntime, input: core.JSValue) error{OutOfMemory}!core.JSValue {
+    return flatRegExpInputRooted(rt, input) catch |err| switch (err) {
+        error.OutOfMemory, error.RootGenerationExhausted => error.OutOfMemory,
+        // Existing string values already satisfy the engine's length limit.
+        error.StringTooLong, error.ExpectedString, error.RootAlreadyActive, error.RootMutationDuringCollection, error.WrongRuntime, error.InactiveRoot, error.InvalidRootIndex => std.debug.panic("regexp input root contract: {s}", .{@errorName(err)}),
+    };
+}
+
+fn flatRegExpInputRooted(rt: *core.JSRuntime, input: core.JSValue) !core.JSValue {
+    var roots = core.runtime.ExactValueRoots(1){};
+    try roots.activate(rt);
+    defer roots.deactivate();
+    const value = try roots.ref(0);
+    try value.set(rt, input);
+    try core.string.ensureFlat(rt, value.readOnly(), value);
+    return value.get(rt);
+}
+
+/// Compiled storage is native-owned or retained by a caller's explicit root.
+/// Runtime interrupt hooks may run while the matcher borrows stable flat data.
 pub fn testOnStringFromIndex(rt: *core.JSRuntime, compiled: Compiled, string_value: core.JSValue, start_index: usize) ExecError!?bool {
-    const string_object = string_value.asStringBody() orelse return null;
+    if (!string_value.isString()) return null;
+    var values = [_]core.JSValue{ string_value, core.JSValue.undefinedValue() };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    values[1] = try flatRegExpInput(rt, values[0]);
+    const string_object = core.string.asFlat(values[1]).?;
 
     const options = execOptions(rt);
     return switch (string_object.resolveData()) {
@@ -1254,20 +1311,20 @@ pub fn regExpExecMethod(
     caller_function: ?*const bytecode_mod.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
+    var values = [_]core.JSValue{ global.value(), this_value, if (args.len >= 1) args[0] else core.JSValue.undefinedValue() };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
     const regexp_object = core.value_semantics.objectFromValue(this_value) orelse {
         return try throwTypeErrorMessage(ctx, global, "RegExp object expected");
     };
     if (regexp_object.class_id != core.class.ids.regexp) {
         return try throwTypeErrorMessage(ctx, global, "RegExp object expected");
     }
-    const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    var owned_string: ?core.JSValue = null;
-    const string_value = if (input.isString()) input else blk: {
-        const value = try toStringForAnnexB(ctx, output, global, input, caller_function, caller_frame);
-        owned_string = value;
-        break :blk value;
-    };
-    return (try regExpExecResult(ctx, output, global, this_value, regexp_object, string_value, true, caller_function, caller_frame)) orelse error.TypeError;
+    if (!values[2].isString()) values[2] = try toStringForAnnexB(ctx, output, objectFromValue(values[0]).?, values[2], caller_function, caller_frame);
+    return (try regExpExecResult(ctx, output, objectFromValue(values[0]).?, values[1], objectFromValue(values[1]).?, values[2], true, caller_function, caller_frame)) orelse error.TypeError;
 }
 
 pub fn regExpTestMethod(
@@ -1279,26 +1336,26 @@ pub fn regExpTestMethod(
     caller_function: ?*const bytecode_mod.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    const receiver_object = core.value_semantics.objectFromValue(this_value) orelse {
+    var values = [_]core.JSValue{ global.value(), this_value, if (args.len >= 1) args[0] else core.JSValue.undefinedValue() };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    if (core.value_semantics.objectFromValue(this_value) == null) {
         return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "RegExp object expected"));
-    };
-    const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    var owned_string: ?core.JSValue = null;
-    const string_value = if (input.isString()) input else blk: {
-        const value = try toStringForAnnexB(ctx, output, global, input, caller_function, caller_frame);
-        owned_string = value;
-        break :blk value;
-    };
+    }
+    if (!values[2].isString()) values[2] = try toStringForAnnexB(ctx, output, objectFromValue(values[0]).?, values[2], caller_function, caller_frame);
     const exec_atom = (comptime core.atom.predefinedId("exec", .string)) orelse return error.TypeError;
-    if (regExpPrototypeMethodIsDefault(ctx.runtime, receiver_object, exec_atom, @intFromEnum(method_ids.regexp.PrototypeMethod.exec))) {
-        if (try regExpTestFastNoResult(ctx, receiver_object, string_value)) |matched| {
+    if (regExpPrototypeMethodIsDefault(ctx.runtime, objectFromValue(values[1]).?, exec_atom, @intFromEnum(method_ids.regexp.PrototypeMethod.exec))) {
+        if (try regExpTestFastNoResult(ctx, objectFromValue(values[1]).?, values[2])) |matched| {
             return core.JSValue.boolean(matched);
         }
-        const result = try regExpExecResult(ctx, output, global, this_value, receiver_object, string_value, true, caller_function, caller_frame) orelse return core.JSValue.boolean(false);
+        const result = try regExpExecResult(ctx, output, objectFromValue(values[0]).?, values[1], objectFromValue(values[1]).?, values[2], true, caller_function, caller_frame) orelse return core.JSValue.boolean(false);
         return core.JSValue.boolean(!result.is(.null_value));
     }
 
-    const result = try regExpExecGeneric(ctx, output, global, this_value, string_value, caller_function, caller_frame);
+    const result = try regExpExecGeneric(ctx, output, objectFromValue(values[0]).?, values[1], values[2], caller_function, caller_frame);
     return core.JSValue.boolean(!result.is(.null_value));
 }
 
@@ -1308,13 +1365,18 @@ pub fn regExpTestFastNoResult(
     string_value: core.JSValue,
 ) !?bool {
     if (!regExpLastIndexCanSkipCoercion(regexp_object)) return null;
-
-    const cached_bytecode = regexp_object.regexpCompiledBytecode();
+    var values = [_]core.JSValue{ regexp_object.value(), string_value, regexp_object.regexpCompiledBytecodeValue() orelse return null };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    const cached_bytecode = core.string.asFlat(values[2]).?.resolveData().latin1;
     if (cached_bytecode.len != 0) {
         const compiled = Compiled{ .bytecode = @constCast(cached_bytecode) };
         const flags = compiled.flags();
         if (flags.global or flags.sticky) return null;
-        return testOnStringFromIndex(ctx.runtime, compiled, string_value, 0) catch |err| switch (err) {
+        return testOnStringFromIndex(ctx.runtime, compiled, values[1], 0) catch |err| switch (err) {
             error.BytecodeCorrupt, error.Timeout => return null,
             else => return err,
         };
@@ -1338,6 +1400,14 @@ pub fn regExpCompile(
     caller_function: ?*const bytecode_mod.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
+    // Conversion may run JavaScript. Keep both inputs and intermediate strings
+    // in writable root slots, and reacquire heap pointers after every safepoint.
+    var values = [_]core.JSValue{ this_value, global.value(), if (args.len >= 1) args[0] else core.JSValue.undefinedValue(), if (args.len >= 2) args[1] else core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
     const regexp_object = core.value_semantics.objectFromValue(this_value) orelse return null;
     if (regexp_object.class_id != core.class.ids.regexp) return null;
     var expected_prototype = regExpPrototypeFromGlobal(ctx.runtime, global) orelse
@@ -1347,67 +1417,62 @@ pub fn regExpCompile(
         return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "RegExp object expected"));
     }
 
-    const pattern = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const flags = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-
-    if (flags.is(.undefined_value)) {
-        if (objectFromValue(pattern)) |pattern_object| {
+    if (values[3].is(.undefined_value)) {
+        if (objectFromValue(values[2])) |pattern_object| {
             if (pattern_object.class_id == core.class.ids.regexp) {
-                const source_value = try regexpInternalStringValue(ctx.runtime, pattern_object, true);
-                const compiled_bytecode = pattern_object.regexpCompiledBytecode();
+                values[4] = try regexpInternalStringValue(ctx.runtime, pattern_object, true);
+                const compiled_bytecode = objectFromValue(values[2]).?.regexpCompiledBytecode();
                 if (compiled_bytecode.len == 0) return error.TypeError;
 
-                try regexp_object.setRegexpCompiledBytecode(ctx.runtime, compiled_bytecode);
-                try regexp_object.setRegexpSource(ctx.runtime, source_value);
+                try objectFromValue(values[0]).?.setRegexpProgram(ctx.runtime, values[4], compiled_bytecode);
 
-                try setValuePropertyStrict(ctx, output, global, this_value, core.atom.ids.lastIndex, core.JSValue.int32(0), caller_function, caller_frame);
-                return this_value;
+                try setValuePropertyStrict(ctx, output, objectFromValue(values[1]).?, values[0], core.atom.ids.lastIndex, core.JSValue.int32(0), caller_function, caller_frame);
+                return values[0];
             }
         }
     }
 
-    const source_value = blk: {
-        if (objectFromValue(pattern)) |pattern_object| {
+    values[4] = blk: {
+        if (objectFromValue(values[2])) |pattern_object| {
             if (pattern_object.class_id == core.class.ids.regexp) {
-                if (!flags.is(.undefined_value)) return error.TypeError;
+                if (!values[3].is(.undefined_value)) return error.TypeError;
                 break :blk try regexpInternalStringValue(ctx.runtime, pattern_object, true);
             }
         }
-        if (pattern.is(.undefined_value)) break :blk try value_ops.createStringValue(ctx.runtime, "");
-        break :blk try toStringForAnnexB(ctx, output, global, pattern, caller_function, caller_frame);
+        if (values[2].is(.undefined_value)) break :blk try value_ops.createStringValue(ctx.runtime, "");
+        break :blk try toStringForAnnexB(ctx, output, objectFromValue(values[1]).?, values[2], caller_function, caller_frame);
     };
 
-    const flags_value = blk: {
-        if (objectFromValue(pattern)) |pattern_object| {
+    values[5] = blk: {
+        if (objectFromValue(values[2])) |pattern_object| {
             if (pattern_object.class_id == core.class.ids.regexp) {
                 break :blk try regexpInternalStringValue(ctx.runtime, pattern_object, false);
             }
         }
-        if (flags.is(.undefined_value)) break :blk try value_ops.createStringValue(ctx.runtime, "");
-        break :blk try toStringForAnnexB(ctx, output, global, flags, caller_function, caller_frame);
+        if (values[3].is(.undefined_value)) break :blk try value_ops.createStringValue(ctx.runtime, "");
+        break :blk try toStringForAnnexB(ctx, output, objectFromValue(values[1]).?, values[3], caller_function, caller_frame);
     };
 
     var source_bytes = std.ArrayList(u8).empty;
     defer source_bytes.deinit(ctx.runtime.nativeAllocator());
-    try value_ops.appendValueString(ctx.runtime, &source_bytes, source_value);
+    try value_ops.appendValueString(ctx.runtime, &source_bytes, values[4]);
     var flag_bytes = std.ArrayList(u8).empty;
     defer flag_bytes.deinit(ctx.runtime.nativeAllocator());
-    try value_ops.appendValueString(ctx.runtime, &flag_bytes, flags_value);
+    try value_ops.appendValueString(ctx.runtime, &flag_bytes, values[5]);
     var compiled = compileWithRuntime(ctx.runtime, source_bytes.items, flag_bytes.items) catch |err| switch (err) {
         error.InvalidPattern, error.Unsupported => return error.SyntaxError,
         error.StackOverflow => {
-            _ = exception_ops.throwSyntaxErrorMessage(ctx, global, "stack overflow") catch |throw_err| return throw_err;
+            _ = exception_ops.throwSyntaxErrorMessage(ctx, objectFromValue(values[1]).?, "stack overflow") catch |throw_err| return throw_err;
             return error.SyntaxError;
         },
         else => |other| return other,
     };
     defer compiled.deinit(ctx.runtime.nativeAllocator());
 
-    try regexp_object.setRegexpCompiledBytecode(ctx.runtime, compiled.bytecode);
-    try regexp_object.setRegexpSource(ctx.runtime, source_value);
+    try objectFromValue(values[0]).?.setRegexpProgram(ctx.runtime, values[4], compiled.bytecode);
 
-    try setValuePropertyStrict(ctx, output, global, this_value, core.atom.ids.lastIndex, core.JSValue.int32(0), caller_function, caller_frame);
-    return this_value;
+    try setValuePropertyStrict(ctx, output, objectFromValue(values[1]).?, values[0], core.atom.ids.lastIndex, core.JSValue.int32(0), caller_function, caller_frame);
+    return values[0];
 }
 
 pub fn regExpSpeciesConstructor(
@@ -1420,23 +1485,29 @@ pub fn regExpSpeciesConstructor(
 ) !core.JSValue {
     // JS_SpeciesConstructor(ctx, rx, ctx->regexp_ctor): the default is the
     // realm intrinsic, not the observable and replaceable global binding.
-    const default_constructor = try regExpConstructorFromGlobal(ctx.runtime, global);
+    var values = [_]core.JSValue{ global.value(), rx, core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    values[2] = try regExpConstructorFromGlobal(ctx.runtime, objectFromValue(values[0]).?);
 
-    const constructor_value = try getValueProperty(ctx, output, global, rx, core.atom.ids.constructor, caller_function, caller_frame);
-    if (constructor_value.is(.undefined_value)) return default_constructor;
-    if (!constructor_value.is(.object)) {
+    values[3] = try getValueProperty(ctx, output, objectFromValue(values[0]).?, values[1], core.atom.ids.constructor, caller_function, caller_frame);
+    if (values[3].is(.undefined_value)) return values[2];
+    if (!values[3].is(.object)) {
         return error.TypeError;
     }
 
     const species_atom = (comptime core.atom.predefinedId("Symbol.species", .symbol)) orelse {
         return error.TypeError;
     };
-    const species_value = try getValueProperty(ctx, output, global, constructor_value, species_atom, caller_function, caller_frame);
-    if (species_value.is(.undefined_value) or species_value.is(.null_value)) return default_constructor;
-    if (!(try isConstructorLike(ctx, species_value))) {
+    values[3] = try getValueProperty(ctx, output, objectFromValue(values[0]).?, values[3], species_atom, caller_function, caller_frame);
+    if (values[3].is(.undefined_value) or values[3].is(.null_value)) return values[2];
+    if (!(try isConstructorLike(ctx, values[3]))) {
         return error.TypeError;
     }
-    return species_value;
+    return values[3];
 }
 
 pub fn regExpFlagsAreFullUnicode(rt: *core.JSRuntime, flags_string: core.JSValue) !bool {
@@ -1463,6 +1534,12 @@ pub fn appendNamedCaptureSubstitution(
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
     if (named_captures.is(.undefined_value)) return false;
+    var values = [_]core.JSValue{ global.value(), named_captures, core.JSValue.undefinedValue() };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
     const name_start = index.* + 2;
     const name_end = std.mem.indexOfScalarPos(u16, replacement, name_start, '>') orelse return false;
     var name = std.ArrayList(u8).empty;
@@ -1474,10 +1551,10 @@ pub fn appendNamedCaptureSubstitution(
     var group_atom_roots = core.runtime.rootAtoms(.{&atom});
     group_atom_roots.activate(ctx.runtime);
     defer group_atom_roots.deactivate(ctx.runtime);
-    const capture = try getValueProperty(ctx, output, global, named_captures, atom, caller_function, caller_frame);
-    if (!capture.is(.undefined_value)) {
-        const capture_string = try toStringForAnnexB(ctx, output, global, capture, caller_function, caller_frame);
-        try appendStringValueUnits(ctx.runtime, out, capture_string);
+    values[2] = try getValueProperty(ctx, output, core.value_semantics.objectFromValue(values[0]).?, values[1], atom, caller_function, caller_frame);
+    if (!values[2].is(.undefined_value)) {
+        values[2] = try toStringForAnnexB(ctx, output, core.value_semantics.objectFromValue(values[0]).?, values[2], caller_function, caller_frame);
+        try appendStringValueUnits(ctx.runtime, out, values[2]);
     }
     index.* = name_end;
     return true;
@@ -1493,19 +1570,28 @@ pub fn regExpExecGeneric(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const exec_atom = (comptime core.atom.predefinedId("exec", .string)) orelse return error.TypeError;
-    const exec_method = try getValueProperty(ctx, output, global, rx, exec_atom, caller_function, caller_frame);
+    // Reading `exec` can run a getter. Keep the actual argument slots visible
+    // in non-test builds too, then reload them before calling the method.
+    var values = [_]core.JSValue{ global.value(), rx, string_value, core.JSValue.undefinedValue() };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    values[3] = try getValueProperty(ctx, output, objectFromValue(values[0]).?, values[1], exec_atom, caller_function, caller_frame);
+    const exec_method = values[3];
     if (!exec_method.is(.undefined_value) and !exec_method.is(.null_value)) {
         if (isCallableValue(exec_method)) {
             // JS_RegExpExec is a synchronous native algorithm boundary. The
             // receiver, method and string are all rooted by this scope, so an
             // eligible bytecode override can execute on the active Machine;
             // non-eligible targets retain the authoritative root-call path.
-            const call_args = [_]core.JSValue{string_value};
+            const call_args = [_]core.JSValue{values[2]};
             const result = try call_runtime.callValueOrBytecodeSyncInternalOutlined(
                 ctx,
                 output,
-                global,
-                rx,
+                objectFromValue(values[0]).?,
+                values[1],
                 exec_method,
                 &call_args,
                 caller_function,
@@ -1516,10 +1602,10 @@ pub fn regExpExecGeneric(
             }
             return result;
         }
-        const rx_object = objectFromValue(rx) orelse return error.TypeError;
+        const rx_object = objectFromValue(values[1]) orelse return error.TypeError;
         if (rx_object.class_id != core.class.ids.regexp) return error.TypeError;
     }
-    return try regExpExecMethod(ctx, output, global, rx, &.{string_value}, caller_function, caller_frame);
+    return try regExpExecMethod(ctx, output, objectFromValue(values[0]).?, values[1], &.{values[2]}, caller_function, caller_frame);
 }
 
 pub fn regExpLegacyAccessor(
@@ -1678,26 +1764,37 @@ pub fn regExpExecResult(
     caller_function: ?*const bytecode_mod.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    const string_object = string_value.asStringBody() orelse return null;
-    const string_data = string_object.resolveData();
-    const input_len = string_data.len();
+    if (!string_value.isString()) return null;
+    var values = [_]core.JSValue{ global.value(), regexp_value, regexp_object.value(), string_value, core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    values[4] = try flatRegExpInput(ctx.runtime, values[3]);
+    const input_len = core.string.stringValueLenUnchecked(values[4]);
     const initial_last_index = if (use_last_index)
-        try getRegExpLastIndexLength(ctx, output, global, regexp_value, regexp_object, caller_function, caller_frame)
+        try getRegExpLastIndexLength(ctx, output, objectFromValue(values[0]).?, values[1], objectFromValue(values[2]).?, caller_function, caller_frame)
     else
         0;
 
-    const cached_bytecode = regexp_object.regexpCompiledBytecode();
+    // lastIndex conversion can reenter JS and replace the receiver's program.
+    // Select it after conversion, then retain that exact bytecode body through
+    // interrupt callbacks and capture/result allocation.
+    values[5] = objectFromValue(values[2]).?.regexpCompiledBytecodeValue() orelse return null;
+    const cached_bytecode = core.string.asFlat(values[5]).?.resolveData().latin1;
     if (cached_bytecode.len != 0) {
         const compiled = Compiled{ .bytecode = @constCast(cached_bytecode) };
         const flags = compiled.flags();
         const start_index = if (use_last_index and (flags.global or flags.sticky)) initial_last_index else 0;
         if (start_index > input_len) {
             if (use_last_index and (flags.global or flags.sticky)) {
-                try setRegExpLastIndexStrict(ctx, output, global, regexp_value, regexp_object, core.JSValue.int32(0), caller_function, caller_frame);
+                try setRegExpLastIndexStrict(ctx, output, objectFromValue(values[0]).?, values[1], objectFromValue(values[2]).?, core.JSValue.int32(0), caller_function, caller_frame);
             }
             return core.JSValue.nullValue();
         }
-        return try regExpExecCompiledResult(ctx, output, global, regexp_value, regexp_object, string_value, string_data, compiled, use_last_index, flags, start_index, caller_function, caller_frame);
+        const string_data = core.string.asFlat(values[4]).?.resolveData();
+        return try regExpExecCompiledResult(ctx, output, objectFromValue(values[0]).?, values[1], objectFromValue(values[2]).?, values[3], string_data, compiled, use_last_index, flags, start_index, caller_function, caller_frame);
     }
 
     return null;
@@ -1719,18 +1816,13 @@ pub fn regExpExecCompiledResult(
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
     const rt = ctx.runtime;
-    // TGC R1-c. Three borrowed things outlive a collection point here.
-    // `compiled.bytecode` (carried on into `found.capture_bytecode`, which
-    // `captureNameAt` reads while the result array is being built) is the
-    // regexp object's own compiled payload, and `string_data` is the input
-    // string's flat payload; neither is a GC pointer the scanner can map
-    // back to an owner. Naming `regexp_value` and `string_value` is what
-    // keeps both payloads addressable across `setRegExpLastIndexStrict`
-    // (which can run an accessor) and `createRegExpMatchArrayFromValue`
-    // (which allocates every capture substring).
-    var rooted_regexp = regexp_value;
-    var rooted_string = string_value;
-    var exec_roots = core.runtime.rootValues(.{ &rooted_regexp, &rooted_string });
+    // The caller retains the exact compiled/flat backing snapshots, including
+    // when an interrupt hook replaces the regexp's current program. Mutable
+    // slots here protect and refresh the receiver/global used after callbacks.
+    var values = [_]core.JSValue{ global.value(), regexp_value, regexp_object.value(), string_value };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var exec_roots = core.runtime.ValueRootFrame{ .slices = &slices };
     exec_roots.activate(rt);
     defer exec_roots.deactivate(rt);
     const alloc_count = compiled.allocCount();
@@ -1758,7 +1850,7 @@ pub fn regExpExecCompiledResult(
                     core.JSValue.int32(@intCast(next_index))
                 else
                     core.JSValue.float64(@floatFromInt(next_index));
-                try setRegExpLastIndexStrict(ctx, output, global, regexp_value, regexp_object, next_value, caller_function, caller_frame);
+                try setRegExpLastIndexStrict(ctx, output, objectFromValue(values[0]).?, values[1], objectFromValue(values[2]).?, next_value, caller_function, caller_frame);
             }
 
             const total_capture_count = compiled.captureCount();
@@ -1770,11 +1862,11 @@ pub fn regExpExecCompiledResult(
                 .capture_count = total_capture_count - 1,
                 .has_named_captures = compiled.flags().named_groups,
             };
-            return try createRegExpMatchArrayFromValue(rt, global, string_value, &found, string_data.len(), flags.indices);
+            return try createRegExpMatchArrayFromValue(rt, objectFromValue(values[0]).?, values[3], &found, string_data.len(), flags.indices);
         },
         .no_match, .out_of_range => {
             if (use_last_index and (flags.global or flags.sticky)) {
-                try setRegExpLastIndexStrict(ctx, output, global, regexp_value, regexp_object, core.JSValue.int32(0), caller_function, caller_frame);
+                try setRegExpLastIndexStrict(ctx, output, objectFromValue(values[0]).?, values[1], objectFromValue(values[2]).?, core.JSValue.int32(0), caller_function, caller_frame);
             }
             return core.JSValue.nullValue();
         },
@@ -1796,10 +1888,16 @@ pub fn isRegExpObservable(
     caller_frame: ?*frame_mod.Frame,
 ) !bool {
     if (!value.is(.object)) return false;
+    var values = [_]core.JSValue{ global.value(), value };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
     const match_atom = (comptime core.atom.predefinedId("Symbol.match", .symbol)) orelse return isRegExpValue(value);
-    const matcher = try getValueProperty(ctx, output, global, value, match_atom, caller_function, caller_frame);
+    const matcher = try getValueProperty(ctx, output, core.value_semantics.objectFromValue(values[0]).?, values[1], match_atom, caller_function, caller_frame);
     if (!matcher.is(.undefined_value)) return valueTruthy(matcher);
-    return isRegExpValue(value);
+    return isRegExpValue(values[1]);
 }
 
 pub fn regexpLastIndex(_: *core.JSRuntime, object: *core.Object) usize {
@@ -1814,11 +1912,16 @@ pub fn regexpLastIndex(_: *core.JSRuntime, object: *core.Object) usize {
 }
 
 pub fn createRegExpIndexPair(rt: *core.JSRuntime, global: *core.Object, start: usize, end: usize) !core.JSValue {
-    const out = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
-    errdefer core.Object.destroyFromHeader(rt, out.gcHeader());
-    try defineSplitValueElement(rt, out, 0, core.JSValue.int32(@intCast(start)));
-    try defineSplitValueElement(rt, out, 1, core.JSValue.int32(@intCast(end)));
-    return out.value();
+    var values = [_]core.JSValue{global.value()};
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    values[0] = (try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, objectFromValue(values[0]).?))).value();
+    try defineSplitValueElement(rt, objectFromValue(values[0]).?, 0, core.JSValue.int32(@intCast(start)));
+    try defineSplitValueElement(rt, objectFromValue(values[0]).?, 1, core.JSValue.int32(@intCast(end)));
+    return values[0];
 }
 
 pub fn appendDecodedRegExpGroupName(rt: *core.JSRuntime, out: *std.ArrayList(u8), name: []const u8) !void {

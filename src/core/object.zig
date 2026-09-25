@@ -283,7 +283,10 @@ pub const ObjectFlags = packed struct(u32) {
     /// record carries the `NativeType`. Lets `nativeSelf` answer without a
     /// class-table probe.
     is_native_object: bool = false,
-    reserved: u14 = 0,
+    /// Membership in the runtime's iterator-next side table, which is keyed
+    /// by object address; relocation must rebind the entry.
+    has_iterator_next: bool = false,
+    reserved: u13 = 0,
 };
 
 var test_standard_exotic_methods: [class.ids.init_count]?*const ExoticMethods = @splat(null);
@@ -1169,27 +1172,10 @@ pub const Object = extern struct {
     /// deferred plugin finalizer can allocate, find this fully initialized
     /// Shape in the hash table, and retain it. Leaving it hash-visible but
     /// unpublished across that callback would let the nested constructor
-    /// observe an impossible half-state. The local header root protects both
-    /// a newly published Shape and a pre-existing hash hit from collection.
+    /// observe an impossible half-state. The caller's header root must span
+    /// the entire construction, including storage charges after this call.
     fn collectBeforeObjectAllocationPublishingShape(rt: *JSRuntime, shape_ref: *shape.Shape, accounted_size: usize) void {
         if (!shape_ref.header.meta().alloc_info.heap_accounted) rt.shapes.publish(shape_ref);
-        // The root has to outlive the collection it is taken for, so the
-        // collection call belongs INSIDE the frame's block. It used to sit
-        // after it, which meant the frame's `defer deactivate` had already run
-        // and the Shape was unrooted for exactly the window the frame exists
-        // to cover. The conservative arm hid that; a precise-only scan would
-        // not have.
-        if (comptime !runtime_mod.value_root_link_containers_only) {
-            var header_roots = [_]runtime_mod.HeaderRootValue{.{ .header = &shape_ref.header }};
-            var frame = runtime_mod.ValueRootFrame{ .headers = &header_roots };
-            frame.activate(rt);
-            defer frame.deactivate(rt);
-            // INSIDE the block, so the frame's `defer` runs after this call
-            // rather than before it. The production arm below is the same
-            // straight-line `publish; collect` it was, byte for byte.
-            rt.collectBeforeObjectAllocation(accounted_size);
-            return;
-        }
         rt.collectBeforeObjectAllocation(accounted_size);
     }
 
@@ -1221,6 +1207,13 @@ pub const Object = extern struct {
         const shape_ref = try rt.shapes.createObjectRootReserved(rt, prototype);
         var shape_owned = true;
         errdefer if (shape_owned) rt.shapes.dropUnshared(rt, shape_ref);
+        // The shape hash is weak. Keep the selected shape alive through ALL
+        // construction charges and storage allocations, not only the initial
+        // object-allocation safepoint: no object owns this edge until publish.
+        const shape_headers = [_]runtime_mod.HeaderRootValue{.{ .header = &shape_ref.header }};
+        var shape_roots = runtime_mod.ValueRootFrame{ .headers = &shape_headers };
+        shape_roots.activate(rt);
+        defer shape_roots.deactivate(rt);
 
         const alloc_size = objectBodyBytes(class.ids.object, false);
         const accounted = prospectiveAccountedBodyBytes(alloc_size);
@@ -1299,6 +1292,10 @@ pub const Object = extern struct {
         std.debug.assert(shape_ref.prop_size == trailing_property_capacity);
         var shape_owned = true;
         errdefer if (shape_owned) rt.shapes.dropUnshared(rt, shape_ref);
+        const shape_headers = [_]runtime_mod.HeaderRootValue{.{ .header = &shape_ref.header }};
+        var shape_roots = runtime_mod.ValueRootFrame{ .headers = &shape_headers };
+        shape_roots.activate(rt);
+        defer shape_roots.deactivate(rt);
 
         const alloc_size = objectBodyBytes(class.ids.object, true);
         const accounted = prospectiveAccountedBodyBytes(alloc_size);
@@ -1349,12 +1346,25 @@ pub const Object = extern struct {
         groups_value: JSValue,
     ) !*Object {
         std.debug.assert(shape_ref.prop_count == 3);
+        var values = [_]JSValue{ input_value, groups_value };
+        const slots: []JSValue = &values;
+        const slices = [_]runtime_mod.ValueRootSlice{.{ .mutable = &slots }};
+        var roots = runtime_mod.ValueRootFrame{ .slices = &slices };
+        roots.activate(rt);
+        defer roots.deactivate(rt);
+        // Construction can move the groups object. Publish initialized empty
+        // cells first, then install the updated values without another GC point.
         const entries = [_]property.Entry{
             .{ .slot = .{ .data = JSValue.int32(match_index) } },
-            .{ .slot = .{ .data = input_value } },
-            .{ .slot = .{ .data = groups_value } },
+            .{ .slot = .{ .data = JSValue.undefinedValue() } },
+            .{ .slot = .{ .data = JSValue.undefinedValue() } },
         };
-        return createArrayFromShape(rt, shape_ref, &entries);
+        const object = try createArrayFromShape(rt, shape_ref, &entries);
+        object.propertyEntry(1).slot.data = values[0];
+        rt.gc.generationalBarrierValue(object.gcHeader(), values[0]);
+        object.propertyEntry(2).slot.data = values[1];
+        rt.gc.generationalBarrierValue(object.gcHeader(), values[1]);
+        return object;
     }
 
     /// Allocate an arguments object (unmapped or mapped) straight from its
@@ -1583,6 +1593,12 @@ pub const Object = extern struct {
             try rt.shapes.createObjectRootWithPropertyCapacityReserved(rt, prototype, property_capacity);
         var shape_owned = true;
         errdefer if (shape_owned) rt.shapes.dropUnshared(rt, shape_ref);
+        // Storage allocation follows the first safepoint; the weak shape
+        // cache cannot own this edge until the new object is published.
+        const shape_headers = [_]runtime_mod.HeaderRootValue{.{ .header = &shape_ref.header }};
+        var shape_roots = runtime_mod.ValueRootFrame{ .headers = &shape_headers };
+        shape_roots.activate(rt);
+        defer shape_roots.deactivate(rt);
         // TGC S4-b spec 2.2: the buffer is a `.property_storage` GC cell,
         // minted immediately before the object cell so that NOTHING that can
         // collect runs between its publication and the install below -- a bare
@@ -2319,7 +2335,7 @@ pub const Object = extern struct {
 
     pub fn setGlobalLexicals(self: *Object, rt: *JSRuntime, v: ?*Object) !void {
         const ctx = rt.contextForGlobalIncludingConstructing(self) orelse return error.InvalidBuiltinRegistry;
-        ctx.lexicals = v;
+        ctx.setLexicals(v);
     }
 
     // qjs u.global_object.uninitialized_vars accessors.
@@ -3264,6 +3280,11 @@ pub const Object = extern struct {
         return &payloadPresent(self.collectionPayload()).bucket_heads;
     }
 
+    pub fn collectionIndexStaleSlot(self: *Object) ?*bool {
+        const payload = self.collectionPayload() orelse return null;
+        return &payload.index_stale;
+    }
+
     pub fn collectionBucketHeads(self: *const Object) []usize {
         if (self.collectionPayloadConst()) |payload| return payload.bucket_heads;
         return &.{};
@@ -3939,14 +3960,72 @@ pub const Object = extern struct {
         return null;
     }
 
-    /// Store the owned flat-string pointer used by QuickJS's `JSRegExp`.
-    /// `asStringBody` materializes a rope at the value boundary when needed;
-    /// RegExp source is required to be a string by the internal constructor.
+    /// Materialize a string into a rooted flat value, then publish its edge.
+    /// Failure leaves the previous source intact; no payload borrow crosses GC.
     pub fn setRegexpSource(self: *Object, rt: *JSRuntime, source_value: JSValue) !void {
-        const source = source_value.asStringBody() orelse return error.TypeError;
-        const payload = self.regExpPayload() orelse return error.TypeError;
+        return self.setRegexpSourceRooted(rt, source_value) catch |err| switch (err) {
+            error.RootGenerationExhausted => error.OutOfMemory,
+            error.RootAlreadyActive, error.RootMutationDuringCollection, error.WrongRuntime, error.InactiveRoot, error.InvalidRootIndex, error.ExpectedString => std.debug.panic("regexp source root contract: {s}", .{@errorName(err)}),
+            else => |other| other,
+        };
+    }
+
+    fn setRegexpSourceRooted(self: *Object, rt: *JSRuntime, source_value: JSValue) !void {
+        if (!source_value.isString() or self.regExpPayload() == null) return error.TypeError;
+        var roots = runtime_mod.ExactValueRoots(2){};
+        try roots.activate(rt);
+        defer roots.deactivate();
+        const owner = try roots.ref(0);
+        const input = try roots.ref(1);
+        try owner.set(rt, self.value());
+        try input.set(rt, source_value);
+        try string.ensureFlat(rt, input.readOnly(), input);
+        const object = Object.fromHeader((try owner.get(rt)).refHeader().?);
+        const source = string.asFlat(try input.get(rt)).?;
+        const payload = object.regExpPayload().?;
         payload.source = source;
-        rt.gc.generationalBarrierValue(self.gcHeader(), source.value());
+        rt.gc.generationalBarrierValue(object.gcHeader(), source.value());
+    }
+
+    /// Prepare both program fields before publishing either edge. Bytecode
+    /// must be native-owned or backed by a caller-rooted, stable flat string.
+    /// Allocation failure preserves the previous source and compiled program;
+    /// the caller resets lastIndex separately, after this commit succeeds.
+    pub fn setRegexpProgram(self: *Object, rt: *JSRuntime, source_value: JSValue, bytecode: []const u8) !void {
+        return self.setRegexpProgramRooted(rt, source_value, bytecode) catch |err| switch (err) {
+            error.RootGenerationExhausted => error.OutOfMemory,
+            error.RootAlreadyActive, error.RootMutationDuringCollection, error.WrongRuntime, error.InactiveRoot, error.InvalidRootIndex, error.ExpectedString => std.debug.panic("regexp program root contract: {s}", .{@errorName(err)}),
+            else => |other| other,
+        };
+    }
+
+    fn setRegexpProgramRooted(self: *Object, rt: *JSRuntime, source_value: JSValue, bytecode: []const u8) !void {
+        if (!source_value.isString() or bytecode.len == 0 or self.regExpPayload() == null) return error.TypeError;
+        var roots = runtime_mod.ExactValueRoots(4){};
+        try roots.activate(rt);
+        defer roots.deactivate();
+        const owner = try roots.ref(0);
+        const input = try roots.ref(1);
+        const flat = try roots.ref(2);
+        const compiled = try roots.ref(3);
+        try owner.set(rt, self.value());
+        try input.set(rt, source_value);
+        // Preserve the original rope as well as the prepared flat source:
+        // the later bytecode allocation can fail and the caller may retry.
+        try string.ensureFlat(rt, input.readOnly(), flat);
+        try compiled.set(rt, (try string.String.createLatin1(rt, bytecode)).value());
+
+        var borrow = runtime_mod.NoGcScope{};
+        borrow.activate(rt);
+        defer borrow.deactivate();
+        const object = Object.fromHeader((try owner.get(rt)).refHeader().?);
+        const source = string.asFlat(try flat.get(rt)).?;
+        const program = string.asFlat(try compiled.get(rt)).?;
+        const payload = object.regExpPayload().?;
+        payload.source = source;
+        rt.gc.generationalBarrierValue(object.gcHeader(), source.value());
+        payload.compiled_bytecode = program;
+        rt.gc.generationalBarrierValue(object.gcHeader(), program.value());
     }
 
     /// QuickJS keeps RegExp `lastIndex` as the first ordinary, non-configurable
@@ -3991,6 +4070,13 @@ pub const Object = extern struct {
         std.debug.assert(self.regexpLastIndexSlot().as(.int).? == 0);
     }
 
+    /// Pure projection of the bytecode owner for callers that must retain a
+    /// program snapshot across allocation or reentrant execution.
+    pub fn regexpCompiledBytecodeValue(self: *const Object) ?JSValue {
+        const payload = self.regExpPayloadConst() orelse return null;
+        return (payload.compiled_bytecode orelse return null).value();
+    }
+
     pub fn regexpCompiledBytecode(self: *const Object) []const u8 {
         if (self.regExpPayloadConst()) |payload| {
             const bytecode = payload.compiled_bytecode orelse return &.{};
@@ -4012,17 +4098,24 @@ pub const Object = extern struct {
     }
 
     pub fn setRegexpCompiledBytecode(self: *Object, rt: *JSRuntime, bytecode: []const u8) !void {
-        if (self.regExpPayload()) |payload| {
+        if (self.regExpPayload() != null) {
             if (bytecode.len == 0) {
                 self.clearRegexpCompiledBytecode(rt);
                 return;
             }
 
-            // qjs wraps lre bytecode in a narrow JSString and stores that
-            // string pointer in `u.regexp.bytecode`.
+            var values = [_]JSValue{self.value()};
+            const slots: []JSValue = &values;
+            const slices = [_]runtime_mod.ValueRootSlice{.{ .mutable = &slots }};
+            var roots = runtime_mod.ValueRootFrame{ .slices = &slices };
+            roots.activate(rt);
+            defer roots.deactivate(rt);
+            // The input is caller-owned or backed by a rooted flat string.
+            // Reacquire the receiver payload after result allocation.
             const owned = try string.String.createLatin1(rt, bytecode);
-            payload.compiled_bytecode = owned;
-            rt.gc.generationalBarrierValue(self.gcHeader(), owned.value());
+            const object = Object.fromHeader(values[0].refHeader().?);
+            object.regExpPayload().?.compiled_bytecode = owned;
+            rt.gc.generationalBarrierValue(object.gcHeader(), owned.value());
         } else {
             std.debug.assert(self.flags.class_payload_kind == .regexp);
             unreachable;
@@ -5511,6 +5604,7 @@ pub const Object = extern struct {
     /// reference on success.  An out-of-range index does not consume `cell`.
     pub fn replaceModuleCaptureSlotOwned(
         self: *Object,
+        rt: *JSRuntime,
         index: usize,
         cell: *var_ref_mod.VarRef,
     ) !void {
@@ -5519,6 +5613,9 @@ pub const Object = extern struct {
         if (index >= slots.len) return error.InvalidBytecode;
 
         slots[index] = cell;
+        // Linking runs long after the module function was created, so the
+        // owner can be old while the cell is fresh.
+        rt.gc.generationalBarrier(self.gcHeader(), &cell.header);
     }
 
     /// Roll one indexed module-import slot back to its pre-link null state.
@@ -5553,16 +5650,22 @@ pub const Object = extern struct {
         return @ptrCast(@alignCast(stored));
     }
 
-    /// Stores a strong `[[HomeObject]]` edge; callers must not write the slot directly.
-    pub fn setFunctionHomeObject(self: *Object, _: *JSRuntime, home_object: ?*Object) !void {
+    /// Internal typed view of the real field, after resolving the aux tag.
+    /// The untagged word stores an Object pointer (never a GC-header alias).
+    fn functionHomeObjectSlot(self: *Object) *?*Object {
         std.debug.assert(class.isBytecodeFunctionClass(self.class_id));
-        const old_home_object = self.functionHomeObject();
-        if (old_home_object == home_object) return;
-        if (self.bytecodeFunctionAux()) |aux| {
-            aux.home_object = home_object;
-        } else {
-            self.bytecodeArm().*.home_or_aux = if (home_object) |next| @ptrCast(next) else null;
-        }
+        if (self.bytecodeFunctionAux()) |aux| return &aux.home_object;
+        return @ptrCast(&self.bytecodeArm().*.home_or_aux);
+    }
+
+    /// Stores a strong `[[HomeObject]]` edge; callers must not write the slot directly.
+    pub fn setFunctionHomeObject(self: *Object, rt: *JSRuntime, home_object: ?*Object) !void {
+        const slot = self.functionHomeObjectSlot();
+        if (slot.* == home_object) return;
+        slot.* = home_object;
+        // Aux storage is traced through this function, so the remembered
+        // owner is the function for both direct and tagged representations.
+        rt.gc.generationalBarrier(self.gcHeader(), if (home_object) |home| home.gcHeader() else null);
     }
 
     pub fn setCallSiteMetadata(
@@ -6555,12 +6658,8 @@ pub const Object = extern struct {
         switch (slot_flags.kind) {
             .data => unreachable,
             .accessor => {
-                var getter_value = entry.slot.accessor.getterValue();
-                try gc_visit.value(visitor, &getter_value);
-                entry.slot.accessor.syncGetterFromVisitedValue(getter_value);
-                var setter_value = entry.slot.accessor.setterValue();
-                try gc_visit.value(visitor, &setter_value);
-                entry.slot.accessor.syncSetterFromVisitedValue(setter_value);
+                try gc_visit.object(visitor, &entry.slot.accessor.getter);
+                try gc_visit.object(visitor, &entry.slot.accessor.setter);
             },
             .var_ref => {
                 var cell_value = entry.slot.var_ref.valueRef();
@@ -6569,8 +6668,8 @@ pub const Object = extern struct {
             .auto_init => {
                 const realm_header = entry.slot.auto_init.realm_and_id.realmHeader().?;
                 var realm: ?*context_mod.RealmContext = @alignCast(@fieldParentPtr("header", realm_header));
+                defer entry.slot.auto_init.realm_and_id.syncRealmHeader(&(realm.?).header);
                 try gc_visit.realm(visitor, &realm);
-                entry.slot.auto_init.realm_and_id.syncRealmHeader(&(realm.?).header);
             },
         }
     }
@@ -6749,29 +6848,30 @@ pub const Object = extern struct {
             }
             if (self.bytecodeArm().*.function_bytecode) |fb| {
                 var bytecode_value = JSValue.functionBytecode(&fb.header);
+                defer {
+                    self.bytecodeArm().*.function_bytecode = if (bytecode_value.functionBytecodeHeader()) |header|
+                        @alignCast(@fieldParentPtr("header", header))
+                    else
+                        null;
+                }
                 try gc_visit.value(visitor, &bytecode_value);
-                self.bytecodeArm().*.function_bytecode = if (bytecode_value.functionBytecodeHeader()) |header|
-                    @alignCast(@fieldParentPtr("header", header))
-                else
-                    null;
-            }
-            var home_object = self.functionHomeObject();
-            try gc_visit.object(visitor, &home_object);
-            if (self.bytecodeFunctionAux()) |aux| {
-                aux.home_object = home_object;
-            } else {
-                self.bytecodeArm().*.home_or_aux = if (home_object) |home| @ptrCast(home) else null;
             }
             // zjs-only aux (source / realm_global / promise slots). Absent in
             // qjs 6262; keep so rare cycle edges stay live. Then return: the
             // class mark is done. TGC S4-c: the aux record is a `.payload`
             // cell, so report the cell before walking its contents.
-            if (self.bytecodeFunctionAux()) |aux| {
+            if (self.bytecodeFunctionAux() != null) {
                 try gc_visit.storageCell(visitor, .{
                     .slot = @ptrCast(&self.bytecodeArm().*.home_or_aux),
                     .tag = bytecode_function_aux_tag,
                 });
+                // Resolve again after the storage visitor repairs its owner
+                // slot. Child addresses belong to the current aux allocation.
+                const aux = self.bytecodeFunctionAux().?;
+                try gc_visit.object(visitor, &aux.home_object);
                 try aux.rare.traceChildEdges(visitor);
+            } else {
+                try gc_visit.object(visitor, self.functionHomeObjectSlot());
             }
             return;
         }
@@ -7244,9 +7344,9 @@ pub const Object = extern struct {
 
     /// QJS-shaped first-access transaction. Shape preparation uses the caller
     /// Runtime before the stored construction Realm invokes exactly one
-    /// builder. Any failure leaves the placeholder and its Realm owner intact;
-    /// successful commit is infallible and releases that slot owner exactly
-    /// once while the produced C function (if any) keeps its own RealmRef.
+    /// builder. An unchanged placeholder survives failure for retry. Global
+    /// value publication can still fail while allocating its VarRef cell;
+    /// successful publication replaces the placeholder exactly once.
     fn materializeAutoInit(self: *Object, index: usize) PropertyReadError!JSValue {
         if (index >= self.shape_ref.prop_count or !self.isAutoInitAt(index)) return error.IncompatibleDescriptor;
 
@@ -7255,6 +7355,18 @@ pub const Object = extern struct {
         const realm_header = expected_slot.realm_and_id.realmHeader() orelse return error.InvalidBuiltinRegistry;
         const realm: *context_mod.RealmContext = @alignCast(@fieldParentPtr("header", realm_header));
         const rt = realm.runtime;
+
+        // Readers also enter here without an outer definition transaction.
+        // Keep the raw receiver stable across shape growth and reentrant
+        // builders. The saved Realm/atom must survive even if a callback
+        // replaces the placeholder before the post-callback validation.
+        const values = [_]JSValue{self.value()};
+        const slices = [_]runtime_mod.ValueRootSlice{.{ .borrowed = &values }};
+        const headers = [_]runtime_mod.HeaderRootValue{.{ .header = realm_header }};
+        const atoms = [_]runtime_mod.AtomRootSlot{.{ .single = &expected_atom }};
+        var roots = runtime_mod.ValueRootFrame{ .slices = &slices, .headers = &headers, .atoms = &atoms };
+        roots.activate(rt);
+        defer roots.deactivate(rt);
 
         // This is the only fallible target-shape step. It deliberately occurs
         // before the builder so commit never needs to allocate or clone shape
@@ -7386,14 +7498,13 @@ pub const Object = extern struct {
     fn materializeNativeFunctionAutoInit(realm: *context_mod.RealmContext, info: *const property.AutoInit) !JSValue {
         const function_proto = realm.cached_function_proto orelse return error.InvalidBuiltinRegistry;
         const materialized = try function.nativeFunctionWithPrototypeAndCapacity(realm, function_proto, info.name, info.length, 2);
-        if (comptime runtime_mod.value_root_frames_enabled) {
-            var live = materialized;
-            var val_roots = runtime_mod.rootValues(.{&live});
-            val_roots.activate(realm.runtime);
-            defer val_roots.deactivate(realm.runtime);
-            try prepareAutoInitNativeFunction(realm.runtime, info, live);
-            return live;
-        }
+        // Preparation can allocate and invoke a host hook with a by-value
+        // function argument. It is not reachable from the placeholder yet.
+        const values = [_]JSValue{materialized};
+        const slices = [_]runtime_mod.ValueRootSlice{.{ .borrowed = &values }};
+        var roots = runtime_mod.ValueRootFrame{ .slices = &slices };
+        roots.activate(realm.runtime);
+        defer roots.deactivate(realm.runtime);
         try prepareAutoInitNativeFunction(realm.runtime, info, materialized);
         return materialized;
     }
@@ -7418,8 +7529,13 @@ pub const Object = extern struct {
     }
 
     fn materializeArrayUnscopablesAutoInit(rt: *JSRuntime) !JSValue {
-        const object = try Object.create(rt, class.ids.object, null);
-        const unscopables_value = object.value();
+        var values = [_]JSValue{JSValue.undefinedValue()};
+        const slots: []JSValue = &values;
+        const slices = [_]runtime_mod.ValueRootSlice{.{ .mutable = &slots }};
+        var roots = runtime_mod.ValueRootFrame{ .slices = &slices };
+        roots.activate(rt);
+        defer roots.deactivate(rt);
+        values[0] = (try Object.create(rt, class.ids.object, null)).value();
         // qjs js_array_unscopables (order incl. "at"; spec 23.1.3.41).
         const names = [_][]const u8{
             "at",
@@ -7445,13 +7561,13 @@ pub const Object = extern struct {
             var key_roots = runtime_mod.rootAtoms(.{&key});
             key_roots.activate(rt);
             defer key_roots.deactivate(rt);
-            try object.defineOwnPropertyAssumingNew(
+            try Object.fromHeader(values[0].refHeader().?).defineOwnPropertyAssumingNew(
                 rt,
                 key,
                 descriptor.Descriptor.data(JSValue.boolean(true), .all),
             );
         }
-        return unscopables_value;
+        return values[0];
     }
 
     fn applyAutoInitFunctionMarkers(rt: *JSRuntime, function_value: JSValue, info: *const property.AutoInit) !void {
@@ -7482,19 +7598,24 @@ pub const Object = extern struct {
         if (realm.global == null) return error.InvalidBuiltinRegistry;
         const function_proto = realm.cached_function_proto orelse return error.InvalidBuiltinRegistry;
         const function_capacity: usize = 2 + if (info.host_function_prototype) @as(usize, 1) else 0;
-        const function_value = try function.nativeFunctionWithPrototypeAndCapacity(realm, function_proto, info.name, info.length, function_capacity);
-        const function_object = try Object.expect(function_value);
+        var values = [_]JSValue{ JSValue.undefinedValue(), JSValue.undefinedValue(), JSValue.undefinedValue() };
+        const slots: []JSValue = &values;
+        const slices = [_]runtime_mod.ValueRootSlice{.{ .mutable = &slots }};
+        var roots = runtime_mod.ValueRootFrame{ .slices = &slices };
+        roots.activate(rt);
+        defer roots.deactivate(rt);
+        values[0] = try function.nativeFunctionWithPrototypeAndCapacity(realm, function_proto, info.name, info.length, function_capacity);
+        const function_object = try Object.expect(values[0]);
         function_object.hostFunctionKindSlot().* = info.host_function_kind;
         if (info.native_entry) |entry| function_object.installNativeEntry(entry);
         if (info.host_function_prototype) {
-            const object_proto_value = try objectPrototypeValueForAutoInit(realm);
-            const prototype = try Object.createWithOwnPropertyCapacity(rt, class.ids.object, objectFromValue(object_proto_value), 0);
-            const prototype_value = prototype.value();
+            values[1] = try objectPrototypeValueForAutoInit(realm);
+            values[2] = (try Object.createWithOwnPropertyCapacity(rt, class.ids.object, objectFromValue(values[1]), 0)).value();
             const prototype_key = atom.ids.prototype;
-            try function_object.defineOwnPropertyAssumingNew(rt, prototype_key, descriptor.Descriptor.data(prototype_value, .all));
+            try Object.fromHeader(values[0].refHeader().?).defineOwnPropertyAssumingNew(rt, prototype_key, descriptor.Descriptor.data(values[2], .all));
         }
 
-        return function_value;
+        return values[0];
     }
 
     fn materializeBuiltinNamespaceAutoInit(realm: *context_mod.RealmContext, info: *const property.AutoInit) PropertyReadError!JSValue {
@@ -7532,61 +7653,71 @@ pub const Object = extern struct {
 
     fn materializeNavigatorAutoInit(realm: *context_mod.RealmContext) !JSValue {
         const rt = realm.runtime;
-        const object_proto_value = try objectPrototypeValueForAutoInit(realm);
-        const proto = try Object.createWithOwnPropertyCapacity(rt, class.ids.object, objectFromValue(object_proto_value), 2);
+        var values = [_]JSValue{ JSValue.undefinedValue(), JSValue.undefinedValue() };
+        const slots: []JSValue = &values;
+        const slices = [_]runtime_mod.ValueRootSlice{.{ .mutable = &slots }};
+        var roots = runtime_mod.ValueRootFrame{ .slices = &slices };
+        roots.activate(rt);
+        defer roots.deactivate(rt);
+        values[0] = try objectPrototypeValueForAutoInit(realm);
+        values[0] = (try Object.createWithOwnPropertyCapacity(rt, class.ids.object, objectFromValue(values[0]), 2)).value();
 
-        const tag = try string.String.createAscii(rt, "Navigator");
-        const tag_value = tag.value();
-        try proto.defineOwnPropertyAssumingNew(
+        values[1] = (try string.String.createAscii(rt, "Navigator")).value();
+        try Object.fromHeader(values[0].refHeader().?).defineOwnPropertyAssumingNew(
             rt,
             atom.predefinedId("Symbol.toStringTag", .symbol).?,
-            descriptor.Descriptor.data(tag_value, .{ .configurable = true }),
+            descriptor.Descriptor.data(values[1], .{ .configurable = true }),
         );
 
-        const getter = try function.nativeFunction(realm, "get userAgent", 0);
-        if (getter.refHeader()) |getter_header| {
+        values[1] = try function.nativeFunction(realm, "get userAgent", 0);
+        if (values[1].refHeader()) |getter_header| {
             const getter_object = Object.fromHeader(getter_header);
             getter_object.setNativeBuiltinIdAndRecord(rt, function.nativeBuiltinId(.host, @intFromEnum(function.HostGlobalMethod.navigator_user_agent_get)));
         }
         const user_agent = atom.ids.userAgent;
-        try proto.defineOwnPropertyAssumingNew(
+        try Object.fromHeader(values[0].refHeader().?).defineOwnPropertyAssumingNew(
             rt,
             user_agent,
-            descriptor.Descriptor.accessor(getter, JSValue.undefinedValue(), .{ .enumerable = true, .configurable = true }),
+            descriptor.Descriptor.accessor(values[1], JSValue.undefinedValue(), .{ .enumerable = true, .configurable = true }),
         );
 
-        const navigator = try Object.createWithOwnPropertyCapacity(rt, class.ids.object, proto, 0);
+        const navigator = try Object.createWithOwnPropertyCapacity(rt, class.ids.object, objectFromValue(values[0]), 0);
         return navigator.value();
     }
 
     fn materializePerformanceAutoInit(realm: *context_mod.RealmContext) !JSValue {
         const rt = realm.runtime;
-        const global = realm.global orelse return error.InvalidBuiltinRegistry;
+        if (realm.global == null) return error.InvalidBuiltinRegistry;
         if (rt.performance_time_origin_ms == 0) rt.performance_time_origin_ms = performanceAutoInitNowMs();
-        const object_proto_value = try objectPrototypeValueForAutoInit(realm);
-        const performance = try Object.createWithOwnPropertyCapacity(rt, class.ids.object, objectFromValue(object_proto_value), 2);
-        const performance_value = performance.value();
+        var values = [_]JSValue{JSValue.undefinedValue()};
+        const slots: []JSValue = &values;
+        const slices = [_]runtime_mod.ValueRootSlice{.{ .mutable = &slots }};
+        var roots = runtime_mod.ValueRootFrame{ .slices = &slices };
+        roots.activate(rt);
+        defer roots.deactivate(rt);
+        values[0] = try objectPrototypeValueForAutoInit(realm);
+        values[0] = (try Object.createWithOwnPropertyCapacity(rt, class.ids.object, objectFromValue(values[0]), 2)).value();
 
         const now_key = atom.predefinedId("now", .string).?;
         const method_flags = property.Flags.data(.method);
-        try performance.defineAutoInitPropertyWithRealmAndNative(
+        try Object.fromHeader(values[0].refHeader().?).defineAutoInitPropertyWithRealmAndNative(
             rt,
             now_key,
             "now",
             0,
             method_flags,
-            global,
+            realm.global orelse return error.InvalidBuiltinRegistry,
             function.nativeBuiltinId(.performance, 1),
         );
 
         const origin_key = atom.predefinedId("timeOrigin", .string).?;
-        try performance.defineOwnPropertyAssumingNew(
+        try Object.fromHeader(values[0].refHeader().?).defineOwnPropertyAssumingNew(
             rt,
             origin_key,
             descriptor.Descriptor.data(JSValue.float64(rt.performance_time_origin_ms), .all),
         );
 
-        return performance_value;
+        return values[0];
     }
 
     fn performanceAutoInitNowMs() f64 {
@@ -7623,13 +7754,18 @@ pub const Object = extern struct {
     /// function whose `.prototype` is never observed.
     fn materializeFunctionPrototypeAutoInit(self: *Object, realm: *context_mod.RealmContext) !JSValue {
         const rt = realm.runtime;
-        const object_proto_value = try objectPrototypeValueForAutoInit(realm);
-        const prototype = try Object.create(rt, class.ids.object, objectFromValue(object_proto_value));
-        var prototype_owned = true;
-        errdefer if (prototype_owned) Object.destroyFromHeader(rt, prototype.gcHeader());
-        try prototype.defineOwnProperty(rt, atom.ids.constructor, descriptor.Descriptor.data(self.value(), .method));
-        prototype_owned = false;
-        return prototype.value();
+        var values = [_]JSValue{JSValue.undefinedValue()};
+        const slots: []JSValue = &values;
+        const slices = [_]runtime_mod.ValueRootSlice{.{ .mutable = &slots }};
+        var roots = runtime_mod.ValueRootFrame{ .slices = &slices };
+        roots.activate(rt);
+        defer roots.deactivate(rt);
+        // The materialization transaction borrows self at a stable address.
+        // Partial results belong to GC on failure, including after relocation.
+        values[0] = try objectPrototypeValueForAutoInit(realm);
+        values[0] = (try Object.create(rt, class.ids.object, objectFromValue(values[0]))).value();
+        try Object.fromHeader(values[0].refHeader().?).defineOwnProperty(rt, atom.ids.constructor, descriptor.Descriptor.data(self.value(), .method));
+        return values[0];
     }
 
     /// qjs `JS_DefineAutoInitProperty` on a freshly
@@ -7763,6 +7899,15 @@ pub const Object = extern struct {
     }
 
     pub fn defineOwnProperty(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, desc: descriptor.Descriptor) !void {
+        // Existing properties may run an AUTOINIT callback before consuming
+        // the descriptor. The raw receiver and copied descriptor fields are
+        // borrowed for this entire transaction, including failure rollback.
+        const values = [_]JSValue{ self.value(), desc.value, desc.getter, desc.setter };
+        const slices = [_]runtime_mod.ValueRootSlice{.{ .borrowed = &values }};
+        const atoms = [_]runtime_mod.AtomRootSlot{.{ .single = &atom_id }};
+        var roots = runtime_mod.ValueRootFrame{ .slices = &slices, .atoms = &atoms };
+        roots.activate(rt);
+        defer roots.deactivate(rt);
         // Generational barrier at the define funnel. Every define path below --
         // ordinary, exotic, array, create-on-miss -- publishes the descriptor's
         // references into this object, and they are spread across a dozen raw
@@ -7928,6 +8073,13 @@ pub const Object = extern struct {
         std.debug.assert(self.class_id != class.ids.mapped_arguments);
         std.debug.assert(self.flags.extensible);
         if (needed <= self.propertyStorageCapacity() and rt.shapes.hasReservedOwnPropertyCapacity(self.shape_ref, needed)) return;
+        // Shape/storage growth lends interior pointers into this raw receiver.
+        // Heap-budget retry must neither collect nor relocate their owner.
+        const values = [_]JSValue{self.value()};
+        const slices = [_]runtime_mod.ValueRootSlice{.{ .borrowed = &values }};
+        var roots = runtime_mod.ValueRootFrame{ .slices = &slices };
+        roots.activate(rt);
+        defer roots.deactivate(rt);
         // Bulk install paths build fresh ordinary objects. Once capacity is
         // reserved, keep their shapes unique and append in place instead of
         // creating a transition node per property.
@@ -9401,6 +9553,13 @@ pub const Object = extern struct {
             var i = self.shape_ref.prop_count;
             while (i > 0) {
                 i -= 1;
+                // A deletion below may compact the shape. Compaction keeps the
+                // survivors in order, so every entry not yet visited now sits
+                // below both the cursor and the new count.
+                if (i >= self.shape_ref.prop_count) {
+                    i = self.shape_ref.prop_count;
+                    continue;
+                }
                 if (self.propFlagsAt(i).deleted) continue;
                 const prop_atom = self.propAtomAt(i);
                 const index = array.arrayIndexFromAtom(rt.atoms, prop_atom) orelse continue;
@@ -9511,8 +9670,8 @@ pub const Object = extern struct {
         switch (flags.kind) {
             .data => rt.gc.generationalBarrier(self.gcHeader(), slot.data.cycleMarkHeader()),
             .accessor => {
-                if (slot.accessor.getter) |g| rt.gc.generationalBarrier(self.gcHeader(), g);
-                if (slot.accessor.setter) |st| rt.gc.generationalBarrier(self.gcHeader(), st);
+                if (slot.accessor.getter) |g| rt.gc.generationalBarrier(self.gcHeader(), g.gcHeader());
+                if (slot.accessor.setter) |st| rt.gc.generationalBarrier(self.gcHeader(), st.gcHeader());
             },
             .var_ref => rt.gc.generationalBarrier(self.gcHeader(), &slot.var_ref.header),
             .auto_init => {},
@@ -9569,21 +9728,14 @@ pub const Object = extern struct {
         // barrier was therefore duplicate fixed work, including on failures;
         // it also cannot replace the commit barrier because a major may begin
         // during the allocations between the probe and the eventual store.
-        // §4.6 rooted construction: the over-hang value is excluded from
-        // `propertyEntries()` until the shape transition commits, and the
-        // holder is only a Zig `*Object`. Trial deletion treated the live RC
-        // as an external root; tracing needs the mutation window named.
-        if (comptime runtime_mod.value_root_frames_enabled) {
-            var holder: ?*Object = self;
-            var in_flight = data_value;
-            var obj_roots = runtime_mod.rootObjects(.{&holder});
-            var val_roots = runtime_mod.rootValues(.{&in_flight});
-            obj_roots.activate(rt);
-            defer obj_roots.deactivate(rt);
-            val_roots.activate(rt);
-            defer val_roots.deactivate(rt);
-            return definePlainDataPropertyKnownFastMut(self, rt, atom_id, in_flight);
-        }
+        // The duplicate-key leg can materialize an AUTOINIT property before
+        // replacing it. Protect its raw receiver/value borrow in production
+        // too; the append helper's shorter window cannot cover that callback.
+        const values = [_]JSValue{ self.value(), data_value };
+        const slices = [_]runtime_mod.ValueRootSlice{.{ .borrowed = &values }};
+        var roots = runtime_mod.ValueRootFrame{ .slices = &slices };
+        roots.activate(rt);
+        defer roots.deactivate(rt);
         return definePlainDataPropertyKnownFastMut(self, rt, atom_id, data_value);
     }
 
@@ -9654,25 +9806,28 @@ pub const Object = extern struct {
     }
 
     inline fn appendPreparedPropertyEntryRooted(comptime named_put_no_index: bool, self: *Object, rt: *JSRuntime, atom_id: atom.Atom, entry_flags: property.Flags, slot: property.Slot) !void {
-        if (comptime runtime_mod.value_root_frames_enabled) {
-            var holder: ?*Object = self;
-            var in_flight: JSValue = if (entry_flags.kind == .data) slot.data else JSValue.undefinedValue();
-            var obj_roots = runtime_mod.rootObjects(.{&holder});
-            var val_roots = runtime_mod.rootValues(.{&in_flight});
-            obj_roots.activate(rt);
-            defer obj_roots.deactivate(rt);
-            val_roots.activate(rt);
-            defer val_roots.deactivate(rt);
-            const live_slot: property.Slot = if (entry_flags.kind == .data) .{ .data = in_flight } else slot;
-            return appendPreparedPropertyEntryWork(
-                named_put_no_index,
-                self,
-                rt,
-                atom_id,
-                entry_flags,
-                live_slot,
-            );
-        }
+        // This transaction lends interior pointers (shape_ref and the inline
+        // property tail) to allocating helpers. Keep that borrow at a stable
+        // address until commit/rollback; mutable caller roots alone cannot
+        // rewrite those interior pointers or the copied property union.
+        const values = [_]JSValue{
+            self.value(),
+            if (entry_flags.kind == .data) slot.data else JSValue.undefinedValue(),
+            if (entry_flags.kind == .accessor and slot.accessor.getter != null) slot.accessor.getter.?.value() else JSValue.undefinedValue(),
+            if (entry_flags.kind == .accessor and slot.accessor.setter != null) slot.accessor.setter.?.value() else JSValue.undefinedValue(),
+            if (entry_flags.kind == .var_ref) slot.var_ref.valueRef() else JSValue.undefinedValue(),
+        };
+        const headers: [1]runtime_mod.HeaderRootValue = if (entry_flags.kind == .auto_init)
+            .{.{ .header = slot.auto_init.realm_and_id.realmHeader().? }}
+        else
+            undefined;
+        const slices = [_]runtime_mod.ValueRootSlice{.{ .borrowed = &values }};
+        var roots = runtime_mod.ValueRootFrame{
+            .slices = &slices,
+            .headers = if (entry_flags.kind == .auto_init) &headers else &.{},
+        };
+        roots.activate(rt);
+        defer roots.deactivate(rt);
         return appendPreparedPropertyEntryWork(
             named_put_no_index,
             self,
@@ -9695,6 +9850,18 @@ pub const Object = extern struct {
         const old_len = self.shape_ref.prop_count;
         const old_storage = self.prop_values;
         const old_capacity = self.propertyStorageCapacity();
+        // Rollback may restore this cell after the replacement is published.
+        // It is then no longer reachable through the owner during shape growth.
+        const has_old_storage_cell = self.propertyStoragePointerIsExternal(old_storage);
+        const old_storage_headers: [1]runtime_mod.HeaderRootValue = if (has_old_storage_cell)
+            .{.{ .header = propertyStorageCellHeader(old_storage) }}
+        else
+            undefined;
+        var old_storage_roots = runtime_mod.ValueRootFrame{
+            .headers = if (has_old_storage_cell) &old_storage_headers else &.{},
+        };
+        old_storage_roots.activate(rt);
+        defer old_storage_roots.deactivate(rt);
         var current_capacity = old_capacity;
         var grew_properties = false;
         if (old_len + 1 > old_capacity) {
@@ -9738,8 +9905,7 @@ pub const Object = extern struct {
         // BEFORE adoptShapeForNewProperty below commits prop_count = old_len + 1.
         // Until that commit the entry is EXCLUDED from propertyEntries(); a GC
         // triggered by the shape allocation skips it. Tracing keeps the value
-        // through the mutation-window ValueRootFrame (§4.6). Trial deletion
-        // keeps it because the untraced RC is an external root.
+        // through the mutation-window ValueRootFrame.
         self.propertyEntry(old_len).* = .{ .slot = slot };
         // A new property on a long-lived object is an old-to-young edge like
         // any other store. The shape transition below takes its own barrier for
@@ -10471,6 +10637,223 @@ pub const Object = extern struct {
     }
 };
 
+test "home object old to young writes survive minor collection" {
+    for ([_]bool{ false, true }) |auxiliary| {
+        for ([_]bool{ false, true }) |nursery| {
+            const rt = try JSRuntime.create(std.testing.allocator, .{});
+            defer rt.destroy();
+            rt.gc.nursery.enabled = nursery;
+            var roots = runtime_mod.ExactValueRoots(1){};
+            try roots.activate(rt);
+            defer roots.deactivate();
+            const closure = try Object.create(rt, class.ids.bytecode_function, null);
+            try (try roots.ref(0)).set(rt, closure.value());
+            if (auxiliary) _ = try closure.ensureFunctionRarePayload(rt);
+            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            try std.testing.expect(!closure.gcHeader().meta().flags.young);
+            const home = try Object.createPlainObject(rt, null);
+            const before = @intFromPtr(home);
+            try closure.setFunctionHomeObject(rt, home);
+            try std.testing.expect(rt.gc.generation.remembered.contains(@intFromPtr(closure.gcHeader())));
+            _ = try @import("gc_trace_stw.zig").collectMinor(rt, null, .declared_only);
+            const stored = closure.functionHomeObject().?;
+            try std.testing.expect(rt.gc.containsHeader(stored.gcHeader()));
+            try std.testing.expectEqual(nursery, @intFromPtr(stored) != before);
+            try closure.setFunctionHomeObject(rt, null);
+            _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+            try std.testing.expect(!rt.gc.containsHeader(stored.gcHeader()));
+        }
+    }
+}
+
+test "home object tracing exposes real slots on success and failure" {
+    for ([_]bool{ false, true }) |auxiliary| {
+        for ([_]bool{ false, true }) |fail| {
+            const rt = try JSRuntime.create(std.testing.allocator, .{});
+            defer rt.destroy();
+            const closure = try Object.create(rt, class.ids.bytecode_function, null);
+            const original = try Object.createPlainObject(rt, null);
+            const replacement = try Object.createPlainObject(rt, null);
+            try closure.setFunctionHomeObject(rt, original);
+            if (auxiliary) _ = try closure.ensureFunctionRarePayload(rt);
+            const Probe = struct {
+                pub const gc_visit_policy: gc_visit.Policy = .partial;
+                expected: usize,
+                original: *Object,
+                replacement: *Object,
+                fail: bool,
+                actual_slot: bool = false,
+                pub fn visitObject(self: *@This(), slot: *?*Object) error{PayloadMarkFailed}!void {
+                    if (slot.* != self.original) return;
+                    self.actual_slot = @intFromPtr(slot) == self.expected;
+                    slot.* = self.replacement;
+                    if (self.fail) return error.PayloadMarkFailed;
+                }
+            };
+            var probe = Probe{
+                .expected = if (closure.bytecodeFunctionAux()) |aux| @intFromPtr(&aux.home_object) else @intFromPtr(&closure.bytecodeArm().*.home_or_aux),
+                .original = original,
+                .replacement = replacement,
+                .fail = fail,
+            };
+            if (fail) {
+                try std.testing.expectError(error.PayloadMarkFailed, closure.traceChildEdgesFallible(rt, &probe));
+            } else {
+                try closure.traceChildEdgesFallible(rt, &probe);
+            }
+            try std.testing.expect(probe.actual_slot);
+            try std.testing.expectEqual(replacement, closure.functionHomeObject().?);
+        }
+    }
+}
+
+test "home object tracing resolves auxiliary storage before child slots" {
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const closure = try Object.create(rt, class.ids.bytecode_function, null);
+    const original = try Object.createPlainObject(rt, null);
+    const replacement = try Object.createPlainObject(rt, null);
+    try closure.setFunctionHomeObject(rt, original);
+    _ = try closure.ensureFunctionRarePayload(rt);
+    const old_aux = closure.bytecodeFunctionAux().?;
+    old_aux.rare.source = JSValue.int32(11);
+    var moved_aux = old_aux.*;
+    moved_aux.rare.source = JSValue.int32(73);
+    const stored_word = closure.bytecodeArm().*.home_or_aux;
+    // This visitor simulates storage relocation into a local copy. Restore
+    // the registered allocation before Runtime tears down the real heap.
+    defer closure.bytecodeArm().*.home_or_aux = stored_word;
+    const Probe = struct {
+        pub const gc_visit_policy: gc_visit.Policy = .partial;
+        old_aux: *BytecodeFunctionAux,
+        moved_aux: *BytecodeFunctionAux,
+        replacement: *Object,
+        storage_repaired: bool = false,
+        home_repaired: bool = false,
+        source_visited: bool = false,
+        pub fn storageCell(self: *@This(), edge: gc_visit.CellSlot) void {
+            if (edge.address() != @intFromPtr(self.old_aux)) return;
+            edge.rebind(@intFromPtr(self.moved_aux));
+            self.storage_repaired = true;
+        }
+        pub fn visitObject(self: *@This(), slot: *?*Object) void {
+            if (slot != &self.moved_aux.home_object) return;
+            self.home_repaired = self.storage_repaired;
+            slot.* = self.replacement;
+        }
+        pub fn visitValue(self: *@This(), slot: *JSValue) void {
+            if (slot == &self.moved_aux.rare.source.?) self.source_visited = self.storage_repaired;
+        }
+    };
+    var probe = Probe{ .old_aux = old_aux, .moved_aux = &moved_aux, .replacement = replacement };
+    try closure.traceChildEdgesFallible(rt, &probe);
+    try std.testing.expect(probe.storage_repaired and probe.home_repaired and probe.source_visited);
+    try std.testing.expectEqual(replacement, closure.functionHomeObject().?);
+    try std.testing.expectEqual(original, old_aux.home_object.?);
+    try std.testing.expectEqual(Object.bytecode_function_aux_tag, @intFromPtr(closure.bytecodeArm().*.home_or_aux.?) & Object.bytecode_function_aux_tag);
+}
+
+test "root adapter bytecode preserves visitor repairs on failure" {
+    for ([_]bool{ false, true }) |fail| {
+        const rt = try JSRuntime.create(std.testing.allocator, .{});
+        defer rt.destroy();
+        const closure = try Object.create(rt, class.ids.bytecode_function, null);
+        // Only the carrier addresses are observed; no bytecode body or GC
+        // metadata is read by this partial visitor. Unlink before teardown.
+        var original: FunctionBytecode = undefined;
+        var replacement: FunctionBytecode = undefined;
+        closure.bytecodeArm().*.function_bytecode = &original;
+        defer closure.bytecodeArm().*.function_bytecode = null;
+        const Probe = struct {
+            pub const gc_visit_policy: gc_visit.Policy = .partial;
+            original: JSValue,
+            replacement: JSValue,
+            fail: bool,
+            pub fn visitValue(self: *@This(), slot: *JSValue) !void {
+                if (!slot.same(self.original)) return;
+                slot.* = self.replacement;
+                if (self.fail) return error.PayloadMarkFailed;
+            }
+        };
+        var probe = Probe{ .original = JSValue.functionBytecode(&original.header), .replacement = JSValue.functionBytecode(&replacement.header), .fail = fail };
+        if (fail) try std.testing.expectError(error.PayloadMarkFailed, closure.traceChildEdgesFallible(rt, &probe)) else try closure.traceChildEdgesFallible(rt, &probe);
+        try std.testing.expectEqual(&replacement, closure.bytecodeArm().*.function_bytecode.?);
+    }
+}
+
+test "root adapter AUTOINIT Realm preserves visitor repairs on failure" {
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const original = try context_mod.RealmContext.create(rt, .{});
+    defer original.destroy();
+    const replacement = try context_mod.RealmContext.create(rt, .{});
+    defer replacement.destroy();
+    for ([_]bool{ false, true }) |fail| {
+        var entry = property.Entry{ .slot = .{ .auto_init = property.AutoInitSlot.retainPrototype(&original.header) } };
+        const Probe = struct {
+            pub const gc_visit_policy: gc_visit.Policy = .partial;
+            replacement: *context_mod.RealmContext,
+            fail: bool,
+            pub fn visitRealm(self: *@This(), slot: *?*context_mod.RealmContext) !void {
+                slot.* = self.replacement;
+                if (self.fail) return error.PayloadMarkFailed;
+            }
+        };
+        var probe = Probe{ .replacement = replacement, .fail = fail };
+        if (fail) try std.testing.expectError(error.PayloadMarkFailed, Object.traceUnusualPropertyFallible(&probe, &entry, .{ .kind = .auto_init })) else try Object.traceUnusualPropertyFallible(&probe, &entry, .{ .kind = .auto_init });
+        try std.testing.expectEqual(&replacement.header, entry.slot.auto_init.realm_and_id.realmHeader().?);
+    }
+}
+
+test "accessor tracing exposes real slots and preserves repairs on failure" {
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const original = try Object.createPlainObject(rt, null);
+    const replacement = try Object.createPlainObject(rt, null);
+    for ([_]bool{ false, true }) |setter| {
+        for ([_]bool{ false, true }) |fail| {
+            var entry = property.Entry{ .slot = .{ .accessor = property.Accessor.fromBorrowedValues(
+                if (setter) JSValue.undefinedValue() else original.value(),
+                if (setter) original.value() else JSValue.undefinedValue(),
+            ) } };
+            const Probe = struct {
+                pub const gc_visit_policy: gc_visit.Policy = .partial;
+                expected_address: usize,
+                original: *Object,
+                replacement: *Object,
+                fail: bool,
+                actual_slot: bool = false,
+                pub fn visitValue(self: *@This(), slot: *JSValue) error{PayloadMarkFailed}!void {
+                    if (slot.bits != self.original.value().bits) return;
+                    self.actual_slot = @intFromPtr(slot) == self.expected_address;
+                    slot.* = self.replacement.value();
+                    if (self.fail) return error.PayloadMarkFailed;
+                }
+                pub fn visitObject(self: *@This(), slot: *?*Object) error{PayloadMarkFailed}!void {
+                    if (slot.* != self.original) return;
+                    self.actual_slot = @intFromPtr(slot) == self.expected_address;
+                    slot.* = self.replacement;
+                    if (self.fail) return error.PayloadMarkFailed;
+                }
+            };
+            var probe = Probe{
+                .expected_address = if (setter) @intFromPtr(&entry.slot.accessor.setter) else @intFromPtr(&entry.slot.accessor.getter),
+                .original = original,
+                .replacement = replacement,
+                .fail = fail,
+            };
+            if (fail) {
+                try std.testing.expectError(error.PayloadMarkFailed, Object.traceUnusualPropertyFallible(&probe, &entry, .{ .kind = .accessor }));
+            } else {
+                try Object.traceUnusualPropertyFallible(&probe, &entry, .{ .kind = .accessor });
+            }
+            try std.testing.expect(probe.actual_slot);
+            const repaired = if (setter) entry.slot.accessor.setterValue() else entry.slot.accessor.getterValue();
+            try std.testing.expectEqual(replacement.value().bits, repaired.bits);
+        }
+    }
+}
+
 test "object value refs keep nested symbol bodies without external symbol roots" {
     const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
@@ -10735,14 +11118,24 @@ fn arrayLengthNumber(rt: *JSRuntime, value: JSValue) !?f64 {
 }
 
 fn arrayLengthStringNumber(rt: *JSRuntime, value: JSValue) !f64 {
-    const string_value = value.asStringBody() orelse return std.math.nan(f64);
+    if (!value.isString()) return std.math.nan(f64);
+    // This core descriptor path retains its ASCII-only conversion contract.
+    // Native copying may fail, but must not collect while the caller borrows
+    // the array and descriptor, nor implicitly materialize a rope.
+    var borrow = runtime_mod.NoGcScope{};
+    borrow.activate(rt);
+    defer borrow.deactivate();
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.nativeAllocator());
-    try bytes.ensureTotalCapacity(rt.nativeAllocator(), string_value.len());
-    for (0..string_value.len()) |index| {
-        const unit = string_value.codeUnitAt(index);
-        if (unit > 0x7f) return std.math.nan(f64);
-        bytes.appendAssumeCapacity(@intCast(unit));
+    try bytes.ensureTotalCapacity(rt.nativeAllocator(), string.stringValueLenUnchecked(value));
+    var iterator = string.StringValueIterator.init(value);
+    while (iterator.next()) |leaf| {
+        switch (leaf) {
+            inline .latin1, .utf16 => |units| for (units) |unit| {
+                if (unit > 0x7f) return std.math.nan(f64);
+                bytes.appendAssumeCapacity(@intCast(unit));
+            },
+        }
     }
     return value_format.parseJsNumber(bytes.items);
 }
@@ -10894,56 +11287,56 @@ fn stringIteratorPrimitiveValue(value: JSValue) !JSValue {
 }
 
 fn defineStringIteratorToStringTag(rt: *JSRuntime, object: *Object, tag_name: []const u8) !void {
+    var values = [_]JSValue{ object.value(), JSValue.undefinedValue() };
+    const slots: []JSValue = &values;
+    const slices = [_]runtime_mod.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = runtime_mod.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
     const tag_atom = atom.predefinedId("Symbol.toStringTag", .symbol) orelse return error.TypeError;
-    const tag_value = try string.String.createUtf8(rt, tag_name);
-    try object.defineOwnProperty(rt, tag_atom, descriptor.Descriptor.data(tag_value.value(), .{ .configurable = true }));
+    values[1] = (try string.String.createUtf8(rt, tag_name)).value();
+    try Object.fromHeader(values[0].refHeader().?).defineOwnProperty(rt, tag_atom, descriptor.Descriptor.data(values[1], .{ .configurable = true }));
 }
 
 fn stringIteratorPrototype(ctx: *context_mod.RealmContext, tag_name: []const u8) !*Object {
     const rt = ctx.runtime;
-    const base = try Object.create(rt, class.ids.object, null);
-    var base_raw_owned = true;
-    errdefer if (base_raw_owned) Object.destroyFromHeader(rt, base.gcHeader());
-    try defineStringIteratorToStringTag(rt, base, "Iterator");
-    const specific = try Object.create(rt, class.ids.object, base);
-    errdefer Object.destroyFromHeader(rt, specific.gcHeader());
-    base_raw_owned = false;
-    try defineStringIteratorToStringTag(rt, specific, tag_name);
-    const next = try function.nativeFunction(ctx, "next", 0);
-    const next_object = (next.refHeader() orelse return error.TypeError);
-    if (!next.is(.object)) return error.TypeError;
+    var values = [_]JSValue{ JSValue.undefinedValue(), JSValue.undefinedValue(), JSValue.undefinedValue() };
+    const slots: []JSValue = &values;
+    const slices = [_]runtime_mod.ValueRootSlice{.{ .mutable = &slots }};
+    const headers = [_]runtime_mod.HeaderRootValue{.{ .header = &ctx.header }};
+    var roots = runtime_mod.ValueRootFrame{ .slices = &slices, .headers = &headers };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    values[0] = (try Object.create(rt, class.ids.object, null)).value();
+    try defineStringIteratorToStringTag(rt, Object.fromHeader(values[0].refHeader().?), "Iterator");
+    values[1] = (try Object.create(rt, class.ids.object, Object.fromHeader(values[0].refHeader().?))).value();
+    try defineStringIteratorToStringTag(rt, Object.fromHeader(values[1].refHeader().?), tag_name);
+    values[2] = try function.nativeFunction(ctx, "next", 0);
+    const next_object = (values[2].refHeader() orelse return error.TypeError);
+    if (!values[2].is(.object)) return error.TypeError;
     const next_function = Object.fromHeader(next_object);
     next_function.setNativeBuiltinIdAndRecord(rt, function.nativeBuiltinId(.string, @intFromEnum(host_function.builtin_method_ids.string.PrototypeMethod.iterator_next)));
-    try specific.defineOwnProperty(rt, atom.predefinedId("next", .string).?, descriptor.Descriptor.data(next, .method));
-    return specific;
+    try Object.fromHeader(values[1].refHeader().?).defineOwnProperty(rt, atom.predefinedId("next", .string).?, descriptor.Descriptor.data(values[2], .method));
+    return Object.fromHeader(values[1].refHeader().?);
 }
 
 pub fn stringIterator(ctx: *context_mod.RealmContext, receiver: JSValue) !JSValue {
     const rt = ctx.runtime;
-    var rooted_receiver = receiver;
-    var target = JSValue.undefinedValue();
-    var prototype_value = JSValue.undefinedValue();
-    var object_value = JSValue.undefinedValue();
-    var root_frame = runtime_mod.rootValues(.{
-        &rooted_receiver,
-        &target,
-        &prototype_value,
-        &object_value,
-    });
+    var values = [_]JSValue{ receiver, JSValue.undefinedValue(), JSValue.undefinedValue() };
+    const slots: []JSValue = &values;
+    const slices = [_]runtime_mod.ValueRootSlice{.{ .mutable = &slots }};
+    const headers = [_]runtime_mod.HeaderRootValue{.{ .header = &ctx.header }};
+    var root_frame = runtime_mod.ValueRootFrame{ .slices = &slices, .headers = &headers };
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    target = try stringIteratorPrimitiveValue(rooted_receiver);
-    const prototype = try stringIteratorPrototype(ctx, "String Iterator");
-    prototype_value = prototype.value();
-    const object = try Object.create(rt, class.ids.string_iterator, prototype);
-    object_value = object.value();
-    errdefer {
-        object_value = JSValue.undefinedValue();
-    }
-    try object.setOptionalValueSlot(rt, object.iteratorTargetSlot(), target);
-    object.iteratorIndexSlot().* = 0;
-    return object_value;
+    values[0] = try stringIteratorPrimitiveValue(values[0]);
+    values[1] = (try stringIteratorPrototype(ctx, "String Iterator")).value();
+    values[2] = (try Object.create(rt, class.ids.string_iterator, Object.fromHeader(values[1].refHeader().?))).value();
+    const object = Object.fromHeader(values[2].refHeader().?);
+    try object.setOptionalValueSlot(rt, object.iteratorTargetSlot(), values[0]);
+    Object.fromHeader(values[2].refHeader().?).iteratorIndexSlot().* = 0;
+    return values[2];
 }
 
 test "M-cut Object handle conversion keeps the head at the handle address" {

@@ -8,10 +8,9 @@
 //!
 //! Pages rather than one span, for one reason: a conservative stack scan can
 //! pin an object, and a pinned object cannot be moved. The page holding it is
-//! RETAINED -- its objects become old in place -- and every other page goes
-//! back to the free list. That bounds the waste at one page per pin instead
-//! of leaking the whole region, and it is the same shape Chrome uses while
-//! its conservative scanning and its moving young generation coexist. Once
+//! retained in the nursery, with its objects still young, and every other page
+//! goes back to the free list. Old holders of retained objects must be traced
+//! again at the next minor, even if no mutator store occurred. Once
 //! the precise-root work drives the pin count to zero, retention stops
 //! happening and the region is always reclaimed whole.
 
@@ -40,9 +39,11 @@ pub const Page = struct {
     /// order -- which is how the finalizer sweep finds corpses without a
     /// membership structure.
     top: usize,
-    /// Set when a pinned object was found on this page. The page leaves the
-    /// nursery instead of being reclaimed.
+    /// Set when a pinned object was found on this page in the current trace.
     retained: bool = false,
+    /// Prior collection kept this page young while its holders could become
+    /// old. The next minor cannot rely on mutator write barriers alone.
+    survived_collection: bool = false,
 
     pub inline fn limit(self: Page) usize {
         return self.base + page_bytes;
@@ -90,6 +91,9 @@ pub const Nursery = struct {
     allocated_bytes: usize = 0,
     /// Cumulative, for `--gc-stats`.
     stats: Stats = .{},
+    /// Address span covering every page in `pages` (empty when lo > hi).
+    span_lo: usize = std.math.maxInt(usize),
+    span_hi: usize = 0,
     /// Page bases handed back by the last collection, in safety builds.
     ///
     /// A reference that still names one of these is the defect a copying
@@ -171,8 +175,7 @@ pub const Nursery = struct {
                 }
             }
             break :blk reused;
-        }
-        else blk: {
+        } else blk: {
             const mapped = mapPage(allocator) orelse return null;
             self.stats.pages_mapped += 1;
             break :blk mapped;
@@ -182,6 +185,8 @@ pub const Nursery = struct {
             return null;
         };
         self.open = self.pages.items.len - 1;
+        self.span_lo = @min(self.span_lo, base);
+        self.span_hi = @max(self.span_hi, base + page_bytes);
         return base;
     }
 
@@ -205,12 +210,24 @@ pub const Nursery = struct {
         return false;
     }
 
-    /// The page holding `addr`, for the pin path.
+    /// The page holding `addr`, for the pin path. Every visited header and
+    /// every conservative word asks, and most are not young at all, so the
+    /// span of all pages rejects first.
     pub fn pageOf(self: *Nursery, addr: usize) ?*Page {
+        if (addr < self.span_lo or addr >= self.span_hi) return null;
         for (self.pages.items) |*page| {
             if (page.contains(addr)) return page;
         }
         return null;
+    }
+
+    fn refreshBounds(self: *Nursery) void {
+        self.span_lo = std.math.maxInt(usize);
+        self.span_hi = 0;
+        for (self.pages.items) |page| {
+            self.span_lo = @min(self.span_lo, page.base);
+            self.span_hi = @max(self.span_hi, page.limit());
+        }
     }
 
     pub fn liveBytes(self: *const Nursery) usize {
@@ -232,12 +249,8 @@ pub const Nursery = struct {
         return .{ .pages = self.pages.items.len };
     }
 
-    /// Hand back every page a collection did not retain. Retained pages are
-    /// removed from the nursery too -- their objects are old now -- and the
-    /// caller owns their memory from here on.
-    ///
-    /// Returns the retained bases so the caller can register them with the old
-    /// generation before this returns to service.
+    /// Hand back every page a collection did not retain. Retained pages remain
+    /// young and are reconsidered in the next collection.
     pub fn reclaim(
         self: *Nursery,
         allocator: std.mem.Allocator,
@@ -261,6 +274,7 @@ pub const Nursery = struct {
                 // reclaimed then. Retaining it out of the nursery instead
                 // would make the waste permanent.
                 self.pages.items[index].retained = false;
+                self.pages.items[index].survived_collection = true;
                 self.stats.pages_retained += 1;
                 index += 1;
                 continue;
@@ -284,10 +298,14 @@ pub const Nursery = struct {
         }
         // What survives is the retained pages plus whatever the sweep's
         // destructors allocated; together they are the next collection's
-        // young population.
+        // young population. Only the latter is new allocation: counting the
+        // retained survivors toward the trigger would start a minor at every
+        // safepoint once they fill the trigger budget, and each of those
+        // minors retains the same pages again.
         self.open = if (self.pages.items.len == 0) 0 else self.pages.items.len - 1;
         self.allocated_bytes = 0;
-        for (self.pages.items) |page| self.allocated_bytes += page.used();
+        for (self.pages.items[index..]) |page| self.allocated_bytes += page.used();
+        self.refreshBounds();
         self.stats.collections += 1;
     }
 
@@ -400,6 +418,11 @@ test "reclaim keeps pinned pages and recycles the rest" {
     try std.testing.expectEqual(retained_base, nursery.pages.items[0].base);
     try std.testing.expect(!nursery.pages.items[0].retained);
     try std.testing.expectEqual(recycled, nursery.spare.items.len);
+    // Survivors kept in place are young but not new allocation: they must
+    // not count toward the next trigger, and the page span still covers them.
+    try std.testing.expectEqual(@as(usize, 0), nursery.allocated_bytes);
+    try std.testing.expect(nursery.pageOf(retained_base) != null);
+    try std.testing.expect(nursery.pageOf(retained_base + page_bytes * 64) == null);
 
     // The recycled mappings are reused rather than re-mapped.
     const mapped_before = nursery.stats.pages_mapped;

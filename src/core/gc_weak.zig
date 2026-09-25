@@ -14,6 +14,7 @@
 
 const std = @import("std");
 const object_mod = @import("object.zig");
+const property_state = @import("property_state.zig");
 const Object = object_mod.Object;
 const JSRuntime = @import("../runtime.zig").JSRuntime;
 
@@ -111,6 +112,32 @@ pub fn peekObject(rt: *const JSRuntime, object: *const Object) ?usize {
     const address = @intFromPtr(object.gcHeaderConst()) & ~@as(usize, 1);
     const weak_id = rt.weak_object_ids.get(address) orelse return null;
     return weak_id << 1;
+}
+
+/// Rebind every address-keyed side table for an object the collector moved,
+/// or moved back during evacuation rollback. Promotion and rollback must both
+/// come through here so no table is left naming the husk.
+pub fn relocateObjectIdentities(rt: *JSRuntime, previous: *const Object, current: *Object) void {
+    relocateObject(rt, previous, current);
+    property_state.relocateIteratorNext(rt, previous, current);
+}
+
+/// Move the address half of an existing identity without changing the id or
+/// allocating. Removing the old key supplies capacity for its replacement.
+/// `previous` may already be a forwarding husk; only its address is read.
+/// The evacuation journal calls this in reverse when restoring the source.
+pub fn relocateObject(rt: *JSRuntime, previous: *const Object, current: *Object) void {
+    if (!current.flags.has_weak_id) return;
+    const old_address = @intFromPtr(previous.gcHeaderConst());
+    const new_address = @intFromPtr(current.gcHeader());
+    std.debug.assert(old_address != new_address);
+    const entry = rt.weak_object_ids.fetchRemove(old_address) orelse
+        @panic("gc: relocating object missing weak identity");
+    const registered = rt.weak_id_objects.getPtr(entry.value) orelse
+        @panic("gc: relocating weak identity missing reverse entry");
+    std.debug.assert(registered.* == previous);
+    rt.weak_object_ids.putAssumeCapacityNoClobber(new_address, entry.value);
+    registered.* = current;
 }
 
 /// Removes `object` from both maps and returns its encoded identity.

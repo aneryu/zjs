@@ -1,7 +1,7 @@
 # VM 值表示契约
 
-Version: 3
-Date: 2026-09-06
+Version: 4
+Date: 2026-09-23
 Status: normative — 本契约定义 VM 值表示与 GC 的共同约束面，
 收集器规则见 [gc-invariants.md](gc-invariants.md)。**修改本页所述协议 = 先改本契约并递增版本号,再动任一线
 代码。**
@@ -11,6 +11,15 @@ tracing GC 完成计划 S0–S5 合入之后),非设计意向。每条给出代�
 (文件:符号;行号仅作历史参考,函数/常量名才是锚)。机器可读的表示
 基线是各载体 struct 旁的 comptime 断言(`gc.zig`、`object.zig`、
 `gc_representation_constants.zig`),本页与代码不一致时以代码为准并修订本页。
+
+## v4 changelog
+
+增加独立于物理 Header 的 opaque `HeapRef` 编码边界：堆地址必须非零、
+8 字节对齐且完整落在 48-bit payload 中，装箱不得先掩码再验证。
+`heapReference`／`isHeapReference` 表达表示类别，不证明堆成员资格或 Runtime 归属。
+重定位适配归堆布局层，保留原 tag，并校验载体 kind；旧 Header API 保留兼容入口。
+JSValue 仍为 8 字节，tag 编码和 `abi_encoding_revision = 2` 不变。
+本次递增的是文档契约版本，不是二进制编码版本。
 
 ## v3 changelog(v2 → v3,逐条)
 
@@ -61,10 +70,10 @@ v2(2026-08-26)= FNABI ABI tuple 过渡 + layout_epoch 定义;v1
   ```
 
   **tracer-owned tag = 一个连续区间 `[symbol, object]` = `[−8, −1]`**
-  (`value.zig:Tag.symbol`,`cycleMarkHeader`/`isTracerOwned`
+  (`value.zig:Tag.symbol`,`heapReference`/`isHeapReference`
   用一次区间比较);heap BigInt 坐在 qjs 的 −4 空位而非 −9,这是与
-  qjs 的**刻意偏离**。`cycleMarkHeader` 是「哪些 tag 带可追踪 header」的
-  唯一定义;kind 加入 tracer 的时刻就是它被加宽的时刻。
+  qjs 的**刻意偏离**。分类由 `value_encoding.isHeapReference` 定义，
+  `cycleMarkHeader`／`isTracerOwned` 保留转发兼容；kind 加入 tracer 的时刻就是分类加宽的时刻。
 - 表示修订以 `JSValue.abi_encoding_revision` 记录（现值 2，由
   `value.zig` comptime assert 钉住）。历史 FNABI 的 `FUN_VALUE_ABI` =
   (`layout_epoch`, revision) 已随公开 ABI 撤回；**layout_epoch 现值

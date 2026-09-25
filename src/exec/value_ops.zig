@@ -1,7 +1,7 @@
 //! Primitive conversion, arithmetic/comparison, BigInt, and string-value kernels.
 //!
-//! Inputs are borrowed unless a helper is explicitly named `Owned`; notably
-//! `addStringsOwned` consumes both string operands and returns one owned value.
+//! Inputs are borrowed value snapshots; legacy `Owned` names do not transfer
+//! tracing ownership. String addition roots its operands through allocation.
 //! Temporary BigInts, UTF buffers, and formatting storage are released in this
 //! module. Realm-aware coercion remains in exec callers, while bare-runtime
 //! string policy delegates to core. QuickJS coordinates include
@@ -362,8 +362,9 @@ pub fn toNumberValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
     if (value.as(.boolean)) |bool_value| return core.JSValue.int32(if (bool_value) 1 else 0);
     if (value.is(.null_value)) return core.JSValue.int32(0);
     if (value.isString()) {
-        const str = stringObject(value).?;
-        switch (str.resolveData()) {
+        // Flat Latin1 keeps its direct parser fast path. Other string forms
+        // stream into native UTF-8 storage without materialization or GC.
+        if (core.string.asFlat(value)) |str| switch (str.resolveData()) {
             .latin1 => |bytes| {
                 if (fastStringToInt32(bytes)) |val| return core.JSValue.int32(val);
                 // Latin1 0x80-0xFF are single code points, not UTF-8 lead bytes
@@ -371,7 +372,7 @@ pub fn toNumberValue(rt: *core.JSRuntime, value: core.JSValue) !core.JSValue {
                 return numberToValue(core.value_format.parseJsNumberLatin1(bytes));
             },
             .utf16 => {},
-        }
+        };
         var bytes = std.ArrayList(u8).empty;
         defer bytes.deinit(rt.nativeAllocator());
         try appendRawString(rt, &bytes, value);
@@ -547,10 +548,95 @@ pub fn toBigIntValue(rt: *core.JSRuntime, value: core.JSValue) !bignum.BigInt {
             // qjs js_atobigint throws its RangeError through js_atof rather
             // than folding it into the bad-literal SyntaxError.
             error.BigIntTooLarge => error.BigIntTooLarge,
-            else => error.SyntaxError,
+            error.OutOfMemory => error.OutOfMemory,
+            error.InvalidBigInt => error.SyntaxError,
         };
     }
     return error.TypeError;
+}
+
+test "string boundary numeric conversion reads ropes without materialization" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    var roots = core.runtime.ExactValueRoots(3){};
+    try roots.activate(rt);
+    defer roots.deactivate();
+    const left = try roots.ref(0);
+    const right = try roots.ref(1);
+    const input = try roots.ref(2);
+    const cases = [_]struct { units: []const u16, expected: f64 }{
+        .{ .units = &.{}, .expected = 0 },
+        .{ .units = &.{ '4', '2' }, .expected = 42 },
+        .{ .units = &.{ 0xa0, '-', '0', 0x2028 }, .expected = -0.0 },
+        .{ .units = &.{ 0xfeff, '1', '.', '2', '5', 'e', '2', 0x2000 }, .expected = 125 },
+        .{ .units = &.{ '0', 'x', 'f', 'f' }, .expected = 255 },
+        .{ .units = &.{ '0', 'b', '1', '0' }, .expected = 2 },
+        .{ .units = &.{ '-', 'I', 'n', 'f', 'i', 'n', 'i', 't', 'y' }, .expected = -std.math.inf(f64) },
+        .{ .units = &.{ '1', '2', 'x' }, .expected = std.math.nan(f64) },
+        .{ .units = &.{ 0xd800, 0xdc00 }, .expected = std.math.nan(f64) },
+        .{ .units = &.{0xd800}, .expected = std.math.nan(f64) },
+    };
+    for (cases) |case| {
+        const split = case.units.len / 2;
+        try left.set(rt, (try core.string.String.createUtf16(rt, case.units[0..split])).value());
+        try right.set(rt, (try core.string.String.createUtf16(rt, case.units[split..])).value());
+        const rope = try core.string.String.createRope(rt, try left.get(rt), try right.get(rt));
+        try input.set(rt, rope.value());
+        const epoch = rt.gc.collection_epoch;
+        rt.setMemoryLimit(0);
+        defer rt.setMemoryLimit(null);
+        const number = numberValue(try toNumberValue(rt, try input.get(rt))).?;
+        rt.setMemoryLimit(null);
+        if (std.math.isNan(case.expected)) {
+            try std.testing.expect(std.math.isNan(number));
+        } else try std.testing.expectEqual(@as(u64, @bitCast(case.expected)), @as(u64, @bitCast(number)));
+        try std.testing.expect(!rope.isLinearized());
+        try std.testing.expectEqual(epoch, rt.gc.collection_epoch);
+    }
+    try left.set(rt, (try core.string.String.createAscii(rt, "123456789012345")).value());
+    try right.set(rt, (try core.string.String.createAscii(rt, "678901234567890")).value());
+    const rope = try core.string.String.createRope(rt, try left.get(rt), try right.get(rt));
+    try input.set(rt, rope.value());
+    rt.setMemoryLimit(0);
+    defer rt.setMemoryLimit(null);
+    var bigint = try toBigIntValue(rt, try input.get(rt));
+    defer bigint.deinit();
+    const decimal = try bigint.formatBase10Alloc(rt.nativeAllocator());
+    defer rt.nativeAllocator().free(decimal);
+    try std.testing.expectEqualStrings("123456789012345678901234567890", decimal);
+    try std.testing.expect(!rope.isLinearized());
+    rt.setNativeBytesLimitForTest(rt.diagnostics.allocations.allocated_bytes);
+    defer rt.setNativeBytesLimitForTest(null);
+    try std.testing.expectError(error.OutOfMemory, toNumberValue(rt, try input.get(rt)));
+    try std.testing.expect(!rope.isLinearized());
+}
+
+test "string boundary BigInt conversion preserves allocation failures" {
+    var failed: usize = 0;
+    var succeeded = false;
+    for (0..64) |offset| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        const rt = try core.JSRuntime.create(failing.allocator(), .{});
+        defer rt.destroy();
+        const value = (try core.string.String.createAscii(rt, "123456789012345678901234567890123456789012345678901234567890")).value();
+        const native_before = rt.diagnostics.allocations.allocated_bytes;
+        const epoch = rt.gc.collection_epoch;
+        failing.fail_index = failing.alloc_index + offset;
+        const result = toBigIntValue(rt, value);
+        failing.fail_index = std.math.maxInt(usize);
+        if (result) |big_value| {
+            var big = big_value;
+            big.deinit();
+            succeeded = true;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            failed += 1;
+        }
+        try std.testing.expectEqual(native_before, rt.diagnostics.allocations.allocated_bytes);
+        try std.testing.expectEqual(epoch, rt.gc.collection_epoch);
+        if (succeeded) break;
+    }
+    try std.testing.expect(succeeded and failed >= 2);
 }
 
 /// The heap BigInt behind a value, or null for short BigInts and non-BigInts.
@@ -803,6 +889,12 @@ fn toInt32(rt: *core.JSRuntime, value: core.JSValue) !i32 {
 }
 
 fn stringAdd(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core.JSValue {
+    var values = [_]core.JSValue{ a, b };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
     if (a.is(.symbol) or b.is(.symbol)) return error.TypeError;
     if (a.isString() and b.is(.int)) {
         if (try stringAddStringInt(rt, a, b.as(.int).?, .suffix)) |out| return out;
@@ -813,8 +905,8 @@ fn stringAdd(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core.JSValu
     if (a.isString() and b.isString()) return stringAddStringsOwned(rt, a, b);
     var buffer = std.ArrayList(u8).empty;
     defer buffer.deinit(rt.nativeAllocator());
-    try appendValueString(rt, &buffer, a);
-    try appendValueString(rt, &buffer, b);
+    try appendValueString(rt, &buffer, values[0]);
+    try appendValueString(rt, &buffer, values[1]);
     return createStringValue(rt, buffer.items);
 }
 
@@ -824,50 +916,38 @@ const StringIntPosition = enum {
 };
 
 fn stringAddStringInt(rt: *core.JSRuntime, string_value: core.JSValue, int_value: i32, position: StringIntPosition) !?core.JSValue {
-    // Detect ropes at the value/tag level before `stringObject` would flatten
-    // them, then extend the immutable tree with another balanced node.
+    var values = [_]core.JSValue{ string_value, core.JSValue.int32(int_value) };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    // Preserve the tree path, rooting the input through digit allocation.
     if (string_value.ropeBody()) |node| {
         if (node.len == 0) return try toStringValue(rt, core.JSValue.int32(int_value));
-        const digits_value = try toStringValue(rt, core.JSValue.int32(int_value));
-        const left = if (position == .prefix) digits_value else string_value;
-        const right = if (position == .prefix) string_value else digits_value;
-        const out = core.string.String.createBalancedRope(rt, left, right) catch |err| {
-            return err;
-        };
-        return out;
+        values[1] = try toStringValue(rt, values[1]);
+        const left = if (position == .prefix) values[1] else values[0];
+        const right = if (position == .prefix) values[0] else values[1];
+        return try core.string.String.createBalancedRope(rt, left, right);
     }
 
-    const string = stringObject(string_value) orelse return null;
+    const string = core.string.asFlat(string_value) orelse return null;
     if (string.len() == 0) {
         return try toStringValue(rt, core.JSValue.int32(int_value));
     }
 
-    const string_bytes = string.borrowLatin1() orelse return null;
-    if (int_value >= 0 and int_value < 256) {
-        const cached = try rt.smallIntString(@intCast(int_value));
-        const digits = cached.borrowLatin1() orelse return null;
-
-        const out = switch (position) {
-            .prefix => try core.string.String.createLatin1Concat(rt, digits, string_bytes),
-            .suffix => try core.string.String.createLatin1Concat(rt, string_bytes, digits),
-        };
-        return out.value();
-    }
-
-    var int_buf: [16]u8 = undefined;
-    const digits = dtoa.formatInt32(&int_buf, int_value);
-
-    const out = switch (position) {
-        .prefix => try core.string.String.createLatin1Concat(rt, digits, string_bytes),
-        .suffix => try core.string.String.createLatin1Concat(rt, string_bytes, digits),
+    // Allocate first and read the strings afterward. Int32 digits are written
+    // directly into the result; no borrowed bytes span a cache allocation.
+    if (position == .prefix) std.mem.swap(core.JSValue, &values[0], &values[1]);
+    const result = core.string.String.createConcatParts(rt, &values) catch |err| switch (err) {
+        error.ExpectedString => @panic("string/int concat passed an invalid part"),
+        else => |other| return other,
     };
-    return out.value();
+    return result.value();
 }
 
-/// QuickJS `OP_add`'s direct both-string leg consumes both stack operands in
-/// `JS_ConcatString` and returns one owned result. Keeping that ownership
-/// contract here lets the register-resident dispatcher bypass the generic
-/// stack-pop/coercion shell without leaking or double-freeing on OOM.
+/// Direct both-string addition. The legacy Owned spelling does not transfer
+/// tracing ownership: inputs are rooted for the operation, results belong to GC.
 pub fn addStringsOwned(rt: *core.JSRuntime, lhs: core.JSValue, rhs: core.JSValue) !core.JSValue {
     return stringAddStringsOwned(rt, lhs, rhs);
 }
@@ -876,18 +956,17 @@ pub fn addStringsOwned(rt: *core.JSRuntime, lhs: core.JSValue, rhs: core.JSValue
 /// allocation. Mirrors qjs `JS_ConcatString3(ctx, "", value, suffix)` without
 /// first materializing `suffix` as a second JSString.
 pub fn appendAsciiSuffixOwned(rt: *core.JSRuntime, value: core.JSValue, suffix: []const u8) !core.JSValue {
-    const body = value.asStringBody() orelse {
-        return error.TypeError;
-    };
-    const result = core.string.String.createAsciiSuffix(rt, body.resolveData(), suffix) catch |err| {
-        return err;
-    };
-    return result.value();
+    return (try core.string.String.createValueAsciiSuffix(rt, value, suffix)).value();
 }
 
-/// Consumes two known string values, mirroring `JS_ConcatString` rather than
-/// retaining children into a result and then freeing the input owners again.
+/// Root both inputs and any detached children/merged result across allocations.
 fn stringAddStringsOwned(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) !core.JSValue {
+    var values = [_]core.JSValue{ a, b, core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
     const b_rope = b.ropeBody();
     if (b_rope == null) {
         const b_string = b.asStringBodyRaw() orelse {
@@ -919,15 +998,11 @@ fn stringAddStringsOwned(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) 
             {
                 if (node.right.asStringBodyRaw()) |right_string| {
                     if (right_string.len() <= core.string.String.rope_short_len) {
-                        // QJS: ConcatString2(Dup(r1->right), op2), then
-                        // new_string_rope(Dup(r1->left), merged), Free(op1).
-                        const merged = concatFlatStringBodiesOwned(rt, right_string, b_string) catch |err| {
-                            return err;
-                        };
-                        const result = core.string.String.createBalancedRopeOwned(rt, node.left, merged) catch |err| {
-                            return err;
-                        };
-                        return result;
+                        // Snapshot the prefix before allocation can change
+                        // the source node's cached representation.
+                        values[2] = node.left;
+                        values[3] = try concatFlatStringBodiesOwned(rt, right_string, b_string);
+                        return core.string.String.createBalancedRopeOwned(rt, values[2], values[3]);
                     }
                 }
             }
@@ -965,22 +1040,16 @@ fn stringAddStringsOwned(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) 
             if (!node.isLinearized()) {
                 if (node.left.asStringBodyRaw()) |left_string| {
                     if (left_string.len() <= core.string.String.rope_short_len) {
-                        const merged = concatFlatStringBodiesOwned(rt, a_string, left_string) catch |err| {
-                            return err;
-                        };
-                        const result = core.string.String.createBalancedRopeOwned(rt, merged, node.right) catch |err| {
-                            return err;
-                        };
-                        return result;
+                        values[2] = node.right;
+                        values[3] = try concatFlatStringBodiesOwned(rt, a_string, left_string);
+                        return core.string.String.createBalancedRopeOwned(rt, values[3], values[2]);
                     }
                 }
             }
         }
     }
 
-    // Inputs transfer directly into the final node; on allocation/rebalance
-    // failure createBalancedRopeOwned releases both.
-    return core.string.String.createBalancedRopeOwned(rt, a, b);
+    return core.string.String.createBalancedRopeOwned(rt, values[0], values[1]);
 }
 
 fn concatFlatStringBodiesOwned(
@@ -988,37 +1057,24 @@ fn concatFlatStringBodiesOwned(
     a_string: *core.string.String,
     b_string: *core.string.String,
 ) !core.JSValue {
-    const total_len = try std.math.add(usize, a_string.len(), b_string.len());
-    if (total_len > core.string.max_length) return error.StringTooLong;
-    // Fast path: both operands are latin1. We allocate the result string
-    // directly and memcpy in place, skipping the ArrayList intermediate
-    // and the latin1→utf16 fallback when both sides fit in 8 bits.
+    var parts = [_]core.JSValue{ a_string.value(), b_string.value() };
+    const slots: []core.JSValue = &parts;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    // The percent probe consumes its borrowed bytes before a cache miss can
+    // allocate. General concatenation rederives both operands after allocation.
     if (a_string.borrowLatin1()) |a_bytes| {
         if (b_string.borrowLatin1()) |b_bytes| {
             if (try percentHexConcat(rt, a_bytes, b_bytes)) |result| return result;
-
-            const out = try core.string.String.createLatin1Concat(rt, a_bytes, b_bytes);
-            return out.value();
         }
     }
-    // Fast path: both operands are utf16, concat directly into a fresh
-    // utf16 buffer.
-    switch (a_string.resolveData()) {
-        .utf16 => |a_units| switch (b_string.resolveData()) {
-            .utf16 => |b_units| {
-                const out = try core.string.String.createUtf16Concat(rt, a_units, b_units);
-                return out.value();
-            },
-            .latin1 => {},
-        },
-        .latin1 => {},
-    }
-    // Mixed widths fall back to the slower ArrayList path.
-    var units = try std.ArrayList(u16).initCapacity(rt.nativeAllocator(), total_len);
-    defer units.deinit(rt.nativeAllocator());
-    try appendStringUtf16Units(rt, &units, a_string);
-    try appendStringUtf16Units(rt, &units, b_string);
-    return (try core.string.String.createUtf16(rt, units.items)).value();
+    const result = core.string.String.createConcatParts(rt, &parts) catch |err| switch (err) {
+        error.ExpectedString => @panic("flat string concat passed an invalid part"),
+        else => |other| return other,
+    };
+    return result.value();
 }
 
 fn percentHexConcat(rt: *core.JSRuntime, a: []const u8, b: []const u8) !?core.JSValue {
@@ -1037,19 +1093,6 @@ fn percentHexConcat(rt: *core.JSRuntime, a: []const u8, b: []const u8) !?core.JS
 
 fn upperHexValue(byte: u8) ?u8 {
     return unicode_lib.asciiUpperHexDigitValueByte(byte);
-}
-
-fn stringObject(value: core.JSValue) ?*core.string.String {
-    return value.asStringBody();
-}
-
-fn appendStringUtf16Units(rt: *core.JSRuntime, out: *std.ArrayList(u16), string: *const core.string.String) !void {
-    switch (string.resolveData()) {
-        .latin1 => |bytes| {
-            for (bytes) |byte| try out.append(rt.nativeAllocator(), byte);
-        },
-        .utf16 => |units| try out.appendSlice(rt.nativeAllocator(), units),
-    }
 }
 
 fn shiftBigInt(allocator: std.mem.Allocator, lhs: bignum.BigInt, rhs: bignum.BigInt, direction: enum { left, right }) !bignum.BigInt {
@@ -1199,6 +1242,7 @@ const callObjectToPrimitiveMethod = object_ops.callObjectToPrimitiveMethod;
 const callValueOrBytecodeSyncInternal = call_runtime.callValueOrBytecodeSyncInternalOutlined;
 const getValueProperty = object_ops.getValueProperty;
 const isCallableValue = call_runtime.isCallableValue;
+const objectFromValue = core.value_semantics.objectFromValue;
 const throwTypeErrorMessage = exception_ops.throwTypeErrorMessage;
 pub inline fn toPrimitiveForAdditionFree(
     ctx: *core.JSContext,
@@ -1221,22 +1265,7 @@ fn toPrimitiveForAdditionObject(
     global: *core.Object,
     value: core.JSValue,
 ) !core.JSValue {
-    const symbol_to_primitive = core.atom.predefinedId("Symbol.toPrimitive", .symbol) orelse return toOrdinaryPrimitive(ctx, output, global, value);
-    const method = try getValueProperty(ctx, output, global, value, symbol_to_primitive, null, null);
-    if (!method.is(.undefined_value) and !method.is(.null_value)) {
-        // JS_ToPrimitiveInternal (quickjs.c JS_CallFree): a non-callable
-        // Symbol.toPrimitive is still called and reports "not a function"; an
-        // object return value throws "toPrimitive".
-        if (!isCallableValue(method)) return throwTypeErrorMessage(ctx, global, "not a function");
-        const hint = try createStringValue(ctx.runtime, "default");
-        const primitive = try callValueOrBytecodeSyncInternal(ctx, output, global, value, method, &.{hint}, null, null);
-        if (primitive.is(.object)) {
-            return throwTypeErrorMessage(ctx, global, "toPrimitive");
-        }
-        return primitive;
-    }
-
-    return toOrdinaryPrimitive(ctx, output, global, value);
+    return toPrimitiveWithHint(ctx, output, global, value, "default");
 }
 
 pub fn toPrimitiveForNumber(
@@ -1246,22 +1275,39 @@ pub fn toPrimitiveForNumber(
     value: core.JSValue,
 ) !core.JSValue {
     if (!value.is(.object)) return value;
-    const symbol_to_primitive = core.atom.predefinedId("Symbol.toPrimitive", .symbol) orelse return toOrdinaryPrimitiveNumber(ctx, output, global, value);
-    const method = try getValueProperty(ctx, output, global, value, symbol_to_primitive, null, null);
-    if (!method.is(.undefined_value) and !method.is(.null_value)) {
+    return toPrimitiveWithHint(ctx, output, global, value, "number");
+}
+
+fn toPrimitiveWithHint(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    value: core.JSValue,
+    comptime hint: []const u8,
+) !core.JSValue {
+    var values = [_]core.JSValue{ global.value(), value, core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    const live: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &live }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+
+    const symbol_to_primitive = core.atom.predefinedId("Symbol.toPrimitive", .symbol) orelse return toOrdinaryPrimitive(ctx, output, global, value);
+    values[2] = try getValueProperty(ctx, output, objectFromValue(values[0]).?, values[1], symbol_to_primitive, null, null);
+    if (!values[2].is(.undefined_value) and !values[2].is(.null_value)) {
         // JS_ToPrimitiveInternal (quickjs.c JS_CallFree): a non-callable
         // Symbol.toPrimitive is still called and reports "not a function"; an
         // object return value throws "toPrimitive".
-        if (!isCallableValue(method)) return throwTypeErrorMessage(ctx, global, "not a function");
-        const hint = try createStringValue(ctx.runtime, "number");
-        const primitive = try callValueOrBytecodeSyncInternal(ctx, output, global, value, method, &.{hint}, null, null);
+        if (!isCallableValue(values[2])) return throwTypeErrorMessage(ctx, objectFromValue(values[0]).?, "not a function");
+        values[3] = try createStringValue(ctx.runtime, hint);
+        const primitive = try callValueOrBytecodeSyncInternal(ctx, output, objectFromValue(values[0]).?, values[1], values[2], values[3..4], null, null);
         if (primitive.is(.object)) {
-            return throwTypeErrorMessage(ctx, global, "toPrimitive");
+            return throwTypeErrorMessage(ctx, objectFromValue(values[0]).?, "toPrimitive");
         }
         return primitive;
     }
 
-    return toOrdinaryPrimitiveNumber(ctx, output, global, value);
+    return toOrdinaryPrimitive(ctx, output, objectFromValue(values[0]).?, values[1]);
 }
 
 pub fn toOrdinaryPrimitive(
@@ -1270,10 +1316,16 @@ pub fn toOrdinaryPrimitive(
     global: *core.Object,
     value: core.JSValue,
 ) !core.JSValue {
-    if (try callObjectToPrimitiveMethod(ctx, output, global, value, core.atom.ids.valueOf, null, null)) |primitive| return primitive;
-    if (try callObjectToPrimitiveMethod(ctx, output, global, value, core.atom.ids.toString, null, null)) |primitive| return primitive;
+    var values = [_]core.JSValue{ global.value(), value };
+    const live: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &live }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    if (try callObjectToPrimitiveMethod(ctx, output, objectFromValue(values[0]).?, values[1], core.atom.ids.valueOf, null, null)) |primitive| return primitive;
+    if (try callObjectToPrimitiveMethod(ctx, output, objectFromValue(values[0]).?, values[1], core.atom.ids.toString, null, null)) |primitive| return primitive;
     // JS_ToPrimitiveInternal: no primitive from valueOf/toString.
-    return throwTypeErrorMessage(ctx, global, "toPrimitive");
+    return throwTypeErrorMessage(ctx, objectFromValue(values[0]).?, "toPrimitive");
 }
 
 pub fn toOrdinaryPrimitiveNumber(
@@ -1282,10 +1334,7 @@ pub fn toOrdinaryPrimitiveNumber(
     global: *core.Object,
     value: core.JSValue,
 ) !core.JSValue {
-    if (try callObjectToPrimitiveMethod(ctx, output, global, value, core.atom.ids.valueOf, null, null)) |primitive| return primitive;
-    if (try callObjectToPrimitiveMethod(ctx, output, global, value, core.atom.ids.toString, null, null)) |primitive| return primitive;
-    // JS_ToPrimitiveInternal: no primitive from valueOf/toString.
-    return throwTypeErrorMessage(ctx, global, "toPrimitive");
+    return toOrdinaryPrimitive(ctx, output, global, value);
 }
 
 pub fn valueTruthy(value: core.JSValue) bool {

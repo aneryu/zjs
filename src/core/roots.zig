@@ -20,12 +20,150 @@ const provider_inline_capacity = 1;
 
 pub const RootProvider = struct {
     context: *anyopaque,
+    /// Enumerate the same roots on every walk while collection is active.
+    /// A relocating collector first walks to retain readonly targets, then
+    /// walks to mark and update slots. Do not consume entries or mutate the
+    /// root set from this callback; failures may abort either walk.
     trace: *const fn (context: *anyopaque, visitor: *RootVisitor) RootTraceError!void,
 };
 
 pub const RootSlot = struct {
     value: JSValue = JSValue.undefinedValue(),
 };
+
+pub const RootReferenceError = error{
+    WrongRuntime,
+    InactiveRoot,
+    InvalidRootIndex,
+    RootMutationDuringCollection,
+};
+
+/// Internal registration record. Only live records are traversed when
+/// validating a borrowed reference, never the reference's possibly dead frame.
+const ExactValueRootFrame = struct {
+    runtime: ?*JSRuntime = null,
+    previous: ?*ExactValueRootFrame = null,
+    generation: u64 = 0,
+    values: []JSValue = &.{},
+    slices: [1]runtime_mod.ValueRootSlice = undefined,
+    frame: runtime_mod.ValueRootFrame = .{},
+
+    fn activate(self: *@This(), rt: *JSRuntime, values: []JSValue) !void {
+        rt.assertOwnerThread();
+        if (self.runtime != null) return error.RootAlreadyActive;
+        if (rt.gc_running or rt.roots.isTracing()) return error.RootMutationDuringCollection;
+        const generation = std.math.add(u64, rt.roots.exact_root_generation, 1) catch return error.RootGenerationExhausted;
+        // A deactivated scope can contain pointers reclaimed since its last
+        // use. Never publish that old storage on reactivation.
+        @memset(values, JSValue.undefinedValue());
+        self.values = values;
+        self.slices[0] = .{ .mutable = &self.values };
+        self.frame = .{ .slices = &self.slices };
+        self.frame.activate(rt);
+        self.runtime = rt;
+        self.generation = generation;
+        self.previous = rt.roots.active_exact_roots;
+        rt.roots.exact_root_generation = generation;
+        rt.roots.active_exact_roots = self;
+    }
+
+    fn deactivate(self: *@This()) void {
+        const rt = self.runtime orelse return;
+        rt.assertOwnerThread();
+        if (rt.gc_running) @panic("exact root mutation during collection");
+        rt.roots.assertMutable();
+        if (rt.roots.active_exact_roots != self or rt.active_value_roots != &self.frame)
+            @panic("exact roots must deactivate in root-frame LIFO order");
+        self.frame.deactivate(rt);
+        rt.roots.active_exact_roots = self.previous;
+        self.runtime = null;
+        self.previous = null;
+        self.values = &.{};
+    }
+};
+
+/// Borrow of a registered slot, not a copied value. Runtime must outlive the
+/// reference. Scope membership and generation are checked before slot access.
+pub const RootedValueRef = struct {
+    runtime: *JSRuntime,
+    owner: *const ExactValueRootFrame,
+    generation: u64,
+    index: usize,
+
+    fn slot(self: @This(), rt: *JSRuntime) RootReferenceError!*JSValue {
+        if (self.runtime != rt) return error.WrongRuntime;
+        rt.assertOwnerThread();
+        var current = rt.roots.active_exact_roots;
+        while (current) |frame| : (current = frame.previous) {
+            if (frame != self.owner) continue;
+            if (frame.generation != self.generation) return error.InactiveRoot;
+            if (self.index >= frame.values.len) return error.InvalidRootIndex;
+            return &frame.values[self.index];
+        }
+        return error.InactiveRoot;
+    }
+
+    pub fn get(self: @This(), rt: *JSRuntime) RootReferenceError!JSValue {
+        return (try self.slot(rt)).*;
+    }
+};
+
+pub const MutableRootedValueRef = struct {
+    reference: RootedValueRef,
+
+    pub fn readOnly(self: @This()) RootedValueRef {
+        return self.reference;
+    }
+
+    pub fn get(self: @This(), rt: *JSRuntime) RootReferenceError!JSValue {
+        return self.reference.get(rt);
+    }
+
+    /// Check an output before a fallible operation, without changing its value.
+    pub fn validate(self: @This(), rt: *JSRuntime) RootReferenceError!void {
+        _ = try self.reference.slot(rt);
+        if (rt.gc_running or rt.roots.isTracing()) return error.RootMutationDuringCollection;
+    }
+
+    pub fn set(self: @This(), rt: *JSRuntime, value: JSValue) RootReferenceError!void {
+        const destination = try self.reference.slot(rt);
+        if (rt.gc_running or rt.roots.isTracing()) return error.RootMutationDuringCollection;
+        destination.* = value;
+    }
+
+    /// Alias-safe, allocation-free transfer between two registered slots.
+    pub fn copyFrom(self: @This(), rt: *JSRuntime, source: RootedValueRef) RootReferenceError!void {
+        const value = try source.get(rt);
+        try self.set(rt, value);
+    }
+};
+
+/// Declare, then activate at the final address. Slots start as undefined;
+/// activation never allocates, so installing the initial value needs no extra
+/// root. Never copy or move an active scope.
+pub fn ExactValueRoots(comptime count: usize) type {
+    return struct {
+        storage: [count]JSValue = @splat(JSValue.undefinedValue()),
+        registration: ExactValueRootFrame = .{},
+
+        pub fn activate(self: *@This(), rt: *JSRuntime) !void {
+            try self.registration.activate(rt, &self.storage);
+        }
+
+        pub fn deactivate(self: *@This()) void {
+            self.registration.deactivate();
+        }
+
+        pub fn ref(self: *@This(), comptime index: usize) RootReferenceError!MutableRootedValueRef {
+            if (index >= count) @compileError("exact root index out of bounds");
+            const frame = &self.registration;
+            const rt = frame.runtime orelse return error.InactiveRoot;
+            const reference = RootedValueRef{ .runtime = rt, .owner = frame, .generation = frame.generation, .index = index };
+            _ = try reference.slot(rt);
+            return .{ .reference = reference };
+        }
+    };
+}
 
 pub const WeakPersistentCallback = *const fn (runtime: *JSRuntime, context: ?*anyopaque) void;
 
@@ -38,6 +176,11 @@ pub const WeakRootSlot = struct {
 /// Host handles and declared root providers. Inline storage contains no
 /// self-pointer; the default value is immediately usable.
 pub const RootSet = struct {
+    /// Owner-thread trace windows can nest. Collector slot repair remains
+    /// legal; mutator changes to roots and registration storage do not.
+    trace_depth: usize = 0,
+    active_exact_roots: ?*ExactValueRootFrame = null,
+    exact_root_generation: u64 = 0,
     root_providers_heap: ?[]RootProvider = null,
     root_providers_len: usize = 0,
     root_providers_inline: [provider_inline_capacity]RootProvider = undefined,
@@ -46,6 +189,23 @@ pub const RootSet = struct {
     local_root_slots: std.ArrayListUnmanaged(*RootSlot) = .empty,
     persistent_root_slots: std.ArrayListUnmanaged(*RootSlot) = .empty,
     weak_root_slots: std.ArrayListUnmanaged(*WeakRootSlot) = .empty,
+
+    pub fn beginTrace(self: *RootSet) void {
+        self.trace_depth = std.math.add(usize, self.trace_depth, 1) catch @panic("root trace depth exhausted");
+    }
+
+    pub fn endTrace(self: *RootSet) void {
+        if (self.trace_depth == 0) @panic("unbalanced root trace window");
+        self.trace_depth -= 1;
+    }
+
+    pub fn isTracing(self: *const RootSet) bool {
+        return self.trace_depth != 0;
+    }
+
+    pub fn assertMutable(self: *const RootSet) void {
+        if (self.isTracing()) @panic("root mutation during tracing");
+    }
 
     pub fn usingInline(self: *const RootSet) bool {
         return self.root_providers_heap == null;
@@ -66,6 +226,7 @@ pub const RootSet = struct {
 
     /// Transfer heap storage to the caller and restore the default empty set.
     pub fn takeHeapProviderStorage(self: *RootSet) []RootProvider {
+        self.assertMutable();
         const heap: []RootProvider = self.root_providers_heap orelse &.{};
         self.root_providers_heap = null;
         self.root_providers_len = 0;
@@ -73,12 +234,14 @@ pub const RootSet = struct {
     }
 
     pub fn deinitSlotLists(self: *RootSet, allocator: std.mem.Allocator) void {
+        self.assertMutable();
         self.local_root_slots.deinit(allocator);
         self.persistent_root_slots.deinit(allocator);
         self.weak_root_slots.deinit(allocator);
     }
 
     pub fn register(self: *RootSet, rt: *JSRuntime, provider: RootProvider) !void {
+        self.assertMutable();
         for (self.providers()) |registered| {
             if (registered.context == provider.context and registered.trace == provider.trace) return;
         }
@@ -86,6 +249,7 @@ pub const RootSet = struct {
     }
 
     pub fn unregister(self: *RootSet, rt: *JSRuntime, provider: RootProvider) void {
+        self.assertMutable();
         var found: ?usize = null;
         for (self.providers(), 0..) |registered, index| {
             if (registered.context == provider.context and registered.trace == provider.trace) {
@@ -124,7 +288,9 @@ pub const RootSet = struct {
         self.root_providers_len += 1;
     }
 
-    pub fn traceHandleSlots(self: *const RootSet, visitor: *RootVisitor) RootTraceError!void {
+    pub fn traceHandleSlots(self: *RootSet, visitor: *RootVisitor) RootTraceError!void {
+        self.beginTrace();
+        defer self.endTrace();
         for (self.local_root_slots.items) |slot| {
             try visitor.value(&slot.value);
         }
@@ -133,17 +299,21 @@ pub const RootSet = struct {
         }
     }
 
-    pub fn traceProviders(self: *const RootSet, visitor: *RootVisitor) RootTraceError!void {
+    pub fn traceProviders(self: *RootSet, visitor: *RootVisitor) RootTraceError!void {
+        self.beginTrace();
+        defer self.endTrace();
         for (self.providers()) |provider| {
             try provider.trace(provider.context, visitor);
         }
     }
 
     pub fn createPersistent(self: *RootSet, rt: *JSRuntime, value: JSValue) !*RootSlot {
+        self.assertMutable();
         return createStrong(rt, value, &self.persistent_root_slots);
     }
 
     pub fn createLocal(self: *RootSet, rt: *JSRuntime, value: JSValue) !*RootSlot {
+        self.assertMutable();
         return createStrong(rt, value, &self.local_root_slots);
     }
 
@@ -154,6 +324,7 @@ pub const RootSet = struct {
         callback: ?WeakPersistentCallback,
         callback_context: ?*anyopaque,
     ) !*WeakRootSlot {
+        self.assertMutable();
         const budget = &rt.gc.heap_budget;
         const saved_suspend = budget.suspend_alloc_notify;
         budget.suspend_alloc_notify = true;
@@ -185,6 +356,7 @@ pub const RootSet = struct {
     }
 
     pub fn destroyWeak(self: *RootSet, rt: *JSRuntime, slot: *WeakRootSlot) void {
+        self.assertMutable();
         self.removeWeak(rt, slot);
         rt.clearWeakRootSlot(slot, false);
         slot.* = .{};
@@ -205,6 +377,7 @@ pub const RootSet = struct {
     }
 
     pub fn takePersistent(self: *RootSet, rt: *JSRuntime, slot: *RootSlot) JSValue {
+        self.assertMutable();
         self.removePersistent(rt, slot);
         const value = slot.value;
         slot.value = JSValue.undefinedValue();
@@ -226,6 +399,8 @@ pub const RootSet = struct {
     }
 
     pub fn assertNoOutstandingBuffers(self: *const RootSet) void {
+        if (self.active_exact_roots != null)
+            @panic("JSRuntime destroyed with active exact roots");
         if (self.value_root_buffers != 0)
             @panic("JSRuntime destroyed with outstanding value root buffers");
     }
@@ -240,6 +415,7 @@ pub const RootSet = struct {
     }
 
     pub fn clearLocalFrom(self: *RootSet, rt: *JSRuntime, start: usize) void {
+        self.assertMutable();
         std.debug.assert(start <= self.local_root_slots.items.len);
         var index = self.local_root_slots.items.len;
         while (index > start) {
@@ -280,6 +456,7 @@ pub const JSValueHandle = struct {
     pub fn deinit(self: *JSValueHandle) void {
         const runtime = self.runtime orelse return;
         const slot = self.slot orelse return;
+        runtime.roots.assertMutable();
         self.runtime = null;
         self.slot = null;
         _ = runtime.roots.takePersistent(runtime, slot);
@@ -301,6 +478,15 @@ pub const JSValueHandle = struct {
         self.runtime = null;
         self.slot = null;
         return value;
+    }
+
+    /// Install the destination before consuming this persistent root. Failure
+    /// leaves both source ownership and the destination value unchanged.
+    pub fn takeInto(self: *JSValueHandle, destination: MutableRootedValueRef) !void {
+        const rt = self.runtime orelse return error.InactiveHandle;
+        const slot = self.slot orelse return error.InactiveHandle;
+        try destination.set(rt, slot.value);
+        _ = self.take();
     }
 };
 
@@ -358,6 +544,7 @@ pub const WeakPersistentValue = struct {
         callback: ?WeakPersistentCallback,
         callback_context: ?*anyopaque,
     ) !WeakPersistentValue {
+        runtime.roots.assertMutable();
         const identity = (try object_mod.Object.weakIdentityFromValue(runtime, value)) orelse return error.InvalidWeakTarget;
         const slot = try runtime.roots.createWeak(runtime, identity, callback, callback_context);
         runtime.retainWeakIdentity(identity);
@@ -405,6 +592,7 @@ pub const NativePin = struct {
     pub fn deinit(self: *NativePin) void {
         const runtime = self.runtime orelse return;
         const header = self.header orelse return;
+        runtime.roots.assertMutable();
         self.runtime = null;
         self.header = null;
         runtime.gc.unpinHeader(header);
@@ -417,6 +605,7 @@ pub fn pinValueForNative(runtime: *JSRuntime, value: JSValue) !?NativePin {
 }
 
 pub fn pinHeaderForNative(runtime: *JSRuntime, header: *gc.Header) !NativePin {
+    runtime.roots.assertMutable();
     try runtime.gc.pinHeader(header);
     return .{
         .runtime = runtime,

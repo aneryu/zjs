@@ -482,22 +482,35 @@ pub fn groupByWithCallbackHost(
     if (args.len < 2) return error.TypeError;
     if (!call_runtime.isCallableValue(args[1])) return error.TypeError;
 
-    const map_value = try constructWithPrototype(rt, 1, prototype);
-    const map = try expectObject(map_value);
+    // Actual slots survive callbacks in both test and executable builds.
+    // The constructor still accepts a raw prototype, so pin that snapshot
+    // until it has been installed in the result's shape.
+    var values = [_]core.JSValue{ args[0], args[1], core.JSValue.undefinedValue(), if (prototype) |object| object.value() else core.JSValue.nullValue() };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = values[3..4] } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    values[2] = try constructWithPrototype(rt, 1, prototype);
+    values[3] = core.JSValue.undefinedValue();
 
-    if (args[0].isString()) {
-        try groupString(rt, map, args[0], args[1], host);
-        return map_value;
+    if (values[0].isString()) {
+        var unit_index: usize = 0;
+        var element_index: u32 = 0;
+        while (unit_index < core.string.stringValueLenUnchecked(values[0])) : (element_index += 1) {
+            const element = try stringElementAt(rt, values[0], &unit_index);
+            try addGroupedItem(rt, try expectObject(values[2]), values[1], host, element, element_index);
+        }
+        return values[2];
     }
 
-    const source = try expectObject(args[0]);
-    if (!source.isArray()) return error.TypeError;
+    if (!(try expectObject(values[0])).isArray()) return error.TypeError;
     var index: u32 = 0;
-    while (index < source.arrayLength()) : (index += 1) {
-        const item = try source.getProperty(core.Atom.taggedInt(index));
-        try addGroupedItem(rt, map, args[1], host, item, index);
+    while (index < (try expectObject(values[0])).arrayLength()) : (index += 1) {
+        const item = try (try expectObject(values[0])).getProperty(core.Atom.taggedInt(index));
+        try addGroupedItem(rt, try expectObject(values[2]), values[1], host, item, index);
     }
-    return map_value;
+    return values[2];
 }
 
 fn mapSet(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue, value: core.JSValue) !core.JSValue {
@@ -1294,22 +1307,6 @@ test "appendValue roots existing values and incoming value during growth" {
     try std.testing.expect(trigger.saw_second);
 }
 
-fn groupString(
-    rt: *core.JSRuntime,
-    map: *core.Object,
-    string_value: core.JSValue,
-    callback: core.JSValue,
-    host: CallbackHost,
-) !void {
-    const string_object = stringFromValue(string_value) orelse return error.TypeError;
-    var unit_index: usize = 0;
-    var element_index: u32 = 0;
-    while (unit_index < string_object.len()) : (element_index += 1) {
-        const element = try stringElementAt(rt, string_object, &unit_index);
-        try addGroupedItem(rt, map, callback, host, element, element_index);
-    }
-}
-
 fn addGroupedItem(
     rt: *core.JSRuntime,
     map: *core.Object,
@@ -1318,49 +1315,55 @@ fn addGroupedItem(
     item: core.JSValue,
     index: u32,
 ) !void {
-    var rooted_item = item;
-    var key = core.JSValue.undefinedValue();
-    var existing = core.JSValue.undefinedValue();
-    var group_value = core.JSValue.undefinedValue();
-    var root_values = [_]*core.JSValue{
-        &rooted_item,
-        &key,
-        &existing,
-        &group_value,
+    // map, callback, callback arguments, key, group. Pass the registered
+    // argument slots themselves so a collection can update the caller's item.
+    var values = [_]core.JSValue{
+        map.value(),                   callback,                      item, core.JSValue.int32(@intCast(index)),
+        core.JSValue.undefinedValue(), core.JSValue.undefinedValue(),
     };
-    var root_frame = core.runtime.ValueRootFrame{
-        .values = &root_values,
-    };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var root_frame = core.runtime.ValueRootFrame{ .slices = &slices };
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    const index_value = core.JSValue.int32(@intCast(index));
-    var callback_args = [_]core.JSValue{ rooted_item, index_value };
-    key = try host.callValue(callback, &callback_args);
+    values[4] = try host.callValue(values[1], values[2..4]);
 
-    existing = try mapGet(rt, map, key);
-    if (!existing.is(.undefined_value)) {
-        const group = try expectObject(existing);
-        try appendArrayValue(rt, group, rooted_item);
+    values[5] = try mapGet(rt, try expectObject(values[0]), values[4]);
+    if (!values[5].is(.undefined_value)) {
+        try appendArrayValue(rt, try expectObject(values[5]), values[2]);
         return;
     }
 
-    const group = try core.Object.createArray(rt, null);
-    group_value = group.value();
-    try appendArrayValue(rt, group, rooted_item);
-    _ = try mapSet(rt, map, key, group_value);
+    values[5] = (try core.Object.createArray(rt, null)).value();
+    try appendArrayValue(rt, try expectObject(values[5]), values[2]);
+    // Entry publication passes snapshots through storage growth. Keep those
+    // snapshots stable for that call, then release the pins with this frame.
+    const publish = [_]core.JSValue{ values[0], values[4], values[5] };
+    const publish_slices = [_]core.runtime.ValueRootSlice{.{ .borrowed = &publish }};
+    var publish_roots = core.runtime.ValueRootFrame{ .slices = &publish_slices };
+    publish_roots.activate(rt);
+    defer publish_roots.deactivate(rt);
+    _ = try mapSet(rt, try expectObject(publish[0]), publish[1], publish[2]);
 }
 
 fn appendArrayValue(rt: *core.JSRuntime, array: *core.Object, value: core.JSValue) !void {
     if (!array.isArray()) return error.TypeError;
+    const snapshots = [_]core.JSValue{ array.value(), value };
+    const slices = [_]core.runtime.ValueRootSlice{.{ .borrowed = &snapshots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
     try array.defineOwnProperty(rt, core.Atom.taggedInt(array.arrayLength()), core.Descriptor.data(value, .all));
 }
 
-fn stringElementAt(rt: *core.JSRuntime, string_object: *core.string.String, index: *usize) !core.JSValue {
-    const first = string_object.codeUnitAt(index.*);
+fn stringElementAt(rt: *core.JSRuntime, string_value: core.JSValue, index: *usize) !core.JSValue {
+    // Copy at most two units before allocating. No borrowed leaf or iterator
+    // survives either this allocation or the grouping callback.
+    const first = core.string.stringValueCodeUnitAtUnchecked(string_value, index.*);
     index.* += 1;
-    if (unicode.isHighSurrogateUnit(first) and index.* < string_object.len()) {
-        const second = string_object.codeUnitAt(index.*);
+    if (unicode.isHighSurrogateUnit(first) and index.* < core.string.stringValueLenUnchecked(string_value)) {
+        const second = core.string.stringValueCodeUnitAtUnchecked(string_value, index.*);
         if (unicode.isLowSurrogateUnit(second)) {
             index.* += 1;
             const units = [_]u16{ first, second };
@@ -1458,10 +1461,6 @@ fn defineNativeMethods(realm: *core.RealmContext, object: *core.Object, class_id
 }
 
 const expectObject = core.value_semantics.expectObject;
-
-fn stringFromValue(value: core.JSValue) ?*core.string.String {
-    return value.asStringBody();
-}
 
 // === Realm-aware Map/Set/WeakMap method bodies (relocated from exec) ===
 //
@@ -1640,6 +1639,8 @@ fn collectionForEachRecord(
         caller_function,
         caller_frame,
     );
+    callback_call.activateRoots();
+    defer callback_call.deinit();
     // Same record lock + argument duplication as js_map_forEach
     receiver.retainCollectionCursor();
     defer receiver.releaseCollectionCursor();
@@ -2129,6 +2130,8 @@ pub fn mapGroupByRecord(
         caller_function,
         caller_frame,
     );
+    callback_call.activateRoots();
+    defer callback_call.deinit();
 
     var index: usize = 0;
     while (true) {

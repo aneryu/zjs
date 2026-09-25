@@ -1179,17 +1179,16 @@ pub const State = struct {
         return err;
     }
 
-    pub fn tokenKindLabel(self: *const State, kind: tok.TokenKind, buffer: []u8) []const u8 {
-        const raw = @intFromEnum(kind);
-        if (raw >= 0 and raw <= std.math.maxInt(u8)) {
+    pub fn tokenKindLabel(self: *const State, kind: tok.Kind, buffer: []u8) []const u8 {
+        if (kind.punctuatorByte()) |byte| {
             if (buffer.len < 3) return "token";
             buffer[0] = '\'';
-            buffer[1] = @as(u8, @intCast(raw));
+            buffer[1] = byte;
             buffer[2] = '\'';
             return buffer[0..3];
         }
-        if (tok.isKeyword(kind)) {
-            return self.atoms.name(tok.keywordAtom(kind)) orelse "keyword";
+        if (kind.isKeyword()) {
+            return self.atoms.name(kind.keywordAtom()) orelse "keyword";
         }
         return switch (kind) {
             .number => "number",
@@ -1211,14 +1210,15 @@ pub const State = struct {
     fn currentTokenKindLabel(self: *const State, buffer: []u8) []const u8 {
         const generic = self.tokenKindLabel(self.peekKind(), buffer);
         if (!std.mem.eql(u8, generic, "token")) return generic;
-        if (self.token.len == 0 or self.token.len > buffer.len - 2) return generic;
+        const text = self.lex.source[self.token.start..self.token.end];
+        if (text.len == 0 or text.len > buffer.len - 2) return generic;
         buffer[0] = '\'';
-        @memcpy(buffer[1 .. self.token.len + 1], self.token.ptr[0..self.token.len]);
-        buffer[self.token.len + 1] = '\'';
-        return buffer[0 .. self.token.len + 2];
+        @memcpy(buffer[1..][0..text.len], text);
+        buffer[text.len + 1] = '\'';
+        return buffer[0 .. text.len + 2];
     }
 
-    pub fn failExpectedToken(self: *State, expected: tok.TokenKind) Error {
+    pub fn failExpectedToken(self: *State, expected: tok.Kind) Error {
         var expected_buffer: [8]u8 = undefined;
         const expected_name = self.tokenKindLabel(expected, &expected_buffer);
         return self.failExpectedDescription(expected_name);
@@ -1248,7 +1248,7 @@ pub const State = struct {
     pub fn failExpectedDescriptionAt(
         self: *State,
         expected: []const u8,
-        actual: tok.TokenKind,
+        actual: tok.Kind,
         position: diagnostics.Position,
     ) Error {
         var actual_buffer: [16]u8 = undefined;
@@ -1287,15 +1287,12 @@ pub const State = struct {
         return self.failWithMessage(null, message);
     }
 
-    pub fn peekKind(self: *const State) tok.TokenKind {
-        return self.token.val;
+    pub fn peekKind(self: *const State) tok.Kind {
+        return self.token.kind;
     }
 
     pub fn currentTokenStartOffset(self: *const State) usize {
-        const source_ptr = @intFromPtr(self.lex.source.ptr);
-        const token_ptr = @intFromPtr(self.token.ptr);
-        if (token_ptr <= source_ptr) return 0;
-        return @min(token_ptr - source_ptr, self.lex.source.len);
+        return self.token.start;
     }
 
     pub fn currentFunctionSourceStart(self: *const State) FunctionSourceStart {
@@ -1307,7 +1304,7 @@ pub const State = struct {
     }
 
     pub fn currentTokenEndOffset(self: *const State) usize {
-        return @min(self.currentTokenStartOffset() + self.token.len, self.lex.source.len);
+        return self.token.end;
     }
 
     pub fn captureFunctionSource(self: *State, fd: *function_def_mod.FunctionDef, source_start: usize) Error!void {
@@ -1540,14 +1537,14 @@ pub const State = struct {
     }
 
     /// Expect a specific token kind.
-    pub fn expectToken(s: *State, kind: tok.TokenKind) Error!void {
+    pub fn expectToken(s: *State, kind: tok.Kind) Error!void {
         if (s.peekKind() != kind) return s.failExpectedToken(kind);
         try s.advance();
     }
 
     /// Peek at the next token kind without consuming the current token.
     /// Saves and restores lexer position so the cached token stays valid.
-    pub fn peekNextKind(s: *State) tok.TokenKind {
+    pub fn peekNextKind(s: *State) tok.Kind {
         return s.peekNext().kind;
     }
 
@@ -1556,19 +1553,19 @@ pub const State = struct {
         defer lookahead.restoreLexerCursorSnapshot(s, saved_cursor);
         var peek_token = s.lex.next() catch return false;
         defer s.lex.freeToken(&peek_token);
-        if (peek_token.val == .kw_of) return true;
-        return peek_token.val == .ident and
+        if (peek_token.kind == .kw_of) return true;
+        return peek_token.kind == .ident and
             !peek_token.payload.ident.has_escape and
             identifiers.atomNameEquals(s, peek_token.payload.ident.atom, "of");
     }
 
     pub const PeekedToken = struct {
-        kind: tok.TokenKind,
+        kind: tok.Kind,
         line_terminator: bool,
 
         /// `kind` with no line terminator in between: the restricted
         /// productions (`async function`, `get`/`set` names, ...).
-        pub fn isBefore(self: PeekedToken, kind: tok.TokenKind) bool {
+        pub fn isBefore(self: PeekedToken, kind: tok.Kind) bool {
             return self.kind == kind and !self.line_terminator;
         }
     };
@@ -1580,7 +1577,7 @@ pub const State = struct {
         defer lookahead.restoreLexerCursorSnapshot(s, saved_cursor);
         var peek_token = s.lex.next() catch return .{ .kind = .eof, .line_terminator = false };
         defer s.lex.freeToken(&peek_token);
-        return .{ .kind = peek_token.val, .line_terminator = s.lex.gotLineTerminator() };
+        return .{ .kind = peek_token.kind, .line_terminator = s.lex.gotLineTerminator() };
     }
 
     /// Mirror QuickJS's `SKIP_HAS_SEMI` dispatch at the `for` statement
@@ -1609,7 +1606,7 @@ pub const State = struct {
         var paren_depth: usize = 0;
         var bracket_depth: usize = 0;
         var brace_depth: usize = 0;
-        var previous_token_kind: ?tok.TokenKind = null;
+        var previous_token_kind: ?tok.Kind = null;
         while (true) {
             const kind = s.peekKind();
             if (kind == .eof) return false;
@@ -1685,7 +1682,7 @@ pub const State = struct {
         var paren_depth: usize = 0;
         var bracket_depth: usize = 0;
         var brace_depth: usize = 0;
-        var previous_token_kind: ?tok.TokenKind = null;
+        var previous_token_kind: ?tok.Kind = null;
         var eval_candidate = false;
         // Keep a direct-eval candidate alive while closing a grouping
         // whose complete expression was `eval`. This covers `(eval)(...)`
@@ -1776,12 +1773,12 @@ pub const State = struct {
 
         while (true) {
             var expr_depth: usize = 0;
-            var previous_token_kind: ?tok.TokenKind = .lbrace;
+            var previous_token_kind: ?tok.Kind = .lbrace;
             var eval_candidate = false;
             while (true) {
                 var scan_token = s.lex.next() catch return false;
                 defer s.lex.freeToken(&scan_token);
-                const kind = scan_token.val;
+                const kind = scan_token.kind;
                 if (kind == .eof) return false;
                 if (kind == .kw_function) {
                     lookahead.skipFunctionInPredeclareScan(s) catch return false;

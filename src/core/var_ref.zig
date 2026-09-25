@@ -150,13 +150,22 @@ pub const VarRef = struct {
             std.debug.assert(fromValue(next_value) == null);
         }
         self.pvalue.* = next_value;
-        // A closure cell is a traced object owning one value slot, so storing
-        // a fresh value into a long-lived cell is an old-to-young edge the
-        // minor cannot rediscover: its sticky marks stop the trace at the old
-        // cell. `pvalue` may alias a frame slot rather than `value`, but the
-        // owner recorded here is always the cell itself, which is what the
-        // remembered set re-traces.
-        rt.gc.generationalBarrier(&self.header, next_value.cycleMarkHeader());
+        rt.gc.generationalBarrier(self.slotOwner(), next_value.cycleMarkHeader());
+    }
+
+    /// The traced owner of the slot `pvalue` names, for the write barrier.
+    ///
+    /// A closed cell owns `value`. An open cell borrows a frame slot: while
+    /// the frame runs, that slot is a root and needs no barrier, but once a
+    /// generator or async frame is parked the slot lives in storage its
+    /// object owns, and `value` names that object (`attachOpenOwner`).
+    /// Remembering the cell there would be useless: re-tracing it reaches
+    /// only the old owner, whose sticky mark stops the minor before the slot.
+    pub inline fn slotOwner(self: *VarRef) *gc.Header {
+        if (self.is_open) {
+            if (self.value.cycleMarkHeader()) |frame_owner| return frame_owner;
+        }
+        return &self.header;
     }
 
     pub fn varRefValueSlot(self: *VarRef) *JSValue {

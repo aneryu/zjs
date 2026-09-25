@@ -19,8 +19,7 @@ Direct `@import("exec/….zig")` is limited to a few compile tests.
 
 | Caller | Exec names it uses | Why |
 | --- | --- | --- |
-| `src/js_context.zig` | `eval_entry`, `zjs_vm`, `call_site`, `call_runtime`, `standard_globals`, `object_ops`, `exception_ops`, `coercion_ops`, `string_ops` | Public `Context`: eval, property get, `callFunction`, drain |
-| `src/native.zig` | `builtin_dispatch` | Host `defineFunction` thunks use the same native-call view as builtins |
+| `src/js_context.zig` | `eval_entry`, `zjs_vm`, `call_site`, `call_runtime`, `standard_globals`, `object_ops`, `exception_ops`, `coercion_ops`, `string_ops`, `builtin_dispatch` | Public `Context`: eval, property get, `callFunction`, drain, host-function thunks |
 | `src/host/event_loop.zig` | `zjs_vm`, `call_runtime`, `atomics_ops`, `object_ops`, `promise_ops` | Timers/fd callbacks, microtasks, Atomics waiter wake |
 | `src/root.zig` | `exceptions`, `opcodeName`, `small_inline` | Public error aliases; opcode-profile name provider |
 | CLI (`zjs`, `run-test262`) | `module` / `module_graph`, `atomics_ops`, `call_runtime`, `buffer_ops` | File modules, agents, harness helpers |
@@ -36,7 +35,7 @@ These layers describe who *calls* whom on a normal eval. They are not a
 compile DAG: a builtin file in L6 still `@import`s `call_runtime.zig`.
 
 ```
-L0  host facade     js_context.zig, native.zig, event_loop.zig
+L0  host facade     js_context.zig, event_loop.zig
 L1  exec entries    eval_entry.zig, root.Vm, standard_globals.zig
 L2  interpreter     zjs_vm.zig, inline_calls.zig,
                     tailcall_dispatch.zig + tailcall_dispatch_colds.zig
@@ -152,7 +151,7 @@ standard_globals.install*
 ```
 
 Host functions registered with `Context.defineFunction` are the same
-`NativeEntry` shape. `src/native.zig` builds the thunk; dispatch is
+`NativeEntry` shape. `src/js_context.zig` builds the thunk; dispatch is
 `builtin_dispatch`, not a second registry.
 
 ### 3.5 `[[Construct]]`

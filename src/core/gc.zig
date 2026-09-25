@@ -23,6 +23,16 @@ const shape = @import("shape.zig");
 const JSValue = @import("value.zig").JSValue;
 const value_format = @import("value_format.zig");
 
+/// Operational time for destruction budgets and aged page decommit. Keep
+/// independent of optional Runtime diagnostic hooks: disabling measurement
+/// must not disable GC scheduling. Mirrors host/clock.zig's conversion;
+/// the engine cannot import the bundled host. Keep the conversion in sync.
+pub fn schedulingNanos() u64 {
+    const io = std.Io.Threaded.global_single_threaded.io();
+    const nanos = std.Io.Clock.Timestamp.now(io, .awake).raw.toNanoseconds();
+    return if (nanos <= 0) 0 else @intCast(nanos);
+}
+
 const KB: usize = 1024;
 const MB: usize = 1024 * KB;
 
@@ -120,6 +130,13 @@ pub const Forensics = struct {
         if (comptime std.debug.runtime_safety) {
             if (read("ZJS_GC_AUDIT")) |level| self.audit = level;
             if (read("ZJS_GC_VERIFY")) |level| self.verify = level;
+        }
+
+        // `ZJS_GC_NURSERY=1`: opt this process into the copying nursery so a
+        // suite can be reported in moving mode. The default stays off.
+        if (std.c.getenv("ZJS_GC_NURSERY")) |nursery_raw| {
+            const nursery_text = std.mem.span(nursery_raw);
+            if (nursery_text.len != 0 and !std.mem.eql(u8, nursery_text, "0")) nursery_enabled = true;
         }
 
         const raw = std.c.getenv("ZJS_GC_STRESS") orelse return;
@@ -2292,8 +2309,9 @@ pub const Registry = struct {
     /// every production reader of it (`Table.containsHeader`, both
     /// conservative resolvers, `clearYoungMarksStw`) tests the ALLOC BITMAP
     /// first, so a stale byte behind a cleared alloc bit is unobservable. The
-    /// bytes were debited in one stroke at condemnation
-    /// (`DoomedSnapshot.bitmap_bytes`).
+    /// Diagnostic allocation bytes were debited at condemnation
+    /// (`DoomedSnapshot.bitmap_bytes`); the JS heap budget is discharged here
+    /// when these cells actually leave the allocated population.
     ///
     /// Two cold cases still walk the cells:
     ///   * audit builds, which own an independent publish/unpublish oracle and
@@ -2304,8 +2322,9 @@ pub const Registry = struct {
     ///     retires the whole map at cycle begin).
     pub fn reclaimDoomedBlock(self: *Registry, block: *BlockHeapMod.Block) usize {
         const audit_walk = comptime carrier_audit_enabled;
-        if (audit_walk or self.generation.rememberedCount() != 0) {
-            const accounted = block.cell_size - metadata_prefix_size;
+        const walk_cells = audit_walk or self.generation.rememberedCount() != 0;
+        const accounted = block.cell_size - metadata_prefix_size;
+        if (walk_cells) {
             const cells_base = @intFromPtr(block) + block.cells_offset + metadata_prefix_size;
             const cell_size: usize = block.cell_size;
             // TGC S4-g (4): word arithmetic, and one prefetch pass per word.
@@ -2349,6 +2368,10 @@ pub const Registry = struct {
             }
         }
         const reclaimed = self.block_heap.reclaimDoomedCells(block);
+        // The cold walk discharges each publication through
+        // unpublishStringCell. The word-only path must return the same budget
+        // without reading dead headers; finalizer cells were drained earlier.
+        if (!walk_cells) self.heap_budget.discharge(reclaimed * accounted);
         if (comptime native_alloc.diagnostic_accounting_enabled and !audit_walk) {
             // Audit builds debit each cell above. Debug executables still
             // account allocations, but retire bitmap-only cells in bulk.
@@ -3490,6 +3513,16 @@ pub const Registry = struct {
         self.observeNewPublication(h, bytes);
     }
 
+    /// Release a published evacuation copy after its source and incoming
+    /// references have been restored. Its resources still belong to the
+    /// source: no object/payload finalizer may run on this duplicate body.
+    pub fn discardPromotedCell(self: *Registry, copy: *Header, source_body_bytes: usize) void {
+        std.debug.assert(isBlockCellHeader(copy));
+        std.debug.assert(copy.metaConst().flags.kind == .object);
+        self.unlinkObjectWithBytes(copy, heapByteSizeFromHeader(self.runtime.?, copy));
+        self.destroyWithFam(object.Object, object.Object.fromHeader(copy), source_body_bytes - @sizeOf(object.Object));
+    }
+
     /// Copy a young cell into the old generation and leave a forwarding
     /// address behind.
     ///
@@ -3526,8 +3559,12 @@ pub const Registry = struct {
         moved.meta().lifetime = source_meta.lifetime;
         moved.meta().alloc_info = .{ .block_size_idx = representation.block_cell_size_class, .nursery = false };
         moved.meta().flags.young = false;
+        // The nursery uses the header flag; the destination block also needs
+        // its finalizer bitmap stamped (including weak-identity cleanup).
+        if (source_meta.flags.needs_finalizer) self.setNeedsFinalizer(moved);
 
         object.Object.fromHeader(moved).rebindAfterRelocation(@intFromPtr(old), body_bytes);
+        gc_weak.relocateObjectIdentities(rt, object.Object.fromHeader(old), object.Object.fromHeader(moved));
         setForwarding(old, moved, body_bytes);
         // Poison what the copy left behind, in safety builds. Without this the
         // husk still holds the object's old field values, so code that kept a

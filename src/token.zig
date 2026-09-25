@@ -1,123 +1,105 @@
-//! QuickJS-aligned token API mirroring `JSToken` and `TOK_*` from
-//! QuickJS `quickjs.c`.
-//!
-//! Strong-alignment contract:
-//!   * `Kind` integer values match `enum { TOK_NUMBER = -128, ... }`
-//! in `quickjs.c` exactly.
-//!   * Single-character punctuators reuse their raw ASCII byte (so `+`
-//!     is `0x2B`, `;` is `0x3B`, …) — QuickJS does the same.
-//!   * The keyword block `TOK_NULL..TOK_AWAIT` is laid out so that
-//!     `tokenAtomFromKeyword(tok) == ATOM_null + (tok - TOK_NULL)`
-//! because `quickjs-atom.h:29..76` matches `quickjs.c`
-//!     row-for-row. `keywordAtomAlignmentTest` enforces the invariant.
+//! Lexer tokens: the token kinds, their per-kind payloads, and the mapping
+//! from keyword kinds to predefined atoms.
 
 const std = @import("std");
 const atom = @import("core/atom.zig");
 
-/// Token kinds. The integer values are QuickJS's `TOK_*` numbering
-///: keyword tokens map onto the predefined atom ids
-/// (`keywordAtom`), the assignment operators derive their opcode from
-/// `OP_mul + (op - mul_assign)`, and single-byte punctuators keep their
-/// ASCII value so the lexer can `@enumFromInt` them.
-pub const Kind = enum(i16) {
-    number = -128,
-    string = -127,
-    template = -126,
-    ident = -125,
-    regexp = -124,
-    // Order is significant: js_parse_assign_expr2 derives the assignment
-    // opcode from `OP_mul + (op - mul_assign)`.
-    mul_assign = -123,
-    div_assign = -122,
-    mod_assign = -121,
-    plus_assign = -120,
-    minus_assign = -119,
-    shl_assign = -118,
-    sar_assign = -117,
-    shr_assign = -116,
-    and_assign = -115,
-    xor_assign = -114,
-    or_assign = -113,
-    pow_assign = -112,
-    land_assign = -111,
-    lor_assign = -110,
-    double_question_mark_assign = -109,
-    // `<` and `>` are lexed as the single-byte `lt` / `gt`; the two QuickJS
-    // slots are kept so the numbering stays aligned.
-    dec = -108,
-    inc = -107,
-    shl = -106,
-    sar = -105,
-    shr = -104,
-    lt_reserved = -103,
-    lte = -102,
-    gt_reserved = -101,
-    gte = -100,
-    eq = -99,
-    strict_eq = -98,
-    neq = -97,
-    strict_neq = -96,
-    land = -95,
-    lor = -94,
-    pow = -93,
-    arrow = -92,
-    ellipsis = -91,
-    double_question_mark = -90,
-    question_mark_dot = -89,
-    err = -88,
-    private_name = -87,
-    eof = -86,
-    // Keywords, in `quickjs-atom.h` order; `kw_of` and `kw_async` are
-    // pseudo keywords the lexer never emits (they stay TOK_IDENT).
-    kw_null = -85,
-    kw_false = -84,
-    kw_true = -83,
-    kw_if = -82,
-    kw_else = -81,
-    kw_return = -80,
-    kw_var = -79,
-    kw_this = -78,
-    kw_delete = -77,
-    kw_void = -76,
-    kw_typeof = -75,
-    kw_new = -74,
-    kw_in = -73,
-    kw_instanceof = -72,
-    kw_do = -71,
-    kw_while = -70,
-    kw_for = -69,
-    kw_break = -68,
-    kw_continue = -67,
-    kw_switch = -66,
-    kw_case = -65,
-    kw_default = -64,
-    kw_throw = -63,
-    kw_try = -62,
-    kw_catch = -61,
-    kw_finally = -60,
-    kw_function = -59,
-    kw_debugger = -58,
-    kw_with = -57,
-    kw_class = -56,
-    kw_const = -55,
-    kw_enum = -54,
-    kw_export = -53,
-    kw_extends = -52,
-    kw_import = -51,
-    kw_super = -50,
-    kw_implements = -49,
-    kw_interface = -48,
-    kw_let = -47,
-    kw_package = -46,
-    kw_private = -45,
-    kw_protected = -44,
-    kw_public = -43,
-    kw_static = -42,
-    kw_yield = -41,
-    kw_await = -40,
-    kw_of = -39,
-    kw_async = -38,
-    // Single-byte punctuators; `newline` is the balanced scan's
+/// Token kinds. A single-byte punctuator is its own ASCII byte, so the lexer
+/// can `@enumFromInt` it directly; every other kind is numbered from 0x80 up.
+/// The keywords `kw_null..kw_await` are contiguous and follow the predefined
+/// atom table's keyword block row for row (see `keywordAtom`).
+pub const Kind = enum(u8) {
+    number = 0x80,
+    string,
+    template,
+    ident,
+    regexp,
+    mul_assign,
+    div_assign,
+    mod_assign,
+    plus_assign,
+    minus_assign,
+    shl_assign,
+    sar_assign,
+    shr_assign,
+    and_assign,
+    xor_assign,
+    or_assign,
+    pow_assign,
+    land_assign,
+    lor_assign,
+    double_question_mark_assign,
+    dec,
+    inc,
+    shl,
+    sar,
+    shr,
+    lte,
+    gte,
+    eq,
+    strict_eq,
+    neq,
+    strict_neq,
+    land,
+    lor,
+    pow,
+    arrow,
+    ellipsis,
+    double_question_mark,
+    question_mark_dot,
+    err,
+    private_name,
+    eof,
+    kw_null,
+    kw_false,
+    kw_true,
+    kw_if,
+    kw_else,
+    kw_return,
+    kw_var,
+    kw_this,
+    kw_delete,
+    kw_void,
+    kw_typeof,
+    kw_new,
+    kw_in,
+    kw_instanceof,
+    kw_do,
+    kw_while,
+    kw_for,
+    kw_break,
+    kw_continue,
+    kw_switch,
+    kw_case,
+    kw_default,
+    kw_throw,
+    kw_try,
+    kw_catch,
+    kw_finally,
+    kw_function,
+    kw_debugger,
+    kw_with,
+    kw_class,
+    kw_const,
+    kw_enum,
+    kw_export,
+    kw_extends,
+    kw_import,
+    kw_super,
+    kw_implements,
+    kw_interface,
+    kw_let,
+    kw_package,
+    kw_private,
+    kw_protected,
+    kw_public,
+    kw_static,
+    kw_yield,
+    kw_await,
+    /// Never lexed: `of` stays an `ident`. Parser lookahead uses this kind
+    /// for the contextual keyword.
+    kw_of,
+    // Single-byte punctuators. `newline` is the balanced scan's
     // line-terminator sentinel.
     newline = '\n',
     bang = '!',
@@ -144,26 +126,82 @@ pub const Kind = enum(i16) {
     pipe = '|',
     rbrace = '}',
     tilde = '~',
+
+    const first_keyword: Kind = .kw_null;
+    const last_keyword: Kind = .kw_await;
+
+    pub fn isKeyword(kind: Kind) bool {
+        const raw = @intFromEnum(kind);
+        return raw >= @intFromEnum(first_keyword) and raw <= @intFromEnum(last_keyword);
+    }
+
+    /// The source byte of a single-byte punctuator, or null for every other
+    /// kind.
+    pub fn punctuatorByte(kind: Kind) ?u8 {
+        const raw = @intFromEnum(kind);
+        return if (raw < 0x80) raw else null;
+    }
+
+    /// The predefined atom naming a keyword kind.
+    pub fn keywordAtom(kind: Kind) atom.Atom {
+        std.debug.assert(kind.isKeyword());
+        return atom.Atom.fromRaw(atom.ids.null_.raw() + @intFromEnum(kind) - @intFromEnum(first_keyword));
+    }
+
+    /// Keyword spellings by length, generated from the `kw_*` tag names.
+    const keywords_by_len = blk: {
+        @setEvalBranchQuota(10_000);
+        const max_len = 10;
+        var counts = [_]usize{0} ** (max_len + 1);
+        for (@intFromEnum(first_keyword)..@intFromEnum(last_keyword) + 1) |raw| {
+            counts[keywordSpelling(@enumFromInt(raw)).len] += 1;
+        }
+        var table: [max_len + 1][]const Kind = undefined;
+        for (&table, counts, 0..) |*row, count, len| {
+            var kinds: [count]Kind = undefined;
+            var i: usize = 0;
+            for (@intFromEnum(first_keyword)..@intFromEnum(last_keyword) + 1) |raw| {
+                const kind: Kind = @enumFromInt(raw);
+                if (keywordSpelling(kind).len != len) continue;
+                kinds[i] = kind;
+                i += 1;
+            }
+            const final = kinds;
+            row.* = &final;
+        }
+        break :blk table;
+    };
+
+    fn keywordSpelling(comptime kind: Kind) []const u8 {
+        return @tagName(kind)["kw_".len..];
+    }
+
+    /// The keyword kind spelled by `lexeme`, if any.
+    pub fn keyword(lexeme: []const u8) ?Kind {
+        switch (lexeme.len) {
+            inline 2...keywords_by_len.len - 1 => |len| {
+                const bytes: *const [len]u8 = lexeme[0..len];
+                inline for (keywords_by_len[len]) |kind| {
+                    if (std.mem.eql(u8, bytes, keywordSpelling(kind))) return kind;
+                }
+                return null;
+            },
+            else => return null,
+        }
+    }
+
+    comptime {
+        // `keywordAtom` is plain arithmetic, so a reordering on either side
+        // must fail the build instead of misnaming keywords.
+        @setEvalBranchQuota(10_000);
+        std.debug.assert(atom.last_keyword == keywordAtom(last_keyword));
+        for (@intFromEnum(first_keyword)..@intFromEnum(last_keyword) + 1) |raw| {
+            const kind: Kind = @enumFromInt(raw);
+            std.debug.assert(std.mem.eql(u8, atom.predefinedName(keywordAtom(kind)), keywordSpelling(kind)));
+        }
+    }
 };
 
-pub const first_keyword = Kind.kw_null;
-pub const last_keyword = Kind.kw_await;
-
-pub fn isKeyword(val: Kind) bool {
-    const raw = @intFromEnum(val);
-    return raw >= @intFromEnum(first_keyword) and raw <= @intFromEnum(last_keyword);
-}
-
-/// Map a keyword token to its predefined atom. Mirrors the QuickJS
-/// invariant `s->token.u.ident.atom = atom_null + (val - TOK_NULL)`
-/// (see `quickjs.c`). Predefined atom ids start at 1 and the
-/// 47 keywords occupy ids 1..47 in `quickjs-atom.h:29..76`.
-pub fn keywordAtom(val: Kind) atom.Atom {
-    std.debug.assert(isKeyword(val));
-    return atom.Atom.fromRaw(atom.ids.null_.raw() + @as(u32, @intCast(@intFromEnum(val) - @intFromEnum(first_keyword))));
-}
-
-/// Per-token payload union (mirrors JSToken's anonymous union).
 pub const TemplatePart = enum(u8) {
     no_substitution, // `...`
     head, // `... ${
@@ -171,19 +209,17 @@ pub const TemplatePart = enum(u8) {
     tail, // }...`
 };
 
+/// Per-kind token payload.
 pub const Payload = union(enum) {
     none,
-    /// TOK_NUMBER — for now we keep both the lexeme bytes and the parsed
-    /// double; bigint is reported via `is_bigint`. F4 will move to a
-    /// JSValue payload (matching `JSToken.u.num.val`).
+    /// `number`; a BigInt literal keeps its digits in `bigint_text`.
     num: struct {
         value: f64,
         is_bigint: bool = false,
         bigint_text: []const u8 = "",
     },
-    /// TOK_STRING / TOK_TEMPLATE — owns the decoded UTF-8 byte slice.
-    /// `sep` matches QuickJS `JSToken.u.str.sep` (`'`, `"`, `` ` ``, or
-    /// the substitution delimiter).
+    /// `string` / `template`. `sep` is the opening delimiter (`'`, `"`, or
+    /// `` ` ``).
     str: struct {
         bytes: []u8,
         raw_bytes: []u8 = &.{},
@@ -193,47 +229,31 @@ pub const Payload = union(enum) {
         sep: u8,
         template: ?TemplatePart = null,
     },
-    /// TOK_IDENT, TOK_PRIVATE_NAME, and any keyword.
+    /// `ident`, `private_name`, and every keyword.
     ident: struct {
         atom: atom.Atom,
         has_escape: bool,
-        is_reserved: bool,
     },
-    /// TOK_REGEXP — pattern + flags as raw source bytes (compiled in F12).
+    /// `regexp` — pattern and flags as source slices.
     regexp: struct {
         pattern: []const u8,
         flags: []const u8,
     },
 };
 
-/// QuickJS-aligned token. Mirrors `JSToken` with the
-/// same field set (`val`, `line_num`, `col_num`, `ptr`) plus a sum type
-/// for the per-kind payload. Lifetime: `payload.str.bytes` and optional
-/// `payload.str.raw_bytes` are owned by
-/// the lexer's allocator; `payload.regexp.{pattern,flags}` are slices
-/// into the source buffer.
-pub const TokenImpl = struct {
-    val: Kind,
+/// Lifetime: `payload.str.bytes` and `payload.str.raw_bytes` are owned by the
+/// lexer's allocator; `payload.regexp.{pattern,flags}` are slices into the
+/// source buffer.
+pub const Token = struct {
+    kind: Kind,
     line_num: u32,
     col_num: u32,
-    /// Pointer to the first byte of the token in the source buffer.
-    ptr: [*]const u8,
-    /// Length of the token in source bytes. Not present in JSToken
-    /// (which uses `s->buf_ptr - s->mark`); we expose it for tests.
-    len: usize,
+    /// Byte range `start..end` of the token in the source buffer.
+    start: usize,
+    end: usize,
     payload: Payload,
+
+    pub fn len(tok: *const Token) usize {
+        return tok.end - tok.start;
+    }
 };
-
-test "F1: keyword token integer values match QuickJS TOK_*" {
-    // Spot-check anchors from quickjs.c.
-    try std.testing.expectEqual(@as(i16, -128), @intFromEnum(Kind.number));
-    try std.testing.expectEqual(@as(i16, -127), @intFromEnum(Kind.string));
-    try std.testing.expectEqual(@as(i16, -125), @intFromEnum(Kind.ident));
-    try std.testing.expectEqual(@as(i16, -86), @intFromEnum(Kind.eof));
-    try std.testing.expectEqual(@as(i16, -85), @intFromEnum(Kind.kw_null));
-    try std.testing.expectEqual(@as(i16, -40), @intFromEnum(Kind.kw_await));
-    try std.testing.expectEqual(@as(i16, -39), @intFromEnum(Kind.kw_of));
-}
-
-pub const TokenKind = Kind;
-pub const Token = TokenImpl;

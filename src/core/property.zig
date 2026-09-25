@@ -12,6 +12,7 @@ const gc = @import("gc.zig");
 const JSValue = @import("value.zig").JSValue;
 const JSRuntime = @import("../runtime.zig").JSRuntime;
 const VarRef = @import("var_ref.zig").VarRef;
+const Object = @import("object.zig").Object;
 const native_entry = @import("native_entry.zig");
 const module_auto_init = @import("module_auto_init.zig");
 const property_state = @import("property_state.zig");
@@ -114,28 +115,31 @@ pub const Flags = packed struct(u6) {
     }
 };
 
-/// qjs `struct { JSObject *getter, *setter; }`. Getters and
-/// setters are always callable objects or absent; absence is `null` (qjs NULL),
-/// surfacing as `undefined`. Two object-header pointers = 16B, faithful to qjs
-/// and half the size of the old `{ getter, setter: JSValue }` (32B).
+/// Getters and setters are callable objects or absent (`undefined`). Typed
+/// object slots let the collector repair the actual fields without boxing
+/// temporary values. The compact two-pointer representation stays 16 bytes.
 pub const Accessor = struct {
-    getter: ?*gc.Header = null, // qjs JSObject *getter; NULL if undefined
-    setter: ?*gc.Header = null, // qjs JSObject *setter; NULL if undefined
+    getter: ?*Object = null,
+    setter: ?*Object = null,
+
+    comptime {
+        std.debug.assert(@sizeOf(@This()) == 16);
+    }
 
     /// Build the compact traced representation from accessor values.
     pub fn fromBorrowedValues(getter_value: JSValue, setter_value: JSValue) Accessor {
         return .{
-            .getter = accessorHeaderFromValue(getter_value),
-            .setter = accessorHeaderFromValue(setter_value),
+            .getter = accessorObjectFromValue(getter_value),
+            .setter = accessorObjectFromValue(setter_value),
         };
     }
 
     pub fn getterValue(self: Accessor) JSValue {
-        return valueFromAccessorHeader(self.getter);
+        return if (self.getter) |object| object.value() else JSValue.undefinedValue();
     }
 
     pub fn setterValue(self: Accessor) JSValue {
-        return valueFromAccessorHeader(self.setter);
+        return if (self.setter) |object| object.value() else JSValue.undefinedValue();
     }
 
     pub fn getterIsUndefined(self: Accessor) bool {
@@ -145,28 +149,12 @@ pub const Accessor = struct {
     pub fn setterIsUndefined(self: Accessor) bool {
         return self.setter == null;
     }
-
-    /// GC bridge: the trace visitor reads `getterValue()` into a stack temp,
-    /// visits (possibly rewriting it under a moving collector), then writes the
-    /// possibly-updated value back through these. The value is always an object
-    /// or undefined, so re-deriving the header is lossless.
-    pub fn syncGetterFromVisitedValue(self: *Accessor, value: JSValue) void {
-        self.getter = accessorHeaderFromValue(value);
-    }
-
-    pub fn syncSetterFromVisitedValue(self: *Accessor, value: JSValue) void {
-        self.setter = accessorHeaderFromValue(value);
-    }
 };
 
-fn accessorHeaderFromValue(value: JSValue) ?*gc.Header {
+fn accessorObjectFromValue(value: JSValue) ?*Object {
     if (value.is(.undefined_value)) return null;
     std.debug.assert(value.is(.object));
-    return value.refHeader().?;
-}
-
-fn valueFromAccessorHeader(header: ?*gc.Header) JSValue {
-    return if (header) |h| JSValue.object(h) else JSValue.undefinedValue();
+    return Object.fromHeader(value.refHeader().?);
 }
 
 pub const AutoInitKind = enum(u8) {

@@ -30,14 +30,31 @@ pub const FourByteEscapeUnits = struct {
 /// decodes to; otherwise null. utf16-backed strings and any other shape defer
 /// to the general decode path (null). Mirrors the URI grammar's ASCII-only
 /// constraint, so a non-ASCII utf16 string can never be a valid escape run.
+/// Reads at most twelve code units without allocating or materializing ropes.
 pub fn decodeSingleFourByteEscapeUnits(value: JSValue) !?FourByteEscapeUnits {
     if (!value.isString()) return null;
-    const string_value = value.asStringBody() orelse return null;
-    const bytes = switch (string_value.resolveData()) {
-        .latin1 => |latin1| latin1,
-        .utf16 => return null,
-    };
-    return decodeSingleFourByteEscapeUnitsFromAscii(bytes);
+    if (string.asFlat(value)) |flat| {
+        return switch (flat.resolveData()) {
+            .latin1 => |bytes| decodeSingleFourByteEscapeUnitsFromAscii(bytes),
+            .utf16 => null,
+        };
+    }
+    const rope = value.ropeBody() orelse return null;
+    if (rope.isWide() or string.stringValueLenUnchecked(value) != 12) return null;
+    var bytes: [12]u8 = undefined;
+    var offset: usize = 0;
+    var iterator = string.StringValueIterator.init(value);
+    while (iterator.next()) |leaf| {
+        switch (leaf) {
+            .latin1 => |part| {
+                @memcpy(bytes[offset..][0..part.len], part);
+                offset += part.len;
+            },
+            .utf16 => return null,
+        }
+    }
+    std.debug.assert(offset == bytes.len);
+    return decodeSingleFourByteEscapeUnitsFromAscii(&bytes);
 }
 
 /// Probe a raw ASCII byte slice for a single four-byte UTF-8 URI escape.

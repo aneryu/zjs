@@ -1151,25 +1151,32 @@ pub fn iteratorPrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) ?*
 
 pub fn defineToStringTag(rt: *core.JSRuntime, object: *core.Object, tag_name: []const u8) !void {
     const tag_atom = core.atom.predefinedId("Symbol.toStringTag", .symbol) orelse return error.TypeError;
-    const tag = try value_ops.createStringValue(rt, tag_name);
-    try object.defineOwnProperty(rt, tag_atom, core.Descriptor.data(tag, .{ .configurable = true }));
+    var values = [_]core.JSValue{ object.value(), core.JSValue.undefinedValue() };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    values[1] = try value_ops.createStringValue(rt, tag_name);
+    try core.value_semantics.objectFromValue(values[0]).?.defineOwnProperty(rt, tag_atom, core.Descriptor.data(values[1], .{ .configurable = true }));
 }
 
 pub fn iteratorPrototype(rt: *core.JSRuntime, global: *core.Object, tag_name: []const u8) !*core.Object {
-    var fallback_base = if (iteratorPrototypeFromGlobal(rt, global) == null) blk: {
-        const base = try core.Object.create(rt, core.class.ids.object, null);
-        errdefer core.Object.destroyFromHeader(rt, base.gcHeader());
-        try defineToStringTag(rt, base, "Iterator");
-        break :blk base;
-    } else null;
-    const base = iteratorPrototypeFromGlobal(rt, global) orelse fallback_base.?;
-    const specific = try core.Object.create(rt, core.class.ids.object, base);
-    errdefer core.Object.destroyFromHeader(rt, specific.gcHeader());
-    if (fallback_base) |_| {
-        fallback_base = null;
+    var values = [_]core.JSValue{ global.value(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    if (iteratorPrototypeFromGlobal(rt, global)) |base| {
+        values[1] = base.value();
+    } else {
+        values[1] = (try core.Object.create(rt, core.class.ids.object, null)).value();
+        try defineToStringTag(rt, core.value_semantics.objectFromValue(values[1]).?, "Iterator");
     }
-    try defineToStringTag(rt, specific, tag_name);
-    return specific;
+    values[2] = (try core.Object.create(rt, core.class.ids.object, core.value_semantics.objectFromValue(values[1]).?)).value();
+    try defineToStringTag(rt, core.value_semantics.objectFromValue(values[2]).?, tag_name);
+    return core.value_semantics.objectFromValue(values[2]).?;
 }
 
 pub fn iteratorPrototypeAccessor(
@@ -1277,15 +1284,18 @@ fn iteratorMethodsPrototype(
 ) !*core.Object {
     if (global.cachedRealmValue(rt, slot)) |stored| return property_ops.expectObject(stored);
 
-    const proto = try iteratorPrototype(rt, global, tag_name);
-    var proto_raw_owned = true;
-    errdefer if (proto_raw_owned) core.Object.destroyFromHeader(rt, proto.gcHeader());
-    try installIteratorHelperMethod(rt, global, proto, core.atom.ids.next, 1);
-    try installIteratorHelperMethod(rt, global, proto, core.atom.ids.return_, 2);
-    const value = proto.value();
-    proto_raw_owned = false;
-    try global.setCachedRealmValue(rt, slot, value);
-    return proto;
+    var values = [_]core.JSValue{core.JSValue.undefinedValue()};
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    values[0] = (try iteratorPrototype(rt, global, tag_name)).value();
+    try installIteratorHelperMethod(rt, global, objectFromValue(values[0]).?, core.atom.ids.next, 1);
+    try installIteratorHelperMethod(rt, global, objectFromValue(values[0]).?, core.atom.ids.return_, 2);
+    try global.setCachedRealmValue(rt, slot, values[0]);
+    return objectFromValue(values[0]).?;
 }
 
 pub fn iteratorHelperPrototype(
@@ -1304,33 +1314,30 @@ pub fn iteratorConcatCall(
     comptime getIteratorMethod: anytype,
     comptime isCallableValue: anytype,
 ) !core.JSValue {
-    const records = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
-    errdefer core.Object.destroyFromHeader(ctx.runtime, records.gcHeader());
-
-    var rooted_records = records.value();
-    var records_root_frame = core.runtime.rootValues(.{&rooted_records});
-    records_root_frame.activate(ctx.runtime);
-    defer records_root_frame.deactivate(ctx.runtime);
+    // The argument window is an immutable ABI borrow; intermediate objects
+    // and returned methods must remain independently movable across getters.
+    var values = [_]core.JSValue{core.JSValue.undefinedValue()} ** 5;
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals }, .{ .borrowed = args } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    values[0] = (try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global))).value();
 
     for (args, 0..) |item, index| {
-        var rooted_item = item;
-        var rooted_iterator_method = core.JSValue.undefinedValue();
-        var loop_root_frame = core.runtime.rootValues(.{ &rooted_item, &rooted_iterator_method });
-        loop_root_frame.activate(ctx.runtime);
-        defer loop_root_frame.deactivate(ctx.runtime);
-
-        _ = try property_ops.expectObject(rooted_item);
-        rooted_iterator_method = try getIteratorMethod(ctx, output, global, rooted_item);
-        if (rooted_iterator_method.is(.undefined_value) or rooted_iterator_method.is(.null_value) or !isCallableValue(rooted_iterator_method)) return error.TypeError;
-        try records.setProperty(ctx.runtime, core.Atom.taggedInt(@intCast(index * 2)), rooted_item);
-        try records.setProperty(ctx.runtime, core.Atom.taggedInt(@intCast(index * 2 + 1)), rooted_iterator_method);
+        values[1] = item;
+        _ = try property_ops.expectObject(values[1]);
+        values[2] = try getIteratorMethod(ctx, output, global, values[1]);
+        if (values[2].is(.undefined_value) or values[2].is(.null_value) or !isCallableValue(values[2])) return error.TypeError;
+        try objectFromValue(values[0]).?.setProperty(ctx.runtime, core.Atom.taggedInt(@intCast(index * 2)), values[1]);
+        try objectFromValue(values[0]).?.setProperty(ctx.runtime, core.Atom.taggedInt(@intCast(index * 2 + 1)), values[2]);
     }
 
-    const prototype = try iteratorMethodsPrototype(ctx.runtime, global, .iterator_concat_prototype, "Iterator Concat");
-    const helper = try core.Object.create(ctx.runtime, core.class.ids.iterator_helper, prototype);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, helper.gcHeader());
-    try helper.setOptionalValueSlot(ctx.runtime, helper.iteratorTargetSlot(), rooted_records);
-    rooted_records = core.JSValue.undefinedValue();
+    values[3] = (try iteratorMethodsPrototype(ctx.runtime, global, .iterator_concat_prototype, "Iterator Concat")).value();
+    values[4] = (try core.Object.create(ctx.runtime, core.class.ids.iterator_helper, objectFromValue(values[3]).?)).value();
+    const helper = objectFromValue(values[4]).?;
+    try helper.setOptionalValueSlot(ctx.runtime, helper.iteratorTargetSlot(), values[0]);
     setHelperKind(helper, .concat);
     helper.iteratorIndexSlot().* = 0;
     return helper.value();
@@ -1416,6 +1423,22 @@ pub const IteratorZipRecord = struct {
 pub const IteratorZipCompletion = struct {
     err: ?IteratorZipError = null,
     exception: core.JSValue = core.JSValue.uninitialized(),
+    exception_slot: []core.JSValue = &.{},
+    root_slices: [1]core.runtime.ValueRootSlice = undefined,
+    root_frame: core.runtime.ValueRootFrame = .{},
+    roots_active: bool = false,
+
+    /// Activate at the final address immediately after construction. The
+    /// saved exception must survive even while Runtime.current_exception is
+    /// cleared or replaced by another iterator's close callback.
+    pub fn activateRoots(self: *IteratorZipCompletion, rt: *core.JSRuntime) void {
+        std.debug.assert(!self.roots_active);
+        self.exception_slot = @as([*]core.JSValue, @ptrCast(&self.exception))[0..1];
+        self.root_slices[0] = .{ .mutable = &self.exception_slot };
+        self.root_frame = .{ .slices = &self.root_slices };
+        self.root_frame.activate(rt);
+        self.roots_active = true;
+    }
 
     pub fn initNormal() IteratorZipCompletion {
         return .{};
@@ -1440,7 +1463,11 @@ pub const IteratorZipCompletion = struct {
         if (!self.exception.is(.uninitialized)) _ = ctx.throwValue(self.exception);
     }
 
-    pub fn deinit(self: *IteratorZipCompletion, _: *core.JSRuntime) void {
+    pub fn deinit(self: *IteratorZipCompletion, rt: *core.JSRuntime) void {
+        if (self.roots_active) {
+            self.root_frame.deactivate(rt);
+            self.roots_active = false;
+        }
         if (!self.exception.is(.uninitialized)) {
             self.exception = core.JSValue.uninitialized();
         }
@@ -1460,102 +1487,33 @@ pub fn iteratorZipCall(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const rt = ctx.runtime;
-    var rooted_args = args;
-    var iters_val = core.JSValue.undefinedValue();
-    var nexts_val = core.JSValue.undefinedValue();
-    var pads_val = core.JSValue.undefinedValue();
-    var keys_val = core.JSValue.undefinedValue();
-    var padding_val = core.JSValue.undefinedValue();
-
-    var root_values = [_]*core.JSValue{
-        &iters_val,
-        &nexts_val,
-        &pads_val,
-        &keys_val,
-        &padding_val,
-    };
-    var rooted_args_buffer = try core.runtime.ValueRootBuffer.initCopy(rt, rooted_args);
-    defer rooted_args_buffer.deinit();
-    rooted_args = rooted_args_buffer.values();
-    var root_frame = core.runtime.ValueRootFrame{
-        .values = &root_values,
-    };
-    root_frame.activate(rt);
-    defer root_frame.deactivate(rt);
-
-    if (rooted_args.len < 1) return error.TypeError;
-    const iterables = rooted_args[0];
-    const iterables_object = objectFromValue(iterables) orelse return error.TypeError;
-
-    const options = if (rooted_args.len >= 2) rooted_args[1] else core.JSValue.undefinedValue();
-    const mode = try iteratorZipModeFromOptions(ctx, output, global, options, caller_function, caller_frame);
-    if (mode == .longest and rooted_args.len >= 2 and !options.is(.undefined_value)) {
-        const padding_key = core.atom.ids.padding;
-        const padding_value = try object_ops.getValueProperty(ctx, output, global, options, padding_key, caller_function, caller_frame);
-        if (!padding_value.is(.undefined_value) and objectFromValue(padding_value) == null) return error.TypeError;
-        padding_val = padding_value;
+    if (args.len < 1) return error.TypeError;
+    // Inputs, options, accumulated iterators/nexts/pads/keys, padding source,
+    // and the outer iterator record each have an actual mutable slot.
+    var values = [_]core.JSValue{ args[0], if (args.len >= 2) args[1] else core.JSValue.undefinedValue() } ++ ([_]core.JSValue{core.JSValue.undefinedValue()} ** 7);
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    _ = objectFromValue(values[0]) orelse return error.TypeError;
+    const mode = try iteratorZipModeFromOptions(ctx, output, global, values[1], caller_function, caller_frame);
+    if (mode == .longest and !values[1].is(.undefined_value)) {
+        values[6] = try object_ops.getValueProperty(ctx, output, global, values[1], core.atom.ids.padding, caller_function, caller_frame);
+        if (!values[6].is(.undefined_value) and objectFromValue(values[6]) == null) return error.TypeError;
     }
-
-    const iters = try core.Object.create(rt, core.class.ids.object, null);
-    iters_val = iters.value();
-    errdefer {
-        core.Object.destroyFromHeader(rt, iters.gcHeader());
-        iters_val = core.JSValue.undefinedValue();
-    }
-    const nexts = try core.Object.create(rt, core.class.ids.object, null);
-    nexts_val = nexts.value();
-    errdefer {
-        core.Object.destroyFromHeader(rt, nexts.gcHeader());
-        nexts_val = core.JSValue.undefinedValue();
-    }
-    const pads = try core.Object.create(rt, core.class.ids.object, null);
-    pads_val = pads.value();
-    errdefer {
-        core.Object.destroyFromHeader(rt, pads.gcHeader());
-        pads_val = core.JSValue.undefinedValue();
-    }
-    const keys = if (keyed) try core.Object.create(rt, core.class.ids.object, null) else null;
-    if (keys) |k| keys_val = k.value();
-    errdefer if (keys) |object| {
-        core.Object.destroyFromHeader(rt, object.gcHeader());
-        keys_val = core.JSValue.undefinedValue();
-    };
-
+    values[2] = (try core.Object.create(rt, core.class.ids.object, null)).value();
+    values[3] = (try core.Object.create(rt, core.class.ids.object, null)).value();
+    values[4] = (try core.Object.create(rt, core.class.ids.object, null)).value();
+    if (keyed) values[5] = (try core.Object.create(rt, core.class.ids.object, null)).value();
     const count = if (!keyed) blk: {
-        const iterables_iterator = iteratorForValue(ctx, output, global, iterables, caller_function, caller_frame) catch |err| return err;
-        const iterables_next = try iteratorZipNextMethod(ctx, output, global, iterables_iterator, caller_function, caller_frame);
-
-        break :blk try iteratorZipCollectIndexed(
-            ctx,
-            output,
-            global,
-            iterables_iterator,
-            iterables_next,
-            iters,
-            nexts,
-            pads,
-            padding_val,
-            mode,
-            caller_function,
-            caller_frame,
-        );
-    } else try iteratorZipCollectKeyed(
-        ctx,
-        output,
-        global,
-        iterables_object,
-        iters,
-        nexts,
-        pads,
-        keys.?,
-        padding_val,
-        mode,
-        caller_function,
-        caller_frame,
-    );
-
+        values[7] = try iteratorForValue(ctx, output, global, values[0], caller_function, caller_frame);
+        values[8] = try iteratorZipNextMethod(ctx, output, global, values[7], caller_function, caller_frame);
+        break :blk try iteratorZipCollectIndexed(ctx, output, global, values[7], values[8], objectFromValue(values[2]).?, objectFromValue(values[3]).?, objectFromValue(values[4]).?, values[6], mode, caller_function, caller_frame);
+    } else try iteratorZipCollectKeyed(ctx, output, global, objectFromValue(values[0]).?, objectFromValue(values[2]).?, objectFromValue(values[3]).?, objectFromValue(values[4]).?, objectFromValue(values[5]).?, values[6], mode, caller_function, caller_frame);
     if (count > std.math.maxInt(i32)) return error.RangeError;
-    return try iteratorZipCreateHelper(rt, global, iters, nexts, pads, keys, count, mode, keyed);
+    return try iteratorZipCreateHelper(rt, global, objectFromValue(values[2]).?, objectFromValue(values[3]).?, objectFromValue(values[4]).?, objectFromValue(values[5]), count, mode, keyed);
 }
 
 pub fn iteratorZipModeFromOptions(
@@ -1591,74 +1549,84 @@ pub fn iteratorZipCollectIndexed(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !usize {
+    var rooted = [_]core.JSValue{ iterables_iterator, iterables_next, iters.value(), nexts.value(), pads.value(), padding } ++ ([_]core.JSValue{core.JSValue.undefinedValue()} ** 5);
+    var slots: []core.JSValue = &rooted;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+
     var count: usize = 0;
 
     while (true) {
-        const item_result = call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, iterables_iterator, iterables_next, &.{}, caller_function, caller_frame) catch |err| {
-            return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+        rooted[6] = call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, rooted[0], rooted[1], &.{}, caller_function, caller_frame) catch |err| {
+            return iteratorZipCloseAllAndPropagate(ctx, output, global, objectFromValue(rooted[2]).?, count, err, null, caller_function, caller_frame);
         };
-        const item_object = objectFromValue(item_result) orelse {
-            return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, error.TypeError, null, caller_function, caller_frame);
+        _ = objectFromValue(rooted[6]) orelse {
+            return iteratorZipCloseAllAndPropagate(ctx, output, global, objectFromValue(rooted[2]).?, count, error.TypeError, null, caller_function, caller_frame);
         };
-        const done_value = object_ops.getValueProperty(ctx, output, global, item_object.value(), core.atom.predefinedId("done", .string).?, caller_function, caller_frame) catch |err| {
-            return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+        const done_value = object_ops.getValueProperty(ctx, output, global, rooted[6], core.atom.predefinedId("done", .string).?, caller_function, caller_frame) catch |err| {
+            return iteratorZipCloseAllAndPropagate(ctx, output, global, objectFromValue(rooted[2]).?, count, err, null, caller_function, caller_frame);
         };
         if (coercion_ops.valueTruthy(done_value)) break;
-        const item = object_ops.getValueProperty(ctx, output, global, item_object.value(), core.atom.predefinedId("value", .string).?, caller_function, caller_frame) catch |err| {
-            return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+        const item = object_ops.getValueProperty(ctx, output, global, rooted[6], core.atom.predefinedId("value", .string).?, caller_function, caller_frame) catch |err| {
+            return iteratorZipCloseAllAndPropagate(ctx, output, global, objectFromValue(rooted[2]).?, count, err, null, caller_function, caller_frame);
         };
         const record = iteratorZipFlattenableRecord(ctx, output, global, item, caller_function, caller_frame) catch |err| {
-            return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, iterables_iterator, caller_function, caller_frame);
+            return iteratorZipCloseAllAndPropagate(ctx, output, global, objectFromValue(rooted[2]).?, count, err, rooted[0], caller_function, caller_frame);
         };
-        try iteratorZipStoreIndex(ctx.runtime, iters, count, record.iterator);
-        try iteratorZipStoreIndex(ctx.runtime, nexts, count, record.next);
+        rooted[9] = record.iterator;
+        rooted[10] = record.next;
+        try iteratorZipStoreIndex(ctx.runtime, objectFromValue(rooted[2]).?, count, rooted[9]);
+        try iteratorZipStoreIndex(ctx.runtime, objectFromValue(rooted[3]).?, count, rooted[10]);
         count += 1;
     }
 
     if (mode == .longest) {
-        if (!padding.is(.undefined_value) and !padding.is(.null_value)) {
-            var padding_iterator = iteratorForValue(ctx, output, global, padding, caller_function, caller_frame) catch |err| {
-                return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+        if (!rooted[5].is(.undefined_value) and !rooted[5].is(.null_value)) {
+            rooted[7] = iteratorForValue(ctx, output, global, rooted[5], caller_function, caller_frame) catch |err| {
+                return iteratorZipCloseAllAndPropagate(ctx, output, global, objectFromValue(rooted[2]).?, count, err, null, caller_function, caller_frame);
             };
-            const padding_next = iteratorZipNextMethod(ctx, output, global, padding_iterator, caller_function, caller_frame) catch |err| {
-                return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+            rooted[8] = iteratorZipNextMethod(ctx, output, global, rooted[7], caller_function, caller_frame) catch |err| {
+                return iteratorZipCloseAllAndPropagate(ctx, output, global, objectFromValue(rooted[2]).?, count, err, null, caller_function, caller_frame);
             };
 
             var index: usize = 0;
             var done = false;
             while (index < count) : (index += 1) {
-                const pad_step = call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, padding_iterator, padding_next, &.{}, caller_function, caller_frame) catch |err| {
-                    padding_iterator = core.JSValue.undefinedValue();
-                    return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+                rooted[6] = call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, rooted[7], rooted[8], &.{}, caller_function, caller_frame) catch |err| {
+                    rooted[7] = core.JSValue.undefinedValue();
+                    return iteratorZipCloseAllAndPropagate(ctx, output, global, objectFromValue(rooted[2]).?, count, err, null, caller_function, caller_frame);
                 };
-                const pad_object = objectFromValue(pad_step) orelse {
-                    padding_iterator = core.JSValue.undefinedValue();
-                    return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, error.TypeError, null, caller_function, caller_frame);
+                _ = objectFromValue(rooted[6]) orelse {
+                    rooted[7] = core.JSValue.undefinedValue();
+                    return iteratorZipCloseAllAndPropagate(ctx, output, global, objectFromValue(rooted[2]).?, count, error.TypeError, null, caller_function, caller_frame);
                 };
-                const done_value = object_ops.getValueProperty(ctx, output, global, pad_object.value(), core.atom.predefinedId("done", .string).?, caller_function, caller_frame) catch |err| {
-                    padding_iterator = core.JSValue.undefinedValue();
-                    return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+                const done_value = object_ops.getValueProperty(ctx, output, global, rooted[6], core.atom.predefinedId("done", .string).?, caller_function, caller_frame) catch |err| {
+                    rooted[7] = core.JSValue.undefinedValue();
+                    return iteratorZipCloseAllAndPropagate(ctx, output, global, objectFromValue(rooted[2]).?, count, err, null, caller_function, caller_frame);
                 };
                 done = coercion_ops.valueTruthy(done_value);
-                const value = object_ops.getValueProperty(ctx, output, global, pad_object.value(), core.atom.predefinedId("value", .string).?, caller_function, caller_frame) catch |err| {
-                    padding_iterator = core.JSValue.undefinedValue();
-                    return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+                const value = object_ops.getValueProperty(ctx, output, global, rooted[6], core.atom.predefinedId("value", .string).?, caller_function, caller_frame) catch |err| {
+                    rooted[7] = core.JSValue.undefinedValue();
+                    return iteratorZipCloseAllAndPropagate(ctx, output, global, objectFromValue(rooted[2]).?, count, err, null, caller_function, caller_frame);
                 };
                 if (done) break;
-                try iteratorZipStoreIndex(ctx.runtime, pads, index, value);
+                try iteratorZipStoreIndex(ctx.runtime, objectFromValue(rooted[4]).?, index, value);
             }
             if (!done) {
-                iteratorZipClose(ctx, output, global, padding_iterator, caller_function, caller_frame) catch |err| {
-                    padding_iterator = core.JSValue.undefinedValue();
-                    return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+                iteratorZipClose(ctx, output, global, rooted[7], caller_function, caller_frame) catch |err| {
+                    rooted[7] = core.JSValue.undefinedValue();
+                    return iteratorZipCloseAllAndPropagate(ctx, output, global, objectFromValue(rooted[2]).?, count, err, null, caller_function, caller_frame);
                 };
             }
             while (index < count) : (index += 1) {
-                try iteratorZipStoreIndex(ctx.runtime, pads, index, core.JSValue.undefinedValue());
+                try iteratorZipStoreIndex(ctx.runtime, objectFromValue(rooted[4]).?, index, core.JSValue.undefinedValue());
             }
         } else {
             for (0..count) |index| {
-                try iteratorZipStoreIndex(ctx.runtime, pads, index, core.JSValue.undefinedValue());
+                try iteratorZipStoreIndex(ctx.runtime, objectFromValue(rooted[4]).?, index, core.JSValue.undefinedValue());
             }
         }
     }
@@ -1680,47 +1648,59 @@ pub fn iteratorZipCollectKeyed(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !usize {
-    const own_keys = try object_ops.objectRestOwnKeys(ctx, output, global, iterables);
+    var rooted = [_]core.JSValue{ iterables.value(), iters.value(), nexts.value(), pads.value(), keys.value(), padding } ++ ([_]core.JSValue{core.JSValue.undefinedValue()} ** 3);
+    var slots: []core.JSValue = &rooted;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var own_keys: []core.Atom = &.{};
+    const atom_roots = [_]core.runtime.AtomRootSlot{.{ .list = &own_keys }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices, .atoms = &atom_roots };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+
+    own_keys = try object_ops.objectRestOwnKeys(ctx, output, global, objectFromValue(rooted[0]).?);
     defer core.Object.freeKeys(ctx.runtime, own_keys);
 
     var count: usize = 0;
     for (own_keys) |key| {
-        const desc = object_ops.proxyAwareOwnPropertyDescriptor(ctx, output, global, iterables, key, caller_function, caller_frame) catch |err| {
-            return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+        const desc = object_ops.proxyAwareOwnPropertyDescriptor(ctx, output, global, objectFromValue(rooted[0]).?, key, caller_function, caller_frame) catch |err| {
+            return iteratorZipCloseAllAndPropagate(ctx, output, global, objectFromValue(rooted[1]).?, count, err, null, caller_function, caller_frame);
         } orelse continue;
         if (desc.enumerable != true) continue;
 
-        const iter = object_ops.getValueProperty(ctx, output, global, iterables.value(), key, caller_function, caller_frame) catch |err| {
-            return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+        const iter = object_ops.getValueProperty(ctx, output, global, objectFromValue(rooted[0]).?.value(), key, caller_function, caller_frame) catch |err| {
+            return iteratorZipCloseAllAndPropagate(ctx, output, global, objectFromValue(rooted[1]).?, count, err, null, caller_function, caller_frame);
         };
         if (iter.is(.undefined_value)) continue;
 
         const record = iteratorZipFlattenableRecord(ctx, output, global, iter, caller_function, caller_frame) catch |err| {
-            return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+            return iteratorZipCloseAllAndPropagate(ctx, output, global, objectFromValue(rooted[1]).?, count, err, null, caller_function, caller_frame);
         };
-        const key_value = object_ops.proxyTrapKeyValue(ctx.runtime, key) catch |err| {
-            return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+        rooted[6] = record.iterator;
+        rooted[7] = record.next;
+        rooted[8] = object_ops.proxyTrapKeyValue(ctx.runtime, key) catch |err| {
+            return iteratorZipCloseAllAndPropagate(ctx, output, global, objectFromValue(rooted[1]).?, count, err, null, caller_function, caller_frame);
         };
 
-        try iteratorZipStoreIndex(ctx.runtime, iters, count, record.iterator);
-        try iteratorZipStoreIndex(ctx.runtime, nexts, count, record.next);
-        try iteratorZipStoreIndex(ctx.runtime, keys, count, key_value);
+        try iteratorZipStoreIndex(ctx.runtime, objectFromValue(rooted[1]).?, count, rooted[6]);
+        try iteratorZipStoreIndex(ctx.runtime, objectFromValue(rooted[2]).?, count, rooted[7]);
+        try iteratorZipStoreIndex(ctx.runtime, objectFromValue(rooted[4]).?, count, rooted[8]);
         count += 1;
     }
 
     if (mode == .longest) {
         for (0..count) |index| {
-            if (!padding.is(.undefined_value) and !padding.is(.null_value)) {
-                const key_value = iteratorZipGetIndex(keys, index);
+            if (!rooted[5].is(.undefined_value) and !rooted[5].is(.null_value)) {
+                const key_value = iteratorZipGetIndex(objectFromValue(rooted[4]).?, index);
                 const key = property_ops.propertyKeyAtom(ctx.runtime, key_value) catch |err| {
-                    return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+                    return iteratorZipCloseAllAndPropagate(ctx, output, global, objectFromValue(rooted[1]).?, count, err, null, caller_function, caller_frame);
                 };
-                const pad_value = object_ops.getValueProperty(ctx, output, global, padding, key, caller_function, caller_frame) catch |err| {
-                    return iteratorZipCloseAllAndPropagate(ctx, output, global, iters, count, err, null, caller_function, caller_frame);
+                const pad_value = object_ops.getValueProperty(ctx, output, global, rooted[5], key, caller_function, caller_frame) catch |err| {
+                    return iteratorZipCloseAllAndPropagate(ctx, output, global, objectFromValue(rooted[1]).?, count, err, null, caller_function, caller_frame);
                 };
-                try iteratorZipStoreIndex(ctx.runtime, pads, index, pad_value);
+                try iteratorZipStoreIndex(ctx.runtime, objectFromValue(rooted[3]).?, index, pad_value);
             } else {
-                try iteratorZipStoreIndex(ctx.runtime, pads, index, core.JSValue.undefinedValue());
+                try iteratorZipStoreIndex(ctx.runtime, objectFromValue(rooted[3]).?, index, core.JSValue.undefinedValue());
             }
         }
     }
@@ -1736,18 +1716,23 @@ pub fn iteratorZipFlattenableRecord(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !IteratorZipRecord {
-    _ = objectFromValue(value) orelse return error.TypeError;
+    var values = [_]core.JSValue{ value, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    _ = objectFromValue(values[0]) orelse return error.TypeError;
     const symbol_key = core.atom.predefinedId("Symbol.iterator", .symbol) orelse return error.TypeError;
-    const iterator_method = try object_ops.getValueProperty(ctx, output, global, value, symbol_key, caller_function, caller_frame);
-    const iterator_value = if (!iterator_method.is(.undefined_value) and !iterator_method.is(.null_value)) blk: {
-        if (!call_runtime.isCallableValue(iterator_method)) return error.TypeError;
-        const iterator = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, value, iterator_method, &.{}, caller_function, caller_frame);
-        _ = objectFromValue(iterator) orelse return error.TypeError;
-        break :blk iterator;
-    } else value;
-
-    const next_value = try iteratorZipNextMethod(ctx, output, global, iterator_value, caller_function, caller_frame);
-    return .{ .iterator = iterator_value, .next = next_value };
+    values[1] = try object_ops.getValueProperty(ctx, output, global, values[0], symbol_key, caller_function, caller_frame);
+    if (!values[1].is(.undefined_value) and !values[1].is(.null_value)) {
+        if (!call_runtime.isCallableValue(values[1])) return error.TypeError;
+        values[2] = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, values[0], values[1], &.{}, caller_function, caller_frame);
+        _ = objectFromValue(values[2]) orelse return error.TypeError;
+    } else values[2] = values[0];
+    values[3] = try iteratorZipNextMethod(ctx, output, global, values[2], caller_function, caller_frame);
+    return .{ .iterator = values[2], .next = values[3] };
 }
 
 pub fn iteratorZipNextMethod(
@@ -1776,46 +1761,38 @@ pub fn iteratorZipCreateHelper(
     mode: IteratorZipMode,
     keyed: bool,
 ) !core.JSValue {
-    var helper_value = core.JSValue.undefinedValue();
-    var iters_value = iters.value();
-    var nexts_value = nexts.value();
-    var pads_value = pads.value();
-    var keys_value = if (keys) |keys_object| keys_object.value() else core.JSValue.undefinedValue();
-    var root_values = [_]*core.JSValue{
-        &helper_value,
-        &iters_value,
-        &nexts_value,
-        &pads_value,
-        &keys_value,
+    var values = [_]core.JSValue{
+        core.JSValue.undefinedValue(),
+        iters.value(),
+        nexts.value(),
+        pads.value(),
+        if (keys) |object| object.value() else core.JSValue.undefinedValue(),
+        core.JSValue.undefinedValue(),
     };
-    var root_frame = core.runtime.ValueRootFrame{
-        .values = &root_values,
-    };
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var root_frame = core.runtime.ValueRootFrame{ .slices = &slices };
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    const prototype = try iteratorHelperPrototype(rt, global);
-    const helper = try core.Object.create(rt, core.class.ids.iterator_helper, prototype);
-    errdefer core.Object.destroyFromHeader(rt, helper.gcHeader());
-    helper_value = helper.value();
+    values[5] = (try iteratorHelperPrototype(rt, global)).value();
+    values[0] = (try core.Object.create(rt, core.class.ids.iterator_helper, objectFromValue(values[5]).?)).value();
+    const helper = objectFromValue(values[0]).?;
     setHelperKind(helper, if (keyed) .zip_keyed else .zip);
     helper.iteratorIndexSlot().* = count;
     setZipMode(helper, mode);
     setZipState(helper, .fresh);
     helper.iteratorZipAliveSlot().* = count;
-    try installIteratorHelperMethod(rt, global, helper, core.atom.ids.next, 1);
-    try installIteratorHelperMethod(rt, global, helper, core.atom.ids.return_, 2);
-    try helper.setOptionalValueSlot(rt, helper.iteratorTargetSlot(), iters_value);
-    iters_value = core.JSValue.undefinedValue();
-    try helper.setOptionalValueSlot(rt, helper.iteratorZipNextsSlot(), nexts_value);
-    nexts_value = core.JSValue.undefinedValue();
-    try helper.setOptionalValueSlot(rt, helper.iteratorZipPadsSlot(), pads_value);
-    pads_value = core.JSValue.undefinedValue();
-    if (keys != null) {
-        try helper.setOptionalValueSlot(rt, helper.iteratorZipKeysSlot(), keys_value);
-        keys_value = core.JSValue.undefinedValue();
+    try installIteratorHelperMethod(rt, global, objectFromValue(values[0]).?, core.atom.ids.next, 1);
+    try installIteratorHelperMethod(rt, global, objectFromValue(values[0]).?, core.atom.ids.return_, 2);
+    try objectFromValue(values[0]).?.setOptionalValueSlot(rt, objectFromValue(values[0]).?.iteratorTargetSlot(), values[1]);
+    try objectFromValue(values[0]).?.setOptionalValueSlot(rt, objectFromValue(values[0]).?.iteratorZipNextsSlot(), values[2]);
+    try objectFromValue(values[0]).?.setOptionalValueSlot(rt, objectFromValue(values[0]).?.iteratorZipPadsSlot(), values[3]);
+    if (!values[4].is(.undefined_value)) {
+        try objectFromValue(values[0]).?.setOptionalValueSlot(rt, objectFromValue(values[0]).?.iteratorZipKeysSlot(), values[4]);
     }
-    return helper_value;
+    return values[0];
 }
 
 pub fn iteratorZipStoreIndex(rt: *core.JSRuntime, object: *core.Object, index: usize, value: core.JSValue) !void {
@@ -1925,13 +1902,20 @@ pub fn iteratorZipCloseAllWithCompletion(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
+    var values = [_]core.JSValue{ iters.value(), core.JSValue.undefinedValue() };
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
     var index = count;
     while (index > 0) {
         index -= 1;
-        const iterator_value = iteratorZipGetIndex(iters, index);
-        try iteratorZipSetIndex(ctx.runtime, iters, index, core.JSValue.undefinedValue());
-        if (iterator_value.is(.undefined_value) or iterator_value.is(.null_value)) continue;
-        iteratorZipCloseWithCompletion(ctx, output, global, completion, iterator_value, caller_function, caller_frame);
+        values[1] = iteratorZipGetIndex(objectFromValue(values[0]).?, index);
+        try iteratorZipSetIndex(ctx.runtime, objectFromValue(values[0]).?, index, core.JSValue.undefinedValue());
+        if (values[1].is(.undefined_value) or values[1].is(.null_value)) continue;
+        iteratorZipCloseWithCompletion(ctx, output, global, completion, values[1], caller_function, caller_frame);
     }
 }
 
@@ -1943,20 +1927,29 @@ pub fn iteratorZipClose(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
+    var values = [_]core.JSValue{iterator_value};
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
     const return_key = core.atom.ids.return_;
-    const return_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, return_key, caller_function, caller_frame);
+    const return_method = try object_ops.getValueProperty(ctx, output, global, values[0], return_key, caller_function, caller_frame);
     if (return_method.is(.undefined_value) or return_method.is(.null_value)) return;
     if (!call_runtime.isCallableValue(return_method)) return error.TypeError;
-    _ = try call_runtime.callValueOrBytecodeSyncInternalOutlined(
+    var close_call = CallSite.initInternal(
         ctx,
         output,
         global,
-        iterator_value,
+        values[0],
         return_method,
-        &.{},
         caller_function,
         caller_frame,
     );
+    close_call.activateRoots();
+    defer close_call.deinit();
+    _ = try close_call.call(&.{});
 }
 
 pub fn iteratorZipCloseAllAndPropagate(
@@ -1970,14 +1963,22 @@ pub fn iteratorZipCloseAllAndPropagate(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) IteratorZipError {
+    var values = [_]core.JSValue{ iters.value(), extra_iterator orelse core.JSValue.undefinedValue() };
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
     var completion = IteratorZipCompletion.initThrow(ctx, err);
+    completion.activateRoots(ctx.runtime);
     defer completion.deinit(ctx.runtime);
-    iteratorZipCloseAllWithCompletion(ctx, output, global, &completion, iters, count, caller_function, caller_frame) catch |close_err| {
+    iteratorZipCloseAllWithCompletion(ctx, output, global, &completion, objectFromValue(values[0]).?, count, caller_function, caller_frame) catch |close_err| {
         completion.restore(ctx);
         return close_err;
     };
-    if (extra_iterator) |iterator_value| {
-        iteratorZipCloseWithCompletion(ctx, output, global, &completion, iterator_value, caller_function, caller_frame);
+    if (extra_iterator != null) {
+        iteratorZipCloseWithCompletion(ctx, output, global, &completion, values[1], caller_function, caller_frame);
     }
     completion.restore(ctx);
     return completion.err orelse err;
@@ -2005,6 +2006,7 @@ pub fn iteratorCloseWithCompletionAndPropagate(
     caller_frame: ?*frame_mod.Frame,
 ) IteratorZipError {
     var completion = IteratorZipCompletion.initThrow(ctx, err);
+    completion.activateRoots(ctx.runtime);
     defer completion.deinit(ctx.runtime);
     iteratorZipCloseWithCompletion(ctx, output, global, &completion, iterator_value, caller_function, caller_frame);
     completion.restore(ctx);
@@ -2021,6 +2023,7 @@ fn iteratorHelperCloseWithCompletionAndPropagate(
     caller_frame: ?*frame_mod.Frame,
 ) IteratorZipError {
     var completion = IteratorZipCompletion.initThrow(ctx, err);
+    completion.activateRoots(ctx.runtime);
     defer completion.deinit(ctx.runtime);
     iteratorHelperClose(ctx, output, global, helper, caller_function, caller_frame) catch |close_err| {
         if (ctx.hasException()) ctx.clearException();
@@ -2066,11 +2069,7 @@ fn iteratorDisposeCall(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const return_key = core.atom.ids.return_;
-    const return_method = try object_ops.getValueProperty(ctx, output, global, receiver, return_key, caller_function, caller_frame);
-    if (return_method.is(.undefined_value) or return_method.is(.null_value)) return core.JSValue.undefinedValue();
-    if (!call_runtime.isCallableValue(return_method)) return error.TypeError;
-    _ = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, receiver, return_method, &.{}, caller_function, caller_frame);
+    try iteratorZipClose(ctx, output, global, receiver, caller_function, caller_frame);
     return core.JSValue.undefinedValue();
 }
 
@@ -2082,30 +2081,39 @@ fn iteratorToArrayCall(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const iterator = objectFromValue(receiver) orelse return error.TypeError;
+    _ = objectFromValue(receiver) orelse return error.TypeError;
+    var values = [_]core.JSValue{ receiver, core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
     const next_key = core.atom.ids.next;
-    const next_method = try object_ops.getValueProperty(ctx, output, global, iterator.value(), next_key, caller_function, caller_frame);
+    const next_method = try object_ops.getValueProperty(ctx, output, global, values[0], next_key, caller_function, caller_frame);
     if (!call_runtime.isCallableValue(next_method)) return error.TypeError;
     var next_call = CallSite.initInternal(
         ctx,
         output,
         global,
-        iterator.value(),
+        values[0],
         next_method,
         caller_function,
         caller_frame,
     );
+    next_call.activateRoots();
+    defer next_call.deinit();
 
-    const out = try core.Object.createArray(ctx.runtime, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global));
-    errdefer core.Object.destroyFromHeader(ctx.runtime, out.gcHeader());
+    values[1] = (try core.Object.createArray(ctx.runtime, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global))).value();
     var index: u32 = 0;
     while (true) : (index += 1) {
         const step = try iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
         if (step.done) {
-            out.setArrayLength(index);
-            return out.value();
+            objectFromValue(values[1]).?.setArrayLength(index);
+            return values[1];
         }
-        try out.defineOwnProperty(ctx.runtime, core.Atom.taggedInt(index), core.Descriptor.data(step.value, .all));
+        values[2] = step.value;
+        try objectFromValue(values[1]).?.defineOwnProperty(ctx.runtime, core.Atom.taggedInt(index), core.Descriptor.data(values[2], .all));
     }
 }
 
@@ -2119,31 +2127,42 @@ fn iteratorPredicateCall(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const iterator = objectFromValue(receiver) orelse return error.TypeError;
-    if (args.len < 1 or !call_runtime.isCallableValue(args[0])) {
-        return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator.value(), error.TypeError, caller_function, caller_frame);
+    _ = objectFromValue(receiver) orelse return error.TypeError;
+    var values = [_]core.JSValue{ receiver, if (args.len > 0) args[0] else core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    if (args.len < 1 or !call_runtime.isCallableValue(values[1])) {
+        return iteratorCloseWithCompletionAndPropagate(ctx, output, global, values[0], error.TypeError, caller_function, caller_frame);
     }
     const next_key = core.atom.ids.next;
-    const next_method = try object_ops.getValueProperty(ctx, output, global, iterator.value(), next_key, caller_function, caller_frame);
+    const next_method = try object_ops.getValueProperty(ctx, output, global, values[0], next_key, caller_function, caller_frame);
     if (!call_runtime.isCallableValue(next_method)) return error.TypeError;
     var next_call = CallSite.initInternal(
         ctx,
         output,
         global,
-        iterator.value(),
+        values[0],
         next_method,
         caller_function,
         caller_frame,
     );
+    next_call.activateRoots();
+    defer next_call.deinit();
     var callback_call = CallSite.initInternal(
         ctx,
         output,
         global,
         core.JSValue.undefinedValue(),
-        args[0],
+        values[1],
         caller_function,
         caller_frame,
     );
+    callback_call.activateRoots();
+    defer callback_call.deinit();
 
     var index: usize = 0;
     while (true) : (index += 1) {
@@ -2156,22 +2175,23 @@ fn iteratorPredicateCall(
             };
         }
 
-        const result = callback_call.call(&.{ step.value, core.JSValue.int32(@intCast(index)) }) catch |err| {
-            return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator.value(), err, caller_function, caller_frame);
+        values[2] = step.value;
+        const result = callback_call.call(&.{ values[2], core.JSValue.int32(@intCast(index)) }) catch |err| {
+            return iteratorCloseWithCompletionAndPropagate(ctx, output, global, values[0], err, caller_function, caller_frame);
         };
         const truthy = coercion_ops.valueTruthy(result);
         switch (kind) {
             .every => if (!truthy) {
-                try iteratorZipClose(ctx, output, global, iterator.value(), caller_function, caller_frame);
+                try iteratorZipClose(ctx, output, global, values[0], caller_function, caller_frame);
                 return core.JSValue.boolean(false);
             },
             .some => if (truthy) {
-                try iteratorZipClose(ctx, output, global, iterator.value(), caller_function, caller_frame);
+                try iteratorZipClose(ctx, output, global, values[0], caller_function, caller_frame);
                 return core.JSValue.boolean(true);
             },
             .find => if (truthy) {
-                try iteratorZipClose(ctx, output, global, iterator.value(), caller_function, caller_frame);
-                return step.value;
+                try iteratorZipClose(ctx, output, global, values[0], caller_function, caller_frame);
+                return values[2];
             },
             .for_each => {},
         }
@@ -2187,48 +2207,60 @@ fn iteratorReduceCall(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const iterator = objectFromValue(receiver) orelse return error.TypeError;
-    if (args.len < 1 or !call_runtime.isCallableValue(args[0])) {
-        return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator.value(), error.TypeError, caller_function, caller_frame);
+    _ = objectFromValue(receiver) orelse return error.TypeError;
+    var values = [_]core.JSValue{ receiver, if (args.len > 0) args[0] else core.JSValue.undefinedValue(), if (args.len > 1) args[1] else core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    if (args.len < 1 or !call_runtime.isCallableValue(values[1])) {
+        return iteratorCloseWithCompletionAndPropagate(ctx, output, global, values[0], error.TypeError, caller_function, caller_frame);
     }
     const next_key = core.atom.ids.next;
-    const next_method = try object_ops.getValueProperty(ctx, output, global, iterator.value(), next_key, caller_function, caller_frame);
+    const next_method = try object_ops.getValueProperty(ctx, output, global, values[0], next_key, caller_function, caller_frame);
     if (!call_runtime.isCallableValue(next_method)) return error.TypeError;
     var next_call = CallSite.initInternal(
         ctx,
         output,
         global,
-        iterator.value(),
+        values[0],
         next_method,
         caller_function,
         caller_frame,
     );
+    next_call.activateRoots();
+    defer next_call.deinit();
     var callback_call = CallSite.initInternal(
         ctx,
         output,
         global,
         core.JSValue.undefinedValue(),
-        args[0],
+        values[1],
         caller_function,
         caller_frame,
     );
+    callback_call.activateRoots();
+    defer callback_call.deinit();
 
     var index: usize = 0;
-    var accumulator = if (args.len >= 2) args[1] else blk: {
+    if (args.len < 2) {
         const first = try iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
         if (first.done) return error.TypeError;
         index = 1;
-        break :blk first.value;
-    };
+        values[2] = first.value;
+    }
 
     while (true) : (index += 1) {
         const step = try iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
-        if (step.done) return accumulator;
+        if (step.done) return values[2];
+        values[3] = step.value;
 
-        const result = callback_call.call(&.{ accumulator, step.value, core.JSValue.int32(@intCast(index)) }) catch |err| {
-            return iteratorCloseWithCompletionAndPropagate(ctx, output, global, iterator.value(), err, caller_function, caller_frame);
+        const result = callback_call.call(&.{ values[2], values[3], core.JSValue.int32(@intCast(index)) }) catch |err| {
+            return iteratorCloseWithCompletionAndPropagate(ctx, output, global, values[0], err, caller_function, caller_frame);
         };
-        accumulator = result;
+        values[2] = result;
     }
 }
 
@@ -2246,16 +2278,19 @@ noinline fn iteratorStepFromNextResult(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !IteratorStep {
-    var rooted_result = next_result;
-    var roots = core.runtime.rootValues(.{&rooted_result});
+    var values = [_]core.JSValue{next_result};
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
     roots.activate(ctx.runtime);
     defer roots.deactivate(ctx.runtime);
-    const next_object = objectFromValue(next_result) orelse return error.TypeError;
+    _ = objectFromValue(next_result) orelse return error.TypeError;
     const done = try object_ops.getValueProperty(
         ctx,
         output,
         global,
-        next_object.value(),
+        values[0],
         core.atom.predefinedId("done", .string).?,
         caller_function,
         caller_frame,
@@ -2265,7 +2300,7 @@ noinline fn iteratorStepFromNextResult(
         ctx,
         output,
         global,
-        next_object.value(),
+        values[0],
         core.atom.predefinedId("value", .string).?,
         caller_function,
         caller_frame,
@@ -2316,6 +2351,8 @@ fn iteratorStepWithSyncValues(
         caller_function,
         caller_frame,
     );
+    next_call.activateRoots();
+    defer next_call.deinit();
     return iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
 }
 
@@ -2347,10 +2384,17 @@ fn iteratorCreateLimitHelper(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     _ = objectFromValue(receiver) orelse return error.TypeError;
-    const limit = iteratorLimitArgument(ctx, output, global, args) catch |err| {
-        return iteratorCloseWithCompletionAndPropagate(ctx, output, global, receiver, err, caller_function, caller_frame);
+    var values = [_]core.JSValue{ receiver, if (args.len > 0) args[0] else core.JSValue.undefinedValue() };
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    const limit = iteratorLimitArgument(ctx, output, global, values[1..]) catch |err| {
+        return iteratorCloseWithCompletionAndPropagate(ctx, output, global, values[0], err, caller_function, caller_frame);
     };
-    return try iteratorCreateHelper(ctx, output, global, receiver, kind, core.JSValue.undefinedValue(), limit, caller_function, caller_frame, object_ops.getValueProperty);
+    return try iteratorCreateHelper(ctx, output, global, values[0], kind, core.JSValue.undefinedValue(), limit, caller_function, caller_frame, object_ops.getValueProperty);
 }
 
 fn iteratorLimitArgument(
@@ -2385,30 +2429,29 @@ fn iteratorCreateHelper(
     caller_frame: ?*frame_mod.Frame,
     comptime getValueProperty: anytype,
 ) !core.JSValue {
-    var rooted_receiver = receiver;
-    var rooted_callback = callback;
-    var rooted_next_method = core.JSValue.undefinedValue();
-    var root_frame = core.runtime.rootValues(.{
-        &rooted_receiver,
-        &rooted_callback,
-        &rooted_next_method,
-    });
+    var values = [_]core.JSValue{ receiver, callback, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var root_frame = core.runtime.ValueRootFrame{ .slices = &slices };
     root_frame.activate(ctx.runtime);
     defer root_frame.deactivate(ctx.runtime);
 
-    const iterator = objectFromValue(rooted_receiver) orelse return error.TypeError;
+    _ = objectFromValue(values[0]) orelse return error.TypeError;
     const next_key = core.atom.ids.next;
-    rooted_next_method = try getValueProperty(ctx, output, global, iterator.value(), next_key, caller_function, caller_frame);
+    values[2] = try getValueProperty(ctx, output, global, values[0], next_key, caller_function, caller_frame);
 
-    const prototype = try iteratorHelperPrototype(ctx.runtime, global);
-    const helper = try core.Object.create(ctx.runtime, core.class.ids.iterator_helper, prototype);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, helper.gcHeader());
-    try helper.setOptionalValueSlot(ctx.runtime, helper.iteratorTargetSlot(), rooted_receiver);
+    values[3] = (try iteratorHelperPrototype(ctx.runtime, global)).value();
+    values[4] = (try core.Object.create(ctx.runtime, core.class.ids.iterator_helper, objectFromValue(values[3]).?)).value();
+    // Payload publication stores existing values and records their barriers;
+    // it does not invoke JS or collect.
+    const helper = objectFromValue(values[4]).?;
+    try helper.setOptionalValueSlot(ctx.runtime, helper.iteratorTargetSlot(), values[0]);
     setHelperKind(helper, kind);
     helper.iteratorIndexSlot().* = limit orelse 0;
-    try helper.setOptionalValueSlot(ctx.runtime, helper.iteratorNextSlot(), rooted_next_method);
-    if (!rooted_callback.is(.undefined_value)) try helper.setOptionalValueSlot(ctx.runtime, helper.iteratorCallbackSlot(), rooted_callback);
-    return helper.value();
+    try helper.setOptionalValueSlot(ctx.runtime, helper.iteratorNextSlot(), values[2]);
+    if (!values[1].is(.undefined_value)) try helper.setOptionalValueSlot(ctx.runtime, helper.iteratorCallbackSlot(), values[1]);
+    return values[4];
 }
 
 test "iteratorCreateHelper roots direct function bytecode callback while creating helper" {
@@ -2470,13 +2513,19 @@ fn iteratorZipPutResult(
     index: usize,
     value: core.JSValue,
 ) !void {
-    if (keys) |key_store| {
+    var rooted = [_]core.JSValue{ results.value(), value, if (keys) |object| object.value() else core.JSValue.undefinedValue() };
+    var slots: []core.JSValue = &rooted;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    if (objectFromValue(rooted[2])) |key_store| {
         const key_value = iteratorZipGetIndex(key_store, index);
         const atom_id = try property_ops.propertyKeyAtom(rt, key_value);
-        try results.defineOwnProperty(rt, atom_id, core.Descriptor.data(value, .all));
+        try objectFromValue(rooted[0]).?.defineOwnProperty(rt, atom_id, core.Descriptor.data(rooted[1], .all));
         return;
     }
-    try results.defineOwnProperty(rt, core.Atom.taggedInt(@intCast(index)), core.Descriptor.data(value, .all));
+    try objectFromValue(rooted[0]).?.defineOwnProperty(rt, core.Atom.taggedInt(@intCast(index)), core.Descriptor.data(rooted[1], .all));
 }
 
 fn iteratorZipCompleteAbrupt(
@@ -2491,9 +2540,18 @@ fn iteratorZipCompleteAbrupt(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) IteratorZipError {
+    var rooted = [_]core.JSValue{helper.value()};
+    var slots: []core.JSValue = &rooted;
+    const borrowed = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &borrowed } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+
     var completion = IteratorZipCompletion.initThrow(ctx, err);
+    completion.activateRoots(ctx.runtime);
     defer completion.deinit(ctx.runtime);
-    helper.iteratorZipAliveSlot().* = 0;
+    objectFromValue(rooted[0]).?.iteratorZipAliveSlot().* = 0;
     if (current_index) |index| {
         try iteratorZipSetIndex(ctx.runtime, iters, index, core.JSValue.undefinedValue());
     }
@@ -2501,8 +2559,8 @@ fn iteratorZipCompleteAbrupt(
         completion.restore(ctx);
         return close_err;
     };
-    try iteratorHelperClear(ctx.runtime, helper);
-    setZipState(helper, .done);
+    try iteratorHelperClear(ctx.runtime, objectFromValue(rooted[0]).?);
+    setZipState(objectFromValue(rooted[0]).?, .done);
     completion.restore(ctx);
     return completion.err orelse err;
 }
@@ -2515,79 +2573,86 @@ fn iteratorZipHelperNext(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    switch (zipState(helper)) {
-        .fresh, .yielded => setZipState(helper, .running),
+    // helper, iterators, next methods, padding, keys, unpublished row, step.
+    // Re-project after every callback; rooting the owner does not pin children.
+    var rooted = [_]core.JSValue{helper.value()} ++ ([_]core.JSValue{core.JSValue.undefinedValue()} ** 6);
+    var slots: []core.JSValue = &rooted;
+    const borrowed = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &borrowed } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    switch (zipState(objectFromValue(rooted[0]).?)) {
+        .fresh, .yielded => setZipState(objectFromValue(rooted[0]).?, .running),
         .running => return error.TypeError,
         .done => return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true),
     }
 
-    const iterator_value = (helper.iteratorTargetSlot().*) orelse return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
-    const iters = objectFromValue(iterator_value) orelse return error.TypeError;
-    const nexts_value = helper.iteratorZipNexts() orelse return error.TypeError;
-    const nexts = objectFromValue(nexts_value) orelse return error.TypeError;
-    const pads_value = helper.iteratorZipPads() orelse return error.TypeError;
-    const pads = objectFromValue(pads_value) orelse return error.TypeError;
-    const keys = if (helperKind(helper) == .zip_keyed) blk: {
-        const keys_value = helper.iteratorZipKeys() orelse return error.TypeError;
-        break :blk objectFromValue(keys_value) orelse return error.TypeError;
-    } else null;
-    const mode = zipMode(helper);
-    var alive: usize = helper.iteratorZipAliveSlot().*;
-    const count = (helper.iteratorIndexSlot().*);
+    rooted[1] = objectFromValue(rooted[0]).?.iteratorTargetSlot().* orelse return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
+    _ = objectFromValue(rooted[1]) orelse return error.TypeError;
+    rooted[2] = objectFromValue(rooted[0]).?.iteratorZipNexts() orelse return error.TypeError;
+    _ = objectFromValue(rooted[2]) orelse return error.TypeError;
+    rooted[3] = objectFromValue(rooted[0]).?.iteratorZipPads() orelse return error.TypeError;
+    _ = objectFromValue(rooted[3]) orelse return error.TypeError;
+    if (helperKind(objectFromValue(rooted[0]).?) == .zip_keyed) {
+        rooted[4] = objectFromValue(rooted[0]).?.iteratorZipKeys() orelse return error.TypeError;
+        _ = objectFromValue(rooted[4]) orelse return error.TypeError;
+    }
+    const mode = zipMode(objectFromValue(rooted[0]).?);
+    var alive: usize = objectFromValue(rooted[0]).?.iteratorZipAliveSlot().*;
+    const count = (objectFromValue(rooted[0]).?.iteratorIndexSlot().*);
 
-    const results = if (keys == null)
-        try core.Object.createArray(ctx.runtime, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global))
-    else blk: {
-        const object = try core.Object.create(ctx.runtime, core.class.ids.object, null);
-        break :blk object;
-    };
-    const results_value = results.value();
+    rooted[5] = if (rooted[4].is(.undefined_value))
+        (try core.Object.createArray(ctx.runtime, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global))).value()
+    else
+        (try core.Object.create(ctx.runtime, core.class.ids.object, null)).value();
 
     var dones: usize = 0;
     var values: usize = 0;
     for (0..count) |index| {
-        const iter = iteratorZipGetIndex(iters, index);
+        const iter = iteratorZipGetIndex(objectFromValue(rooted[1]).?, index);
         if (iter.is(.undefined_value) or iter.is(.null_value)) {
             if (mode != .longest) return error.TypeError;
-            const pad = iteratorZipGetIndex(pads, index);
-            try iteratorZipPutResult(ctx.runtime, results, keys, index, pad);
+            const pad = iteratorZipGetIndex(objectFromValue(rooted[3]).?, index);
+            try iteratorZipPutResult(ctx.runtime, objectFromValue(rooted[5]).?, objectFromValue(rooted[4]), index, pad);
             continue;
         }
 
-        const next_method = iteratorZipGetIndex(nexts, index);
-        const step_result = call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, iter, next_method, &.{}, caller_function, caller_frame) catch |err| {
-            return iteratorZipCompleteAbrupt(ctx, output, global, helper, iters, count, index, err, caller_function, caller_frame);
+        const next_method = iteratorZipGetIndex(objectFromValue(rooted[2]).?, index);
+        rooted[6] = call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, iter, next_method, &.{}, caller_function, caller_frame) catch |err| {
+            return iteratorZipCompleteAbrupt(ctx, output, global, objectFromValue(rooted[0]).?, objectFromValue(rooted[1]).?, count, index, err, caller_function, caller_frame);
         };
-        const step_object = objectFromValue(step_result) orelse {
-            return iteratorZipCompleteAbrupt(ctx, output, global, helper, iters, count, index, error.TypeError, caller_function, caller_frame);
+        _ = objectFromValue(rooted[6]) orelse {
+            return iteratorZipCompleteAbrupt(ctx, output, global, objectFromValue(rooted[0]).?, objectFromValue(rooted[1]).?, count, index, error.TypeError, caller_function, caller_frame);
         };
-        const done_value = object_ops.getValueProperty(ctx, output, global, step_object.value(), core.atom.predefinedId("done", .string).?, caller_function, caller_frame) catch |err| {
-            return iteratorZipCompleteAbrupt(ctx, output, global, helper, iters, count, index, err, caller_function, caller_frame);
+        const done_value = object_ops.getValueProperty(ctx, output, global, rooted[6], core.atom.predefinedId("done", .string).?, caller_function, caller_frame) catch |err| {
+            return iteratorZipCompleteAbrupt(ctx, output, global, objectFromValue(rooted[0]).?, objectFromValue(rooted[1]).?, count, index, err, caller_function, caller_frame);
         };
         if (!coercion_ops.valueTruthy(done_value)) {
             if (mode == .strict and dones > 0) {
-                return iteratorZipCompleteAbrupt(ctx, output, global, helper, iters, count, null, error.TypeError, caller_function, caller_frame);
+                return iteratorZipCompleteAbrupt(ctx, output, global, objectFromValue(rooted[0]).?, objectFromValue(rooted[1]).?, count, null, error.TypeError, caller_function, caller_frame);
             }
-            const value = object_ops.getValueProperty(ctx, output, global, step_object.value(), core.atom.predefinedId("value", .string).?, caller_function, caller_frame) catch |err| {
-                return iteratorZipCompleteAbrupt(ctx, output, global, helper, iters, count, index, err, caller_function, caller_frame);
+            const value = object_ops.getValueProperty(ctx, output, global, rooted[6], core.atom.predefinedId("value", .string).?, caller_function, caller_frame) catch |err| {
+                return iteratorZipCompleteAbrupt(ctx, output, global, objectFromValue(rooted[0]).?, objectFromValue(rooted[1]).?, count, index, err, caller_function, caller_frame);
             };
-            try iteratorZipPutResult(ctx.runtime, results, keys, index, value);
+            try iteratorZipPutResult(ctx.runtime, objectFromValue(rooted[5]).?, objectFromValue(rooted[4]), index, value);
             values += 1;
             continue;
         }
 
         if (alive > 0) alive -= 1;
         dones += 1;
-        try iteratorZipSetIndex(ctx.runtime, iters, index, core.JSValue.undefinedValue());
-        helper.iteratorZipAliveSlot().* = alive;
+        try iteratorZipSetIndex(ctx.runtime, objectFromValue(rooted[1]).?, index, core.JSValue.undefinedValue());
+        objectFromValue(rooted[0]).?.iteratorZipAliveSlot().* = alive;
 
         switch (mode) {
             .shortest => {
                 var completion = IteratorZipCompletion.initNormal();
+                completion.activateRoots(ctx.runtime);
                 defer completion.deinit(ctx.runtime);
-                try iteratorZipCloseAllWithCompletion(ctx, output, global, &completion, iters, count, caller_function, caller_frame);
-                try iteratorHelperClear(ctx.runtime, helper);
-                setZipState(helper, .done);
+                try iteratorZipCloseAllWithCompletion(ctx, output, global, &completion, objectFromValue(rooted[1]).?, count, caller_function, caller_frame);
+                try iteratorHelperClear(ctx.runtime, objectFromValue(rooted[0]).?);
+                setZipState(objectFromValue(rooted[0]).?, .done);
                 if (completion.err) |err| {
                     completion.restore(ctx);
                     return err;
@@ -2596,30 +2661,30 @@ fn iteratorZipHelperNext(
             },
             .longest => {
                 if (alive < 1) {
-                    try iteratorHelperClear(ctx.runtime, helper);
-                    setZipState(helper, .done);
+                    try iteratorHelperClear(ctx.runtime, objectFromValue(rooted[0]).?);
+                    setZipState(objectFromValue(rooted[0]).?, .done);
                     return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
                 }
-                const pad = iteratorZipGetIndex(pads, index);
-                try iteratorZipPutResult(ctx.runtime, results, keys, index, pad);
+                const pad = iteratorZipGetIndex(objectFromValue(rooted[3]).?, index);
+                try iteratorZipPutResult(ctx.runtime, objectFromValue(rooted[5]).?, objectFromValue(rooted[4]), index, pad);
             },
             .strict => {
                 if (values > 0) {
-                    return iteratorZipCompleteAbrupt(ctx, output, global, helper, iters, count, null, error.TypeError, caller_function, caller_frame);
+                    return iteratorZipCompleteAbrupt(ctx, output, global, objectFromValue(rooted[0]).?, objectFromValue(rooted[1]).?, count, null, error.TypeError, caller_function, caller_frame);
                 }
             },
         }
     }
 
     if (values == 0) {
-        try iteratorHelperClear(ctx.runtime, helper);
-        setZipState(helper, .done);
+        try iteratorHelperClear(ctx.runtime, objectFromValue(rooted[0]).?);
+        setZipState(objectFromValue(rooted[0]).?, .done);
         return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
     }
 
-    if (keys == null) results.setArrayLength(@intCast(count));
-    setZipState(helper, .yielded);
-    return try createIteratorResult(ctx.runtime, global, results_value, false);
+    if (objectFromValue(rooted[4]) == null) objectFromValue(rooted[5]).?.setArrayLength(@intCast(count));
+    setZipState(objectFromValue(rooted[0]).?, .yielded);
+    return try createIteratorResult(ctx.runtime, global, rooted[5], false);
 }
 
 fn iteratorZipHelperReturn(
@@ -2630,28 +2695,36 @@ fn iteratorZipHelperReturn(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    switch (zipState(helper)) {
-        .fresh => setZipState(helper, .done),
-        .yielded => setZipState(helper, .running),
+    var rooted = [_]core.JSValue{helper.value()};
+    var slots: []core.JSValue = &rooted;
+    const borrowed = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &borrowed } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    switch (zipState(objectFromValue(rooted[0]).?)) {
+        .fresh => setZipState(objectFromValue(rooted[0]).?, .done),
+        .yielded => setZipState(objectFromValue(rooted[0]).?, .running),
         .running => return error.TypeError,
         .done => return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true),
     }
 
-    if ((helper.iteratorTargetSlot().*)) |iterator_value| {
+    if ((objectFromValue(rooted[0]).?.iteratorTargetSlot().*)) |iterator_value| {
         const iters = objectFromValue(iterator_value) orelse return error.TypeError;
         var completion = IteratorZipCompletion.initNormal();
+        completion.activateRoots(ctx.runtime);
         defer completion.deinit(ctx.runtime);
-        try iteratorZipCloseAllWithCompletion(ctx, output, global, &completion, iters, (helper.iteratorIndexSlot().*), caller_function, caller_frame);
-        try iteratorHelperClear(ctx.runtime, helper);
-        setZipState(helper, .done);
+        try iteratorZipCloseAllWithCompletion(ctx, output, global, &completion, iters, (objectFromValue(rooted[0]).?.iteratorIndexSlot().*), caller_function, caller_frame);
+        try iteratorHelperClear(ctx.runtime, objectFromValue(rooted[0]).?);
+        setZipState(objectFromValue(rooted[0]).?, .done);
         if (completion.err) |err| {
             completion.restore(ctx);
             return err;
         }
         return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
     }
-    try iteratorHelperClear(ctx.runtime, helper);
-    setZipState(helper, .done);
+    try iteratorHelperClear(ctx.runtime, objectFromValue(rooted[0]).?);
+    setZipState(objectFromValue(rooted[0]).?, .done);
     return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
 }
 
@@ -2667,72 +2740,85 @@ pub fn iteratorHelperNext(
     if (function_object.iteratorHelperMethod() != 1) return null;
     const helper = objectFromValue(receiver) orelse return error.TypeError;
     if (helper.class_id != core.class.ids.iterator_helper) return error.TypeError;
-    if (helper.generatorExecuting()) return error.TypeError;
-    helper.generatorExecutingSlot().* = true;
-    defer helper.generatorExecutingSlot().* = false;
-    const iterator = (helper.iteratorTargetSlot().*) orelse return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
-    const kind = helperKind(helper);
+    const borrowed = [_]core.JSValue{global.value()};
+    var values = [_]core.JSValue{ receiver, core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    var slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .borrowed = &borrowed }, .{ .mutable = &slots } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    if (objectFromValue(values[0]).?.generatorExecuting()) return error.TypeError;
+    objectFromValue(values[0]).?.generatorExecutingSlot().* = true;
+    defer objectFromValue(values[0]).?.generatorExecutingSlot().* = false;
+    const iterator = (objectFromValue(values[0]).?.iteratorTargetSlot().*) orelse return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
+    const kind = helperKind(objectFromValue(values[0]).?);
 
     switch (kind) {
-        .zip, .zip_keyed => return try iteratorZipHelperNext(ctx, output, global, helper, caller_function, caller_frame),
+        .zip, .zip_keyed => return try iteratorZipHelperNext(ctx, output, global, objectFromValue(values[0]).?, caller_function, caller_frame),
         .concat => {
             while (true) {
-                if (helper.iteratorData()) |inner_iterator| {
-                    const inner_next = helper.iteratorInnerNext() orelse return error.TypeError;
+                if (objectFromValue(values[0]).?.iteratorData()) |inner_iterator| {
+                    const inner_next = objectFromValue(values[0]).?.iteratorInnerNext() orelse return error.TypeError;
                     const inner_step = try iteratorStepWithSyncValues(ctx, output, global, inner_iterator, inner_next, caller_function, caller_frame);
                     if (!inner_step.done) return try createIteratorResult(ctx.runtime, global, inner_step.value, false);
-                    try iteratorHelperClearInner(ctx.runtime, helper);
+                    try iteratorHelperClearInner(ctx.runtime, objectFromValue(values[0]).?);
                 }
 
-                const records = objectFromValue(iterator) orelse return error.TypeError;
-                if ((helper.iteratorIndexSlot().*) >= records.arrayLength() / 2) {
-                    try iteratorHelperClear(ctx.runtime, helper);
+                const records = objectFromValue(objectFromValue(values[0]).?.iteratorTargetSlot().* orelse return error.TypeError) orelse return error.TypeError;
+                if ((objectFromValue(values[0]).?.iteratorIndexSlot().*) >= records.arrayLength() / 2) {
+                    try iteratorHelperClear(ctx.runtime, objectFromValue(values[0]).?);
                     return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
                 }
-                const item_index: u32 = @intCast((helper.iteratorIndexSlot().*) * 2);
-                helper.iteratorIndexSlot().* += 1;
+                const item_index: u32 = @intCast((objectFromValue(values[0]).?.iteratorIndexSlot().*) * 2);
+                objectFromValue(values[0]).?.iteratorIndexSlot().* += 1;
                 const item = try records.getProperty(core.Atom.taggedInt(item_index));
                 const method = try records.getProperty(core.Atom.taggedInt(item_index + 1));
                 const inner_iterator = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, item, method, &.{}, caller_function, caller_frame);
-                try iteratorHelperSetInnerFromIterator(ctx, output, global, helper, inner_iterator, caller_function, caller_frame);
+                try iteratorHelperSetInnerFromIterator(ctx, output, global, objectFromValue(values[0]).?, inner_iterator, caller_function, caller_frame);
             }
         },
         .take => {
-            const next_method = helper.iteratorNext() orelse return error.TypeError;
+            const next_method = objectFromValue(values[0]).?.iteratorNext() orelse return error.TypeError;
             var next_call = CallSite.initInternal(ctx, output, global, iterator, next_method, caller_function, caller_frame);
-            if ((helper.iteratorIndexSlot().*) == 0) {
-                try iteratorHelperClose(ctx, output, global, helper, caller_function, caller_frame);
+            next_call.activateRoots();
+            defer next_call.deinit();
+            if ((objectFromValue(values[0]).?.iteratorIndexSlot().*) == 0) {
+                try iteratorHelperClose(ctx, output, global, objectFromValue(values[0]).?, caller_function, caller_frame);
                 return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
             }
-            helper.iteratorIndexSlot().* -= 1;
+            objectFromValue(values[0]).?.iteratorIndexSlot().* -= 1;
             const step = try iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
             if (step.done) {
-                try iteratorHelperClear(ctx.runtime, helper);
+                try iteratorHelperClear(ctx.runtime, objectFromValue(values[0]).?);
                 return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
             }
             return try createIteratorResult(ctx.runtime, global, step.value, false);
         },
         .drop => {
-            const next_method = helper.iteratorNext() orelse return error.TypeError;
+            const next_method = objectFromValue(values[0]).?.iteratorNext() orelse return error.TypeError;
             var next_call = CallSite.initInternal(ctx, output, global, iterator, next_method, caller_function, caller_frame);
-            while ((helper.iteratorIndexSlot().*) > 0) : (helper.iteratorIndexSlot().* -= 1) {
+            next_call.activateRoots();
+            defer next_call.deinit();
+            while ((objectFromValue(values[0]).?.iteratorIndexSlot().*) > 0) : (objectFromValue(values[0]).?.iteratorIndexSlot().* -= 1) {
                 const skipped = try iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
                 if (skipped.done) {
-                    try iteratorHelperClear(ctx.runtime, helper);
+                    try iteratorHelperClear(ctx.runtime, objectFromValue(values[0]).?);
                     return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
                 }
             }
             const step = try iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
             if (step.done) {
-                try iteratorHelperClear(ctx.runtime, helper);
+                try iteratorHelperClear(ctx.runtime, objectFromValue(values[0]).?);
                 return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
             }
             return try createIteratorResult(ctx.runtime, global, step.value, false);
         },
         .map, .filter, .flatMap => {
-            const next_method = helper.iteratorNext() orelse return error.TypeError;
-            const callback = helper.iteratorCallback() orelse return error.TypeError;
+            const next_method = objectFromValue(values[0]).?.iteratorNext() orelse return error.TypeError;
+            const callback = objectFromValue(values[0]).?.iteratorCallback() orelse return error.TypeError;
             var next_call = CallSite.initInternal(ctx, output, global, iterator, next_method, caller_function, caller_frame);
+            next_call.activateRoots();
+            defer next_call.deinit();
             var callback_call = CallSite.initInternal(
                 ctx,
                 output,
@@ -2742,31 +2828,34 @@ pub fn iteratorHelperNext(
                 caller_function,
                 caller_frame,
             );
+            callback_call.activateRoots();
+            defer callback_call.deinit();
             while (true) {
                 if (kind == .flatMap) {
-                    if (helper.iteratorData()) |inner_iterator| {
-                        const inner_next = helper.iteratorInnerNext() orelse return error.TypeError;
+                    if (objectFromValue(values[0]).?.iteratorData()) |inner_iterator| {
+                        const inner_next = objectFromValue(values[0]).?.iteratorInnerNext() orelse return error.TypeError;
                         const inner_step = try iteratorStepWithSyncValues(ctx, output, global, inner_iterator, inner_next, caller_function, caller_frame);
                         if (!inner_step.done) return try createIteratorResult(ctx.runtime, global, inner_step.value, false);
-                        try iteratorHelperClearInner(ctx.runtime, helper);
+                        try iteratorHelperClearInner(ctx.runtime, objectFromValue(values[0]).?);
                     }
                 }
                 const step = try iteratorStepWithSyncCall(ctx, output, global, &next_call, caller_function, caller_frame);
                 if (step.done) {
-                    try iteratorHelperClear(ctx.runtime, helper);
+                    try iteratorHelperClear(ctx.runtime, objectFromValue(values[0]).?);
                     return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
                 }
-                const index = (helper.iteratorIndexSlot().*);
-                helper.iteratorIndexSlot().* += 1;
-                const mapped = callback_call.call(&.{ step.value, core.JSValue.int32(@intCast(index)) }) catch |err| {
-                    return iteratorHelperCloseWithCompletionAndPropagate(ctx, output, global, helper, err, caller_function, caller_frame);
+                const index = (objectFromValue(values[0]).?.iteratorIndexSlot().*);
+                objectFromValue(values[0]).?.iteratorIndexSlot().* += 1;
+                values[1] = step.value;
+                values[2] = callback_call.call(&.{ values[1], core.JSValue.int32(@intCast(index)) }) catch |err| {
+                    return iteratorHelperCloseWithCompletionAndPropagate(ctx, output, global, objectFromValue(values[0]).?, err, caller_function, caller_frame);
                 };
-                if (kind == .map) return try createIteratorResult(ctx.runtime, global, mapped, false);
+                if (kind == .map) return try createIteratorResult(ctx.runtime, global, values[2], false);
                 if (kind == .flatMap) {
-                    try iteratorHelperSetInner(ctx, output, global, helper, mapped, caller_function, caller_frame);
+                    try iteratorHelperSetInner(ctx, output, global, objectFromValue(values[0]).?, values[2], caller_function, caller_frame);
                     continue;
                 }
-                if (coercion_ops.valueTruthy(mapped)) return try createIteratorResult(ctx.runtime, global, step.value, false);
+                if (coercion_ops.valueTruthy(values[2])) return try createIteratorResult(ctx.runtime, global, values[1], false);
             }
         },
     }
@@ -2781,18 +2870,28 @@ fn iteratorHelperSetInner(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
-    const mapped_object = objectFromValue(mapped) orelse return error.TypeError;
+    _ = objectFromValue(mapped) orelse return error.TypeError;
+    var values = [_]core.JSValue{ helper.value(), mapped, core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    var slots: []core.JSValue = &values;
+    const borrowed = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &borrowed } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
     const symbol_key = core.atom.predefinedId("Symbol.iterator", .symbol) orelse return error.TypeError;
-    const iterator_method = try object_ops.getValueProperty(ctx, output, global, mapped, symbol_key, caller_function, caller_frame);
-    const inner_iterator = if (iterator_method.is(.undefined_value) or iterator_method.is(.null_value))
-        mapped_object.value()
+    values[2] = try object_ops.getValueProperty(ctx, output, global, values[1], symbol_key, caller_function, caller_frame);
+    values[3] = if (values[2].is(.undefined_value) or values[2].is(.null_value))
+        values[1]
     else blk: {
-        if (!call_runtime.isCallableValue(iterator_method)) return error.TypeError;
-        const value = try call_runtime.callValueOrBytecodeSyncInternalOutlined(ctx, output, global, mapped, iterator_method, &.{}, caller_function, caller_frame);
+        if (!call_runtime.isCallableValue(values[2])) return error.TypeError;
+        var iterator_call = CallSite.initInternal(ctx, output, global, values[1], values[2], caller_function, caller_frame);
+        iterator_call.activateRoots();
+        defer iterator_call.deinit();
+        const value = try iterator_call.call(&.{});
         _ = objectFromValue(value) orelse return error.TypeError;
         break :blk value;
     };
-    try iteratorHelperSetInnerFromIterator(ctx, output, global, helper, inner_iterator, caller_function, caller_frame);
+    try iteratorHelperSetInnerFromIterator(ctx, output, global, objectFromValue(values[0]).?, values[3], caller_function, caller_frame);
 }
 
 fn iteratorHelperSetInnerFromIterator(
@@ -2805,21 +2904,17 @@ fn iteratorHelperSetInnerFromIterator(
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     _ = objectFromValue(inner_iterator) orelse return error.TypeError;
+    var values = [_]core.JSValue{ helper.value(), inner_iterator, core.JSValue.undefinedValue() };
+    var slots: []core.JSValue = &values;
+    const borrowed = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &borrowed } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
     const next_key = core.atom.ids.next;
-    const inner_next = try object_ops.getValueProperty(ctx, output, global, inner_iterator, next_key, caller_function, caller_frame);
-    const next_inner_iterator = inner_iterator;
-    const next_inner_next = inner_next;
-    const iterator_slot = helper.iteratorDataSlot();
-    const inner_next_slot = helper.iteratorInnerNextSlot();
-    iterator_slot.* = next_inner_iterator;
-    inner_next_slot.* = next_inner_next;
-    // Raw slot stores rather than `setOptionalValueSlot`, so they do not get
-    // that funnel's barrier. This is the one iterator-payload write that is not
-    // a one-time initialisation: `flatMap` re-points a long-lived helper at each
-    // inner iterator the outer sequence yields, which is an old-to-young edge
-    // every time the mapper returns a fresh iterable.
-    ctx.runtime.gc.generationalBarrier(helper.gcHeader(), next_inner_iterator.cycleMarkHeader());
-    ctx.runtime.gc.generationalBarrier(helper.gcHeader(), next_inner_next.cycleMarkHeader());
+    values[2] = try object_ops.getValueProperty(ctx, output, global, values[1], next_key, caller_function, caller_frame);
+    try objectFromValue(values[0]).?.setOptionalValueSlot(ctx.runtime, objectFromValue(values[0]).?.iteratorDataSlot(), values[1]);
+    try objectFromValue(values[0]).?.setOptionalValueSlot(ctx.runtime, objectFromValue(values[0]).?.iteratorInnerNextSlot(), values[2]);
 }
 
 pub fn iteratorHelperReturn(
@@ -2834,13 +2929,20 @@ pub fn iteratorHelperReturn(
     if (function_object.iteratorHelperMethod() != 2) return null;
     const helper = objectFromValue(receiver) orelse return error.TypeError;
     if (helper.class_id != core.class.ids.iterator_helper) return error.TypeError;
-    if (helperKind(helper) == .zip or helperKind(helper) == .zip_keyed) {
-        return try iteratorZipHelperReturn(ctx, output, global, helper, caller_function, caller_frame);
+    const borrowed = [_]core.JSValue{global.value()};
+    var values = [_]core.JSValue{receiver};
+    var slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &borrowed } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    if (helperKind(objectFromValue(values[0]).?) == .zip or helperKind(objectFromValue(values[0]).?) == .zip_keyed) {
+        return try iteratorZipHelperReturn(ctx, output, global, objectFromValue(values[0]).?, caller_function, caller_frame);
     }
-    if (helper.generatorExecuting()) return error.TypeError;
-    helper.generatorExecutingSlot().* = true;
-    defer helper.generatorExecutingSlot().* = false;
-    try iteratorHelperClose(ctx, output, global, helper, caller_function, caller_frame);
+    if (objectFromValue(values[0]).?.generatorExecuting()) return error.TypeError;
+    objectFromValue(values[0]).?.generatorExecutingSlot().* = true;
+    defer objectFromValue(values[0]).?.generatorExecutingSlot().* = false;
+    try iteratorHelperClose(ctx, output, global, objectFromValue(values[0]).?, caller_function, caller_frame);
     return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
 }
 
@@ -2852,17 +2954,24 @@ fn iteratorHelperClose(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
-    try iteratorHelperCloseInner(ctx, output, global, helper, caller_function, caller_frame);
-    if (helperKind(helper) == .concat) {
-        try iteratorHelperClear(ctx.runtime, helper);
+    var values = [_]core.JSValue{helper.value()};
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    try iteratorHelperCloseInner(ctx, output, global, objectFromValue(values[0]).?, caller_function, caller_frame);
+    if (helperKind(objectFromValue(values[0]).?) == .concat) {
+        try iteratorHelperClear(ctx.runtime, objectFromValue(values[0]).?);
         return;
     }
-    const iterator = (helper.iteratorTargetSlot().*) orelse return;
+    const iterator = (objectFromValue(values[0]).?.iteratorTargetSlot().*) orelse return;
     iteratorCloseValue(ctx, output, global, iterator, caller_function, caller_frame) catch |err| {
-        try iteratorHelperClear(ctx.runtime, helper);
+        try iteratorHelperClear(ctx.runtime, objectFromValue(values[0]).?);
         return err;
     };
-    try iteratorHelperClear(ctx.runtime, helper);
+    try iteratorHelperClear(ctx.runtime, objectFromValue(values[0]).?);
 }
 
 fn iteratorHelperClear(rt: *core.JSRuntime, helper: *core.Object) !void {
@@ -2883,12 +2992,19 @@ fn iteratorHelperCloseInner(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
-    const inner_iterator = helper.iteratorData() orelse return;
+    var values = [_]core.JSValue{helper.value()};
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    const inner_iterator = objectFromValue(values[0]).?.iteratorData() orelse return;
     iteratorCloseValue(ctx, output, global, inner_iterator, caller_function, caller_frame) catch |err| {
-        try iteratorHelperClearInner(ctx.runtime, helper);
+        try iteratorHelperClearInner(ctx.runtime, objectFromValue(values[0]).?);
         return err;
     };
-    try iteratorHelperClearInner(ctx.runtime, helper);
+    try iteratorHelperClearInner(ctx.runtime, objectFromValue(values[0]).?);
 }
 
 fn iteratorHelperClearInner(rt: *core.JSRuntime, helper: *core.Object) !void {
@@ -2922,11 +3038,7 @@ pub fn iteratorCloseValue(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !void {
-    const return_key = core.atom.ids.return_;
-    const return_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, return_key, caller_function, caller_frame);
-    if (return_method.is(.undefined_value) or return_method.is(.null_value)) return;
-    if (!call_runtime.isCallableValue(return_method)) return error.TypeError;
-    _ = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator_value, return_method, &.{}, caller_function, caller_frame);
+    try iteratorZipClose(ctx, output, global, iterator_value, caller_function, caller_frame);
 }
 
 pub fn iteratorForValue(
@@ -2937,23 +3049,31 @@ pub fn iteratorForValue(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    if (source_value.isString()) return core.object.stringIterator(ctx, source_value);
-    const source_object = core.value_semantics.objectFromValue(source_value);
-    if (source_object != null and source_object.?.class_id == core.class.ids.string) return core.object.stringIterator(ctx, source_value);
+    var values = [_]core.JSValue{ source_value, core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+
+    if (values[0].isString()) return core.object.stringIterator(ctx, values[0]);
+    const source_object = core.value_semantics.objectFromValue(values[0]);
+    if (source_object != null and source_object.?.class_id == core.class.ids.string) return core.object.stringIterator(ctx, values[0]);
     if (source_object != null and
         (source_object.?.class_id == core.class.ids.array_iterator or
             source_object.?.class_id == core.class.ids.string_iterator or
             source_object.?.class_id == core.class.ids.generator or
             source_object.?.class_id == core.class.ids.async_generator))
     {
-        return source_value;
+        return values[0];
     }
-    const iterator_method = try call_runtime.getIteratorMethod(ctx, output, global, source_value);
-    if (!call_runtime.isCallableValue(iterator_method)) return exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable");
-    const iterator_value = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, source_value, iterator_method, &.{}, caller_function, caller_frame);
-    _ = try property_ops.expectObject(iterator_value);
-    try call_runtime.cacheIteratorNextMethod(ctx, output, global, iterator_value);
-    return iterator_value;
+    values[1] = try call_runtime.getIteratorMethod(ctx, output, global, values[0]);
+    if (!call_runtime.isCallableValue(values[1])) return exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable");
+    values[2] = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, values[0], values[1], &.{}, caller_function, caller_frame);
+    _ = try property_ops.expectObject(values[2]);
+    try call_runtime.cacheIteratorNextMethod(ctx, output, global, values[2]);
+    return values[2];
 }
 
 pub const IteratorStepResult = struct {
@@ -2973,23 +3093,31 @@ pub fn iteratorStepValue(
     global: *core.Object,
     iterator_value: core.JSValue,
 ) !IteratorValueDone {
-    const iterator = try property_ops.expectObject(iterator_value);
-    const next_method = if (iterator.cachedIteratorNext(ctx.runtime)) |stored| stored else blk: {
+    var values = [_]core.JSValue{ iterator_value, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+
+    const iterator = try property_ops.expectObject(values[0]);
+    values[2] = if (iterator.cachedIteratorNext(ctx.runtime)) |stored| stored else blk: {
         const next_key = core.atom.ids.next;
-        break :blk try object_ops.getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
+        break :blk try object_ops.getValueProperty(ctx, output, global, values[0], next_key, null, null);
     };
-    if (!call_runtime.isCallableValue(next_method)) return error.TypeError;
-    const next_result_value = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator_value, next_method, &.{}, null, null);
+    if (!call_runtime.isCallableValue(values[2])) return error.TypeError;
+    values[3] = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, values[0], values[2], &.{}, null, null);
     // IteratorStep (ES 7.4.6) reads `done` and `value` off whatever object
     // `next()` returned. There is no class-based dispatch here: a Promise is
     // an ordinary object to the SYNCHRONOUS protocol (unwrapping one would
     // observe its internal state outside the job queue), and a RegExp is too.
-    const next_result = try property_ops.expectObject(next_result_value);
+    _ = try property_ops.expectObject(values[3]);
     const done_key = core.atom.predefinedId("done", .string).?;
-    const done = try object_ops.getValueProperty(ctx, output, global, next_result.value(), done_key, null, null);
+    const done = try object_ops.getValueProperty(ctx, output, global, values[3], done_key, null, null);
     if (value_ops.isTruthy(done)) return .{ .value = core.JSValue.undefinedValue(), .done = true };
     const value_key = core.atom.predefinedId("value", .string).?;
-    return .{ .value = try object_ops.getValueProperty(ctx, output, global, next_result.value(), value_key, null, null), .done = false };
+    return .{ .value = try object_ops.getValueProperty(ctx, output, global, values[3], value_key, null, null), .done = false };
 }
 
 pub fn iteratorStepResult(
@@ -2999,16 +3127,24 @@ pub fn iteratorStepResult(
     iterator_value: core.JSValue,
     next_arg: core.JSValue,
 ) !IteratorStepResult {
-    const iterator = try property_ops.expectObject(iterator_value);
-    const next_method = if (iterator.cachedIteratorNext(ctx.runtime)) |stored| stored else blk: {
+    var values = [_]core.JSValue{ iterator_value, next_arg, core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+
+    const iterator = try property_ops.expectObject(values[0]);
+    values[2] = if (iterator.cachedIteratorNext(ctx.runtime)) |stored| stored else blk: {
         const next_key = core.atom.ids.next;
-        break :blk try object_ops.getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
+        break :blk try object_ops.getValueProperty(ctx, output, global, values[0], next_key, null, null);
     };
-    if (!call_runtime.isCallableValue(next_method)) return error.TypeError;
-    const next_result_value = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator_value, next_method, &.{next_arg}, null, null);
-    const next_result = try property_ops.expectObject(next_result_value);
+    if (!call_runtime.isCallableValue(values[2])) return error.TypeError;
+    values[3] = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, values[0], values[2], &.{values[1]}, null, null);
+    _ = try property_ops.expectObject(values[3]);
     const done_key = core.atom.predefinedId("done", .string).?;
-    const done = try object_ops.getValueProperty(ctx, output, global, next_result.value(), done_key, null, null);
+    const done = try object_ops.getValueProperty(ctx, output, global, values[3], done_key, null, null);
     const is_done = coercion_ops.valueTruthy(done);
     // Unlike IteratorStepValue, the `yield*` caller only needs `value` on the
     // done step (it becomes the delegation's completion value); the not-done
@@ -3016,9 +3152,9 @@ pub fn iteratorStepResult(
     // there would be an extra observable Get.
     const value = if (is_done) blk: {
         const value_key = core.atom.predefinedId("value", .string).?;
-        break :blk try object_ops.getValueProperty(ctx, output, global, next_result.value(), value_key, null, null);
+        break :blk try object_ops.getValueProperty(ctx, output, global, values[3], value_key, null, null);
     } else core.JSValue.undefinedValue();
-    return .{ .result = next_result_value, .value = value, .done = is_done };
+    return .{ .result = values[3], .value = value, .done = is_done };
 }
 
 pub fn iteratorCallForNativeRecord(
@@ -3077,6 +3213,14 @@ pub fn iteratorFromSourceForIteratorFrom(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !IteratorFromResult {
+    var values = [_]core.JSValue{ source, core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+
     // Iterator.from is two steps, in this order (ES Iterator.from):
     //   1. GetIteratorFlattenable(O, iterate-string-primitives) — resolve the
     //      source to an iterator, through @@iterator when it has one.
@@ -3090,28 +3234,28 @@ pub fn iteratorFromSourceForIteratorFrom(
     // the exact shape of test262 sm/Iterator/from/
     // return-wrapper-if-not-iterator-instance — came back unwrapped, and none
     // of the iterator helpers were reachable on it.
-    const resolved = blk: {
-        const iterator_method = try call_runtime.getIteratorMethod(ctx, output, global, source);
-        if (source.isString()) {
-            break :blk try call_runtime.callValueOrBytecodeRoot(ctx, output, global, source, iterator_method, &.{}, caller_function, caller_frame);
+    values[2] = blk: {
+        values[1] = try call_runtime.getIteratorMethod(ctx, output, global, values[0]);
+        if (values[0].isString()) {
+            break :blk try call_runtime.callValueOrBytecodeRoot(ctx, output, global, values[0], values[1], &.{}, caller_function, caller_frame);
         }
-        const source_object = object_ops.objectFromValue(source) orelse return error.TypeError;
-        if (iterator_method.is(.undefined_value) or iterator_method.is(.null_value)) {
+        const source_object = object_ops.objectFromValue(values[0]) orelse return error.TypeError;
+        if (values[1].is(.undefined_value) or values[1].is(.null_value)) {
             break :blk source_object.value();
         }
-        if (!call_runtime.isCallableValue(iterator_method)) return error.TypeError;
-        const iterator = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, source, iterator_method, &.{}, caller_function, caller_frame);
+        if (!call_runtime.isCallableValue(values[1])) return error.TypeError;
+        const iterator = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, values[0], values[1], &.{}, caller_function, caller_frame);
         _ = object_ops.objectFromValue(iterator) orelse return error.TypeError;
         break :blk iterator;
     };
 
-    if (object_ops.iteratorIsOnIteratorPrototypeChain(ctx.runtime, global, resolved)) {
-        return .{ .iterator = resolved };
+    if (object_ops.iteratorIsOnIteratorPrototypeChain(ctx.runtime, global, values[2])) {
+        return .{ .iterator = values[2] };
     }
 
     const next_key = core.atom.ids.next;
-    const next_method = try object_ops.getValueProperty(ctx, output, global, resolved, next_key, caller_function, caller_frame);
-    return .{ .iterator = resolved, .next_method = next_method, .wrap = true };
+    values[3] = try object_ops.getValueProperty(ctx, output, global, values[2], next_key, caller_function, caller_frame);
+    return .{ .iterator = values[2], .next_method = values[3], .wrap = true };
 }
 
 const IteratorWrapKind = enum { next, return_ };
@@ -3138,19 +3282,26 @@ noinline fn iteratorWrapMethodCall(
         .return_ => 2,
     };
     if (function_object.functionIteratorWrapMethod() != expected) return null;
-    const wrapper = object_ops.objectFromValue(receiver) orelse return error.TypeError;
+    var values = [_]core.JSValue{ receiver, core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    const wrapper = object_ops.objectFromValue(values[0]) orelse return error.TypeError;
     if (wrapper.class_id != core.class.ids.iterator_wrap) return error.TypeError;
-    const iterator = (wrapper.iteratorTargetSlot().*) orelse return error.TypeError;
-    const method = switch (kind) {
+    values[1] = (wrapper.iteratorTargetSlot().*) orelse return error.TypeError;
+    values[2] = switch (kind) {
         .next => if (wrapper.iteratorNext()) |stored| stored else blk: {
             const next_key = core.atom.ids.next;
-            const next_method = try object_ops.getValueProperty(ctx, output, global, iterator, next_key, caller_function, caller_frame);
+            const next_method = try object_ops.getValueProperty(ctx, output, global, values[1], next_key, caller_function, caller_frame);
             if (!call_runtime.isCallableValue(next_method)) return error.TypeError;
             break :blk next_method;
         },
         .return_ => blk: {
             const return_key = core.atom.ids.return_;
-            const return_method = try object_ops.getValueProperty(ctx, output, global, iterator, return_key, caller_function, caller_frame);
+            const return_method = try object_ops.getValueProperty(ctx, output, global, values[1], return_key, caller_function, caller_frame);
             if (return_method.is(.undefined_value) or return_method.is(.null_value)) {
                 return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
             }
@@ -3158,7 +3309,7 @@ noinline fn iteratorWrapMethodCall(
             break :blk return_method;
         },
     };
-    const result = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator, method, &.{}, caller_function, caller_frame);
+    const result = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, values[1], values[2], &.{}, caller_function, caller_frame);
     _ = object_ops.objectFromValue(result) orelse return error.TypeError;
     return result;
 }
@@ -3197,30 +3348,31 @@ pub inline fn iteratorWrapReturn(
 /// exist; two of them (Map/Set and String iterators) shipped null-prototype
 /// results for years, so `.hasOwnProperty` on an iterator result threw.
 pub noinline fn createIteratorResult(rt: *core.JSRuntime, global: ?*core.Object, value: core.JSValue, done: bool) !core.JSValue {
-    var rooted_value = value;
-    var root_frame = core.runtime.rootValues(.{&rooted_value});
+    var values = [_]core.JSValue{ if (global) |realm| realm.value() else core.JSValue.undefinedValue(), value, core.JSValue.undefinedValue() };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var root_frame = core.runtime.ValueRootFrame{ .slices = &slices };
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
     // QuickJS's js_create_iterator_result uses an ordinary object followed by
     // the `value` and `done` transitions; iterator results are not one of the
     // five initial Shapes owned by JSContext.
-    const object = try core.Object.createPlainObjectReserved2(
+    values[2] = (try core.Object.createPlainObjectReserved2(
         rt,
-        if (global) |realm| object_ops.objectPrototypeFromGlobal(rt, realm) else null,
-    );
-    errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
-    try object.defineOwnPropertyAssumingNew(
+        if (core.value_semantics.objectFromValue(values[0])) |realm| object_ops.objectPrototypeFromGlobal(rt, realm) else null,
+    )).value();
+    try core.value_semantics.objectFromValue(values[2]).?.defineOwnPropertyAssumingNew(
         rt,
         core.atom.ids.value,
-        core.Descriptor.data(rooted_value, .all),
+        core.Descriptor.data(values[1], .all),
     );
-    try object.defineOwnPropertyAssumingNew(
+    try core.value_semantics.objectFromValue(values[2]).?.defineOwnPropertyAssumingNew(
         rt,
         core.atom.ids.done,
         core.Descriptor.data(core.JSValue.boolean(done), .all),
     );
-    return object.value();
+    return values[2];
 }
 
 pub fn closeIteratorForFromEntriesAbrupt(
@@ -3229,11 +3381,32 @@ pub fn closeIteratorForFromEntriesAbrupt(
     global: *core.Object,
     iterator_value: core.JSValue,
 ) !void {
+    if (ctx.exceptionIsUncatchable()) return;
+    const globals = [_]core.JSValue{global.value()};
+    var values = [_]core.JSValue{ iterator_value, core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    const live: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .borrowed = &globals }, .{ .mutable = &live } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    const had_exception = ctx.hasException();
+    const was_out_of_memory = ctx.exceptionIsOutOfMemory();
+    if (had_exception) values[2] = ctx.takeException();
+    defer {
+        if (ctx.hasException()) ctx.clearException();
+        if (had_exception) {
+            _ = ctx.throwValue(values[2]);
+            if (was_out_of_memory) ctx.markExceptionOutOfMemory();
+        }
+    }
+    // IteratorClose (ECMA-262 7.4.11): the incoming throw completion wins
+    // over GetMethod/Call failures. The caller retains its original Zig error;
+    // the actual exception slot above survives GC during return lookup/call.
     const return_key = core.atom.ids.return_;
-    const return_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, return_key, null, null);
-    if (return_method.is(.undefined_value) or return_method.is(.null_value)) return;
-    if (!call_runtime.isCallableValue(return_method)) return error.TypeError;
-    _ = try call_runtime.callValueOrBytecodeRoot(ctx, output, global, iterator_value, return_method, &.{}, null, null);
+    values[1] = object_ops.getValueProperty(ctx, output, global, values[0], return_key, null, null) catch return;
+    if (values[1].is(.undefined_value) or values[1].is(.null_value)) return;
+    if (!call_runtime.isCallableValue(values[1])) return;
+    _ = call_runtime.callValueOrBytecodeRoot(ctx, output, global, values[0], values[1], &.{}, null, null) catch return;
 }
 
 test "createIteratorResult roots direct function bytecode value while creating result" {

@@ -4,7 +4,6 @@
 const src = @import("src/root.zig");
 
 pub const native = src.native;
-pub const platform_clock = src.platform_clock;
 pub const core = src.core;
 pub const sort_erased = src.sort_erased;
 pub const parser = src.parser;

@@ -79,7 +79,7 @@ pub fn checkAsyncArrowHeadAfterAsync(s: *State, return_type_forbidden: bool) Err
 /// AsyncArrowBindingIdentifier in sloppy non-generator. Keep `await`
 /// rejected: +Await makes it illegal even though qjs accepts
 /// `async await => 1` at sloppy top-level.
-fn isAsyncArrowBindingIdentifierKind(s: *State, kind: tok.TokenKind) bool {
+fn isAsyncArrowBindingIdentifierKind(s: *State, kind: tok.Kind) bool {
     if (kind == .ident) return true;
     if (s.is_strict or s.curFunc().is_strict_mode) return false;
     return switch (kind) {
@@ -116,20 +116,15 @@ pub fn lookaheadErrorAsNoMatch(err: Error) Error!bool {
 }
 
 const DiagnosticToken = struct {
-    kind: tok.TokenKind,
+    kind: tok.Kind,
     position: diagnostics.Position,
 };
 
-fn diagnosticTokenFromToken(s: *const State, found_token: *const tok.Token) DiagnosticToken {
-    const source_start = @intFromPtr(s.lex.source.ptr);
-    const token_start = @intFromPtr(found_token.ptr);
+fn diagnosticTokenFromToken(found_token: *const tok.Token) DiagnosticToken {
     return .{
-        .kind = found_token.val,
+        .kind = found_token.kind,
         .position = .{
-            .offset = if (token_start <= source_start)
-                0
-            else
-                @min(token_start - source_start, s.lex.source.len),
+            .offset = found_token.start,
             .line = found_token.line_num,
             .column = found_token.col_num,
         },
@@ -152,7 +147,7 @@ pub fn peekNextDiagnosticToken(s: *State) Error!DiagnosticToken {
     defer restoreLexerCursorSnapshot(s, snapshot);
     var next = s.lex.next() catch |err| return mapLookaheadLexerError(s, err);
     defer s.lex.freeToken(&next);
-    return diagnosticTokenFromToken(s, &next);
+    return diagnosticTokenFromToken(&next);
 }
 
 /// QuickJS `js_parse_skip_parens_token` keeps one `JSToken` in parse state
@@ -160,15 +155,15 @@ pub fn peekNextDiagnosticToken(s: *State) Error!DiagnosticToken {
 /// owned inside this helper as well: callers never need its 80-byte payload,
 /// and returning it by value otherwise copies that payload at every step of
 /// a long parenthesized lookahead.
-fn nextRegexpAwareLookaheadKind(s: *State, previous_token_kind: ?tok.TokenKind) Error!tok.TokenKind {
+fn nextRegexpAwareLookaheadKind(s: *State, previous_token_kind: ?tok.Kind) Error!tok.Kind {
     var lookahead_token = s.lex.next() catch |err| return mapLookaheadLexerError(s, err);
     defer s.lex.freeToken(&lookahead_token);
     try rescanLookaheadTokenIfRegexp(s, &lookahead_token, previous_token_kind);
-    return lookahead_token.val;
+    return lookahead_token.kind;
 }
 
-fn rescanLookaheadTokenIfRegexp(s: *State, lookahead_token: *tok.Token, previous_token_kind: ?tok.TokenKind) Error!void {
-    if (!(lookahead_token.val == .slash or lookahead_token.val == .div_assign)) return;
+fn rescanLookaheadTokenIfRegexp(s: *State, lookahead_token: *tok.Token, previous_token_kind: ?tok.Kind) Error!void {
+    if (!(lookahead_token.kind == .slash or lookahead_token.kind == .div_assign)) return;
     if (!predeclareSlashStartsRegexp(s, previous_token_kind)) return;
 
     const slash_offset = s.lex.mark_pos;
@@ -180,15 +175,15 @@ pub fn skipFunctionInPredeclareScan(s: *State) Error!void {
     while (true) {
         var t = try s.lex.next();
         defer s.lex.freeToken(&t);
-        if (t.val == .eof) return;
-        if (t.val == .lbrace) break;
+        if (t.kind == .eof) return;
+        if (t.kind == .lbrace) break;
     }
     var depth: usize = 1;
-    var previous_token_kind: ?tok.TokenKind = .lbrace;
+    var previous_token_kind: ?tok.Kind = .lbrace;
     while (depth != 0) {
         var t = try s.lex.next();
         defer s.lex.freeToken(&t);
-        switch (t.val) {
+        switch (t.kind) {
             .eof => return,
             .lbrace => depth += 1,
             .rbrace => depth -= 1,
@@ -201,7 +196,7 @@ pub fn skipFunctionInPredeclareScan(s: *State) Error!void {
             },
             else => {},
         }
-        previous_token_kind = t.val;
+        previous_token_kind = t.kind;
     }
 }
 
@@ -214,11 +209,11 @@ pub fn skipTemplateInPredeclareScan(s: *State, first: tok.Token) Error!void {
 
     while (true) {
         var expr_depth: usize = 0;
-        var previous_token_kind: ?tok.TokenKind = .lbrace;
+        var previous_token_kind: ?tok.Kind = .lbrace;
         while (true) {
             var t = try s.lex.next();
             defer s.lex.freeToken(&t);
-            switch (t.val) {
+            switch (t.kind) {
                 .eof => {
                     return;
                 },
@@ -238,14 +233,14 @@ pub fn skipTemplateInPredeclareScan(s: *State, first: tok.Token) Error!void {
                 },
                 .lbrace, .lparen, .lbracket => expr_depth += 1,
                 .rbrace, .rparen, .rbracket => {
-                    if (t.val == .rbrace and expr_depth == 0) {
+                    if (t.kind == .rbrace and expr_depth == 0) {
                         break;
                     }
                     if (expr_depth != 0) expr_depth -= 1;
                 },
                 else => {},
             }
-            previous_token_kind = t.val;
+            previous_token_kind = t.kind;
         }
 
         var next_part: tok.Token = undefined;
@@ -259,7 +254,7 @@ pub fn skipTemplateInPredeclareScan(s: *State, first: tok.Token) Error!void {
     }
 }
 
-pub fn skipRegexpInPredeclareScan(s: *State, previous_token_kind: ?tok.TokenKind) Error!bool {
+pub fn skipRegexpInPredeclareScan(s: *State, previous_token_kind: ?tok.Kind) Error!bool {
     if (!predeclareSlashStartsRegexp(s, previous_token_kind)) return false;
 
     const slash_offset = s.lex.mark_pos;
@@ -269,7 +264,7 @@ pub fn skipRegexpInPredeclareScan(s: *State, previous_token_kind: ?tok.TokenKind
     return true;
 }
 
-fn predeclareSlashStartsRegexp(s: *State, previous_token_kind: ?tok.TokenKind) bool {
+fn predeclareSlashStartsRegexp(s: *State, previous_token_kind: ?tok.Kind) bool {
     const previous = previous_token_kind orelse return true;
     if (previous == .kw_yield and !s.ctx.in_generator and !(s.is_strict or s.curFunc().is_strict_mode)) {
         return false;
@@ -426,7 +421,7 @@ pub fn restoreLexerCursorSnapshot(s: *State, snapshot: LexerCursorSnapshot) void
 }
 
 const BalancedTokenScan = struct {
-    following: tok.TokenKind = .eof,
+    following: tok.Kind = .eof,
     closed: bool = false,
     has_top_level_semicolon: bool = false,
     has_top_level_ellipsis: bool = false,
@@ -438,14 +433,14 @@ const BalancedTokenScan = struct {
 /// borrowed and valid; only the lexer cursor moves, and is restored on
 /// return. No parser snapshot, token duplication, emission rollback, or
 /// per-token `State.advance` work is needed.
-fn scanBalancedAfterOpening(s: *State, opening: tok.TokenKind, no_line_terminator: bool) Error!BalancedTokenScan {
+fn scanBalancedAfterOpening(s: *State, opening: tok.Kind, no_line_terminator: bool) Error!BalancedTokenScan {
     // Match QuickJS's fixed local state[256], including its underflow
     // sentinel. The opening token has already advanced lex.pos.
     var delimiters: [256]u8 = undefined;
     delimiters[0] = 0;
     delimiters[1] = @intCast(@intFromEnum(opening));
     var level: usize = 2;
-    var previous_token_kind: ?tok.TokenKind = opening;
+    var previous_token_kind: ?tok.Kind = opening;
     var result = BalancedTokenScan{};
 
     while (level > 1) {
@@ -453,14 +448,14 @@ fn scanBalancedAfterOpening(s: *State, opening: tok.TokenKind, no_line_terminato
         defer s.lex.freeToken(&scratch);
 
         try rescanLookaheadTokenIfRegexp(s, &scratch, previous_token_kind);
-        const diagnostic_token = diagnosticTokenFromToken(s, &scratch);
-        if (scratch.val == .template) {
+        const diagnostic_token = diagnosticTokenFromToken(&scratch);
+        if (scratch.kind == .template) {
             // Treat the complete template as one balanced item. The helper
             // consumes all `${ ... }` parts while the head token remains alive.
             try skipTemplateInPredeclareScan(s, scratch);
         }
 
-        const ident_atom = if (scratch.val == .ident)
+        const ident_atom = if (scratch.kind == .ident)
             switch (scratch.payload) {
                 .ident => |ident| ident.atom,
                 else => atom_module.null_atom,
@@ -469,7 +464,7 @@ fn scanBalancedAfterOpening(s: *State, opening: tok.TokenKind, no_line_terminato
             atom_module.null_atom;
         const is_of = ident_atom == atom_module.ids.of;
 
-        const kind = scratch.val;
+        const kind = scratch.kind;
 
         switch (kind) {
             .lparen, .lbracket, .lbrace => {
@@ -525,7 +520,7 @@ fn scanBalancedAfterOpening(s: *State, opening: tok.TokenKind, no_line_terminato
     result.following = if (no_line_terminator and s.lex.got_lf)
         .newline
     else
-        following.val;
+        following.kind;
     return result;
 }
 
@@ -548,7 +543,7 @@ pub fn scanBalancedToken(s: *State, no_line_terminator: bool) Error!BalancedToke
         @intCast(@intFromEnum(opening)),
         no_line_terminator,
     )) |simple| {
-        const following: tok.TokenKind = switch (simple.following) {
+        const following: tok.Kind = switch (simple.following) {
             .arrow => .arrow,
             .assignment => .assign,
             .comma => .comma,

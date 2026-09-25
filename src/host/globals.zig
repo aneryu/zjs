@@ -84,10 +84,14 @@ fn globalAtob(ctx: *core.JSContext, global: ?*core.Object, args: []const core.JS
 const Latin1StringError = error{ InvalidCharacter, TypeError } || std.mem.Allocator.Error;
 
 fn stringToLatin1Bytes(rt: *core.JSRuntime, value: core.JSValue, max_unit: u16) Latin1StringError!std.ArrayList(u8) {
-    const string_value = value.asStringBody() orelse return error.TypeError;
+    if (!value.isString()) return error.TypeError;
+    var borrow = core.runtime.NoGcScope{};
+    borrow.activate(rt);
+    defer borrow.deactivate();
     var out = std.ArrayList(u8).empty;
     errdefer out.deinit(rt.nativeAllocator());
-    switch (string_value.resolveData()) {
+    var iterator = core.string.StringValueIterator.init(value);
+    while (iterator.next()) |chunk| switch (chunk) {
         .latin1 => |bytes| {
             for (bytes) |byte| {
                 if (byte > max_unit) return error.InvalidCharacter;
@@ -95,13 +99,13 @@ fn stringToLatin1Bytes(rt: *core.JSRuntime, value: core.JSValue, max_unit: u16) 
             try out.appendSlice(rt.nativeAllocator(), bytes);
         },
         .utf16 => |units| {
-            try out.ensureTotalCapacity(rt.nativeAllocator(), units.len);
+            try out.ensureUnusedCapacity(rt.nativeAllocator(), units.len);
             for (units) |unit| {
                 if (unit > max_unit) return error.InvalidCharacter;
                 out.appendAssumeCapacity(@intCast(unit));
             }
         },
-    }
+    };
     return out;
 }
 

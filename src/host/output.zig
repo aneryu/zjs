@@ -110,6 +110,11 @@ fn hostOutputValues(
     output: ?*std.Io.Writer,
     values: []const core.JSValue,
 ) HostError!core.JSValue {
+    const global_value = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .borrowed = values }, .{ .borrowed = &global_value } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
     if (output) |writer| {
         for (0..values.len) |i| {
             if (i != 0) writer.writeByte(' ') catch |err|
@@ -187,6 +192,11 @@ fn makeState(ctx: *core.JSContext, global: *core.Object, output: ?*std.Io.Writer
 /// One `print` / `console.log` argument (`js_print`, quickjs-libc.c:4063):
 /// a top-level string is written raw; every other value is `JS_PrintValue`.
 pub fn printHostArgument(ctx: *core.JSContext, global: *core.Object, output: ?*std.Io.Writer, writer: *std.Io.Writer, value: core.JSValue) Error!void {
+    const snapshots = [_]core.JSValue{ global.value(), value };
+    const slices = [_]core.runtime.ValueRootSlice{.{ .borrowed = &snapshots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
     var state = makeState(ctx, global, output, writer);
     if (value.isString()) return printRawString(&state, value);
     try printValueRec(&state, value);
@@ -208,11 +218,15 @@ fn printFloat64(s: *State, d: f64) Error!void {
 const Units = union(enum) {
     latin1: []const u8,
     utf16: []const u16,
+    /// The caller roots this value. Re-read the current representation after
+    /// every write: a writer can reenter and materialize a rope.
+    string: core.JSValue,
 
     fn len(self: Units) usize {
         return switch (self) {
             .latin1 => |bytes| bytes.len,
             .utf16 => |units| units.len,
+            .string => |value| core.string.stringValueLenUnchecked(value),
         };
     }
 
@@ -220,6 +234,7 @@ const Units = union(enum) {
         return switch (self) {
             .latin1 => |bytes| bytes[index],
             .utf16 => |units| units[index],
+            .string => |value| core.string.stringValueCodeUnitAtUnchecked(value, index),
         };
     }
 };
@@ -276,18 +291,11 @@ fn printUnits(s: *State, units: Units, len: usize, sep: u16) Error!void {
     }
 }
 
-fn unitsOfString(body: *const core.string.String) Units {
-    return switch (body.resolveData()) {
-        .latin1 => |bytes| .{ .latin1 = bytes },
-        .utf16 => |units| .{ .utf16 = units },
-    };
-}
-
 /// `js_print_string`: quoted, escaped, cut at
 /// `max_string_length` with the `... N more characters` tail.
 fn printString(s: *State, value: core.JSValue) Error!void {
-    const body = value.asStringBody() orelse return s.puts("<invalid string tag>");
-    const units = unitsOfString(body);
+    if (!value.isString()) return s.puts("<invalid string tag>");
+    const units = Units{ .string = value };
     const total = units.len();
     const shown = @min(total, default_max_string_length);
     try s.putc('"');
@@ -301,25 +309,28 @@ fn printString(s: *State, value: core.JSValue) Error!void {
 
 /// `js_print_raw_string`: the string text as-is.
 fn printRawString(s: *State, value: core.JSValue) Error!void {
-    const body = value.asStringBody() orelse return;
-    switch (body.resolveData()) {
-        .latin1 => |bytes| {
-            for (bytes) |byte| {
-                if (byte < 0x80) {
-                    try s.putc(byte);
-                } else {
-                    try s.puts(&[_]u8{ 0xc0 | (byte >> 6), 0x80 | (byte & 0x3f) });
-                }
-            }
-        },
-        .utf16 => |units| {
-            var it = std.unicode.Utf16LeIterator.init(units);
-            while (it.nextCodepoint() catch null) |codepoint| {
-                var utf8: [4]u8 = undefined;
-                const n = std.unicode.utf8Encode(codepoint, &utf8) catch continue;
-                try s.puts(utf8[0..n]);
-            }
-        },
+    if (!value.isString()) return;
+    const snapshot = [_]core.JSValue{value};
+    const slices = [_]core.runtime.ValueRootSlice{.{ .borrowed = &snapshot }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(s.rt);
+    defer roots.deactivate(s.rt);
+    const units = Units{ .string = value };
+    var index: usize = 0;
+    while (index < units.len()) : (index += 1) {
+        var codepoint: u32 = units.at(index);
+        if (std.unicode.utf16IsHighSurrogate(@intCast(codepoint))) {
+            if (index + 1 == units.len()) break;
+            const low = units.at(index + 1);
+            if (!std.unicode.utf16IsLowSurrogate(low)) break;
+            codepoint = 0x10000 + (((codepoint & 0x3ff) << 10) | (low & 0x3ff));
+            index += 1;
+        } else if (std.unicode.utf16IsLowSurrogate(@intCast(codepoint))) {
+            // Preserve the former Utf16LeIterator error boundary: raw output
+            // stops at an unpaired surrogate; quoted output escapes it.
+            break;
+        }
+        try putUnitRaw(s, codepoint);
     }
 }
 
@@ -340,7 +351,15 @@ fn isAsciiIdent(bytes: []const u8) bool {
 fn printAtom(s: *State, atom_id: core.Atom) Error!void {
     if (atom_id.isTaggedInt()) return s.printf("{d}", .{atom_id.toUInt32()});
     if (atom_id == core.atom.null_atom) return s.puts("<null>");
-    try printNameBytes(s, s.rt.atoms.name(atom_id) orelse "");
+    const name = s.rt.atoms.name(atom_id) orelse "";
+    var buffer: [256]u8 = undefined;
+    if (name.len <= buffer.len) {
+        @memcpy(buffer[0..name.len], name);
+        return printNameBytes(s, buffer[0..name.len]);
+    }
+    const snapshot = try s.rt.nativeAllocator().dupe(u8, name);
+    defer s.rt.nativeAllocator().free(snapshot);
+    try printNameBytes(s, snapshot);
 }
 
 /// The bare-or-quoted tail of `js_print_atom` on a UTF-8 name.
@@ -443,8 +462,14 @@ fn printRegExp(s: *State, object: *const core.Object) Error!void {
     const regexp_bc = object.regexpCompiledBytecode();
     const source_value = object.regexpSource();
     if (regexp_bc.len == 0 or source_value == null) return s.puts("[uninitialized_regexp]");
-    const body = source_value.?.asStringBody() orelse return s.puts("[uninitialized_regexp]");
-    const units = unitsOfString(body);
+    if (!source_value.?.isString()) return s.puts("[uninitialized_regexp]");
+    const snapshot = [_]core.JSValue{source_value.?};
+    const slices = [_]core.runtime.ValueRootSlice{.{ .borrowed = &snapshot }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(s.rt);
+    defer roots.deactivate(s.rt);
+    const units = Units{ .string = source_value.? };
+    const flags = regexp_adapter.flagsFromBytecode(regexp_bc);
     const n = units.len();
     try s.putc('/');
     if (n == 0) {
@@ -494,7 +519,6 @@ fn printRegExp(s: *State, object: *const core.Object) Error!void {
         }
     }
     try s.putc('/');
-    const flags = regexp_adapter.flagsFromBytecode(regexp_bc);
     const letters = [_]struct { byte: u8, field: std.meta.FieldEnum(regexp_adapter.Flags) }{
         .{ .byte = 'g', .field = .global },
         .{ .byte = 'i', .field = .ignore_case },
@@ -522,16 +546,22 @@ fn putUnitRaw(s: *State, c: u32) Error!void {
 /// `js_print_error`: `Name: message` then the
 /// `stack` text on its own line, trailing newline dropped.
 fn printError(s: *State, object: *const core.Object) Error!void {
+    var values = [_]core.JSValue{ core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(s.rt);
+    defer roots.deactivate(s.rt);
     if (ownOrProtoDataString(object, core.atom.ids.name)) |name| {
         try printRawString(s, name);
     } else {
         try s.puts("Error");
     }
     if (ownOrProtoDataString(object, core.atom.ids.message)) |message| {
-        const body = message.asStringBody();
-        if (body != null and body.?.len() != 0) {
+        values[0] = message;
+        if (core.string.stringValueLenUnchecked(message) != 0) {
             try s.puts(": ");
-            try printRawString(s, message);
+            try printRawString(s, values[0]);
         }
     }
     // zjs keeps `stack` as a native accessor on Error.prototype (V8 shape)
@@ -543,9 +573,9 @@ fn printError(s: *State, object: *const core.Object) Error!void {
         break :blk if (got.isString()) got else null;
     };
     if (stack_value) |stack| {
+        values[1] = stack;
         try s.putc('\n');
-        const body = stack.asStringBody() orelse return;
-        const units = unitsOfString(body);
+        const units = Units{ .string = values[1] };
         var len = units.len();
         if (len > 0 and units.at(len - 1) == '\n') len -= 1;
         var i: usize = 0;
@@ -598,16 +628,21 @@ fn printObject(s: *State, object: *const core.Object) Error!void {
         is_array = true;
         try s.puts("[ ");
         if (object.flags.fast_array) {
-            const len: usize = object.arrayLength();
-            const elements = object.arrayElements();
-            const shown = @min(elements.len, default_max_item_count);
-            for (elements[0..shown]) |element| {
+            // Printing an element can run JS (Error.prepareStackTrace), which
+            // may grow, shrink or de-densify this array: re-read the storage
+            // for every element instead of iterating a stale slice.
+            var shown: usize = 0;
+            while (shown < default_max_item_count) : (shown += 1) {
+                const elements = object.arrayElements();
+                if (shown >= elements.len) break;
                 try printComma(s, &comma_state);
-                try printValueRec(s, element);
+                try printValueRec(s, elements[shown]);
             }
-            if (shown < elements.len) try printMoreItems(s, &comma_state, elements.len - shown);
-            if (elements.len < len) {
-                const n = len - elements.len;
+            const count = object.arrayElements().len;
+            const len: usize = object.arrayLength();
+            if (shown < count) try printMoreItems(s, &comma_state, count - shown);
+            if (count < len) {
+                const n = len - count;
                 try printComma(s, &comma_state);
                 try s.printf("<{d} empty item{s}>", .{ n, if (n > 1) "s" else "" });
             }
@@ -646,7 +681,7 @@ fn printObject(s: *State, object: *const core.Object) Error!void {
     } else if (isCallableClass(class_id)) {
         try s.puts("[Function ");
         if (ownOrProtoDataString(object, core.atom.ids.name)) |name| {
-            if (name.asStringBody().?.len() == 0) {
+            if (core.string.stringValueLenUnchecked(name) == 0) {
                 try s.puts("(anonymous)");
             } else {
                 try printRawString(s, name);
@@ -657,22 +692,28 @@ fn printObject(s: *State, object: *const core.Object) Error!void {
         try s.putc(']');
         comma_state = 2;
     } else if ((class_id == core.class.ids.map or class_id == core.class.ids.set) and object.collectionPayloadBorrowed() != null) {
-        const payload = object.collectionPayloadBorrowed().?;
         try printClassName(s, class_id);
-        try s.printf("({d}) {{ ", .{payload.active_count});
+        try s.printf("({d}) {{ ", .{object.collectionPayloadBorrowed().?.active_count});
+        // Printing a key or value can run JS that mutates this collection,
+        // reallocating (and freeing) its entry array: index it afresh after
+        // every nested print, and read the value only after the key printed.
         var shown: usize = 0;
-        for (payload.entries.items) |entry| {
-            if (!entry.active) continue;
+        var index: usize = 0;
+        while (shown < default_max_item_count) : (index += 1) {
+            const entries = object.collectionPayloadBorrowed().?.entries.items;
+            if (index >= entries.len) break;
+            if (!entries[index].active) continue;
             try printComma(s, &comma_state);
-            try printValueRec(s, entry.key);
+            try printValueRec(s, entries[index].key);
             if (class_id == core.class.ids.map) {
                 try s.puts(" => ");
-                try printValueRec(s, entry.value);
+                const current = object.collectionPayloadBorrowed().?.entries.items;
+                try printValueRec(s, if (index < current.len and current[index].active) current[index].value else core.JSValue.undefinedValue());
             }
             shown += 1;
-            if (shown >= default_max_item_count) break;
         }
-        if (shown < payload.active_count) try printMoreItems(s, &comma_state, payload.active_count - shown);
+        const active_count = object.collectionPayloadBorrowed().?.active_count;
+        if (shown < active_count) try printMoreItems(s, &comma_state, active_count - shown);
     } else if (class_id == core.class.ids.regexp) {
         try printRegExp(s, object);
         comma_state = 2;
@@ -691,8 +732,10 @@ fn printObject(s: *State, object: *const core.Object) Error!void {
 
     // Shape properties in shape order; enumerable only (show_hidden is off).
     var shown: usize = 0;
-    const prop_count = object.shapeProps().len;
-    for (0..prop_count) |index| {
+    var index: usize = 0;
+    // A nested print can run JS that reshapes this object; bound every step
+    // by the current shape, not a count read before the loop.
+    while (index < object.shapeProps().len) : (index += 1) {
         const flags = object.propFlagsAt(index);
         if (flags.deleted) continue;
         if (!flags.enumerable) continue;
@@ -753,6 +796,13 @@ fn printStackIndex(s: *State, object: *const core.Object) ?usize {
 
 /// `js_print_value`.
 fn printValueRec(s: *State, value: core.JSValue) Error!void {
+    // Recursive inspection can invoke Error.prepareStackTrace or a host
+    // writer. Keep both the value and raw Object snapshots stable.
+    const snapshot = [_]core.JSValue{value};
+    const slices = [_]core.runtime.ValueRootSlice{.{ .borrowed = &snapshot }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(s.rt);
+    defer roots.deactivate(s.rt);
     if (value.as(.int)) |int_value| {
         var buf: [32]u8 = undefined;
         return s.puts(dtoa.formatInt32(&buf, int_value));

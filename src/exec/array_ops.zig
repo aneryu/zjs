@@ -395,25 +395,30 @@ pub fn throwRegExpAccessorTypeError(ctx: *core.JSContext, getter_value: core.JSV
 }
 
 pub noinline fn createRegExpIndicesArray(rt: *core.JSRuntime, global: *core.Object, found: *const RegExpMatch) !core.JSValue {
-    const out = try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, global));
-    errdefer core.Object.destroyFromHeader(rt, out.gcHeader());
+    var values = [_]core.JSValue{ global.value(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    values[1] = (try core.Object.createArray(rt, arrayPrototypeFromGlobal(rt, objectFromValue(values[0]).?))).value();
 
-    const full = try createRegExpIndexPair(rt, global, found.index, found.index + found.len);
-    try defineSplitValueElement(rt, out, 0, full);
+    values[2] = try createRegExpIndexPair(rt, objectFromValue(values[0]).?, found.index, found.index + found.len);
+    try defineSplitValueElement(rt, objectFromValue(values[1]).?, 0, values[2]);
 
     var capture_index: usize = 0;
     while (capture_index < found.capture_count) : (capture_index += 1) {
         const capture = found.captureAt(capture_index);
         if (capture.undefined) {
-            try defineSplitValueElement(rt, out, @intCast(capture_index + 1), core.JSValue.undefinedValue());
+            try defineSplitValueElement(rt, objectFromValue(values[1]).?, @intCast(capture_index + 1), core.JSValue.undefinedValue());
         } else {
-            const pair = try createRegExpIndexPair(rt, global, capture.start, capture.start + capture.len);
-            try defineSplitValueElement(rt, out, @intCast(capture_index + 1), pair);
+            values[2] = try createRegExpIndexPair(rt, objectFromValue(values[0]).?, capture.start, capture.start + capture.len);
+            try defineSplitValueElement(rt, objectFromValue(values[1]).?, @intCast(capture_index + 1), values[2]);
         }
     }
 
-    try defineRegExpIndicesGroupsProperty(rt, global, out, found);
-    return out.value();
+    try defineRegExpIndicesGroupsProperty(rt, objectFromValue(values[0]).?, objectFromValue(values[1]).?, found);
+    return values[1];
 }
 
 pub fn constructArrayBufferNativeRecord(
@@ -1496,6 +1501,8 @@ noinline fn arrayIterationModeCall(
         caller_function,
         caller_frame,
     );
+    callback_call.activateRoots();
+    defer callback_call.deinit();
     if (mode == .map and length > std.math.maxInt(u32)) return error.RangeError;
     if (is_typed_method and (mode == .map or mode == .filter)) {
         return try typedArrayMapFilter(ctx, output, global, receiver_object_value, object, length, mode, &callback_call, caller_function, caller_frame);
@@ -1738,6 +1745,8 @@ pub fn arrayReduceCall(
         null,
         null,
     );
+    callback_call.activateRoots();
+    defer callback_call.deinit();
 
     var accumulator: core.JSValue = undefined;
     var accumulator_set = false;
@@ -3748,6 +3757,8 @@ pub fn arrayFromCall(
         CallSite.initInternal(ctx, output, global, this_arg, mapper, caller_function, caller_frame)
     else
         null;
+    if (mapper_call) |*site| site.activateRoots();
+    defer if (mapper_call) |*site| site.deinit();
 
     for (0..length) |index| {
         const key = core.Atom.taggedInt(@intCast(index));
@@ -4417,6 +4428,8 @@ noinline fn fromArrayLikeSource(
         CallSite.initInternal(ctx, output, global, this_arg, mapper, caller_function, caller_frame)
     else
         null;
+    if (mapper_call) |*site| site.activateRoots();
+    defer if (mapper_call) |*site| site.deinit();
     if (kind == .array) {
         if (fixed_length) |length| {
             if (length > @as(usize, @intCast(std.math.maxInt(u32)))) return error.RangeError;
@@ -4512,6 +4525,8 @@ pub fn arrayFromIteratorLike(
         CallSite.initInternal(ctx, output, global, this_arg, mapper, caller_function, caller_frame)
     else
         null;
+    if (mapper_call) |*site| site.activateRoots();
+    defer if (mapper_call) |*site| site.deinit();
 
     var index: u32 = 0;
     while (true) : (index += 1) {
@@ -5040,6 +5055,8 @@ pub fn stableArraySortEntries(
         )
     else
         null;
+    if (comparator_call) |*site| site.activateRoots();
+    defer if (comparator_call) |*site| site.deinit();
 
     // Bottom-up merge, ping-ponging between the two buffers: each pass reads
     // `src` and writes `dst` whole, then the roles swap, so a run is copied
@@ -5387,6 +5404,8 @@ pub fn arrayFlatCall(
         CallSite.initInternal(ctx, output, global, this_arg, mapper, caller_function, caller_frame)
     else
         null;
+    if (mapper_call) |*site| site.activateRoots();
+    defer if (mapper_call) |*site| site.deinit();
     const written = try flattenIntoArray(ctx, output, global, out_value, out, receiver_object_value, source, source_length, 0, depth, if (mapper_call) |*call_site| call_site else null, caller_function, caller_frame);
     if (out.isArray()) {
         _ = try setValueProperty(ctx, output, global, out_value, core.atom.ids.length, lengthIndexValue(written), caller_function, caller_frame);
@@ -5956,6 +5975,7 @@ pub noinline fn putDenseArrayElementOverwriteOwnedFast(rt: *core.JSRuntime, obje
     const new_count = index + 1;
     if (new_count > object.fastArrayCapacity()) return .append_candidate;
     object.fastArraySlotAssumeCapacity(index).* = value;
+    rt.gc.generationalBarrier(object.gcHeader(), value.cycleMarkHeader());
     rt.gc.auditUnbarrieredStore(object.gcHeader(), value.cycleMarkHeader(), .dense_array_in_capacity_append);
     object.setFastArrayCountAssumeCapacity(new_count);
     if (new_count > object.arrayLength()) object.setArrayLength(new_count);
@@ -6732,9 +6752,17 @@ pub fn arrayLengthDefineValue(
     global: *core.Object,
     value: core.JSValue,
 ) !core.JSValue {
-    const first_primitive = try toPrimitiveForNumber(ctx, output, global, value);
+    // Each conversion roots its own inputs. The outer operation must also
+    // receive relocation repairs before it starts the second conversion.
+    var values = [_]core.JSValue{ global.value(), value };
+    const live: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &live }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    const first_primitive = try toPrimitiveForNumber(ctx, output, objectFromValue(values[0]).?, values[1]);
     _ = try value_ops.toNumberValue(ctx.runtime, first_primitive);
-    const second_primitive = try toPrimitiveForNumber(ctx, output, global, value);
+    const second_primitive = try toPrimitiveForNumber(ctx, output, objectFromValue(values[0]).?, values[1]);
     return value_ops.toNumberValue(ctx.runtime, second_primitive);
 }
 

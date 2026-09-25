@@ -448,7 +448,7 @@ fn classNameAtom(s: *State) ?Atom {
         return atom_id;
     }
     if (kind == .kw_await and identifiers.canUseAwaitAsIdentifier(s)) {
-        return tok.keywordAtom(kind);
+        return kind.keywordAtom();
     }
     return null;
 }
@@ -885,11 +885,11 @@ fn collectClassPrivateBoundNames(s: *State, bound_start: usize) Error!void {
     var brace_depth: usize = 1;
     var paren_depth: usize = 0;
     var bracket_depth: usize = 0;
-    var prev_kind: tok.TokenKind = .eof;
+    var prev_kind: tok.Kind = .eof;
     while (brace_depth > 0) {
         var scan_token = s.lex.next() catch |err| return lookahead.mapLookaheadLexerError(s, err);
         defer s.lex.freeToken(&scan_token);
-        const k = scan_token.val;
+        const k = scan_token.kind;
         if (k == .eof) break;
 
         if (k == .private_name and

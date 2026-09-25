@@ -214,8 +214,17 @@ pub fn callValueOrBytecodeRoot(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    var rooted_this = this_value;
-    var rooted_func = func;
+    // Raw ABI snapshots remain in dispatch frames across interrupt callbacks
+    // and nested calls. Register a borrowed slice even in production builds,
+    // before overflow-buffer allocation; scalar-only frames are insufficient.
+    const call_values = [_]core.JSValue{ global.value(), this_value, func };
+    var root_slices = [_]core.runtime.ValueRootSlice{
+        .{ .borrowed = &call_values },
+        .{ .borrowed = args },
+    };
+    var root_frame = core.runtime.ValueRootFrame{ .slices = &root_slices };
+    root_frame.activate(ctx.runtime);
+    defer root_frame.deactivate(ctx.runtime);
     var inline_args: [8]core.JSValue = undefined;
     var args_buffer: core.runtime.ValueRootBuffer = .{};
     defer args_buffer.deinit();
@@ -226,21 +235,10 @@ pub fn callValueOrBytecodeRoot(
         args_buffer = try core.runtime.ValueRootBuffer.initCopy(ctx.runtime, args);
         break :blk args_buffer.values();
     };
-    // The inline window needs a frame; the overflow buffer owns its roots.
-    var root_values = [_]*core.JSValue{
-        &rooted_this,
-        &rooted_func,
-    };
-    var root_slices = [_]core.runtime.ValueRootSlice{
-        .{ .borrowed = inline_args[0..@min(args.len, inline_args.len)] },
-    };
-    var root_frame = core.runtime.ValueRootFrame{
-        .values = &root_values,
-        .slices = if (args.len <= inline_args.len) &root_slices else &.{},
-    };
-    root_frame.activate(ctx.runtime);
-    defer root_frame.deactivate(ctx.runtime);
-    return callValueOrBytecodeDispatch(ctx, output, global, rooted_this, rooted_func, rooted_args, caller_function, caller_frame, true);
+    // Switch protection to the owned snapshot before a callback can mutate
+    // the caller's original argument window. Cleanup does not collect.
+    root_slices[1] = .{ .borrowed = rooted_args };
+    return callValueOrBytecodeDispatch(ctx, output, global, this_value, func, rooted_args, caller_function, caller_frame, true);
 }
 
 /// Eagerly coerce a receiver for suspended async/generator state, whose `this`
@@ -1011,6 +1009,7 @@ pub fn callValueOrBytecodeDispatchAfterInterruptPoll(
     caller_frame: ?*frame_mod.Frame,
     copy_argv: bool,
 ) HostError!core.JSValue {
+    ctx.runtime.assertExecutionAllowed();
     if (func.is(.function_bytecode)) {
         return callRawFunctionBytecode(ctx, output, global, this_value, func, args, copy_argv);
     }
@@ -1057,15 +1056,16 @@ noinline fn callNativeCallableByName(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
-    // Borrow the internal dispatch-name bytes instead of allocating a
-    // fresh `[]u8` per call. Hot URI 4-byte-UTF-8 sweeps call this path millions of
-    // times, and the previous round-trip alloc/free showed up clearly
-    // on the profile. Native dispatch names are atom-backed ASCII
-    // builtin names in practice; a `null` return here means there is
-    // no usable dispatch name.
-    const dispatch = call_mod.nativeFunctionDispatchNameRef(ctx.runtime, function_object) orelse {
+    // Keep the original atom alive even if a callback replaces metadata.
+    // Visible names are native snapshots; no string borrow crosses dispatch.
+    const dispatch_atom = function_object.nativeDispatchName();
+    var name_roots = core.runtime.rootAtoms(.{&dispatch_atom});
+    name_roots.activate(ctx.runtime);
+    defer name_roots.deactivate(ctx.runtime);
+    const dispatch = (try call_mod.nativeFunctionDispatchNameForCall(ctx.runtime, function_object)) orelse {
         return core.JSValue.undefinedValue();
     };
+    defer dispatch.deinit(ctx.runtime);
     const name = dispatch.name;
     if (name.len == 0) return core.JSValue.undefinedValue();
     if (std.mem.eql(u8, name, "raw")) {
@@ -2251,15 +2251,13 @@ fn constructValueOrBytecodeInEnvironment(
                 return (try constructBuiltinNativeRecordVm(ctx, output, constructor_global, function_object, native_ref, null, args, caller_function, caller_frame)) orelse error.TypeError;
             }
         }
-        const dispatch_name = call_mod.nativeFunctionDispatchNameRef(ctx.runtime, function_object);
-        var owned_name: ?[]u8 = null;
-        defer if (owned_name) |name_bytes| ctx.runtime.nativeAllocator().free(name_bytes);
-        const name = if (dispatch_name) |dispatch|
-            dispatch.name
-        else blk: {
-            owned_name = try call_mod.nativeFunctionNameForVm(ctx.runtime, function_object);
-            break :blk owned_name.?;
-        };
+        const dispatch_atom = function_object.nativeDispatchName();
+        var name_roots = core.runtime.rootAtoms(.{&dispatch_atom});
+        name_roots.activate(ctx.runtime);
+        defer name_roots.deactivate(ctx.runtime);
+        const dispatch_name = try call_mod.nativeFunctionNameForVmBorrowed(ctx.runtime, function_object);
+        defer dispatch_name.deinit(ctx.runtime);
+        const name = dispatch_name.name;
         const is_native_array_constructor = function_object.arrayBuiltinMarker() == .constructor;
         // Order matters, not just the predicate: this whole gate only fires for
         // subclass `super(...)` / `Reflect.construct` with a foreign new.target
@@ -2785,12 +2783,20 @@ pub fn cacheIteratorNextMethod(
     global: *core.Object,
     iterator_value: core.JSValue,
 ) !void {
-    const iterator = try property_ops.expectObject(iterator_value);
+    var values = [_]core.JSValue{ iterator_value, core.JSValue.undefinedValue() };
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    _ = try property_ops.expectObject(values[0]);
     const next_key = core.atom.ids.next;
-    const next_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, next_key, null, null);
-    if (!isCallableValue(next_method)) return error.TypeError;
+    values[1] = try object_ops.getValueProperty(ctx, output, global, values[0], next_key, null, null);
+    if (!isCallableValue(values[1])) return error.TypeError;
+    const iterator = try property_ops.expectObject(values[0]);
     const cached = try iterator.cachedIteratorNextSlot(ctx.runtime);
-    try iterator.setOptionalValueSlot(ctx.runtime, cached, next_method);
+    try iterator.setOptionalValueSlot(ctx.runtime, cached, values[1]);
 }
 
 pub fn appendIteratorValues(
@@ -2801,26 +2807,35 @@ pub fn appendIteratorValues(
     source_value: core.JSValue,
     start_index: i32,
 ) !i32 {
-    const source_object = core.value_semantics.objectFromValue(source_value);
-    const iterator_value = if (source_object != null and
+    var values = [_]core.JSValue{ source_value, target.value(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+
+    const source_object = core.value_semantics.objectFromValue(values[0]);
+    values[3] = if (source_object != null and
         (source_object.?.class_id == core.class.ids.generator or source_object.?.class_id == core.class.ids.async_generator))
-        source_value
+        values[0]
     else blk: {
-        const iterator_method = try getIteratorMethod(ctx, output, global, source_value);
-        if (!isCallableValue(iterator_method)) {
+        values[2] = try getIteratorMethod(ctx, output, global, values[0]);
+        if (!isCallableValue(values[2])) {
             _ = exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable") catch |err| return err;
             return error.TypeError;
         }
-        break :blk try callValueOrBytecodeRoot(ctx, output, global, source_value, iterator_method, &.{}, null, null);
+        break :blk try callValueOrBytecodeRoot(ctx, output, global, values[0], values[2], &.{}, null, null);
     };
-    if (!iterator_value.is(.object)) return error.TypeError;
+    if (!values[3].is(.object)) return error.TypeError;
     var index = start_index;
     while (true) {
-        const step = try iterator_ops.iteratorStepValue(ctx, output, global, iterator_value);
+        const step = try iterator_ops.iteratorStepValue(ctx, output, global, values[3]);
         if (step.done) {
             break;
         }
-        try property_ops.defineDataProperty(ctx.runtime, target, core.Atom.taggedInt(@intCast(index)), step.value);
+        values[4] = step.value;
+        try property_ops.defineDataProperty(ctx.runtime, object_ops.objectFromValue(values[1]).?, core.Atom.taggedInt(@intCast(index)), values[4]);
         index += 1;
     }
     return index;
@@ -2850,92 +2865,94 @@ pub fn appendSpreadValuesEnumerate(
     start_index: i32,
 ) !i32 {
     const rt = ctx.runtime;
-    var rooted_source = source_value;
-    var rooted_target = target.value();
-    var iterator_method = core.JSValue.undefinedValue();
-    var iterator_value = core.JSValue.undefinedValue();
-    var next_method = core.JSValue.undefinedValue();
-    var item = core.JSValue.undefinedValue();
-    var roots = core.runtime.rootValues(.{ &rooted_source, &rooted_target, &iterator_method, &iterator_value, &next_method, &item });
+    // Source, destination, method, iterator, next, current item, dense source.
+    var values = [_]core.JSValue{ source_value, target.value() } ++ ([_]core.JSValue{core.JSValue.undefinedValue()} ** 5);
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
     roots.activate(rt);
     defer roots.deactivate(rt);
 
     // iterator method = GetProperty(src, @@iterator) (qjs quickjs.c)
     // Even a generator can override @@iterator; class identity is not a
     // substitute for the observable GetIterator operation.
-    iterator_method = try getIteratorMethod(ctx, output, global, rooted_source);
-    if (!isCallableValue(iterator_method)) {
+    values[2] = try getIteratorMethod(ctx, output, global, values[0]);
+    if (!isCallableValue(values[2])) {
         _ = exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable") catch |err| return err;
         return error.TypeError;
     }
 
     // enumobj = src[@@iterator] (qjs GetIterator, quickjs.c)
-    iterator_value = try callValueOrBytecodeRoot(ctx, output, global, rooted_source, iterator_method, &.{}, null, null);
-    const iterator = try property_ops.expectObject(iterator_value);
+    values[3] = try callValueOrBytecodeRoot(ctx, output, global, values[0], values[2], &.{}, null, null);
+    _ = try property_ops.expectObject(values[3]);
 
     // next = GetProperty(enumobj, "next") (qjs quickjs.c)
     // GetIterator captures next once per acquisition, even if this iterator
     // was consumed previously or its next getter changes the property.
-    next_method = try object_ops.getValueProperty(ctx, output, global, iterator_value, core.atom.ids.next, null, null);
-    if (!isCallableValue(next_method)) return error.TypeError;
+    values[4] = try object_ops.getValueProperty(ctx, output, global, values[3], core.atom.ids.next, null, null);
+    if (!isCallableValue(values[4])) return error.TypeError;
 
     var index = start_index;
 
     // Fast path (qjs quickjs.c): default Array Iterator (value kind)
     // + builtin `next` + hole-free fast-array target (`length == count`).
     fast: {
-        const next_obj = object_ops.objectFromValue(next_method) orelse break :fast;
+        const next_obj = object_ops.objectFromValue(values[4]) orelse break :fast;
         if (!next_obj.isArrayIteratorNextFunction()) break :fast;
-        if (iterator.class_id != core.class.ids.array_iterator) break :fast;
-        if (iterator_slots.arrayIteratorKind(iterator) != .value) break :fast;
-        const target_value = (iterator.iteratorTargetSlot().*) orelse break :fast;
-        const target_obj = object_ops.objectFromValue(target_value) orelse break :fast;
-        if (!target_obj.isArray() or target_obj.hasExoticMethods() or target_obj.proxyTarget() != null) break :fast;
-        const elements = target_obj.arrayElements(); // len == array_count
-        const length: usize = @intCast(target_obj.arrayLength());
-        if (length != elements.len) break :fast; // qjs: len != count32 -> general_case
-        const cursor = iterator.iteratorIndexSlot().*;
-        if (cursor > elements.len) break :fast;
+        if (object_ops.objectFromValue(values[3]).?.class_id != core.class.ids.array_iterator) break :fast;
+        if (iterator_slots.arrayIteratorKind(object_ops.objectFromValue(values[3]).?) != .value) break :fast;
+        const target_value = (object_ops.objectFromValue(values[3]).?.iteratorTargetSlot().*) orelse break :fast;
+        values[6] = target_value;
+        _ = object_ops.objectFromValue(values[6]) orelse break :fast;
+        if (!object_ops.objectFromValue(values[6]).?.isArray() or object_ops.objectFromValue(values[6]).?.hasExoticMethods() or object_ops.objectFromValue(values[6]).?.proxyTarget() != null) break :fast;
+        const element_count = object_ops.objectFromValue(values[6]).?.arrayElements().len;
+        const length: usize = @intCast(object_ops.objectFromValue(values[6]).?.arrayLength());
+        if (length != element_count) break :fast; // qjs: len != count32 -> general_case
+        const cursor = object_ops.objectFromValue(values[3]).?.iteratorIndexSlot().*;
+        if (cursor > element_count) break :fast;
         // This builtin iterator has a known, side-effect-free dense range.
         // Reserve its destination once: each incremental growth otherwise
         // leaves an obsolete GC storage cell alive until the next sweep.
         // Keep all unusual descriptor/length targets on the per-item path.
-        if (cursor < elements.len and index >= 0 and target != target_obj and
-            target.isArray() and !target.hasExoticMethods() and
-            target.arrayElementStorageMode() == .dense and
-            target.flags.extensible and target.flags.length_writable and
-            target.shape_ref.prop_count == 0 and target.arrayElements().len == @as(usize, @intCast(index)))
+        if (cursor < element_count and index >= 0 and object_ops.objectFromValue(values[1]).? != object_ops.objectFromValue(values[6]).? and
+            object_ops.objectFromValue(values[1]).?.isArray() and !object_ops.objectFromValue(values[1]).?.hasExoticMethods() and
+            object_ops.objectFromValue(values[1]).?.arrayElementStorageMode() == .dense and
+            object_ops.objectFromValue(values[1]).?.flags.extensible and object_ops.objectFromValue(values[1]).?.flags.length_writable and
+            object_ops.objectFromValue(values[1]).?.shape_ref.prop_count == 0 and object_ops.objectFromValue(values[1]).?.arrayElements().len == @as(usize, @intCast(index)))
         {
-            const needed = @as(usize, @intCast(index)) + elements.len - cursor;
+            const needed = @as(usize, @intCast(index)) + element_count - cursor;
             if (needed <= std.math.maxInt(i32)) {
                 // A failed first definition has already consumed one item.
-                iterator.iteratorIndexSlot().* = cursor + 1;
-                try target.reserveDenseArrayElements(rt, @intCast(needed));
+                object_ops.objectFromValue(values[3]).?.iteratorIndexSlot().* = cursor + 1;
+                try object_ops.objectFromValue(values[1]).?.reserveDenseArrayElements(rt, @intCast(needed));
             }
         }
         var i: usize = cursor;
-        while (i < elements.len) : (i += 1) {
-            item = elements[i];
-            iterator.iteratorIndexSlot().* = i + 1;
+        while (i < element_count) : (i += 1) {
+            // Reserve and per-item growth can relocate storage, including
+            // the source storage when source and destination are identical.
+            values[5] = object_ops.objectFromValue(values[6]).?.arrayElements()[i];
+            object_ops.objectFromValue(values[3]).?.iteratorIndexSlot().* = i + 1;
             // A contiguous C_W_E definition can stay dense. The shared
             // CreateDataProperty helper retains descriptor/length fallbacks
             // and never invokes an inherited indexed setter.
-            try array_ops.createArrayDataOrTypedArrayElement(rt, target, core.Atom.taggedInt(@intCast(index)), item);
+            try array_ops.createArrayDataOrTypedArrayElement(rt, object_ops.objectFromValue(values[1]).?, core.Atom.taggedInt(@intCast(index)), values[5]);
             index += 1;
         }
-        iterator.iteratorIndexSlot().* = elements.len; // exhaust, matching a full drain
-        iterator.clearOptionalValueSlot(rt, iterator.iteratorTargetSlot());
+        object_ops.objectFromValue(values[3]).?.iteratorIndexSlot().* = element_count; // exhaust, matching a full drain
+        object_ops.objectFromValue(values[3]).?.clearOptionalValueSlot(rt, object_ops.objectFromValue(values[3]).?.iteratorTargetSlot());
         return index;
     }
 
     // General case (qjs quickjs.c): step the constructed iterator.
     while (true) {
-        const step = try iterator_ops.iteratorStepWithNext(ctx, output, global, iterator_value, next_method, null, null);
+        const step = try iterator_ops.iteratorStepWithNext(ctx, output, global, values[3], values[4], null, null);
         if (step.done) {
             break;
         }
-        item = step.value;
-        try array_ops.createArrayDataOrTypedArrayElement(rt, target, core.Atom.taggedInt(@intCast(index)), item);
+        values[5] = step.value;
+        try array_ops.createArrayDataOrTypedArrayElement(rt, object_ops.objectFromValue(values[1]).?, core.Atom.taggedInt(@intCast(index)), values[5]);
         index += 1;
     }
     return index;
@@ -2957,12 +2974,12 @@ pub fn globalLexicalEnv(ctx: *core.JSContext) !*core.Object {
     if (ctx.lexicals) |env| return env;
     if (ctx.global) |global| {
         if (global.globalLexicals(ctx.runtime)) |env| {
-            ctx.lexicals = env;
+            ctx.setLexicals(env);
             return env;
         }
     }
     const env = try core.Object.create(ctx.runtime, core.class.ids.object, null);
-    ctx.lexicals = env;
+    ctx.setLexicals(env);
     return env;
 }
 
@@ -3334,7 +3351,7 @@ pub fn indirectEval(
     const use_global_lexicals = context_global == null or context_global.? != eval_global;
     const keep_active_lexicals = context_global == null;
     const saved_lexicals = ctx.lexicals;
-    if (use_global_lexicals) ctx.lexicals = eval_global.globalLexicals(ctx.runtime);
+    if (use_global_lexicals) ctx.setLexicals(eval_global.globalLexicals(ctx.runtime));
 
     const EvalResult = @typeInfo(@TypeOf(indirectEval)).@"fn".return_type.?;
     const result: EvalResult = blk: {
@@ -4281,21 +4298,24 @@ pub fn generatorPcAfterYieldStar(fb: *const bytecode.FunctionBytecode, pc: usize
 }
 
 pub fn wrapIteratorFromIterator(ctx: *core.JSContext, global: *core.Object, iterator: core.JSValue, next_method: ?core.JSValue) !core.JSValue {
-    var rooted_iterator = iterator;
-    var rooted_next_method = next_method orelse core.JSValue.undefinedValue();
-    var root_frame = core.runtime.rootValues(.{ &rooted_iterator, &rooted_next_method });
+    var values = [_]core.JSValue{ iterator, next_method orelse core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var root_frame = core.runtime.ValueRootFrame{ .slices = &slices };
     root_frame.activate(ctx.runtime);
     defer root_frame.deactivate(ctx.runtime);
 
-    const iterator_object = object_ops.objectFromValue(rooted_iterator) orelse return error.TypeError;
-    const prototype = try object_ops.wrapForValidIteratorPrototype(ctx.runtime, global);
-    const wrapper = try core.Object.create(ctx.runtime, core.class.ids.iterator_wrap, prototype);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, wrapper.gcHeader());
-    try wrapper.setOptionalValueSlot(ctx.runtime, wrapper.iteratorTargetSlot(), rooted_iterator);
+    _ = object_ops.objectFromValue(values[0]) orelse return error.TypeError;
+    values[2] = (try object_ops.wrapForValidIteratorPrototype(ctx.runtime, global)).value();
+    values[3] = (try core.Object.create(ctx.runtime, core.class.ids.iterator_wrap, object_ops.objectFromValue(values[2]).?)).value();
+    const wrapper = object_ops.objectFromValue(values[3]).?;
+    try wrapper.setOptionalValueSlot(ctx.runtime, wrapper.iteratorTargetSlot(), values[0]);
     if (next_method != null) {
-        try wrapper.setOptionalValueSlot(ctx.runtime, wrapper.iteratorNextSlot(), rooted_next_method);
+        try wrapper.setOptionalValueSlot(ctx.runtime, wrapper.iteratorNextSlot(), values[1]);
         return wrapper.value();
     }
+    const iterator_object = object_ops.objectFromValue(values[0]).?;
     if (iterator_object.cachedIteratorNext(ctx.runtime)) |cached_next_method| {
         try wrapper.setOptionalValueSlot(ctx.runtime, wrapper.iteratorNextSlot(), cached_next_method);
         iterator_object.clearCachedIteratorNext(ctx.runtime);
@@ -4683,7 +4703,7 @@ pub const IntegrityLevel = enum {
 };
 
 /// Root provider for the `definePropertiesOnTarget` staging list; see the
-/// activation site for why the list needs one. Erased in default `rc`.
+/// activation site for why the list needs one.
 const PendingDescriptorRoots = struct {
     runtime: *core.JSRuntime,
     list: *std.ArrayList(object_ops.PendingPropertyDescriptor),
@@ -4727,8 +4747,17 @@ pub fn definePropertiesOnTarget(
     caller_frame: ?*frame_mod.Frame,
 ) !void {
     if (properties_arg.is(.null_value) or properties_arg.is(.undefined_value)) return error.TypeError;
-    const properties_value = if (object_ops.objectFromValue(properties_arg)) |_| properties_arg else try object_ops.primitiveObjectForAccess(ctx.runtime, global, properties_arg);
-    const properties = object_ops.objectFromValue(properties_value) orelse return error.TypeError;
+    // The target is not necessarily published yet (Object.create). Keep the
+    // borrowed ABI inputs stable throughout both collection and installation.
+    const borrowed = [_]core.JSValue{ global.value(), target.value(), properties_arg };
+    var values = [_]core.JSValue{core.JSValue.undefinedValue()};
+    const live: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .borrowed = &borrowed }, .{ .mutable = &live } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    values[0] = if (object_ops.objectFromValue(properties_arg)) |_| properties_arg else try object_ops.primitiveObjectForAccess(ctx.runtime, global, properties_arg);
+    const properties = object_ops.objectFromValue(values[0]) orelse return error.TypeError;
 
     const keys = try object_ops.objectRestOwnKeys(ctx, output, global, properties);
     defer core.Object.freeKeys(ctx.runtime, keys);
@@ -4754,16 +4783,13 @@ pub fn definePropertiesOnTarget(
     defer pending_roots.deactivate();
 
     for (keys) |key| {
-        const prop_desc = try object_ops.objectRestOwnPropertyDescriptor(ctx, output, global, properties, key) orelse continue;
+        const prop_desc = try object_ops.objectRestOwnPropertyDescriptor(ctx, output, global, object_ops.objectFromValue(values[0]).?, key) orelse continue;
         if (prop_desc.enumerable != true) continue;
 
-        const desc_value = try object_ops.getValueProperty(ctx, output, global, properties_value, key, caller_function, caller_frame);
+        const desc_value = try object_ops.getValueProperty(ctx, output, global, values[0], key, caller_function, caller_frame);
         const desc_object = object_ops.objectFromValue(desc_value) orelse return error.TypeError;
         const desc = try object_ops.descriptorFromObject(ctx, output, global, desc_value, desc_object, target, key, caller_function, caller_frame);
-        const pending_key = key;
-        var pending_key_owned = true;
-        try pending.append(ctx.runtime.nativeAllocator(), .{ .atom_id = pending_key, .desc = desc });
-        pending_key_owned = false;
+        try pending.append(ctx.runtime.nativeAllocator(), .{ .atom_id = key, .desc = desc });
     }
 
     for (pending.items) |item| {

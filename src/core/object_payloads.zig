@@ -289,6 +289,11 @@ pub const CollectionPayload = struct {
     /// tombstones can be compacted away, which is what
     /// `map_delete_record_internal` does when `--ref_count == 0`.
     live_cursors: usize = 0,
+    /// Set when tracing relocated a strong key. Object keys hash by address,
+    /// so their stored hashes and bucket chains are stale until the next
+    /// lookup relinks the index. Rollback restoring the old addresses only
+    /// makes that relink a no-op.
+    index_stale: bool = false,
     weak_entries: std.ArrayListUnmanaged(WeakCollectionEntry) = .empty,
     weak_holder_link: WeakReferenceHolderLink = .{},
 
@@ -315,7 +320,9 @@ pub const CollectionPayload = struct {
 
     pub fn traceChildEdges(self: *CollectionPayload, visitor: anytype) !void {
         for (self.entries.items) |*entry| {
+            const key_bits = entry.key.bits;
             try gc_visit.value(visitor, &entry.key);
+            if (entry.key.bits != key_bits) self.index_stale = true;
             try gc_visit.value(visitor, &entry.value);
         }
         for (self.weak_entries.items) |*entry| {
@@ -845,8 +852,7 @@ pub const RealmRecordPayload = struct {
     }
 
     pub fn traceChildEdges(self: *RealmRecordPayload, visitor: anytype) !void {
-        var realm = self.realm.borrow();
-        try gc_visit.realm(visitor, &realm);
+        try gc_visit.realm(visitor, &self.realm.ptr);
     }
 };
 

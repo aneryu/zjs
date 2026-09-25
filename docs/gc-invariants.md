@@ -109,8 +109,12 @@ representation snapshot; a value kind that becomes tracer-owned must appear
 in the authority's visitor in the same commit that makes the tracer
 responsible for it.**
 
-`JSValue.cycleMarkHeader` (`value.zig:480`) is the single definition of "which
-tags carry a traceable header". Widening it (S1 for BigInt, S2 for strings)
+`JSValue.isHeapReference` / `heapReference` use the pure word kernel in
+`value_encoding.zig` to classify and extract opaque addresses;
+`cycleMarkHeader` remains a compatibility projection. The physical Header
+conversion and carrier-kind-checked relocation live in `value_heap_layout.zig`.
+Heap addresses must fit 48 bits and be nonzero and 8-byte aligned before
+boxing; neither boxing nor relocation may truncate them. Widening the tag set (S1 for BigInt, S2 for strings)
 is the moment a kind joins the tracer; nothing else may pre-empt it.
 
 Atoms are edges too. Since S3 the dynamic atom table holds no count, so every
@@ -137,12 +141,102 @@ queued or remembered: publication traces its initial edges
 "initialise fields, then publish"; a write barrier that fires on an
 unpublished owner is a bug in the caller, not in the barrier.
 
+The owner is the object whose trace visits the written slot. A write through
+an open closure cell lands in frame storage: while the frame runs that slot is
+a root, but once a generator or async frame is parked the slot belongs to the
+object named by `cell.value`, so the barrier remembers that object
+(`VarRef.slotOwner`), never the cell. Stores made while a realm is still
+bootstrapping, or long after it went old (lexical environment, OOM error,
+`eval`, class prototypes, unhandled rejections), are ordinary stores into a
+traced owner that is not a root once its create-ref is consumed.
+
 The barrier fast path is one 8-byte load of the owner's metadata ANDed with
 `barrier_gate` (`barrierOwnerSkips`). The two skip bits (`young`,
 `remembered`) are the only facts allowed to buy an exit; `comptime` asserts in
 `gc.zig` pin their positions.
 
 ## Roots
+
+`string.asFlat` projects only a flat-tagged value and cannot allocate or
+collect. `string.ensureFlat` accepts registered input/output references,
+validates the output before allocation, and commits only on success; input
+and output may alias. The rooted rope keeps its graph alive. Ropes, flat
+strings and tail buffers currently have stable addresses (nursery allocation
+is Object-only); expanding movable kinds must revise that borrow contract.
+Flattening acquires the rope's current backing after allocation, because a
+reentrant materialization may have replaced and released its tail buffer.
+The legacy `asStringBody` / `flattenInfallible` entry still materializes and
+may collect; it is not a no-GC projection. It has no engine caller any more
+(`tools/check_string_boundaries.py`, part of `zig build test`); it survives
+only behind the documented public `Value.asString()` compatibility entry.
+
+`string.appendValueUtf8` streams flat, rope and tail-buffer chunks into native
+storage without materializing a GC string. A pending high surrogate crosses
+chunk boundaries; lone surrogates keep the existing WTF-8 encoding. The native
+buffer may grow or fail with OOM, but this path invokes neither GC nor allocation
+probes. String inputs to `toNumberValue` and `toBigIntValue` use this path;
+flat Latin1 numbers retain their direct parsing fast path. BigInt parse OOM
+must propagate as OOM, independently of invalid-literal SyntaxError.
+
+`runtime.NoGcScope` checks borrowed-view windows in Debug and test builds.
+Activate at its final address and deactivate in strict LIFO order, including
+error exits. It does not register roots, pin memory, prevent explicit buffer
+mutation, or extend lifetimes. Native allocation is allowed. Runtime collection
+and polling, direct major/minor entry, and pending/sliced destruction reject
+collection requests before changing collector state; they do not defer or skip
+the request to conceal a violation. Runtime teardown also rejects an active
+scope. The scope and Runtime link have no storage in non-test Release builds.
+`appendValueUtf8` uses this scope while traversing borrowed string leaves.
+
+`ExactValueRoots(N)` owns stack slots registered through a mutable-slice
+`ValueRootFrame` in every build. Activate at the final address and deactivate
+in strict root-frame LIFO order; an active scope must not move. Its borrowed
+`RootedValueRef` / `MutableRootedValueRef` check Runtime, live scope membership
+and a non-reused activation generation before accessing a slot. References
+expire on deactivation and never extend Runtime lifetime. Registration and
+updates do not allocate or collect. These checked registration and setter
+operations reject mutation while `gc_running` or a root/payload trace window is active; the current collector completes
+marking while the mutator is stopped and scans these slots at each collection. Collector slot repair uses
+the visitor directly, not the mutator setter. A handle `takeInto` installs the
+destination before removing the source, leaving the source intact on failure.
+
+`ValueRootFrame.headers` also registers in every build without allocation.
+These roots name stable-address carriers, such as Shapes and FunctionBytecode;
+they do not provide relocation or pin movable Objects. Object construction
+keeps its provisional Shape in this frame across pre-allocation collection.
+Ordinary scalar value/object helpers retain their existing production policy.
+
+Root enumeration, payload mark callbacks and host scheduler trace callbacks
+use nested `RootSet` trace windows. Window exit restores the depth even when
+a visitor reports failure. Root-provider registration/removal, handle and pin
+lifecycle operations, and root-frame linking cannot mutate these populations
+inside a trace window. Runtime teardown and collection entry reject reentry;
+execution admission rejects JavaScript calls. Collector slot repair remains
+legal through the visitor. Callback code must not retain visitor or slot
+addresses after returning; these borrowed pointers do not convey ownership.
+
+The generic `gc_visit` protocol requires all edge methods by default. Restricted
+diagnostic visitors must explicitly select `.partial`; the production
+`Collector` also asserts completeness independently of that policy. This
+checks method coverage, not the correctness of each manually enumerated edge.
+
+Linked `Atomics.waitAsync` nodes expose their actual Promise slots. The root
+adapter snapshots node pointers under the global waiter mutex, then invokes
+visitors after unlocking. Only the owning Runtime may consume or free its
+nodes, and those operations reject trace reentry. Foreign notification only
+changes completion state under the mutex. Detached nodes are protected by a
+mutable-window root and a stable Realm header root throughout queue growth;
+the job reads the updated Promise slot after allocation. Failed enqueue
+relinks the same node with any repaired slot intact. After successful handoff,
+the typed job's Promise field is the authoritative root.
+
+waitAsync completion writes the Promise result and reaction argument through
+the ordinary barrier-bearing Object setters. An old Promise storing a newly
+allocated result must be remembered before the next minor. Creation and
+completion keep values in always-linked exact roots and rederive borrowed
+objects after allocation. Result-wrapper property definition temporarily pins
+its receiver and heap-valued descriptor input because the current property
+API still borrows both across allocation; all failure paths release those pins.
 
 `ValueRootBuffer` (`src/core/roots.zig`) owns a fixed native value array and
 its root-provider registration. A successful `initCopy` keeps every element
@@ -168,7 +262,17 @@ is a correctness change, not an optimisation.
 Conservative candidates are validated through the address registry and the
 block geometry; a candidate is never dereferenced before validation. A kind
 that becomes tracer-owned must be resolvable by that path (block cell or
-registered extent) from the same commit.
+registered extent) from the same commit. Nursery pages come from their own
+allocator and are not in the registry: a candidate inside a nursery page is
+resolved by walking that bump page, and only published, unforwarded residents
+are offered (`forEachNurseryCandidateAt`). Every page so named is retained
+before anything is evacuated.
+
+The interpreter's pending call window (`stack.PendingCallRegion`) is judged
+live by Stack identity and top position. A retired Entry's Stack slot is
+reused by later frames, so retiring or tail-replacing an Entry forgets a
+window that names it (`Machine.forgetPendingCallRegion`); otherwise a reused
+slot could match and the tracer would read dead operand slots.
 
 R1-a/c/d narrowed but did not close the precise-root gap: of the six
 attributable windows only the regexp match array was a genuine missing root,
@@ -230,6 +334,15 @@ within young blocks and young extents (`collectMinor`,
 `gc_trace_stw.zig`). Old objects keep their marks between majors, which is
 what makes the remembered set sufficient. Survivors are promoted after one
 minor; there is no aging.
+
+Nursery residents are on no list; the nursery is their membership. Both
+collection kinds therefore clear their header-epoch marks by walking the
+nursery pages (`clearNurseryMarks`); a resident kept in place on a retained
+page would otherwise read as already traced and lose its young storage and
+children. A resident a collection finds dead is finalized if needed and then
+tombstoned (`heap_accounted` cleared): its page may be retained for a
+neighbour, and neither a stale native word nor the next corpse walk may treat
+it as live again.
 
 Minors do not run `processWeak`; WeakRef / FinalizationRegistry / WeakMap
 clearing happens only at major finish. A minor may not run while a major's
@@ -330,12 +443,15 @@ S5-b, not a semantic difference.
 - test262 and the unified suite have passed over real collector defects
   before (missing barrier, missing edge). Suite green is not evidence about
   the collector.
-- `ZJS_GC_STRESS=1` collects at every safepoint; `ZJS_GC_VERIFY_MINOR=1`
-  cross-checks every minor against a full trace (reporting `precise`
-  disagreements only -- `=verbose` adds the expected `conservative_only`
-  ones); `ZJS_MINOR_AUDIT=1` reports live objects holding edges into the
-  condemned set. S0 wires these into the gates (`test-gc-stress`,
+- `ZJS_GC_STRESS=1` collects at every safepoint (`=<n>` sets the cadence);
+  `ZJS_GC_VERIFY` cross-checks every minor against a full trace (reporting
+  `precise` disagreements only); `ZJS_GC_AUDIT` reports live objects holding
+  edges into the condemned set (`=fatal` panics). The two checking arms exist
+  only in safety builds. S0 wires these into the gates (`test-gc-stress`,
   `test262-stress`).
+- `ZJS_GC_NURSERY=1` opts one process into the copying nursery, which stays
+  off by default; with it the same suites report moving-mode results
+  separately from the default configuration.
 - The leak census only sees destroy-side misses.
 - `--gc-stats` measures behaviour; numbers there are single-run readings, not
   verdicts.

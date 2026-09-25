@@ -1,7 +1,7 @@
 //! Global URI encode/decode and Annex B escape/unescape builtin records.
 //!
-//! Arguments are borrowed; coercion strings and temporary byte buffers are
-//! owned locally, and returned JSValues carry one owned reference. Realm-aware
+//! Inputs are borrowed until their last read; native output buffers outlive
+//! that read window, and returned JSValues follow the caller's root contract. Realm-aware
 //! paths perform observable ToString and create named URI errors, while the
 //! narrow primitive helpers remain usable without a realm. The algorithms map
 //! to QuickJS URIError/decoder/encoder code at quickjs.c,
@@ -83,6 +83,20 @@ fn uriCall(
     native_args: []const core.JSValue,
     native_magic: i32,
 ) HostError!core.JSValue {
+    return uriCallRooted(native_ctx, native_this, native_args, native_magic) catch |err| switch (err) {
+        error.RootGenerationExhausted => error.OutOfMemory,
+        // These refs belong to one local, active scope on the callable realm.
+        error.RootAlreadyActive, error.RootMutationDuringCollection, error.WrongRuntime, error.InactiveRoot, error.InvalidRootIndex => std.debug.panic("URI value contract: {s}", .{@errorName(err)}),
+        else => |other| other,
+    };
+}
+
+fn uriCallRooted(
+    native_ctx: *core.JSContext,
+    native_this: core.JSValue,
+    native_args: []const core.JSValue,
+    native_magic: i32,
+) !core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const ctx = host_call.ctx;
     // The VM's name fallback deliberately invokes this record without a
@@ -100,15 +114,22 @@ fn uriCall(
         // (Annex B) before the body, except an already-string input which the
         // body consumes directly (matching the retired exec coercion glue).
         if (input.isString()) return uriBody(ctx, global, mode, input);
-        const string_value = try string_ops.toStringForAnnexB(
+        var roots = core.runtime.ExactValueRoots(2){};
+        try roots.activate(ctx.runtime);
+        defer roots.deactivate();
+        const global_root = try roots.ref(0);
+        const value_root = try roots.ref(1);
+        try global_root.set(ctx.runtime, global.value());
+        try value_root.set(ctx.runtime, input);
+        try value_root.set(ctx.runtime, try string_ops.toStringForAnnexB(
             ctx,
             host_call.output,
             global,
-            input,
+            try value_root.get(ctx.runtime),
             builtin_dispatch.callerBytecode(host_call),
             builtin_dispatch.callerFrame(host_call),
-        );
-        return uriBody(ctx, global, mode, string_value);
+        ));
+        return uriBody(ctx, core.Object.fromHeader((try global_root.get(ctx.runtime)).cycleMarkHeader().?), mode, try value_root.get(ctx.runtime));
     }
     // Bare-runtime primitive path (no realm global for specific URIError text).
     return uriBody(ctx, null, mode, input);
@@ -282,12 +303,11 @@ pub fn call(ctx: *core.JSContext, global: ?*core.Object, mode: u32, input: core.
         // string's owned bytes into a small stack buffer, falling back
         // to an `ArrayList` only when the result outgrows the buffer.
         // The fast path is restricted to ASCII content because the URI
-        // grammar only accepts ASCII; anything else falls through to the
-        // legacy `appendValueString` route below, which preserves
-        // QuickJS-compatible `\uXXXX` widening for non-ASCII utf16 units.
+        // percent escapes are ASCII. Non-ASCII flat strings use the code-unit
+        // decoder directly; ropes first snapshot their original UTF-16 units.
         if (try stringInputValue(input)) |string_value| {
-            if (stringDataFromValue(string_value)) |string_data| {
-                if (!stringDataContainsPercent(string_data)) return string_value;
+            if (!stringValueContainsPercent(rt, string_value)) return string_value;
+            if (core.string.asFlat(string_value)) |string_data| {
                 switch (string_data.resolveData()) {
                     // The stack-buffer fast path is ASCII-only; any non-ASCII
                     // unit routes to the faithful qjs js_global_decodeURI walk
@@ -306,6 +326,13 @@ pub fn call(ctx: *core.JSContext, global: ?*core.Object, mode: u32, input: core.
                 if (try decodeStringDataFast(ctx, global, string_data, mode == 4)) |result| {
                     return result;
                 }
+            } else {
+                // Snapshot rope units without flattening. The decoder may
+                // allocate its result or an error after the borrow ends.
+                var units = std.ArrayList(u16).empty;
+                defer units.deinit(rt.nativeAllocator());
+                try appendStringCodeUnits(rt, &units, string_value);
+                return decodeUriUnits(ctx, global, uriUtf16Bytes(units.items), 2, mode == 4);
             }
         }
     } else if (mode == 1 or mode == 2) {
@@ -345,10 +372,8 @@ pub fn call(ctx: *core.JSContext, global: ?*core.Object, mode: u32, input: core.
 }
 
 /// Stack-buffered decode for `decodeURI` / `decodeURIComponent` on string
-/// inputs. Returns `null` to defer to the slow `appendValueString` path
-/// when the input would not benefit from the fast path (utf16 strings that
-/// contain non-ASCII units, which need the QuickJS `\uXXXX`-widening
-/// stringification before decoding).
+/// inputs. Non-ASCII content is routed to the code-unit decoder by the
+/// caller; the nullable result defensively rejects wide non-ASCII inputs.
 ///
 /// The stack buffer is sized so that 4-byte-UTF-8 URI sweeps
 /// (`decodeURI("%F0%9F%98%80")` and similar) never spills to the heap.
@@ -482,42 +507,39 @@ fn stringInputValue(input: core.JSValue) !?core.JSValue {
     return null;
 }
 
-fn stringDataFromValue(value: core.JSValue) ?*core.string.String {
-    return value.asStringBody();
-}
-
 fn encodeStringValue(ctx: *core.JSContext, global: ?*core.Object, out: *std.ArrayList(u8), value: core.JSValue, component: bool) HostError!void {
     const rt = ctx.runtime;
-    const string_value = value.asStringBody() orelse return;
-    switch (string_value.resolveData()) {
-        .latin1 => |bytes| {
-            for (bytes) |byte| try encodeCodepoint(rt, out, byte, component);
-        },
-        .utf16 => |units| {
-            // js_global_encodeURI: a lone low surrogate throws
-            // URIError "invalid character"; a high surrogate not followed by a
-            // low surrogate throws URIError "expecting surrogate pair".
-            var index: usize = 0;
-            while (index < units.len) : (index += 1) {
-                const unit = units[index];
-                if (unicode.isLowSurrogateUnit(unit)) {
-                    return throwUriErrorMessage(ctx, global, "invalid character");
+    const invalid: ?[]const u8 = blk: {
+        var borrow = core.runtime.NoGcScope{};
+        borrow.activate(rt);
+        defer borrow.deactivate();
+        var iterator = core.string.StringValueIterator.init(value);
+        var high: ?u16 = null;
+        while (iterator.next()) |chunk| {
+            for (0..chunk.len()) |index| {
+                const unit: u16 = switch (chunk) {
+                    .latin1 => |bytes| bytes[index],
+                    .utf16 => |units| units[index],
+                };
+                if (high) |lead| {
+                    if (!unicode.isLowSurrogateUnit(unit)) break :blk "expecting surrogate pair";
+                    try encodeCodepoint(rt, out, unicode.codePointFromSurrogatePair(lead, unit), component);
+                    high = null;
                 } else if (unicode.isHighSurrogateUnit(unit)) {
-                    if (index + 1 >= units.len) {
-                        return throwUriErrorMessage(ctx, global, "expecting surrogate pair");
-                    }
-                    const next = units[index + 1];
-                    if (!unicode.isLowSurrogateUnit(next)) {
-                        return throwUriErrorMessage(ctx, global, "expecting surrogate pair");
-                    }
-                    try encodeCodepoint(rt, out, unicode.codePointFromSurrogatePair(unit, next), component);
-                    index += 1;
+                    high = unit;
+                } else if (unicode.isLowSurrogateUnit(unit)) {
+                    break :blk "invalid character";
                 } else {
                     try encodeCodepoint(rt, out, unit, component);
                 }
             }
-        },
-    }
+        }
+        if (high != null) break :blk "expecting surrogate pair";
+        break :blk null;
+    };
+    // Constructing the named error may collect. No leaf slice or iterator
+    // remains in use once this exits the no-GC read window.
+    if (invalid) |message| return throwUriErrorMessage(ctx, global, message);
 }
 
 fn encodeCodepoint(rt: *core.JSRuntime, out: *std.ArrayList(u8), codepoint: u21, component: bool) !void {
@@ -538,11 +560,19 @@ fn appendPercentByte(rt: *core.JSRuntime, out: *std.ArrayList(u8), byte: u8) !vo
     try out.appendSlice(rt.nativeAllocator(), &encoded);
 }
 
-fn stringDataContainsPercent(string_value: *core.string.String) bool {
-    return switch (string_value.resolveData()) {
-        .latin1 => |bytes| std.mem.indexOfScalar(u8, bytes, '%') != null,
-        .utf16 => |units| std.mem.indexOfScalar(u16, units, '%') != null,
-    };
+fn stringValueContainsPercent(rt: *core.JSRuntime, value: core.JSValue) bool {
+    var borrow = core.runtime.NoGcScope{};
+    borrow.activate(rt);
+    defer borrow.deactivate();
+    var iterator = core.string.StringValueIterator.init(value);
+    while (iterator.next()) |chunk| {
+        const found = switch (chunk) {
+            .latin1 => |bytes| std.mem.indexOfScalar(u8, bytes, '%') != null,
+            .utf16 => |units| std.mem.indexOfScalar(u16, units, '%') != null,
+        };
+        if (found) return true;
+    }
+    return false;
 }
 
 fn encodeBytes(rt: *core.JSRuntime, out: *std.ArrayList(u8), bytes: []const u8, component: bool) !void {
@@ -737,11 +767,14 @@ fn appendValueCodeUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), value: co
 }
 
 fn appendStringCodeUnits(rt: *core.JSRuntime, out: *std.ArrayList(u16), value: core.JSValue) !void {
-    const string_value = value.asStringBody() orelse return;
-    switch (string_value.resolveData()) {
+    var borrow = core.runtime.NoGcScope{};
+    borrow.activate(rt);
+    defer borrow.deactivate();
+    var iterator = core.string.StringValueIterator.init(value);
+    while (iterator.next()) |chunk| switch (chunk) {
         .latin1 => |bytes| for (bytes) |byte| try out.append(rt.nativeAllocator(), byte),
         .utf16 => |units| try out.appendSlice(rt.nativeAllocator(), units),
-    }
+    };
 }
 
 fn isAnnexBEscapeUnmodified(ch: u8) bool {

@@ -32,20 +32,42 @@ fn jsonBytesAreAscii(bytes: []const u8) bool {
 }
 
 /// Append the JSON quoted-string form of a string JSValue to `buffer`.
+/// Only native output storage may grow. Borrowed leaves never cross a GC or
+/// materialization point; a surrogate pair may span two different leaves.
 pub fn appendJsonStringValue(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), value: core.JSValue) !void {
-    var rooted_value = value;
-    var root_frame = core.runtime.rootValues(.{&rooted_value});
-    root_frame.activate(rt);
-    defer root_frame.deactivate(rt);
-
-    const string_value = rooted_value.asStringBody() orelse {
-        try appendEscapedJsonString(rt, buffer, "");
-        return;
+    if (!value.isString()) return appendEscapedJsonString(rt, buffer, "");
+    var borrow = core.runtime.NoGcScope{};
+    borrow.activate(rt);
+    defer borrow.deactivate();
+    try buffer.append(rt.nativeAllocator(), '"');
+    var iterator = core.string.StringValueIterator.init(value);
+    var pending_high: ?u16 = null;
+    while (iterator.next()) |chunk| switch (chunk) {
+        .latin1 => |bytes| {
+            if (pending_high) |high| try appendEscapedJsonUnit(rt, buffer, high);
+            pending_high = null;
+            try appendEscapedJsonLatin1Units(rt, buffer, bytes);
+        },
+        .utf16 => |units| {
+            if (units.len == 0) continue;
+            var start: usize = 0;
+            if (pending_high) |high| {
+                if (unicode.isLowSurrogateUnit(units[0])) {
+                    try appendUtf8CodePoint(rt, buffer, unicode.codePointFromSurrogatePair(high, units[0]));
+                    start = 1;
+                } else try appendEscapedJsonUnit(rt, buffer, high);
+                pending_high = null;
+            }
+            var end = units.len;
+            if (end > start and unicode.isHighSurrogateUnit(units[end - 1])) {
+                end -= 1;
+                pending_high = units[end];
+            }
+            try appendEscapedJsonUtf16Units(rt, buffer, units[start..end]);
+        },
     };
-    switch (string_value.resolveData()) {
-        .latin1 => |bytes| try appendEscapedJsonLatin1String(rt, buffer, bytes),
-        .utf16 => |units| try appendEscapedJsonUtf16String(rt, buffer, units),
-    }
+    if (pending_high) |high| try appendEscapedJsonUnit(rt, buffer, high);
+    try buffer.append(rt.nativeAllocator(), '"');
 }
 
 /// Append the JSON quoted-string form of a property key atom to `buffer`,
@@ -89,8 +111,7 @@ pub fn appendEscapedJsonString(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), 
     try buffer.append(rt.nativeAllocator(), '"');
 }
 
-fn appendEscapedJsonLatin1String(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), bytes: []const u8) !void {
-    try buffer.append(rt.nativeAllocator(), '"');
+fn appendEscapedJsonLatin1Units(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), bytes: []const u8) !void {
     for (bytes) |byte| {
         if (byte <= 0x7f) {
             try appendEscapedJsonByte(rt, buffer, byte);
@@ -98,11 +119,9 @@ fn appendEscapedJsonLatin1String(rt: *core.JSRuntime, buffer: *std.ArrayList(u8)
             try appendUtf8CodePoint(rt, buffer, byte);
         }
     }
-    try buffer.append(rt.nativeAllocator(), '"');
 }
 
-fn appendEscapedJsonUtf16String(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), units: []const u16) !void {
-    try buffer.append(rt.nativeAllocator(), '"');
+fn appendEscapedJsonUtf16Units(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), units: []const u16) !void {
     var index: usize = 0;
     while (index < units.len) : (index += 1) {
         const unit = units[index];
@@ -124,7 +143,6 @@ fn appendEscapedJsonUtf16String(rt: *core.JSRuntime, buffer: *std.ArrayList(u8),
             try appendUtf8CodePoint(rt, buffer, unit);
         }
     }
-    try buffer.append(rt.nativeAllocator(), '"');
 }
 
 fn appendEscapedJsonByte(rt: *core.JSRuntime, buffer: *std.ArrayList(u8), byte: u8) !void {

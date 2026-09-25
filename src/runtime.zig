@@ -24,7 +24,6 @@ const std = @import("std");
 const engine_services = @import("engine_services.zig");
 const builtin = @import("builtin");
 const build_options = @import("build_options");
-const platform_clock = @import("platform_clock.zig");
 
 const atom = @import("core/atom.zig");
 const class = @import("core/class.zig");
@@ -277,6 +276,8 @@ pub const MicrotaskScope = job_mod.Scope;
 pub const MicrotaskExceptionHandler = job_mod.ExceptionHandler;
 
 pub const RuntimeOptions = struct {
+    /// Optional diagnostic clock. Its borrowed state must outlive the Runtime.
+    diagnostic_clock: ?RuntimeDiagnosticClock = null,
     microtask_policy: MicrotaskPolicy = .auto,
     memory_limit: ?usize = null,
     /// Initial collection threshold; collections adjust the next threshold.
@@ -290,6 +291,14 @@ pub const RuntimeOptions = struct {
 };
 
 pub const Options = RuntimeOptions;
+
+/// Host-provided diagnostic time in monotonic nanoseconds. Called on the
+/// Runtime owner thread, including inside collection; must not allocate,
+/// reenter the engine, or mutate Runtime state. Never used for GC scheduling.
+const RuntimeDiagnosticClock = struct {
+    context: ?*anyopaque = null,
+    nowNanos: *const fn (?*anyopaque) u64,
+};
 
 pub const MemoryUsage = struct {
     /// Native allocation counters are unavailable when diagnostic instrumentation is off.
@@ -325,10 +334,8 @@ pub const ValueRootSlice = union(enum) {
     /// `[stack_buf, cur_sp)` without making the slice header the hot-path
     /// operand-depth authority.
     windowed: struct { values: *const []JSValue, live_len: *const usize },
-    /// A slot-typed var-ref cell slice under construction (`JSVarRef **` form,
-    /// VARREFS-SLOT-TYPING-BLUEPRINT phase D). Traced per cell through the
-    /// cell's JSValue view — bit-identical to the pre-typed rooting of the
-    /// same cells stored as JSValues.
+    /// A var-ref cell slice under construction. VarRef carriers keep stable
+    /// addresses; their binding values are traced through actual cell slots.
     cells: *const []*var_ref_mod.VarRef,
     /// Borrowed counterpart of `cells`; keeps the referenced cell/value graph
     /// live without taking temporary per-cell references.
@@ -363,6 +370,8 @@ pub const CellRootBuffer = struct {
 /// A GC header (Shape, Module, VarRef, FunctionBytecode, realm) named as a
 /// root for a mutation or construction window. Tracing does not treat a Zig
 /// `*Shape` local as a root unless it is named here.
+/// A non-rewritable root for a stable-address carrier (for example Shape or
+/// FunctionBytecode). Movable values must use writable value/object slots.
 pub const HeaderRootValue = struct {
     header: *gc_mod.Header,
 };
@@ -382,6 +391,8 @@ pub const AtomRootSlot = union(enum) {
     /// mid-build stays covered and the partially filled array is traced at its
     /// current length.
     list: *const []atom.Atom,
+    /// Fixed immutable key snapshot. Atom identities never relocate.
+    borrowed: []const atom.Atom,
 };
 
 /// Precise ValueRootFrame linking. Always on: tests need it because they have
@@ -449,16 +460,22 @@ pub const ValueRootFrame = struct {
         return self.atoms.len != 0;
     }
 
+    pub inline fn hasHeaderRoots(self: *const ValueRootFrame) bool {
+        if (comptime !value_root_frames_enabled) return false;
+        return self.headers.len != 0;
+    }
+
     /// Activate this frame at its final stack address. The matching
     /// `deactivate` must run before the frame or any referenced root storage
-    /// leaves scope. Default `rc` production erases both operations at
-    /// compile time. Shadow CLI skips scalar frames; tests link every frame.
+    /// leaves scope. Production skips ordinary scalar value/object frames;
+    /// native windows, atom roots and stable header roots always link.
     pub inline fn activate(self: *ValueRootFrame, rt: *JSRuntime) void {
+        rt.roots.assertMutable();
         if (comptime value_root_frames_enabled) {
             const container = self.hasNativeWindow();
             if (comptime builtin.is_test) value_root_frame_stats.activate_calls += 1;
             if (comptime value_root_link_containers_only) {
-                if (!container and !self.hasAtomRoots()) {
+                if (!container and !self.hasAtomRoots() and !self.hasHeaderRoots()) {
                     return;
                 }
             }
@@ -481,6 +498,7 @@ pub const ValueRootFrame = struct {
     /// the registration seam. Shadow CLI may skip scalar activates, so a
     /// skipped frame is not the current head and deactivate is a no-op.
     pub inline fn deactivate(self: *ValueRootFrame, rt: *JSRuntime) void {
+        rt.roots.assertMutable();
         if (comptime value_root_frames_enabled) {
             if (comptime value_root_link_containers_only) {
                 if (rt.active_value_roots != self) return;
@@ -736,9 +754,14 @@ const exception_state = @import("core/exception.zig");
 const execution = @import("core/execution.zig");
 const gc_weak = @import("core/gc_weak.zig");
 const roots_mod = @import("core/roots.zig");
+const gc_scope = @import("core/gc_scope.zig");
+pub const NoGcScope = gc_scope.NoGcScope;
 pub const RootSet = roots_mod.RootSet;
 pub const RootProvider = roots_mod.RootProvider;
 pub const RootSlot = roots_mod.RootSlot;
+pub const ExactValueRoots = roots_mod.ExactValueRoots;
+pub const RootedValueRef = roots_mod.RootedValueRef;
+pub const MutableRootedValueRef = roots_mod.MutableRootedValueRef;
 pub const WeakPersistentCallback = roots_mod.WeakPersistentCallback;
 pub const WeakRootSlot = roots_mod.WeakRootSlot;
 pub const JSValueHandle = roots_mod.JSValueHandle;
@@ -834,6 +857,9 @@ pub const Diagnostics = struct {
 
 pub const JSRuntime = struct {
     pub const Options = RuntimeOptions;
+    pub const DiagnosticClock = RuntimeDiagnosticClock;
+    diagnostic_clock: ?RuntimeDiagnosticClock = null,
+
     /// Runtime-shared logical call depth, including zero-byte nested entries.
     call_depth: usize = 0,
     /// Limit for both logical depth and accumulated planned VM-frame bytes.
@@ -920,6 +946,7 @@ pub const JSRuntime = struct {
     /// Host handles and root providers. Inline storage views are derived on
     /// access from the default-initialized root set.
     roots: roots_mod.RootSet = .{},
+    active_no_gc_scope: if (gc_scope.checks_enabled) ?*NoGcScope else void = if (gc_scope.checks_enabled) null else {},
     active_value_roots: ?*const ValueRootFrame = null,
     job_queue: job_mod.Queue = undefined,
     microtasks: job_mod.Checkpoint = .{},
@@ -1059,6 +1086,17 @@ pub const JSRuntime = struct {
     /// exec registers it; a function published before that keeps the
     /// record-less host path.
     cached_iterator_next_entries: std.ArrayListUnmanaged(CachedIteratorNextEntry) = .empty,
+
+    /// Zero means timing is unavailable when no diagnostic hook was installed.
+    pub fn diagnosticNanos(self: *const JSRuntime) u64 {
+        const clock = self.diagnostic_clock orelse return 0;
+        return clock.nowNanos(clock.context);
+    }
+
+    pub fn diagnosticElapsedSince(self: *const JSRuntime, start: u64) u64 {
+        return self.diagnosticNanos() -| start;
+    }
+
     /// Returns an owned, address-stable runtime. Caller releases it with `destroy`.
     /// The host allocator's backing state must outlive the Runtime.
     pub fn create(allocator: std.mem.Allocator, options: RuntimeOptions) !*JSRuntime {
@@ -1090,6 +1128,7 @@ pub const JSRuntime = struct {
         // read the runtime. Every owned subsystem is already constructed;
         // GC callbacks remain disabled until the complete Runtime is activated.
         rt.* = .{
+            .diagnostic_clock = options.diagnostic_clock,
             .allocator = allocator,
             .owner_thread_id = std.Thread.getCurrentId(),
             .gc = gc,
@@ -1131,6 +1170,16 @@ pub const JSRuntime = struct {
 
     pub fn assertOwnerThread(self: *const JSRuntime) void {
         if (!self.isOwnerThread()) @panic("JSRuntime mutation from non-owner thread");
+    }
+
+    pub fn assertExecutionAllowed(self: *const JSRuntime) void {
+        if (self.roots.isTracing()) @panic("JavaScript execution during tracing");
+    }
+
+    pub fn assertGCAllowed(self: *const JSRuntime) void {
+        if (comptime gc_scope.checks_enabled) {
+            if (self.active_no_gc_scope != null) @panic("collection during no-GC scope");
+        }
     }
 
     fn deinit(self: *JSRuntime) void {
@@ -1485,6 +1534,8 @@ pub const JSRuntime = struct {
     }
 
     pub fn traceRoots(self: *JSRuntime, roots: ?*const ValueRootFrame, visitor: *RootVisitor) RootTraceError!void {
+        self.roots.beginTrace();
+        defer self.roots.endTrace();
         try self.traceValueRootFrames(roots, visitor);
         try visitor.value(&self.current_exception);
         try self.roots.traceHandleSlots(visitor);
@@ -1527,6 +1578,8 @@ pub const JSRuntime = struct {
     }
 
     pub fn traceActiveRoots(self: *JSRuntime, visitor: *RootVisitor) RootTraceError!void {
+        self.roots.beginTrace();
+        defer self.roots.endTrace();
         if (comptime value_root_frames_enabled) {
             try self.traceRoots(self.active_value_roots, visitor);
             var active_job = active_job_root_head;
@@ -1599,6 +1652,7 @@ pub const JSRuntime = struct {
 
         var audit = Audit{ .rt = self };
         var visitor = RootVisitor{
+            .readonly = .observe,
             .context = @ptrCast(&audit),
             .visit_value = Audit.visitValue,
             .visit_object = Audit.visitObject,
@@ -1628,7 +1682,8 @@ pub const JSRuntime = struct {
     }
 
     fn traceValueRootFrames(self: *JSRuntime, roots: ?*const ValueRootFrame, visitor: *RootVisitor) RootTraceError!void {
-        _ = self;
+        self.roots.beginTrace();
+        defer self.roots.endTrace();
         var frame = roots;
         while (frame) |current| {
             for (current.objects) |root| {
@@ -1649,6 +1704,7 @@ pub const JSRuntime = struct {
                         // Read the slice header now: the frame may have been
                         // linked before the array had any element at all.
                         .list => |list| for (list.*) |id| try visitor.atomRoot(id),
+                        .borrowed => |ids| for (ids) |id| try visitor.atomRoot(id),
                     };
                 }
             }
@@ -1658,13 +1714,10 @@ pub const JSRuntime = struct {
                     .borrowed => |values| try visitor.constValues(values),
                     .windowed => |w| try visitor.values(w.values.*.ptr[0..w.live_len.*]),
                     .cells => |cells| {
-                        for (cells.*) |cell| {
-                            var cell_value = cell.valueRef();
-                            try visitor.value(&cell_value);
-                        }
+                        for (cells.*) |cell| try visitor.constHeader(&cell.header);
                     },
                     .borrowed_cells => |cells| {
-                        for (cells) |cell| try visitor.constValue(cell.valueRef());
+                        for (cells) |cell| try visitor.constHeader(&cell.header);
                     },
                 }
             }
@@ -1683,6 +1736,10 @@ pub const JSRuntime = struct {
     /// gone before teardown in every optimization mode; silently continuing
     /// would leave their deferred cleanup pointing into a destroyed Runtime.
     fn assertIdleForTeardown(self: *const JSRuntime) void {
+        if (comptime gc_scope.checks_enabled) {
+            if (self.active_no_gc_scope != null) @panic("JSRuntime destroyed during no-GC scope");
+        }
+        if (self.roots.isTracing()) @panic("JSRuntime destroyed during tracing");
         self.roots.assertNoOutstandingBuffers();
         const active_job_for_runtime = if (comptime active_job_roots_enabled) blk: {
             var current = active_job_root_head;
@@ -1931,6 +1988,8 @@ pub const JSRuntime = struct {
         scan: gc_mod.RootScan,
     ) gc_mod.CollectionError!gc_mod.CollectionResult {
         self.assertOwnerThread();
+        self.assertGCAllowed();
+        if (self.roots.isTracing()) @panic("collection reentry during tracing");
         // A deferred plugin callback runs only after its collector is idle,
         // but it may allocate or explicitly request another collection. Keep
         // that request pending until callback return: the active job is a root,
@@ -1969,7 +2028,7 @@ pub const JSRuntime = struct {
 
         // The cycle's high-water is the account right now, at trigger time.
         self.sampleAllocationPeak();
-        const start_ns = profile.nowNanos();
+        const start_ns = self.diagnosticNanos();
 
         self.gc.scheduler.beginMajorCycle(self.gc.scheduler.activeMajorReason() orelse .manual);
         const freed = @import("core/gc_trace_stw.zig").collectCycles(self, roots, scan) catch |err| {
@@ -1984,7 +2043,7 @@ pub const JSRuntime = struct {
         };
         self.gc.scheduler.setMajorPhase(.sweep);
 
-        const end_ns = profile.nowNanos();
+        const end_ns = self.diagnosticNanos();
         const elapsed = if (end_ns > start_ns) end_ns - start_ns else 0;
         // Charge the census to whoever asked for it, not to the pause. The
         // walks run inside this region and are enabled by the same
@@ -2002,7 +2061,7 @@ pub const JSRuntime = struct {
         // Service the same aged-decommit policy here; otherwise explicit GC,
         // urgent pressure collections, and small-heap floor collections can
         // age free blocks forever without ever scanning them.
-        _ = self.gc.block_heap.releaseFreeBlockPages(end_ns);
+        _ = self.gc.block_heap.releaseFreeBlockPages(gc_mod.schedulingNanos());
         return result;
     }
 
@@ -2012,6 +2071,8 @@ pub const JSRuntime = struct {
         mode: gc_mod.PollMode,
     ) gc_mod.CollectionError!gc_mod.CollectionResult {
         self.assertOwnerThread();
+        self.assertGCAllowed();
+        if (self.roots.isTracing()) @panic("collection reentry during tracing");
         if (self.active_deferred_class_payload_finalizer != null) return .{};
         self.drainDeferredClassPayloadFinalizersAtSafeBoundary();
         return gc_driver.continuePoll(self, roots, mode);

@@ -12,7 +12,7 @@ identify entry points without requiring a full read of large modules.
 ## Layers
 
 ```
-embedder / CLI / tests  →  src/root.zig  →  src/js_context.zig + src/native.zig  →  src/core/
+embedder / CLI / tests  →  src/root.zig  →  src/js_context.zig  →  src/core/
 compile   →  src/parser.zig  →  src/compiler/  →  src/bytecode/
 execute   →  src/exec/  (VM, builtins, modules, promises)
 host      →  src/host/  →  engine (separate internal build module)
@@ -29,7 +29,10 @@ install hooks, and build modules do not import an engine-hooks provider.
 `src/` companions sit beside those layers:
 
 - `js_context.zig`: host `Context` facade (eval, calls, properties).
-- `native.zig`: host-function thunks used by `Context.defineFunction`.
+- Runtime's optional diagnostic clock hook supplies measurement timestamps.
+  `host/clock.zig` owns timer time and the CLI's diagnostic provider; GC owns
+  its operational budget/decommit clock. Realm construction owns default
+  random seeding. There is no engine-exported platform clock utility.
 - `simple_token.zig`: parser token kinds for QuickJS `simple_next_token`
   lookahead; used by `parser.zig` and the CLI.
 
@@ -47,8 +50,8 @@ stay on `Runtime` / `Context` / `Value` / `Call`; in-tree hosts
 also use the layer re-exports (`core`, `exec`, `parser`).
 
 `src/js_context.zig` is the host `Context` facade (eval, calls, properties,
-native-function install). `src/native.zig` builds comptime thunks over
-`NativeEntry`. Neither file may import CLI.
+native-function install), including comptime thunks over `NativeEntry`.
+It must not import CLI.
 
 ## Core — `src/core/`
 

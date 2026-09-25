@@ -69,7 +69,6 @@ const createArrayFromArgs = array_ops.createArrayFromArgs;
 const createRegExpIndexPair = regexp_fastpath.createRegExpIndexPair;
 const currentFrameFunctionIsStrict = call_runtime.currentFrameFunctionIsStrict;
 const defineNativeDataMethod = builtin_glue.defineNativeDataMethod;
-const defineStringWrapperIndexProperty = string_ops.defineStringWrapperIndexProperty;
 const ensureVarRefsCapacity = frame_mod.ensureVarRefsCapacity;
 const functionBytecodeFromValue = call_runtime.functionBytecodeFromValue;
 const functionConstructorFromGlobal = builtin_glue.functionConstructorFromGlobal;
@@ -465,6 +464,10 @@ fn attachFunctionCaptures(
             }
         },
     }
+    // The resolvers allocate, so a minor inside the fill can promote `object`
+    // and retire the remembrance taken when the slots were attached; the
+    // cells stored after it would be unremembered young children.
+    ctx.runtime.gc.rememberOwnerForBulkWrite(object.gcHeader());
 }
 
 fn createBytecodeFunctionObjectInternal(
@@ -985,18 +988,16 @@ pub fn createCallSiteObject(ctx: *core.JSContext, global: *core.Object, entry: c
 
 pub fn callSitePrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
     if (cachedRealmObject(rt, global, .callsite_prototype)) |stored| return stored;
-    const prototype = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
-    var prototype_raw_owned = true;
-    errdefer if (prototype_raw_owned) core.Object.destroyFromHeader(rt, prototype.gcHeader());
-    // Every step below allocates -- six native method objects, their shape
-    // transitions, the property array growth -- and any of them can trigger a
-    // collection. Until `storeRealmValue` publishes it, this half-built
-    // prototype is reachable from nothing but this Zig local, which the trace
-    // does not consider a root.
-    var rooted_prototype: ?*core.Object = prototype;
-    var prototype_roots = core.runtime.rootObjects(.{&rooted_prototype});
-    prototype_roots.activate(rt);
-    defer prototype_roots.deactivate(rt);
+    var values = [_]core.JSValue{core.JSValue.undefinedValue()};
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    // Keep the unpublished prototype alive in non-test builds too. On error,
+    // GC reclaims the partial object after this scope leaves the root chain.
+    values[0] = (try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global))).value();
 
     const methods = [_]struct { name: []const u8, id: core.function.HostGlobalMethod }{
         .{ .name = "getFunction", .id = .callsite_get_function },
@@ -1007,17 +1008,12 @@ pub fn callSitePrototypeFromGlobal(rt: *core.JSRuntime, global: *core.Object) !*
         .{ .name = "isNative", .id = .callsite_is_native },
     };
     for (methods) |method| {
-        // Through the ROOTED slot, not the local the root was taken from:
-        // defining a method allocates, and a moving young generation updates
-        // the slot the frame knows about, not a bare pointer beside it.
-        try builtin_glue.defineNativeDataMethodNamedWithNativeId(rt, global, rooted_prototype.?, method.name, 0, core.function.nativeBuiltinId(.host, @intFromEnum(method.id)));
+        try builtin_glue.defineNativeDataMethodNamedWithNativeId(rt, global, objectFromValue(values[0]).?, method.name, 0, core.function.nativeBuiltinId(.host, @intFromEnum(method.id)));
     }
-    try defineToStringTag(rt, rooted_prototype.?, "CallSite");
+    try defineToStringTag(rt, objectFromValue(values[0]).?, "CallSite");
 
-    const prototype_value = rooted_prototype.?.value();
-    prototype_raw_owned = false;
-    try storeRealmValue(rt, global, .callsite_prototype, prototype_value);
-    return rooted_prototype.?;
+    try storeRealmValue(rt, global, .callsite_prototype, values[0]);
+    return objectFromValue(values[0]).?;
 }
 
 pub fn regExpPrototypeMethodIsDefault(_: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, expected_id: u32) bool {
@@ -1159,19 +1155,37 @@ pub fn datePrototypeMethod(
 }
 
 pub fn defineFreshNonIndexDataProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom, value: core.JSValue, attrs: core.property.Attrs) !void {
+    // Legacy core property writers borrow raw pointers through shape/storage
+    // growth. Keep their addresses stable for this call, including in release.
+    const values = [_]core.JSValue{ object.value(), value };
+    const slices = [_]core.runtime.ValueRootSlice{.{ .borrowed = &values }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    var atom_roots = core.runtime.rootAtoms(.{&atom_id});
+    atom_roots.activate(rt);
+    defer atom_roots.deactivate(rt);
+    var owner_pin = try core.runtime.pinHeaderForNative(rt, object.gcHeader());
+    defer owner_pin.deinit();
+    var value_pin = try core.runtime.pinValueForNative(rt, value);
+    defer if (value_pin) |*held| held.deinit();
     try object.defineOwnNonIndexPropertyAssumingNew(rt, atom_id, core.Descriptor.data(value, attrs));
 }
 
 pub fn defineRegExpIndicesGroupsProperty(rt: *core.JSRuntime, global: *core.Object, out: *core.Object, found: *const RegExpMatch) !void {
+    var values = [_]core.JSValue{ global.value(), out.value(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
     const groups_atom = (comptime core.atom.predefinedId("groups", .string)) orelse return error.TypeError;
     if (!found.has_named_captures) {
-        try defineFreshNonIndexDataProperty(rt, out, groups_atom, core.JSValue.undefinedValue(), .all);
+        try defineFreshNonIndexDataProperty(rt, objectFromValue(values[1]).?, groups_atom, core.JSValue.undefinedValue(), .all);
         return;
     }
 
-    const groups = try core.Object.create(rt, core.class.ids.object, null);
-    var groups_raw_owned = true;
-    errdefer if (groups_raw_owned) core.Object.destroyFromHeader(rt, groups.gcHeader());
+    values[2] = (try core.Object.create(rt, core.class.ids.object, null)).value();
     var capture_index: usize = 0;
     while (capture_index < found.capture_count) : (capture_index += 1) {
         const name = found.captureNameAt(capture_index) orelse continue;
@@ -1187,16 +1201,24 @@ pub fn defineRegExpIndicesGroupsProperty(rt: *core.JSRuntime, global: *core.Obje
         defer group_atom_roots.deactivate(rt);
         // Duplicate named groups share one property; the participating
         // (matched) capture wins, an unset duplicate must not overwrite it.
-        if (capture.undefined and groups.hasOwnProperty(atom)) continue;
-        const value = if (capture.undefined)
+        if (capture.undefined and objectFromValue(values[2]).?.hasOwnProperty(atom)) continue;
+        values[3] = if (capture.undefined)
             core.JSValue.undefinedValue()
         else
-            try createRegExpIndexPair(rt, global, capture.start, capture.start + capture.len);
-        try groups.defineOwnProperty(rt, atom, core.Descriptor.data(value, .all));
+            try createRegExpIndexPair(rt, objectFromValue(values[0]).?, capture.start, capture.start + capture.len);
+        // The descriptor carries a raw snapshot through the core writer.
+        const borrowed = [_]core.JSValue{ values[2], values[3] };
+        const borrowed_slices = [_]core.runtime.ValueRootSlice{.{ .borrowed = &borrowed }};
+        var write_roots = core.runtime.ValueRootFrame{ .slices = &borrowed_slices };
+        write_roots.activate(rt);
+        defer write_roots.deactivate(rt);
+        var owner_pin = try core.runtime.pinValueForNative(rt, values[2]);
+        defer if (owner_pin) |*held| held.deinit();
+        var value_pin = try core.runtime.pinValueForNative(rt, values[3]);
+        defer if (value_pin) |*held| held.deinit();
+        try objectFromValue(values[2]).?.defineOwnProperty(rt, atom, core.Descriptor.data(values[3], .all));
     }
-    const groups_value = groups.value();
-    groups_raw_owned = false;
-    try defineFreshNonIndexDataProperty(rt, out, groups_atom, groups_value, .all);
+    try defineFreshNonIndexDataProperty(rt, objectFromValue(values[1]).?, groups_atom, values[2], .all);
 }
 
 // The RegExp result already owns one value for every capture. Reuse those
@@ -1212,7 +1234,17 @@ pub noinline fn populateRegExpGroupsFromCaptureValues(
 ) !void {
     std.debug.assert(found.has_named_captures);
     std.debug.assert(capture_values.len >= found.capture_count + 1);
+    // The capture backing is a caller-owned native slice or rooted stable
+    // array-storage cell. Its values and the raw groups pointer stay borrowed
+    // through the core property writer's allocating mutation window.
+    const values = [_]core.JSValue{groups.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .borrowed = &values }, .{ .borrowed = capture_values } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
 
+    var groups_pin = try core.runtime.pinHeaderForNative(rt, groups.gcHeader());
+    defer groups_pin.deinit();
     var capture_index: usize = 0;
     while (capture_index < found.capture_count) : (capture_index += 1) {
         const name = found.captureNameAt(capture_index) orelse continue;
@@ -2148,25 +2180,35 @@ pub fn iteratorIsOnIteratorPrototypeChain(rt: *core.JSRuntime, global: *core.Obj
 pub fn wrapForValidIteratorPrototype(rt: *core.JSRuntime, global: *core.Object) !*core.Object {
     if (cachedRealmObject(rt, global, .wrap_for_valid_iterator_prototype)) |stored| return stored;
 
-    const proto = try core.Object.create(rt, core.class.ids.object, iteratorPrototypeFromGlobal(rt, global));
-    var proto_raw_owned = true;
-    errdefer if (proto_raw_owned) core.Object.destroyFromHeader(rt, proto.gcHeader());
-    try defineNativeDataMethod(rt, global, proto, core.atom.ids.next, 0);
-    try tagIteratorWrapPrototypeMethod(rt, global, proto, core.atom.ids.next, 1);
-    try defineNativeDataMethod(rt, global, proto, core.atom.ids.return_, 0);
-    try tagIteratorWrapPrototypeMethod(rt, global, proto, core.atom.ids.return_, 2);
-    const value = proto.value();
-    proto_raw_owned = false;
-    try storeRealmValue(rt, global, .wrap_for_valid_iterator_prototype, value);
-    return proto;
+    var values = [_]core.JSValue{core.JSValue.undefinedValue()};
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    values[0] = (try core.Object.create(rt, core.class.ids.object, iteratorPrototypeFromGlobal(rt, global))).value();
+    try defineNativeDataMethod(rt, global, objectFromValue(values[0]).?, core.atom.ids.next, 0);
+    try tagIteratorWrapPrototypeMethod(rt, global, objectFromValue(values[0]).?, core.atom.ids.next, 1);
+    try defineNativeDataMethod(rt, global, objectFromValue(values[0]).?, core.atom.ids.return_, 0);
+    try tagIteratorWrapPrototypeMethod(rt, global, objectFromValue(values[0]).?, core.atom.ids.return_, 2);
+    try storeRealmValue(rt, global, .wrap_for_valid_iterator_prototype, values[0]);
+    return objectFromValue(values[0]).?;
 }
 
 pub fn tagIteratorWrapPrototypeMethod(rt: *core.JSRuntime, global: *core.Object, proto: *core.Object, key: core.Atom, method_id: i32) !void {
-    const method = try proto.getProperty(key);
-    const method_object = objectFromValue(method) orelse return;
+    var values = [_]core.JSValue{ proto.value(), core.JSValue.undefinedValue() };
+    var slots: []core.JSValue = &values;
+    const globals = [_]core.JSValue{global.value()};
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .mutable = &slots }, .{ .borrowed = &globals } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    values[1] = try objectFromValue(values[0]).?.getProperty(key);
+    const method_object = objectFromValue(values[1]) orelse return;
     (try method_object.functionIteratorWrapMethodSlot(rt)).* = @intCast(method_id);
     if (functionPrototypeFromGlobal(rt, global)) |function_proto| {
-        try method_object.setPrototype(rt, function_proto);
+        try objectFromValue(values[1]).?.setPrototype(rt, function_proto);
     }
 }
 
@@ -2405,11 +2447,19 @@ pub fn callObjectToPrimitiveMethod(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !?core.JSValue {
-    const object = try property_ops.expectObject(receiver);
-    const method = try getMethodPropertyForOrdinaryToPrimitive(ctx, output, global, receiver, object, atom_id, caller_function, caller_frame);
-    if (method.is(.undefined_value) or method.is(.null_value)) return null;
-    if (!isCallableValue(method)) return null;
-    const result = try callValueOrBytecodeSyncInternal(ctx, output, global, receiver, method, &.{}, caller_function, caller_frame);
+    var values = [_]core.JSValue{ global.value(), receiver, core.JSValue.undefinedValue() };
+    const live: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &live }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    const object = try property_ops.expectObject(values[1]);
+    values[2] = try getMethodPropertyForOrdinaryToPrimitive(ctx, output, objectFromValue(values[0]).?, values[1], object, atom_id, caller_function, caller_frame);
+    if (values[2].is(.undefined_value) or values[2].is(.null_value)) return null;
+    if (!isCallableValue(values[2])) return null;
+    // A method getter can move the receiver before the method is invoked.
+    // Re-read both the receiver and callable from their actual root slots.
+    const result = try callValueOrBytecodeSyncInternal(ctx, output, objectFromValue(values[0]).?, values[1], values[2], &.{}, caller_function, caller_frame);
     if (result.is(.object)) {
         return null;
     }
@@ -2759,43 +2809,32 @@ pub fn getValuePropertyWithReceiver(
 }
 
 pub fn primitiveObjectForAccess(rt: *core.JSRuntime, global: *core.Object, primitive: core.JSValue) !core.JSValue {
-    var rooted_primitive = primitive;
-    var root_values = [_]*core.JSValue{
-        &rooted_primitive,
-    };
-    var root_frame = core.runtime.ValueRootFrame{
-        .values = &root_values,
-    };
+    var values = [_]core.JSValue{ global.value(), primitive, core.JSValue.undefinedValue() };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var root_frame = core.runtime.ValueRootFrame{ .slices = &slices };
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    const prototype = primitivePrototypeForAccess(rt, global, rooted_primitive) orelse return error.TypeError;
-    if (rooted_primitive.isString()) {
-        const object = try core.Object.create(rt, core.class.ids.string, prototype);
-        errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
-        try object.setOptionalValueSlot(rt, object.objectDataSlot(), rooted_primitive);
-        const string_value = rooted_primitive.asStringBody() orelse return error.TypeError;
-        var index: u32 = 0;
-        while (index < string_value.len()) : (index += 1) {
-            try defineStringWrapperIndexProperty(rt, object, index, string_value.codeUnitAt(index));
-        }
-        try object.defineOwnProperty(rt, core.atom.ids.length, core.Descriptor.data(core.JSValue.int32(@intCast(string_value.len())), .none));
-        return object.value();
+    const prototype = primitivePrototypeForAccess(rt, objectFromValue(values[0]).?, values[1]) orelse return error.TypeError;
+    if (values[1].isString()) {
+        // Share the rooted, code-unit-based String wrapper construction path.
+        return string_ops.constructWithPrototype(rt, values[1..2], prototype);
     }
-    const class_id: core.class.ClassId = if (rooted_primitive.isNumber())
+    const class_id: core.class.ClassId = if (values[1].isNumber())
         core.class.ids.number
-    else if (rooted_primitive.is(.boolean))
+    else if (values[1].is(.boolean))
         core.class.ids.boolean
-    else if (rooted_primitive.isBigInt())
+    else if (values[1].isBigInt())
         core.class.ids.big_int
-    else if (rooted_primitive.is(.symbol))
+    else if (values[1].is(.symbol))
         core.class.ids.symbol
     else
         return error.TypeError;
-    const object = try core.Object.create(rt, class_id, prototype);
-    errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
-    try object.setOptionalValueSlot(rt, object.objectDataSlot(), rooted_primitive);
-    return object.value();
+    values[2] = (try core.Object.create(rt, class_id, prototype)).value();
+    const object = objectFromValue(values[2]).?;
+    try object.setOptionalValueSlot(rt, object.objectDataSlot(), values[1]);
+    return values[2];
 }
 
 test "primitiveObjectForAccess roots direct symbol while creating wrapper" {
@@ -3347,25 +3386,25 @@ pub fn reflectGetPrototypeOfCall(
 }
 
 pub fn descriptorObjectFromDescriptor(rt: *core.JSRuntime, global: *core.Object, desc: core.Descriptor) !core.JSValue {
-    var desc_value = desc.value;
-    var desc_getter = desc.getter;
-    var desc_setter = desc.setter;
-    var root_frame = core.runtime.rootValues(.{ &desc_value, &desc_getter, &desc_setter });
+    const globals = [_]core.JSValue{global.value()};
+    var values = [_]core.JSValue{ desc.value, desc.getter, desc.setter, core.JSValue.undefinedValue() };
+    const live: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .borrowed = &globals }, .{ .mutable = &live } };
+    var root_frame = core.runtime.ValueRootFrame{ .slices = &slices };
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    const object = try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global));
-    errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
+    values[3] = (try core.Object.create(rt, core.class.ids.object, objectPrototypeFromGlobal(rt, global))).value();
     if (desc.kind == .data and desc.value_present) {
-        try defineValueProperty(rt, object, core.atom.ids.value, desc_value);
+        try defineValueProperty(rt, objectFromValue(values[3]).?, core.atom.ids.value, values[0]);
     } else if (desc.kind == .accessor) {
-        if (desc.getter_present) try defineValueProperty(rt, object, core.atom.ids.get, desc_getter);
-        if (desc.setter_present) try defineValueProperty(rt, object, core.atom.ids.set, desc_setter);
+        if (desc.getter_present) try defineValueProperty(rt, objectFromValue(values[3]).?, core.atom.ids.get, values[1]);
+        if (desc.setter_present) try defineValueProperty(rt, objectFromValue(values[3]).?, core.atom.ids.set, values[2]);
     }
-    if (desc.writable) |writable| try defineValueProperty(rt, object, core.atom.ids.writable, core.JSValue.boolean(writable));
-    if (desc.enumerable) |enumerable| try defineValueProperty(rt, object, core.atom.ids.enumerable, core.JSValue.boolean(enumerable));
-    if (desc.configurable) |configurable| try defineValueProperty(rt, object, core.atom.ids.configurable, core.JSValue.boolean(configurable));
-    return object.value();
+    if (desc.writable) |writable| try defineValueProperty(rt, objectFromValue(values[3]).?, core.atom.ids.writable, core.JSValue.boolean(writable));
+    if (desc.enumerable) |enumerable| try defineValueProperty(rt, objectFromValue(values[3]).?, core.atom.ids.enumerable, core.JSValue.boolean(enumerable));
+    if (desc.configurable) |configurable| try defineValueProperty(rt, objectFromValue(values[3]).?, core.atom.ids.configurable, core.JSValue.boolean(configurable));
+    return values[3];
 }
 
 test "descriptorObjectFromDescriptor roots direct function bytecode value while creating descriptor object" {
@@ -3412,6 +3451,19 @@ pub fn descriptorFromObject(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.Descriptor {
+    // Inputs are borrowed through the by-value API; descriptor fields are
+    // mutable roots because later getters can detach their original edges.
+    const borrowed = [_]core.JSValue{ global.value(), desc_value, desc_object.value(), target.value() };
+    var fields = [_]core.JSValue{core.JSValue.undefinedValue()} ** 3;
+    const live: []core.JSValue = &fields;
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .borrowed = &borrowed }, .{ .mutable = &live } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    var atom_roots = core.runtime.rootAtoms(.{&atom_id});
+    atom_roots.activate(ctx.runtime);
+    defer atom_roots.deactivate(ctx.runtime);
+
     const value_key = core.atom.ids.value;
     const writable_key = core.atom.ids.writable;
     const get_key = core.atom.ids.get;
@@ -3423,8 +3475,7 @@ pub fn descriptorFromObject(
     const configurable = try optionalBoolDescriptorProperty(ctx, output, global, desc_value, desc_object, configurable_key, caller_function, caller_frame);
 
     const has_value = try hasValueProperty(ctx, output, global, desc_value, desc_object, value_key, null, null);
-    var data_value: ?core.JSValue = null;
-    if (has_value) data_value = try getValueProperty(ctx, output, global, desc_value, value_key, caller_function, caller_frame);
+    if (has_value) fields[0] = try getValueProperty(ctx, output, global, desc_value, value_key, caller_function, caller_frame);
 
     const has_writable = try hasValueProperty(ctx, output, global, desc_value, desc_object, writable_key, null, null);
     const writable = if (has_writable) blk: {
@@ -3433,44 +3484,37 @@ pub fn descriptorFromObject(
     } else null;
 
     const has_get = try hasValueProperty(ctx, output, global, desc_value, desc_object, get_key, null, null);
-    var getter_value: ?core.JSValue = null;
     if (has_get) {
         const value = try getValueProperty(ctx, output, global, desc_value, get_key, caller_function, caller_frame);
         if (!value.is(.undefined_value) and !isCallableValue(value)) {
             return error.TypeError;
         }
-        getter_value = value;
+        fields[1] = value;
     }
 
     const has_set = try hasValueProperty(ctx, output, global, desc_value, desc_object, set_key, null, null);
-    var setter_value: ?core.JSValue = null;
     if (has_set) {
         const value = try getValueProperty(ctx, output, global, desc_value, set_key, caller_function, caller_frame);
         if (!value.is(.undefined_value) and !isCallableValue(value)) {
             return error.TypeError;
         }
-        setter_value = value;
+        fields[2] = value;
     }
 
     if ((has_get or has_set) and (has_value or has_writable)) return error.TypeError;
     if (has_get or has_set) {
-        const getter = getter_value orelse core.JSValue.undefinedValue();
-        getter_value = null;
-        const setter = setter_value orelse core.JSValue.undefinedValue();
-        setter_value = null;
         return .{
             .kind = .accessor,
-            .getter = getter,
+            .getter = fields[1],
             .getter_present = has_get,
-            .setter = setter,
+            .setter = fields[2],
             .setter_present = has_set,
             .enumerable = enumerable,
             .configurable = configurable,
         };
     }
     if (has_value or has_writable) {
-        var value = data_value orelse core.JSValue.undefinedValue();
-        data_value = null;
+        var value = fields[0];
         if (has_value and target.isArray() and atom_id == core.atom.ids.length and !value.isNumber()) {
             const coerced = try arrayLengthDefineValue(ctx, output, global, value);
             value = coerced;
@@ -5500,17 +5544,24 @@ pub fn objectAssignCall(
     caller_frame: ?*builtin_dispatch.Frame,
 ) !?core.JSValue {
     if (args.len < 1) return error.TypeError;
+    const globals = [_]core.JSValue{global.value()};
+    var values = [_]core.JSValue{core.JSValue.undefinedValue()} ** 2;
+    const live: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .borrowed = &globals }, .{ .borrowed = args }, .{ .mutable = &live } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
     if (args[0].is(.null_value) or args[0].is(.undefined_value)) return @as(?core.JSValue, try throwTypeErrorMessage(ctx, global, "Cannot convert undefined or null to object"));
-    const target_value = if (objectFromValue(args[0])) |_| args[0] else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
-    _ = objectFromValue(target_value) orelse return error.TypeError;
+    values[0] = if (objectFromValue(args[0])) |_| args[0] else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
+    _ = objectFromValue(values[0]) orelse return error.TypeError;
 
     for (args[1..]) |source_arg| {
         if (source_arg.is(.null_value) or source_arg.is(.undefined_value)) continue;
-        const source_value = if (objectFromValue(source_arg)) |_| source_arg else try primitiveObjectForAccess(ctx.runtime, global, source_arg);
-        const source = objectFromValue(source_value) orelse return error.TypeError;
+        values[1] = if (objectFromValue(source_arg)) |_| source_arg else try primitiveObjectForAccess(ctx.runtime, global, source_arg);
+        const source = objectFromValue(values[1]) orelse return error.TypeError;
         const own_keys = try objectRestOwnKeys(ctx, output, global, source);
         defer core.Object.freeKeys(ctx.runtime, own_keys);
-        if (assignSourceIsOrdinary(source)) {
+        if (assignSourceIsOrdinary(objectFromValue(values[1]).?)) {
             // qjs js_object_assign is ONE JS_CopyDataProperties walk with
             // JS_GPN_ENUM_ONLY. For an ordinary
             // (non-exotic, non-proxy) source the enumerability is filtered
@@ -5518,18 +5569,18 @@ pub fn objectAssignCall(
             // descriptor is materialized (the ~ENUM_ONLY descriptor branch
             // at quickjs.c runs only for the exotic fallback). Mirror
             // that single enumerable-only spec-ordered pass here.
-            try objectAssignEnumOnly(ctx, output, global, target_value, source_value, source, own_keys, caller_function, caller_frame);
+            try objectAssignEnumOnly(ctx, output, global, values[0], values[1], objectFromValue(values[1]).?, own_keys, caller_function, caller_frame);
         } else {
             // Proxy / exotic source: qjs clears JS_GPN_ENUM_ONLY
             // and builds a per-key descriptor in the loop
             // so the ownKeys + getOwnPropertyDescriptor traps fire in order.
             // Keep the descriptor-driven single pass that preserves the trap
             // sequence (symbol_pass = null = no extra traversal).
-            try objectAssignKeys(ctx, output, global, target_value, source_value, source, own_keys, null, caller_function, caller_frame);
+            try objectAssignKeys(ctx, output, global, values[0], values[1], objectFromValue(values[1]).?, own_keys, null, caller_function, caller_frame);
         }
     }
 
-    return target_value;
+    return values[0];
 }
 
 /// True when `Object.assign`'s source is an ordinary object — no proxy
@@ -5574,6 +5625,14 @@ fn objectAssignEnumOnly(
     caller_frame: ?*builtin_dispatch.Frame,
 ) !void {
     if (own_keys.len == 0) return;
+    // These by-value operands remain in this frame across getters/setters.
+    // Keep their addresses stable, including the value being handed to Set.
+    var operands = [_]core.JSValue{ global.value(), target_value, source_value, source.value(), core.JSValue.undefinedValue() };
+    const slices = [_]core.runtime.ValueRootSlice{.{ .borrowed = &operands }};
+    const atoms = [_]core.runtime.AtomRootSlot{.{ .borrowed = own_keys }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices, .atoms = &atoms };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
     // Snapshot the enumerable bit of every key off the shape now, before
     // any getter/setter runs — mirroring qjs filling tab_atom[] with only
     // the enumerable keys during the ENUM_ONLY GPN walk.
@@ -5584,8 +5643,8 @@ fn objectAssignEnumOnly(
     }
     for (own_keys, enumerable_snapshot) |key, enumerable| {
         if (!enumerable) continue;
-        const value = try getValueProperty(ctx, output, global, source_value, key, caller_function, caller_frame);
-        try setValuePropertyStrict(ctx, output, global, target_value, key, value, caller_function, caller_frame);
+        operands[4] = try getValueProperty(ctx, output, global, source_value, key, caller_function, caller_frame);
+        try setValuePropertyStrict(ctx, output, global, target_value, key, operands[4], caller_function, caller_frame);
     }
 }
 
@@ -5601,6 +5660,12 @@ pub fn objectAssignKeys(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !void {
+    var operands = [_]core.JSValue{ global.value(), target_value, source_value, source.value(), core.JSValue.undefinedValue() };
+    const slices = [_]core.runtime.ValueRootSlice{.{ .borrowed = &operands }};
+    const atoms = [_]core.runtime.AtomRootSlot{.{ .borrowed = own_keys }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices, .atoms = &atoms };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
     for (own_keys) |key| {
         const is_symbol = ctx.runtime.atoms.isPublicSymbol(key);
         if (symbol_pass) |pass| {
@@ -5608,8 +5673,8 @@ pub fn objectAssignKeys(
         }
         const desc = try objectRestOwnPropertyDescriptor(ctx, output, global, source, key) orelse continue;
         if (desc.enumerable != true) continue;
-        const value = try getValueProperty(ctx, output, global, source_value, key, caller_function, caller_frame);
-        try setValuePropertyStrict(ctx, output, global, target_value, key, value, caller_function, caller_frame);
+        operands[4] = try getValueProperty(ctx, output, global, source_value, key, caller_function, caller_frame);
+        try setValuePropertyStrict(ctx, output, global, target_value, key, operands[4], caller_function, caller_frame);
     }
 }
 
@@ -5622,16 +5687,26 @@ pub fn objectHasOwnCall(
     caller_frame: ?*builtin_dispatch.Frame,
 ) !?core.JSValue {
     if (args.len < 1) return null;
+    const globals = [_]core.JSValue{global.value()};
+    var values = [_]core.JSValue{core.JSValue.undefinedValue()};
+    const live: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .borrowed = &globals }, .{ .borrowed = args }, .{ .mutable = &live } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
     if (args[0].is(.null_value) or args[0].is(.undefined_value)) return error.TypeError;
-    const object_value = if (objectFromValue(args[0])) |_| args[0] else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
-    const object = objectFromValue(object_value) orelse return error.TypeError;
+    values[0] = if (objectFromValue(args[0])) |_| args[0] else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
+    _ = objectFromValue(values[0]) orelse return error.TypeError;
     const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     const atom_id = try toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
+    var atom_roots = core.runtime.rootAtoms(.{&atom_id});
+    atom_roots.activate(ctx.runtime);
+    defer atom_roots.deactivate(ctx.runtime);
     // qjs `js_object_hasOwn` -> `JS_GetOwnPropertyInternal(ctx, NULL, p, atom)`:
     // the desc==NULL existence mode -- no descriptor is built,
     // no value is dup'd, and auto-init instantiation is delayed. Proxies still
     // route through the full getOwnPropertyDescriptor trap inside the wrapper.
-    const present = try proxyAwareExistsOwnProperty(ctx, output, global, object, atom_id, caller_function, caller_frame);
+    const present = try proxyAwareExistsOwnProperty(ctx, output, global, objectFromValue(values[0]).?, atom_id, caller_function, caller_frame);
     return core.JSValue.boolean(present);
 }
 
@@ -5724,12 +5799,23 @@ pub fn objectPrototypeOwnPropertyCall(
 ) !?core.JSValue {
     if (method_id != @intFromEnum(PrototypeMethod.has_own_property) and method_id != @intFromEnum(PrototypeMethod.property_is_enumerable)) return null;
 
+    const borrowed = [_]core.JSValue{ global.value(), this_value };
+    var values = [_]core.JSValue{core.JSValue.undefinedValue()};
+    const live: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .borrowed = &borrowed }, .{ .borrowed = args }, .{ .mutable = &live } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+
     const key_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const atom_id = try toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
+    var atom_roots = core.runtime.rootAtoms(.{&atom_id});
+    atom_roots.activate(ctx.runtime);
+    defer atom_roots.deactivate(ctx.runtime);
 
     if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.TypeError;
-    const object_value = if (objectFromValue(this_value)) |_| this_value else try primitiveObjectForAccess(ctx.runtime, global, this_value);
-    const object = try property_ops.expectObject(object_value);
+    values[0] = if (objectFromValue(this_value)) |_| this_value else try primitiveObjectForAccess(ctx.runtime, global, this_value);
+    const object = try property_ops.expectObject(values[0]);
     // `hasOwnProperty` is the desc==NULL existence mode of
     // `JS_GetOwnPropertyInternal` (qjs `js_object_hasOwnProperty`,
     // quickjs.c): probe presence with no descriptor materialization.
@@ -5753,13 +5839,24 @@ pub fn objectPrototypeDefineAccessorCall(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !?core.JSValue {
+    const borrowed = [_]core.JSValue{ global.value(), this_value };
+    var values = [_]core.JSValue{core.JSValue.undefinedValue()};
+    const live: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .borrowed = &borrowed }, .{ .borrowed = args }, .{ .mutable = &live } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
     if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.TypeError;
-    const object_value = if (objectFromValue(this_value)) |_| this_value else try primitiveObjectForAccess(ctx.runtime, global, this_value);
-    const object = objectFromValue(object_value) orelse return error.TypeError;
+    values[0] = if (objectFromValue(this_value)) |_| this_value else try primitiveObjectForAccess(ctx.runtime, global, this_value);
+    _ = objectFromValue(values[0]) orelse return error.TypeError;
     const accessor_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     if (!isCallableValue(accessor_value)) return error.TypeError;
     const key_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const key = try toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
+    var atom_roots = core.runtime.rootAtoms(.{&key});
+    atom_roots.activate(ctx.runtime);
+    defer atom_roots.deactivate(ctx.runtime);
+    const object = objectFromValue(values[0]).?;
 
     const desc = if (getter) core.Descriptor{
         .kind = .accessor,
@@ -5802,20 +5899,30 @@ pub fn objectPrototypeLookupAccessorCall(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !?core.JSValue {
+    const borrowed = [_]core.JSValue{ global.value(), this_value };
+    var values = [_]core.JSValue{core.JSValue.undefinedValue()};
+    const live: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .borrowed = &borrowed }, .{ .borrowed = args }, .{ .mutable = &live } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
     if (this_value.is(.null_value) or this_value.is(.undefined_value)) return error.TypeError;
-    const object_value = if (objectFromValue(this_value)) |_| this_value else try primitiveObjectForAccess(ctx.runtime, global, this_value);
-    var object = objectFromValue(object_value) orelse return error.TypeError;
+    values[0] = if (objectFromValue(this_value)) |_| this_value else try primitiveObjectForAccess(ctx.runtime, global, this_value);
+    _ = objectFromValue(values[0]) orelse return error.TypeError;
     const key_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
     const key = try toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
+    var atom_roots = core.runtime.rootAtoms(.{&key});
+    atom_roots.activate(ctx.runtime);
+    defer atom_roots.deactivate(ctx.runtime);
 
     while (true) {
-        const desc = try objectRestOwnPropertyDescriptor(ctx, output, global, object, key);
+        const desc = try objectRestOwnPropertyDescriptor(ctx, output, global, objectFromValue(values[0]).?, key);
         if (desc) |item| {
             if (item.kind != .accessor) return core.JSValue.undefinedValue();
             if (getter) return if (item.getter_present) item.getter else core.JSValue.undefinedValue();
             return if (item.setter_present) item.setter else core.JSValue.undefinedValue();
         }
-        object = (try objectGetPrototypeOfStep(ctx, output, global, object, caller_function, caller_frame)) orelse return core.JSValue.undefinedValue();
+        values[0] = ((try objectGetPrototypeOfStep(ctx, output, global, objectFromValue(values[0]).?, caller_function, caller_frame)) orelse return core.JSValue.undefinedValue()).value();
     }
 }
 
@@ -5828,36 +5935,45 @@ pub fn objectFromEntriesCall(
     caller_frame: ?*builtin_dispatch.Frame,
 ) !?core.JSValue {
     if (args.len < 1) return error.TypeError;
-    const out = try core.Object.create(ctx.runtime, core.class.ids.object, objectPrototypeFromGlobal(ctx.runtime, global));
-    errdefer core.Object.destroyFromHeader(ctx.runtime, out.gcHeader());
-    const out_value = out.value();
-
-    const iterator_value = try iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
+    const globals = [_]core.JSValue{global.value()};
+    var values = [_]core.JSValue{core.JSValue.undefinedValue()} ** 5;
+    const live: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .borrowed = &globals }, .{ .borrowed = args }, .{ .mutable = &live } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    values[0] = (try core.Object.create(ctx.runtime, core.class.ids.object, objectPrototypeFromGlobal(ctx.runtime, global))).value();
+    values[1] = try iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
 
     while (true) {
-        const step = try objectAddEntriesStepValue(ctx, output, global, iterator_value, caller_function, caller_frame);
-        if (step.done) return out_value;
+        const step = try objectAddEntriesStepValue(ctx, output, global, values[1], caller_function, caller_frame);
+        if (step.done) return values[0];
+        values[2] = step.value;
 
-        const entry = objectFromValue(step.value) orelse {
-            try closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
+        _ = objectFromValue(values[2]) orelse {
+            try closeIteratorForFromEntriesAbrupt(ctx, output, global, values[1]);
             return error.TypeError;
         };
-        const key_value = getValueProperty(ctx, output, global, entry.value(), core.Atom.taggedInt(0), caller_function, caller_frame) catch |err| {
-            try closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
+        values[3] = getValueProperty(ctx, output, global, values[2], core.Atom.taggedInt(0), caller_function, caller_frame) catch |err| {
+            try closeIteratorForFromEntriesAbrupt(ctx, output, global, values[1]);
             return err;
         };
-        const value = getValueProperty(ctx, output, global, entry.value(), core.Atom.taggedInt(1), caller_function, caller_frame) catch |err| {
-            try closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
+        values[4] = getValueProperty(ctx, output, global, values[2], core.Atom.taggedInt(1), caller_function, caller_frame) catch |err| {
+            try closeIteratorForFromEntriesAbrupt(ctx, output, global, values[1]);
             return err;
         };
-        const key = toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame) catch |err| {
-            try closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
+        const key = toPropertyKeyAtom(ctx, output, global, values[3], caller_function, caller_frame) catch |err| {
+            try closeIteratorForFromEntriesAbrupt(ctx, output, global, values[1]);
             return err;
         };
-        createDataPropertyOrThrow(ctx, output, global, out_value, out, key, value, caller_function, caller_frame) catch |err| {
-            try closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
+        var atom_roots = core.runtime.rootAtoms(.{&key});
+        atom_roots.activate(ctx.runtime);
+        defer atom_roots.deactivate(ctx.runtime);
+        createDataPropertyOrThrow(ctx, output, global, values[0], objectFromValue(values[0]).?, key, values[4], caller_function, caller_frame) catch |err| {
+            try closeIteratorForFromEntriesAbrupt(ctx, output, global, values[1]);
             return err;
         };
+        @memset(values[2..], core.JSValue.undefinedValue());
     }
 }
 
@@ -5871,11 +5987,16 @@ pub fn objectGroupByCall(
 ) !?core.JSValue {
     if (args.len < 2) return error.TypeError;
     if (!isCallableValue(args[1])) return error.TypeError;
-    const out = try core.Object.create(ctx.runtime, core.class.ids.object, null);
-    errdefer core.Object.destroyFromHeader(ctx.runtime, out.gcHeader());
-    const out_value = out.value();
+    const globals = [_]core.JSValue{global.value()};
+    var values = [_]core.JSValue{core.JSValue.undefinedValue()} ** 4;
+    const live: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .borrowed = &globals }, .{ .borrowed = args }, .{ .mutable = &live } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    values[0] = (try core.Object.create(ctx.runtime, core.class.ids.object, null)).value();
 
-    const iterator_value = try iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
+    values[1] = try iteratorForValue(ctx, output, global, args[0], caller_function, caller_frame);
     var callback_call = CallSite.initInternal(
         ctx,
         output,
@@ -5885,27 +6006,31 @@ pub fn objectGroupByCall(
         caller_function,
         caller_frame,
     );
+    callback_call.activateRoots();
+    defer callback_call.deinit();
 
     var index: usize = 0;
     while (true) {
         const max_safe_integer: usize = 9007199254740991;
         if (index >= max_safe_integer) {
-            try closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
+            try closeIteratorForFromEntriesAbrupt(ctx, output, global, values[1]);
             return error.TypeError;
         }
-        const step = try objectAddEntriesStepValue(ctx, output, global, iterator_value, caller_function, caller_frame);
-        if (step.done) return out_value;
+        const step = try objectAddEntriesStepValue(ctx, output, global, values[1], caller_function, caller_frame);
+        if (step.done) return values[0];
+        values[2] = step.value;
 
         const index_value = value_ops.numberToValue(@floatFromInt(index));
-        const raw_key = callback_call.call(&.{ step.value, index_value }) catch |err| {
-            try closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
+        values[3] = callback_call.call(&.{ values[2], index_value }) catch |err| {
+            try closeIteratorForFromEntriesAbrupt(ctx, output, global, values[1]);
             return err;
         };
-        const key = toPropertyKeyAtom(ctx, output, global, raw_key, caller_function, caller_frame) catch |err| {
-            try closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
+        const key = toPropertyKeyAtom(ctx, output, global, values[3], caller_function, caller_frame) catch |err| {
+            try closeIteratorForFromEntriesAbrupt(ctx, output, global, values[1]);
             return err;
         };
-        try appendObjectGroupByValue(ctx, output, global, out_value, out, key, step.value, caller_function, caller_frame);
+        try appendObjectGroupByValue(ctx, output, global, values[0], objectFromValue(values[0]).?, key, values[2], caller_function, caller_frame);
+        @memset(values[2..], core.JSValue.undefinedValue());
         index += 1;
     }
 }
@@ -5922,25 +6047,32 @@ fn objectAddEntriesStepValue(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !ObjectIteratorStepValue {
-    const iterator = objectFromValue(iterator_value) orelse return error.TypeError;
-    const next_method = if (iterator.cachedIteratorNext(ctx.runtime)) |stored| stored else blk: {
+    const globals = [_]core.JSValue{global.value()};
+    var values = [_]core.JSValue{ iterator_value, core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    const live: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .borrowed = &globals }, .{ .mutable = &live } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    const iterator = objectFromValue(values[0]) orelse return error.TypeError;
+    values[1] = if (iterator.cachedIteratorNext(ctx.runtime)) |stored| stored else blk: {
         const next_key = core.atom.ids.next;
-        break :blk try getValueProperty(ctx, output, global, iterator_value, next_key, caller_function, caller_frame);
+        break :blk try getValueProperty(ctx, output, global, values[0], next_key, caller_function, caller_frame);
     };
-    if (!isCallableValue(next_method)) return error.TypeError;
+    if (!isCallableValue(values[1])) return error.TypeError;
 
-    const next_result_value = try callValueOrBytecodeRoot(ctx, output, global, iterator_value, next_method, &.{}, caller_function, caller_frame);
+    values[2] = try callValueOrBytecodeRoot(ctx, output, global, values[0], values[1], &.{}, caller_function, caller_frame);
     // No class-based dispatch: IteratorStep reads `done`/`value` off whatever
     // object `next()` returned (see iterator_ops.iteratorStepValue).
-    const next_result = objectFromValue(next_result_value) orelse return error.TypeError;
+    _ = objectFromValue(values[2]) orelse return error.TypeError;
 
     const done_key = core.atom.predefinedId("done", .string).?;
-    const done = try getValueProperty(ctx, output, global, next_result.value(), done_key, caller_function, caller_frame);
+    const done = try getValueProperty(ctx, output, global, values[2], done_key, caller_function, caller_frame);
     if (valueTruthy(done)) return .{ .value = core.JSValue.undefinedValue(), .done = true };
 
     const value_key = core.atom.predefinedId("value", .string).?;
-    const value = getValueProperty(ctx, output, global, next_result.value(), value_key, caller_function, caller_frame) catch |err| {
-        try closeIteratorForFromEntriesAbrupt(ctx, output, global, iterator_value);
+    const value = getValueProperty(ctx, output, global, values[2], value_key, caller_function, caller_frame) catch |err| {
+        try closeIteratorForFromEntriesAbrupt(ctx, output, global, values[0]);
         return err;
     };
     return .{ .value = value, .done = false };
@@ -6051,14 +6183,23 @@ pub fn appendObjectGroupByValue(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !void {
-    var group_value = getValueProperty(ctx, output, global, out_value, key, caller_function, caller_frame) catch core.JSValue.undefinedValue();
-    if (group_value.is(.undefined_value)) {
-        const group = try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global));
-        group_value = group.value();
-        try createDataPropertyOrThrow(ctx, output, global, out_value, out, key, group_value, caller_function, caller_frame);
+    const borrowed = [_]core.JSValue{ global.value(), out_value, out.value() };
+    var values = [_]core.JSValue{ value, core.JSValue.undefinedValue() };
+    const live: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .borrowed = &borrowed }, .{ .mutable = &live } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    var atom_roots = core.runtime.rootAtoms(.{&key});
+    atom_roots.activate(ctx.runtime);
+    defer atom_roots.deactivate(ctx.runtime);
+    values[1] = getValueProperty(ctx, output, global, out_value, key, caller_function, caller_frame) catch core.JSValue.undefinedValue();
+    if (values[1].is(.undefined_value)) {
+        values[1] = (try core.Object.createArray(ctx.runtime, arrayPrototypeFromGlobal(ctx.runtime, global))).value();
+        try createDataPropertyOrThrow(ctx, output, global, out_value, out, key, values[1], caller_function, caller_frame);
     }
-    const group = objectFromValue(group_value) orelse return error.TypeError;
-    try createDataPropertyOrThrow(ctx, output, global, group_value, group, core.Atom.taggedInt(group.arrayLength()), value, caller_function, caller_frame);
+    const group = objectFromValue(values[1]) orelse return error.TypeError;
+    try createDataPropertyOrThrow(ctx, output, global, values[1], group, core.Atom.taggedInt(group.arrayLength()), values[0], caller_function, caller_frame);
 }
 
 test "Object.groupBy new group define failure releases group once" {
@@ -6120,13 +6261,23 @@ pub fn getOwnPropertyDescriptorCall(
     caller_frame: ?*builtin_dispatch.Frame,
 ) !?core.JSValue {
     if (args.len < 1) return null;
+    const globals = [_]core.JSValue{global.value()};
+    var values = [_]core.JSValue{core.JSValue.undefinedValue()};
+    const live: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .borrowed = &globals }, .{ .borrowed = args }, .{ .mutable = &live } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
     if (args[0].is(.null_value) or args[0].is(.undefined_value)) return error.TypeError;
-    const object_value = if (objectFromValue(args[0])) |_| args[0] else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
-    const object = objectFromValue(object_value) orelse return error.TypeError;
+    values[0] = if (objectFromValue(args[0])) |_| args[0] else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
+    _ = objectFromValue(values[0]) orelse return error.TypeError;
     const key_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
     const atom_id = try toPropertyKeyAtom(ctx, output, global, key_value, caller_function, caller_frame);
-    var desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, object, atom_id, caller_function, caller_frame) orelse return core.JSValue.undefinedValue();
-    try call.materializeMappedArgumentsDescriptorValueForVm(ctx.runtime, object, atom_id, &desc);
+    var atom_roots = core.runtime.rootAtoms(.{&atom_id});
+    atom_roots.activate(ctx.runtime);
+    defer atom_roots.deactivate(ctx.runtime);
+    var desc = try proxyAwareOwnPropertyDescriptor(ctx, output, global, objectFromValue(values[0]).?, atom_id, caller_function, caller_frame) orelse return core.JSValue.undefinedValue();
+    try call.materializeMappedArgumentsDescriptorValueForVm(ctx.runtime, objectFromValue(values[0]).?, atom_id, &desc);
     const desc_value = try descriptorObjectFromDescriptor(ctx.runtime, global, desc);
     return desc_value;
 }
@@ -6172,20 +6323,34 @@ pub fn getOwnPropertyDescriptorsCall(
 ) !?core.JSValue {
     if (args.len < 1) return null;
     if (args[0].is(.null_value) or args[0].is(.undefined_value)) return error.TypeError;
-    const object_value = if (objectFromValue(args[0])) |_| args[0] else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
-    const object = objectFromValue(object_value) orelse return error.TypeError;
-    const own_keys = try objectRestOwnKeys(ctx, output, global, object);
+    // Source, result, and the descriptor being installed all cross getters,
+    // proxy traps, and allocations; reload each from its slot afterwards.
+    // The result is published once created, so failure leaves it to the GC.
+    const globals = [_]core.JSValue{global.value()};
+    var values = [_]core.JSValue{core.JSValue.undefinedValue()} ** 3;
+    const live: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .borrowed = &globals }, .{ .borrowed = args }, .{ .mutable = &live } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    values[0] = if (objectFromValue(args[0])) |_| args[0] else try primitiveObjectForAccess(ctx.runtime, global, args[0]);
+    _ = objectFromValue(values[0]) orelse return error.TypeError;
+    const own_keys = try objectRestOwnKeys(ctx, output, global, objectFromValue(values[0]).?);
     defer core.Object.freeKeys(ctx.runtime, own_keys);
+    const atoms = [_]core.runtime.AtomRootSlot{.{ .borrowed = own_keys }};
+    var atom_roots = core.runtime.ValueRootFrame{ .atoms = &atoms };
+    atom_roots.activate(ctx.runtime);
+    defer atom_roots.deactivate(ctx.runtime);
 
-    const out = try core.Object.create(ctx.runtime, core.class.ids.object, objectPrototypeFromGlobal(ctx.runtime, global));
-    errdefer core.Object.destroyFromHeader(ctx.runtime, out.gcHeader());
+    values[1] = (try core.Object.create(ctx.runtime, core.class.ids.object, objectPrototypeFromGlobal(ctx.runtime, global))).value();
     for (own_keys) |key| {
-        var desc = (try objectRestOwnPropertyDescriptor(ctx, output, global, object, key)) orelse continue;
-        try call.materializeMappedArgumentsDescriptorValueForVm(ctx.runtime, object, key, &desc);
-        const desc_value = try descriptorObjectFromDescriptor(ctx.runtime, global, desc);
-        try createDataPropertyOrThrow(ctx, output, global, out.value(), out, key, desc_value, caller_function, caller_frame);
+        var desc = (try objectRestOwnPropertyDescriptor(ctx, output, global, objectFromValue(values[0]).?, key)) orelse continue;
+        try call.materializeMappedArgumentsDescriptorValueForVm(ctx.runtime, objectFromValue(values[0]).?, key, &desc);
+        values[2] = try descriptorObjectFromDescriptor(ctx.runtime, global, desc);
+        try createDataPropertyOrThrow(ctx, output, global, values[1], objectFromValue(values[1]).?, key, values[2], caller_function, caller_frame);
+        values[2] = core.JSValue.undefinedValue();
     }
-    return out.value();
+    return values[1];
 }
 
 pub const OwnPropertyKeyFilter = enum {

@@ -156,7 +156,7 @@ pub const vm_helpers = struct {
         // direct-eval placement. Mirror compileQjsProgram's script setup.
         try state.beginProgramEmission();
         try state.enableReturnCompletion();
-        while (state.token.val != .eof) {
+        while (state.token.kind != .eof) {
             try parser_core.parseStatementOrDecl(&state, parser_core.DeclMask{ .func = true, .func_with_label = true, .other = true });
         }
         try state.finalizeEvalReturn();

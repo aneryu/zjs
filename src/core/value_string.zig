@@ -140,16 +140,27 @@ fn unsupportedValue(rt: *JSRuntime, buffer: *std.ArrayList(u8), policy: Policy) 
 
 /// The `Array.prototype.join`-shaped rendering an array gets from ToString:
 /// comma-separated elements with undefined and null rendering as empty.
+/// Native property reads can materialize AUTOINIT and collect; this is not
+/// a no-GC traversal even though it does not invoke JavaScript ToString.
 fn appendArrayString(
     rt: *JSRuntime,
     buffer: *std.ArrayList(u8),
     array: *Object,
     policy: Policy,
 ) AppendStringError!void {
+    var values = [_]JSValue{ array.value(), JSValue.undefinedValue() };
+    const live: []JSValue = &values;
+    const slices = [_]runtime.ValueRootSlice{.{ .mutable = &live }};
+    var roots = runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+
+    // A native property read may materialize AUTOINIT; recursive array
+    // rendering can reach another such read. Reacquire the owner each time.
     var index: u32 = 0;
-    while (index < array.arrayLength()) : (index += 1) {
+    while (index < Object.fromHeader(values[0].cycleMarkHeader().?).arrayLength()) : (index += 1) {
         if (index != 0) try buffer.append(rt.nativeAllocator(), ',');
-        const value = try array.getProperty(atom.Atom.taggedInt(index));
-        if (!value.is(.undefined_value) and !value.is(.null_value)) try appendValueString(rt, buffer, value, policy);
+        values[1] = try Object.fromHeader(values[0].cycleMarkHeader().?).getProperty(atom.Atom.taggedInt(index));
+        if (!values[1].is(.undefined_value) and !values[1].is(.null_value)) try appendValueString(rt, buffer, values[1], policy);
     }
 }

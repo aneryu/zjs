@@ -61,13 +61,14 @@ pub fn JSString(comptime Value: type) type {
             }
 
             pub fn fromValue(allocator: std.mem.Allocator, js_value: Value) !Utf8 {
-                const string = Self.fromValue(js_value) orelse return error.TypeError;
-                return init(allocator, string);
+                return fromValueCesu8(allocator, js_value, false);
             }
 
             pub fn fromValueCesu8(allocator: std.mem.Allocator, js_value: Value, cesu8: bool) !Utf8 {
-                const string = Self.fromValue(js_value) orelse return error.TypeError;
-                return initCesu8(allocator, string, cesu8);
+                if (Self.fromFlatValue(js_value)) |string| return initCesu8(allocator, string, cesu8);
+                const rope = js_value.ropeBody() orelse return error.TypeError;
+                const owned = try Self.valueToOwnedUtf8(rope.rt, allocator, js_value, cesu8);
+                return .{ .bytes = owned, .owned = owned, .allocator = allocator };
             }
 
             pub fn slice(self: Utf8) []const u8 {
@@ -91,6 +92,13 @@ pub fn JSString(comptime Value: type) type {
             }
         };
 
+        /// Pure borrowed projection; even a cached rope is not a flat value.
+        pub fn fromFlatValue(js_value: Value) ?Self {
+            const ptr = string_mod.asFlat(js_value) orelse return null;
+            return .{ .js_value = js_value, .ptr = ptr };
+        }
+
+        /// Compatibility entry: a rope may allocate and collect while flattening.
         pub fn fromValue(js_value: Value) ?Self {
             const string_ptr = js_value.asStringBody() orelse return null;
             return .{
@@ -118,6 +126,60 @@ pub fn JSString(comptime Value: type) type {
 
         pub fn toOwnedUtf8(self: Self, allocator: std.mem.Allocator) ![]u8 {
             return toOwnedUtf8Cesu8(self, allocator, false);
+        }
+
+        /// Own the source root across the caller's allocator, which may collect.
+        /// Stream either representation without materializing a flat GC string.
+        pub fn valueToOwnedUtf8(rt: *@import("../runtime.zig").JSRuntime, allocator: std.mem.Allocator, input: Value, cesu8: bool) ![]u8 {
+            if (!input.isString()) return error.TypeError;
+            const runtime_mod = @import("../runtime.zig");
+            var source = [_]Value{input};
+            const slots: []Value = &source;
+            const slices = [_]runtime_mod.ValueRootSlice{.{ .mutable = &slots }};
+            var frame = runtime_mod.ValueRootFrame{ .slices = &slices };
+            frame.activate(rt);
+            defer frame.deactivate(rt);
+            const len = blk: {
+                var borrow = runtime_mod.NoGcScope{};
+                borrow.activate(rt);
+                defer borrow.deactivate();
+                break :blk encodeValue(source[0], cesu8, null);
+            };
+            const out = try allocator.alloc(u8, len);
+            var borrow = runtime_mod.NoGcScope{};
+            borrow.activate(rt);
+            defer borrow.deactivate();
+            const written = encodeValue(source[0], cesu8, out);
+            std.debug.assert(written == out.len);
+            return out;
+        }
+
+        fn encodeValue(input: Value, cesu8: bool, out: ?[]u8) usize {
+            var iterator = string_mod.StringValueIterator.init(input);
+            var offset: usize = 0;
+            var high: ?u16 = null;
+            while (iterator.next()) |chunk| {
+                switch (chunk) {
+                    inline .latin1, .utf16 => |chunk_units| for (chunk_units) |unit| {
+                        if (high) |pending| {
+                            high = null;
+                            if (unicode.isLowSurrogateUnit(unit)) {
+                                const cp: u32 = @intCast(unicode.codePointFromSurrogatePair(pending, unit));
+                                offset += emitCodePoint(out, offset, cp);
+                                continue;
+                            }
+                            offset += emitCodePoint(out, offset, pending);
+                        }
+                        if (!cesu8 and unicode.isHighSurrogateUnit(unit)) {
+                            high = unit;
+                        } else {
+                            offset += emitCodePoint(out, offset, unit);
+                        }
+                    },
+                }
+            }
+            if (high) |pending| offset += emitCodePoint(out, offset, pending);
+            return offset;
         }
 
         pub fn toOwnedUtf8Cesu8(self: Self, allocator: std.mem.Allocator, cesu8: bool) ![]u8 {
@@ -150,6 +212,11 @@ pub fn JSString(comptime Value: type) type {
             return out;
         }
     };
+}
+
+fn emitCodePoint(out: ?[]u8, offset: usize, cp: u32) usize {
+    if (out) |bytes| return writeUtf8CodePoint(bytes[offset..], cp);
+    return if (cp <= 0xffff) utf8LenCodeUnit(@intCast(cp)) else 4;
 }
 
 fn utf8LenLatin1(bytes: []const u8) usize {
@@ -330,4 +397,24 @@ test "JSString.Utf8 transcodes utf16 through scratch allocator" {
 test "JSString.Utf8 rejects non-string values" {
     const core = @import("root.zig");
     try std.testing.expectError(error.TypeError, core.JSValue.String.Utf8.fromValue(std.testing.allocator, core.JSValue.int32(1)));
+}
+
+test "JSString UTF8 rope conversion preserves tree and reports allocation failure" {
+    const core = @import("root.zig");
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const left = try string_mod.String.createUtf16(rt, &.{ 0xe9, 0xd83d });
+    const right = try string_mod.String.createUtf16(rt, &.{ 0xde00, 'z', 0xd800 });
+    const rope = try string_mod.String.createRope(rt, left.value(), right.value());
+    var empty: [0]u8 = .{};
+    var failing = std.heap.FixedBufferAllocator.init(&empty);
+    try std.testing.expectError(error.OutOfMemory, core.JSValue.String.Utf8.fromValue(failing.allocator(), rope.value()));
+    try std.testing.expect(!rope.isLinearized());
+    for ([_]bool{ false, true }) |cesu8| {
+        var result = try core.JSValue.String.Utf8.fromValueCesu8(std.testing.allocator, rope.value(), cesu8);
+        defer result.deinit();
+        try std.testing.expectEqualStrings(if (cesu8) "\xc3\xa9\xed\xa0\xbd\xed\xb8\x80z\xed\xa0\x80" else "\xc3\xa9\xf0\x9f\x98\x80z\xed\xa0\x80", result.slice());
+        try std.testing.expect(!result.isBorrowed());
+        try std.testing.expect(!rope.isLinearized());
+    }
 }

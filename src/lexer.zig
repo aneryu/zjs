@@ -85,24 +85,23 @@ pub const Lexer = struct {
     /// it, so the remaining bytes are lexed again as their own token.
     /// Mirrors the TypeScript scanner's `reScanGreaterToken`.
     pub fn splitGreaterThan(self: *Lexer, tok: *t.Token) void {
-        std.debug.assert(tok.len >= 2 and tok.ptr[0] == '>');
+        std.debug.assert(tok.len() >= 2 and self.source[tok.start] == '>');
         self.splitLeadingByte(tok, '>');
     }
 
     /// Same re-cut for `<<` and `<<=` when a type argument list or type
     /// parameter list starts with the first `<` (`f<<T>() => T>(x)`).
     pub fn splitLessThan(self: *Lexer, tok: *t.Token) void {
-        std.debug.assert(tok.len >= 2 and tok.ptr[0] == '<');
+        std.debug.assert(tok.len() >= 2 and self.source[tok.start] == '<');
         self.splitLeadingByte(tok, '<');
     }
 
     fn splitLeadingByte(self: *Lexer, tok: *t.Token, byte: u8) void {
-        const start = @intFromPtr(tok.ptr) - @intFromPtr(self.source.ptr);
-        self.pos = start + 1;
+        self.pos = tok.start + 1;
         self.line = tok.line_num;
         self.col = tok.col_num + 1;
-        tok.val = @enumFromInt(byte);
-        tok.len = 1;
+        tok.kind = @enumFromInt(byte);
+        tok.end = self.pos;
         tok.payload = .none;
     }
 
@@ -179,7 +178,7 @@ pub const Lexer = struct {
         return self.got_lf;
     }
 
-    /// Produce the next token. Returns `TOK_EOF` at end of input.
+    /// Produce the next token. Returns `.eof` at end of input.
     pub fn next(self: *Lexer) Error!t.Token {
         var result: t.Token = undefined;
         try self.nextInto(&result);
@@ -328,16 +327,13 @@ pub const Lexer = struct {
         self.mark_col = self.col;
     }
 
-    inline fn emitInto(self: *Lexer, out: *t.Token, val: t.TokenKind, payload: t.Payload) void {
+    inline fn emitInto(self: *Lexer, out: *t.Token, kind: t.Kind, payload: t.Payload) void {
         out.* = .{
-            .val = val,
+            .kind = kind,
             .line_num = self.mark_line,
             .col_num = self.mark_col,
-            .ptr = if (self.mark_pos < self.source.len)
-                self.source[self.mark_pos..].ptr
-            else
-                self.source.ptr + self.source.len,
-            .len = self.pos - self.mark_pos,
+            .start = self.mark_pos,
+            .end = self.pos,
             .payload = payload,
         };
     }
@@ -576,31 +572,17 @@ pub const Lexer = struct {
     }
 
     fn emitIdentifierOrKeyword(self: *Lexer, out: *t.Token, lexeme: []const u8, has_escape: bool) Error!void {
-        // Keep the compact keyword dispatch ahead of the general atom
-        // table. zjs stores predefined spellings in immutable static
-        // storage, so routing keywords through std.HashMap would make the
-        // common literal/control-word path materially more expensive than
-        // QuickJS's preseeded atom hash.
+        // Keywords resolve by spelling before the general atom table: their
+        // atoms are predefined, so no hash lookup is needed.
         if (!has_escape) {
-            if (keywordLookup(lexeme)) |val| {
-                if (t.isKeyword(val)) {
-                    const a = t.keywordAtom(val);
-                    self.emitInto(out, val, .{ .ident = .{
-                        .atom = a,
-                        .has_escape = false,
-                        .is_reserved = isReservedKeyword(val, self.is_strict_mode),
-                    } });
-                    return;
-                }
+            if (t.Kind.keyword(lexeme)) |kind| {
+                self.emitInto(out, kind, .{ .ident = .{ .atom = kind.keywordAtom(), .has_escape = false } });
+                return;
             }
         }
 
         const a = try self.atoms.internString(lexeme);
-        self.emitInto(out, .ident, .{ .ident = .{
-            .atom = a,
-            .has_escape = has_escape,
-            .is_reserved = false,
-        } });
+        self.emitInto(out, .ident, .{ .ident = .{ .atom = a, .has_escape = has_escape } });
     }
 
     fn isNonAsciiTriviaStart(self: *Lexer) bool {
@@ -674,11 +656,7 @@ pub const Lexer = struct {
         }
 
         const a = try self.atoms.internString(decoded.items);
-        self.emitInto(out, .private_name, .{ .ident = .{
-            .atom = a,
-            .has_escape = has_escape,
-            .is_reserved = false,
-        } });
+        self.emitInto(out, .private_name, .{ .ident = .{ .atom = a, .has_escape = has_escape } });
     }
 
     // ---- numbers -----------------------------------------------------
@@ -1629,95 +1607,4 @@ fn legacyOrNonOctalDecimalValue(self: *Lexer, lexeme: []const u8) !?f64 {
 /// BigInt suffix are handled before reaching here.
 fn parseNumberLiteral(lexeme: []const u8) ?f64 {
     return number_format.parseNumberExact(lexeme, 0, .{ .accept_bin_oct = true, .accept_underscores = true });
-}
-
-fn keywordLookup(lexeme: []const u8) ?t.TokenKind {
-    if (lexeme.len < 2 or lexeme.len > 10) return null;
-    return switch (lexeme.len) {
-        2 => switch (lexeme[0]) {
-            'd' => if (eq(lexeme, "do")) .kw_do else null,
-            'i' => if (eq(lexeme, "if")) .kw_if else if (eq(lexeme, "in")) .kw_in else null,
-            // QuickJS keeps `of` as an ordinary identifier in normal
-            // lexing. TOK_OF exists only for parser lookahead.
-            else => null,
-        },
-        3 => switch (lexeme[0]) {
-            'f' => if (eq(lexeme, "for")) .kw_for else null,
-            'l' => if (eq(lexeme, "let")) .kw_let else null,
-            'n' => if (eq(lexeme, "new")) .kw_new else null,
-            't' => if (eq(lexeme, "try")) .kw_try else null,
-            'v' => if (eq(lexeme, "var")) .kw_var else null,
-            else => null,
-        },
-        4 => switch (lexeme[0]) {
-            'c' => if (eq(lexeme, "case")) .kw_case else null,
-            'e' => if (eq(lexeme, "else")) .kw_else else if (eq(lexeme, "enum")) .kw_enum else null,
-            'n' => if (eq(lexeme, "null")) .kw_null else null,
-            't' => if (eq(lexeme, "this")) .kw_this else if (eq(lexeme, "true")) .kw_true else null,
-            'v' => if (eq(lexeme, "void")) .kw_void else null,
-            'w' => if (eq(lexeme, "with")) .kw_with else null,
-            else => null,
-        },
-        5 => switch (lexeme[0]) {
-            'a' => if (eq(lexeme, "async")) .kw_async else if (eq(lexeme, "await")) .kw_await else null,
-            'b' => if (eq(lexeme, "break")) .kw_break else null,
-            'c' => if (eq(lexeme, "catch")) .kw_catch else if (eq(lexeme, "class")) .kw_class else if (eq(lexeme, "const")) .kw_const else null,
-            'f' => if (eq(lexeme, "false")) .kw_false else null,
-            's' => if (eq(lexeme, "super")) .kw_super else null,
-            't' => if (eq(lexeme, "throw")) .kw_throw else null,
-            'w' => if (eq(lexeme, "while")) .kw_while else null,
-            'y' => if (eq(lexeme, "yield")) .kw_yield else null,
-            else => null,
-        },
-        6 => switch (lexeme[0]) {
-            'd' => if (eq(lexeme, "delete")) .kw_delete else null,
-            'e' => if (eq(lexeme, "export")) .kw_export else null,
-            'i' => if (eq(lexeme, "import")) .kw_import else null,
-            'p' => if (eq(lexeme, "public")) .kw_public else null,
-            'r' => if (eq(lexeme, "return")) .kw_return else null,
-            's' => if (eq(lexeme, "static")) .kw_static else if (eq(lexeme, "switch")) .kw_switch else null,
-            't' => if (eq(lexeme, "typeof")) .kw_typeof else null,
-            else => null,
-        },
-        7 => switch (lexeme[0]) {
-            'd' => if (eq(lexeme, "default")) .kw_default else null,
-            'e' => if (eq(lexeme, "extends")) .kw_extends else null,
-            'f' => if (eq(lexeme, "finally")) .kw_finally else null,
-            'p' => if (eq(lexeme, "package")) .kw_package else if (eq(lexeme, "private")) .kw_private else null,
-            else => null,
-        },
-        8 => switch (lexeme[0]) {
-            'c' => if (eq(lexeme, "continue")) .kw_continue else null,
-            'd' => if (eq(lexeme, "debugger")) .kw_debugger else null,
-            'f' => if (eq(lexeme, "function")) .kw_function else null,
-            else => null,
-        },
-        9 => switch (lexeme[0]) {
-            'i' => if (eq(lexeme, "interface")) .kw_interface else null,
-            'p' => if (eq(lexeme, "protected")) .kw_protected else null,
-            else => null,
-        },
-        10 => switch (lexeme[0]) {
-            'i' => if (eq(lexeme, "implements")) .kw_implements else if (eq(lexeme, "instanceof")) .kw_instanceof else null,
-            else => null,
-        },
-        else => null,
-    };
-}
-
-inline fn eq(a: []const u8, b: []const u8) bool {
-    return std.mem.eql(u8, a, b);
-}
-
-/// Returns true for keywords that are ReservedWord per spec; the rest
-/// (let, static, yield in non-strict, of) are contextual.
-fn isReservedKeyword(val: t.TokenKind, is_strict: bool) bool {
-    return switch (val) {
-        .kw_null, .kw_false, .kw_true, .kw_if, .kw_else, .kw_return, .kw_var, .kw_this, .kw_delete, .kw_void, .kw_typeof, .kw_new, .kw_in, .kw_instanceof, .kw_do, .kw_while, .kw_for, .kw_break, .kw_continue, .kw_switch, .kw_case, .kw_default, .kw_throw, .kw_try, .kw_catch, .kw_finally, .kw_function, .kw_debugger, .kw_with, .kw_class, .kw_const, .kw_enum, .kw_export, .kw_extends, .kw_import, .kw_super => true,
-        // FutureReservedWord only in strict mode.
-        .kw_implements, .kw_interface, .kw_let, .kw_package, .kw_private, .kw_protected, .kw_public, .kw_static, .kw_yield => is_strict,
-        // Contextual.
-        .kw_await, .kw_of => false,
-        else => false,
-    };
 }

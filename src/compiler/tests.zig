@@ -203,7 +203,7 @@ fn compileAndRunWithHook(h: *ExecHarness, before_finalize: ?*const fn (*ExecHarn
         &h.state,
         P.DeclMask{ .func = true, .func_with_label = true, .other = true },
     );
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
     try h.state.finalizeEvalReturn();
     if (before_finalize) |hook| try hook(h);
 
@@ -644,7 +644,7 @@ test "compiler.s2g1: conditional expression" {
     defer h.deinit();
 
     try P.parseExpr(&h.state);
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -670,7 +670,7 @@ test "compiler.s2g1: logical or" {
     defer h.deinit();
 
     try P.parseExpr(&h.state);
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -695,7 +695,7 @@ test "compiler.s2g1: logical and chain" {
     defer h.deinit();
 
     try P.parseExpr(&h.state);
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -727,7 +727,7 @@ test "compiler.s2g1: coalesce" {
     defer h.deinit();
 
     try P.parseExpr(&h.state);
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -753,7 +753,7 @@ test "compiler.s2g1: coalesce chain" {
     defer h.deinit();
 
     try P.parseExpr(&h.state);
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -789,7 +789,7 @@ test "compiler.s2g1: optional chain field" {
     const field_atom = try h.rt.atoms.internString("b");
 
     try P.parseExpr(&h.state);
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -822,7 +822,7 @@ test "compiler.s2g1: optional chain element" {
     defer h.deinit();
 
     try P.parseExpr(&h.state);
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -853,7 +853,7 @@ test "compiler.s2g1: if else empty" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -879,7 +879,7 @@ test "compiler.s2g1: if else expression bodies" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -909,7 +909,7 @@ test "compiler.s2g1: if without else" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -933,7 +933,7 @@ test "compiler.s2g1: labeled break" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -960,7 +960,7 @@ test "compiler.s2g1: labeled statement without break" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{});
@@ -982,7 +982,7 @@ test "compiler.s2g1: optional chain atom ownership" {
     const field_atom = try h.rt.atoms.internString("b");
 
     try P.parseExpr(&h.state);
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try std.testing.expectEqual(@as(u32, 1), b.atom_len);
@@ -998,7 +998,7 @@ test "compiler.s2g2: while" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1025,7 +1025,7 @@ test "compiler.s2g2: while continue" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1053,7 +1053,7 @@ test "compiler.s2g2: labeled while continue" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1083,7 +1083,7 @@ test "compiler.s2g2: do while" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1108,7 +1108,7 @@ test "compiler.s2g2: classic for empty head" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1141,7 +1141,7 @@ test "compiler.s2g2: classic for test break" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1172,7 +1172,7 @@ test "compiler.s2g2: for in" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1213,7 +1213,7 @@ test "compiler.s2g2: for in break cleanup" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1257,7 +1257,7 @@ test "compiler.s2g2: for of" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1299,7 +1299,7 @@ test "compiler.s2g2: for of break cleanup" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1344,7 +1344,7 @@ test "compiler.s2g2: switch single case" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1375,7 +1375,7 @@ test "compiler.s2g2: switch break default" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1410,7 +1410,7 @@ test "compiler.s2g2: switch case fallthrough" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1450,7 +1450,7 @@ test "compiler.s2g2: switch default only" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1479,7 +1479,7 @@ test "compiler.s2g2: switch break suppresses fallthrough" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1514,7 +1514,7 @@ test "compiler.s2g3: try finally live tail" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1553,7 +1553,7 @@ test "compiler.s2g3: try catch optional binding live tails" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1604,7 +1604,7 @@ test "compiler.s2g3: try catch binding after throw" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1654,7 +1654,7 @@ test "compiler.s2g3: return through finally" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1695,7 +1695,7 @@ test "compiler.s2g3: break through finally inside loop" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1749,7 +1749,7 @@ test "compiler.s2g3: epilogue after plain statement" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
     try P.emitPlainTailForTest(&h.state);
 
     const b = h.builder();
@@ -1772,7 +1772,7 @@ test "compiler.s2g3: epilogue after terminal" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
     try P.emitPlainTailForTest(&h.state);
 
     const b = h.builder();
@@ -1794,7 +1794,7 @@ test "compiler.s2g3: epilogue after loop merge" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
     try P.emitPlainTailForTest(&h.state);
 
     const b = h.builder();
@@ -1825,7 +1825,7 @@ test "compiler.s2g3: plain return dead epilogue" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try std.testing.expectEqual(@as(u32, 1), b.code_len);
@@ -1850,7 +1850,7 @@ test "compiler.s2g3: return with value" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1871,7 +1871,7 @@ test "compiler.s2g4: classic for splices update after body" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1907,7 +1907,7 @@ test "compiler.s2g4: classic for shifts detached conditional labels" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1950,7 +1950,7 @@ test "compiler.s2g4: classic for splices update after break" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -1986,7 +1986,7 @@ test "compiler.s2g4: plain field assignment rewinds getter" {
     const field_atom = try h.rt.atoms.internString("b");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -2017,7 +2017,7 @@ test "compiler.s2g4: compound field assignment reemits getter" {
     const field_atom = try h.rt.atoms.internString("b");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -2048,7 +2048,7 @@ test "compiler.s2g4: plain array element assignment rewinds getter" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -2078,7 +2078,7 @@ test "compiler.s2g4: postfix field update preserves old value" {
     const field_atom = try h.rt.atoms.internString("b");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -2107,7 +2107,7 @@ test "compiler.s2g4: prefix array element update preserves new value" {
     defer h.deinit();
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -2138,7 +2138,7 @@ test "compiler.s2g4: minimal class expression and default constructor" {
     const fields_atom = try h.rt.atoms.internString("<class_fields_init>");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -2204,7 +2204,7 @@ test "compiler.s2g4: class declaration stores local binding" {
     const fields_atom = try h.rt.atoms.internString("<class_fields_init>");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -2274,7 +2274,7 @@ test "compiler.s2g4: named class method splices runtime definition" {
     const fields_atom = try h.rt.atoms.internString("<class_fields_init>");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -2359,7 +2359,7 @@ test "compiler.s2g4: explicit constructor rolls back parent closure" {
     const empty_atom = try h.rt.atoms.internString("");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -2423,7 +2423,7 @@ test "compiler.s2g4: derived default constructor returns checked this" {
     const fields_atom = try h.rt.atoms.internString("<class_fields_init>");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -2490,7 +2490,7 @@ test "compiler.s2g4: instance field uses dormant brand prologue" {
     const field_atom = try h.rt.atoms.internString("x");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -2558,7 +2558,7 @@ test "compiler.s2g4: private method patches instance brand prologue" {
     const home_atom = try h.rt.atoms.internString("<home_object>");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try std.testing.expectEqual(@as(u32, 4), b.atom_len);
@@ -2653,7 +2653,7 @@ test "compiler.s2g4: static block nests closure in static initializer" {
     const fields_atom = try h.rt.atoms.internString("<class_fields_init>");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -2739,7 +2739,7 @@ test "compiler.s2g4: static field emits through static initializer" {
     const field_atom = try h.rt.atoms.internString("x");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -2803,7 +2803,7 @@ test "compiler.s2g4: computed method splices key and closure" {
     const empty_atom = try h.rt.atoms.internString("");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -2864,7 +2864,7 @@ test "compiler.s2g4: getter child keeps return terminal" {
     const getter_atom = try h.rt.atoms.internString("g");
 
     try P.parseStatementOrDecl(&h.state, P.DeclMask{ .func = true, .func_with_label = true, .other = true });
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const b = h.builder();
     try expectV2Stream(b, &.{
@@ -2927,7 +2927,7 @@ test "compiler.s3: parsed dead code after break is dropped" {
         &h.state,
         P.DeclMask{ .func = true, .func_with_label = true, .other = true },
     );
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const input = h.builder();
     try expectV2Stream(input, &.{
@@ -2968,7 +2968,7 @@ test "compiler.s3: parsed dead-only loop labels stay dead" {
         &h.state,
         P.DeclMask{ .func = true, .func_with_label = true, .other = true },
     );
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const input = h.builder();
     try expectV2Stream(input, &.{
@@ -3012,7 +3012,7 @@ test "compiler.s3: parsed return through finally keeps live gosub" {
         &h.state,
         P.DeclMask{ .func = true, .func_with_label = true, .other = true },
     );
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const input = h.builder();
     // Raw stream: scope markers still present, and the block's fall-through
@@ -3072,7 +3072,7 @@ test "compiler.s3: parsed empty finally removes gosub" {
         &h.state,
         P.DeclMask{ .func = true, .func_with_label = true, .other = true },
     );
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
 
     const input = h.builder();
     try expectV2Stream(input, &.{
@@ -3158,7 +3158,7 @@ fn compileRunAndCount(src: []const u8, expected: i32, want: []const u8) !void {
         &h.state,
         P.DeclMask{ .func = true, .func_with_label = true, .other = true },
     );
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
     try h.state.finalizeEvalReturn();
 
     const fb_slice = try bytecode_mod.pipeline.finalize.createFunctionBytecode(
@@ -3501,7 +3501,7 @@ test "compiler.p5: FunctionDef owners are inert after the FunctionBytecode escap
         &h.state,
         P.DeclMask{ .func = true, .func_with_label = true, .other = true },
     );
-    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.val);
+    try std.testing.expectEqual(parser_mod.token.Kind.eof, h.state.token.kind);
     try h.state.finalizeEvalReturn();
     try std.testing.expect(h.state.function_def.child_list.len >= 1);
 
@@ -3785,7 +3785,7 @@ test "compiler.p5: escaped atoms outlive compiler teardown" {
             &state,
             P.DeclMask{ .func = true, .func_with_label = true, .other = true },
         );
-        try std.testing.expectEqual(parser_mod.token.Kind.eof, state.token.val);
+        try std.testing.expectEqual(parser_mod.token.Kind.eof, state.token.kind);
         try state.finalizeEvalReturn();
 
         const parser_builder = state.function_def.builder.?;

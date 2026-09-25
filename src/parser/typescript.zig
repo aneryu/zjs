@@ -257,7 +257,7 @@ fn parseNamespaceStatement(s: *State) Error!void {
     try statements.parseStatementOrDecl(s, DeclMask{ .func = true, .func_with_label = true, .other = true });
 }
 
-pub fn tsKindIsIdentifierLike(kind: tok.TokenKind) bool {
+pub fn tsKindIsIdentifierLike(kind: tok.Kind) bool {
     return kind == .ident or kind == .kw_await or kind == .kw_yield or
         kind == .kw_static or kind == .kw_let or identifiers.isSloppyFutureReservedToken(kind);
 }
@@ -272,7 +272,7 @@ fn tsAtTypeName(s: *State) bool {
 /// object type: any identifier, keyword, string, or number.
 fn tsAtPropertyNameToken(s: *State) bool {
     const k = s.peekKind();
-    return tsKindIsIdentifierLike(k) or tok.isKeyword(k) or k == .string or k == .number;
+    return tsKindIsIdentifierLike(k) or k.isKeyword() or k == .string or k == .number;
 }
 
 fn tsIsIdentNoLineTerminator(s: *State, name: []const u8) bool {
@@ -303,19 +303,19 @@ pub fn tsPeekNextIsIdent(s: *State, name: []const u8, same_line: bool) bool {
     var next = s.lex.next() catch return false;
     defer s.lex.freeToken(&next);
     if (same_line and s.lex.gotLineTerminator()) return false;
-    return next.val == .ident and !next.payload.ident.has_escape and
+    return next.kind == .ident and !next.payload.ident.has_escape and
         identifiers.atomNameEquals(s, next.payload.ident.atom, name);
 }
 
 /// Kind of the token two positions ahead of the current one.
-fn tsPeekSecondKind(s: *State) tok.TokenKind {
+fn tsPeekSecondKind(s: *State) tok.Kind {
     const saved_cursor = lookahead.takeLexerCursorSnapshot(s);
     defer lookahead.restoreLexerCursorSnapshot(s, saved_cursor);
     var first = s.lex.next() catch return .eof;
     s.lex.freeToken(&first);
     var second = s.lex.next() catch return .eof;
     defer s.lex.freeToken(&second);
-    return second.val;
+    return second.kind;
 }
 
 const TsSpeculation = struct {
@@ -814,7 +814,7 @@ fn tsWordIsMemberModifier(s: *State) bool {
     const next = next_peek.kind;
     const has_lt = next_peek.line_terminator;
     if (has_lt) return false;
-    return tsKindIsIdentifierLike(next) or tok.isKeyword(next) or next == .string or
+    return tsKindIsIdentifierLike(next) or next.isKeyword() or next == .string or
         next == .number or next == .lbracket or next == .private_name;
 }
 
@@ -931,7 +931,7 @@ pub fn tsDeclarationStart(s: *State) TsDeclarationKind {
     };
 }
 
-fn tsAmbientDeclarationFollows(kind: tok.TokenKind) bool {
+fn tsAmbientDeclarationFollows(kind: tok.Kind) bool {
     return kind == .kw_var or kind == .kw_let or kind == .kw_const or
         kind == .kw_function or kind == .kw_class or kind == .kw_enum or
         kind == .kw_interface or kind == .ident;
@@ -1143,9 +1143,9 @@ pub fn tsSkipDeclaredField(s: *State) Error!void {
 /// Modifier word in a class body. tsc `nextTokenCanFollowModifier`: the
 /// next token must be able to start a member; `static` alone tolerates a
 /// line terminator before that token.
-pub fn tsCanFollowClassModifier(kind: tok.TokenKind) bool {
+pub fn tsCanFollowClassModifier(kind: tok.Kind) bool {
     return kind == .lbracket or kind == .lbrace or kind == .star or kind == .ellipsis or
-        kind == .ident or tok.isKeyword(kind) or kind == .string or
+        kind == .ident or kind.isKeyword() or kind == .string or
         kind == .number or kind == .private_name;
 }
 
@@ -1154,12 +1154,12 @@ pub fn tsIndexSignatureAhead(s: *State) bool {
     const saved_cursor = lookahead.takeLexerCursorSnapshot(s);
     defer lookahead.restoreLexerCursorSnapshot(s, saved_cursor);
     var first = s.lex.next() catch return false;
-    const first_kind = first.val;
+    const first_kind = first.kind;
     s.lex.freeToken(&first);
     if (!tsKindIsIdentifierLike(first_kind)) return false;
     var second = s.lex.next() catch return false;
     defer s.lex.freeToken(&second);
-    return second.val == .colon;
+    return second.kind == .colon;
 }
 
 pub fn tsSkipIndexSignature(s: *State) Error!void {
@@ -1244,7 +1244,7 @@ fn tsCanFollowTypeArgumentsInExpression(s: *State) bool {
     return !tsTokenStartsExpression(k);
 }
 
-fn tsIsBinaryOperatorKind(k: tok.TokenKind) bool {
+fn tsIsBinaryOperatorKind(k: tok.Kind) bool {
     return switch (k) {
         .star, .slash, .percent, .amp, .pipe, .caret, .question => true,
         .pow, .shl, .sar, .shr, .lte, .gte, .eq, .strict_eq, .neq, .strict_neq, .land, .lor, .double_question_mark, .kw_in, .kw_instanceof => true,
@@ -1252,8 +1252,8 @@ fn tsIsBinaryOperatorKind(k: tok.TokenKind) bool {
     };
 }
 
-fn tsTokenStartsExpression(k: tok.TokenKind) bool {
-    if (tsKindIsIdentifierLike(k) or tok.isKeyword(k)) return true;
+fn tsTokenStartsExpression(k: tok.Kind) bool {
+    if (tsKindIsIdentifierLike(k) or k.isKeyword()) return true;
     return switch (k) {
         .number, .string, .template, .regexp, .private_name, .inc, .dec, .div_assign => true,
         .lparen, .lbracket, .lbrace, .slash, .plus, .minus, .tilde, .bang, .lt => true,
@@ -1272,12 +1272,12 @@ pub fn tsImportAliasAhead(s: *State) bool {
     const saved_cursor = lookahead.takeLexerCursorSnapshot(s);
     defer lookahead.restoreLexerCursorSnapshot(s, saved_cursor);
     var first = s.lex.next() catch return false;
-    const first_kind = first.val;
+    const first_kind = first.kind;
     s.lex.freeToken(&first);
     if (!tsKindIsIdentifierLike(first_kind)) return false;
     var second = s.lex.next() catch return false;
     defer s.lex.freeToken(&second);
-    return second.val == .assign;
+    return second.kind == .assign;
 }
 
 /// `import x = A.B.C;` lowers to `const x = A.B.C;`. `require(...)` is
@@ -1301,8 +1301,8 @@ pub fn tsParseImportAlias(s: *State, export_decl: bool) Error!void {
         try s.advance();
         const name = if (identifiers.isIdentifierLikeToken(s))
             identifiers.identifierLikeAtom(s)
-        else if (tok.isKeyword(s.peekKind()))
-            tok.keywordAtom(s.peekKind())
+        else if (s.peekKind().isKeyword())
+            s.peekKind().keywordAtom()
         else
             return s.failExpectedDescription("property name");
         try Emitter.opAtom(s, opcode.op.get_field, name);
@@ -1323,15 +1323,15 @@ pub fn tsImportTypeModifier(s: *State) bool {
     defer lookahead.restoreLexerCursorSnapshot(s, saved_cursor);
     var first = s.lex.next() catch return false;
     defer s.lex.freeToken(&first);
-    if (first.val == .lbrace or first.val == .star) return true;
-    if (!tsKindIsIdentifierLike(first.val)) return false;
-    const first_is_from = first.val == .ident and !first.payload.ident.has_escape and
+    if (first.kind == .lbrace or first.kind == .star) return true;
+    if (!tsKindIsIdentifierLike(first.kind)) return false;
+    const first_is_from = first.kind == .ident and !first.payload.ident.has_escape and
         identifiers.atomNameEquals(s, first.payload.ident.atom, "from");
     if (!first_is_from) return true;
     var second = s.lex.next() catch return false;
     defer s.lex.freeToken(&second);
-    if (second.val == .assign) return true;
-    return second.val == .ident and !second.payload.ident.has_escape and
+    if (second.kind == .assign) return true;
+    return second.kind == .ident and !second.payload.ident.has_escape and
         identifiers.atomNameEquals(s, second.payload.ident.atom, "from");
 }
 
@@ -1342,18 +1342,18 @@ pub fn tsSpecifierTypeModifier(s: *State) bool {
     defer lookahead.restoreLexerCursorSnapshot(s, saved_cursor);
     var first = s.lex.next() catch return false;
     defer s.lex.freeToken(&first);
-    const first_is_name = modules.isModuleNameToken(first.val);
+    const first_is_name = modules.isModuleNameToken(first.kind);
     if (!first_is_name) return false;
-    const first_is_as = first.val == .ident and !first.payload.ident.has_escape and
+    const first_is_as = first.kind == .ident and !first.payload.ident.has_escape and
         identifiers.atomNameEquals(s, first.payload.ident.atom, "as");
     if (!first_is_as) return true;
     // `{ type as ... }`
     var second = s.lex.next() catch return false;
     defer s.lex.freeToken(&second);
-    const second_is_as = second.val == .ident and !second.payload.ident.has_escape and
+    const second_is_as = second.kind == .ident and !second.payload.ident.has_escape and
         identifiers.atomNameEquals(s, second.payload.ident.atom, "as");
     if (second_is_as) return true; // `{ type as as X }`
-    if (modules.isModuleNameToken(second.val)) return false; // `{ type as X }`
+    if (modules.isModuleNameToken(second.kind)) return false; // `{ type as X }`
     return true; // `{ type as }`
 }
 
@@ -1433,7 +1433,7 @@ fn tsEnumMemberName(s: *State) Error!Atom {
         try s.advance();
         return atom_id;
     }
-    if (identifiers.isIdentifierLikeToken(s) or tok.isKeyword(k)) {
+    if (identifiers.isIdentifierLikeToken(s) or k.isKeyword()) {
         const atom_id = identifiers.identifierLikeAtom(s);
         try s.advance();
         return atom_id;
@@ -1462,7 +1462,7 @@ fn tsTryFoldEnumInitializer(s: *State, enum_atom: Atom, members: []const TsEnumM
     return null;
 }
 
-fn tsEnumBinaryPrecedence(k: tok.TokenKind) ?u8 {
+fn tsEnumBinaryPrecedence(k: tok.Kind) ?u8 {
     return switch (k) {
         .pipe => 1,
         .caret => 2,
@@ -1496,7 +1496,7 @@ fn tsFoldEnumBinary(s: *State, enum_atom: Atom, members: []const TsEnumMember, m
     }
 }
 
-fn tsFoldEnumApply(s: *State, op: tok.TokenKind, left: TsEnumValue, right: TsEnumValue) Error!?TsEnumValue {
+fn tsFoldEnumApply(s: *State, op: tok.Kind, left: TsEnumValue, right: TsEnumValue) Error!?TsEnumValue {
     if (left == .string or right == .string) {
         if (op != .plus or left != .string or right != .string) return null;
         const joined = try s.scratch.alloc(u8, left.string.len + right.string.len);
@@ -1587,7 +1587,7 @@ fn tsFoldEnumPrimary(s: *State, enum_atom: Atom, members: []const TsEnumMember) 
         try s.advance();
         if (name == enum_atom and s.peekKind() == .dot) {
             try s.advance();
-            if (!identifiers.isIdentifierLikeToken(s) and !tok.isKeyword(s.peekKind())) return null;
+            if (!identifiers.isIdentifierLikeToken(s) and !s.peekKind().isKeyword()) return null;
             name = identifiers.identifierLikeAtom(s);
             try s.advance();
         }

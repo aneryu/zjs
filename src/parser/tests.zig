@@ -135,8 +135,8 @@ test "F1.5: every keyword token maps to its predefined atom" {
         var lx = env.lexer(c[0]);
         var tok = try lx.next();
         defer freeToken(&lx, &tok);
-        try std.testing.expectEqual(@as(t.TokenKind, c[1]), tok.val);
-        const ka = t.keywordAtom(c[1]);
+        try std.testing.expectEqual(@as(t.Kind, c[1]), tok.kind);
+        const ka = @as(t.Kind, c[1]).keywordAtom();
         try std.testing.expectEqual(tok.payload.ident.atom, ka);
         const expected_atom = try env.rt.atoms.internString(c[2]);
         try std.testing.expectEqual(expected_atom, ka);
@@ -151,7 +151,7 @@ test "F1: of remains an identifier in ordinary lexing" {
     var tok = try lx.next();
     defer freeToken(&lx, &tok);
 
-    try std.testing.expectEqual(t.Kind.ident, tok.val);
+    try std.testing.expectEqual(t.Kind.ident, tok.kind);
     const name = env.rt.atoms.name(tok.payload.ident.atom).?;
     try std.testing.expectEqualStrings("of", name);
 }
@@ -162,7 +162,7 @@ test "F1: freeToken releases its identifier atom owner" {
 
     var lx = env.lexer("lexer_token_owned_probe_s5");
     var tok = try lx.next();
-    try std.testing.expectEqual(t.Kind.ident, tok.val);
+    try std.testing.expectEqual(t.Kind.ident, tok.kind);
     try std.testing.expect(env.rt.atoms.name(tok.payload.ident.atom) != null);
 
     lx.freeToken(&tok);
@@ -194,18 +194,18 @@ test "F1: punctuators use raw ASCII for single-character tokens" {
     inline for ("(){};,:") |ch| {
         var tok = try lx.next();
         defer freeToken(&lx, &tok);
-        try std.testing.expectEqual(@as(t.TokenKind, @enumFromInt(ch)), tok.val);
+        try std.testing.expectEqual(@as(t.Kind, @enumFromInt(ch)), tok.kind);
     }
     var eof = try lx.next();
     defer freeToken(&lx, &eof);
-    try std.testing.expectEqual(t.Kind.eof, eof.val);
+    try std.testing.expectEqual(t.Kind.eof, eof.kind);
 }
 
 test "F1: multi-character operator sequences land on TOK_* values" {
     var env = try LexerTestEnv.init();
     defer env.deinit();
 
-    const Case = struct { src: []const u8, val: t.TokenKind };
+    const Case = struct { src: []const u8, val: t.Kind };
     const cases = [_]Case{
         .{ .src = "===", .val = .strict_eq },
         .{ .src = "!==", .val = .strict_neq },
@@ -235,7 +235,7 @@ test "F1: multi-character operator sequences land on TOK_* values" {
         var lx = env.lexer(c.src);
         var tok = try lx.next();
         defer freeToken(&lx, &tok);
-        try std.testing.expectEqual(c.val, tok.val);
+        try std.testing.expectEqual(c.val, tok.kind);
     }
 }
 
@@ -262,7 +262,7 @@ test "F1.2: numeric literals (decimal, hex, octal, binary, exponent, separators)
         var lx = env.lexer(c.src);
         var tok = try lx.next();
         defer freeToken(&lx, &tok);
-        try std.testing.expectEqual(t.Kind.number, tok.val);
+        try std.testing.expectEqual(t.Kind.number, tok.kind);
         try std.testing.expect(!tok.payload.num.is_bigint);
         try std.testing.expectApproxEqAbs(c.expected, tok.payload.num.value, 1e-9);
     }
@@ -317,7 +317,7 @@ test "F1.2: numeric literals have no 128-byte length cap" {
         var lx = env.lexer(c.src);
         var tok = try lx.next();
         defer freeToken(&lx, &tok);
-        try std.testing.expectEqual(t.Kind.number, tok.val);
+        try std.testing.expectEqual(t.Kind.number, tok.kind);
         try std.testing.expect(!tok.payload.num.is_bigint);
         if (std.math.isInf(c.expected)) {
             try std.testing.expect(std.math.isPositiveInf(tok.payload.num.value));
@@ -334,7 +334,7 @@ test "F1.2: bigint suffix records is_bigint and source text" {
     var lx = env.lexer("9007199254740993n");
     var tok = try lx.next();
     defer freeToken(&lx, &tok);
-    try std.testing.expectEqual(t.Kind.number, tok.val);
+    try std.testing.expectEqual(t.Kind.number, tok.kind);
     try std.testing.expect(tok.payload.num.is_bigint);
     try std.testing.expectEqualStrings("9007199254740993", tok.payload.num.bigint_text);
 }
@@ -346,7 +346,7 @@ test "F1.2: string escapes (basic, hex, unicode short and braced, surrogate pair
     var lx = env.lexer("\"a\\nb\\tc\\x41\\u0041\\u{1F600}\"");
     var tok = try lx.next();
     defer freeToken(&lx, &tok);
-    try std.testing.expectEqual(t.Kind.string, tok.val);
+    try std.testing.expectEqual(t.Kind.string, tok.kind);
     // a\nb\tcAA<U+1F600>  — last cp encodes to F0 9F 98 80
     const want = "a\nb\tcAA\xF0\x9F\x98\x80";
     try std.testing.expectEqualStrings(want, tok.payload.str.bytes);
@@ -360,7 +360,7 @@ test "M3.1 F4: string lexer preserves lone surrogate escapes as code units" {
     var lx = env.lexer("\"\\uD800\"");
     var tok = try lx.next();
     defer freeToken(&lx, &tok);
-    try std.testing.expectEqual(t.Kind.string, tok.val);
+    try std.testing.expectEqual(t.Kind.string, tok.kind);
     try std.testing.expectEqualStrings("\xED\xA0\x80", tok.payload.str.bytes);
 }
 
@@ -371,7 +371,7 @@ test "F1.2: line continuation in string and \\0 NUL escape" {
     var lx = env.lexer("'foo\\\nbar\\0z'");
     var tok = try lx.next();
     defer freeToken(&lx, &tok);
-    try std.testing.expectEqual(t.Kind.string, tok.val);
+    try std.testing.expectEqual(t.Kind.string, tok.kind);
     const want = "foobar\x00z";
     try std.testing.expectEqualStrings(want, tok.payload.str.bytes);
 }
@@ -413,14 +413,14 @@ test "F1.2: template head/middle/tail produce TemplatePart classification" {
     var lx = env.lexer("`a${1}b${2}c`");
     var head = try lx.next();
     defer freeToken(&lx, &head);
-    try std.testing.expectEqual(t.Kind.template, head.val);
+    try std.testing.expectEqual(t.Kind.template, head.kind);
     try std.testing.expectEqual(t.TemplatePart.head, head.payload.str.template.?);
     try std.testing.expectEqualStrings("a", head.payload.str.bytes);
 
     // Substitution: parser would consume `1` and `}`. Skip the number here.
     var num1 = try lx.next();
     defer freeToken(&lx, &num1);
-    try std.testing.expectEqual(t.Kind.number, num1.val);
+    try std.testing.expectEqual(t.Kind.number, num1.kind);
 
     // After the parser sees the closing `}`, it asks for the next part.
     var middle = try lx.nextTemplatePart();
@@ -430,7 +430,7 @@ test "F1.2: template head/middle/tail produce TemplatePart classification" {
 
     var num2 = try lx.next();
     defer freeToken(&lx, &num2);
-    try std.testing.expectEqual(t.Kind.number, num2.val);
+    try std.testing.expectEqual(t.Kind.number, num2.kind);
 
     var tail = try lx.nextTemplatePart();
     defer freeToken(&lx, &tail);
@@ -482,7 +482,7 @@ test "F1.2: regex literal exposes pattern and flags" {
     var lx = env.lexer("/a[bc]\\/d/gi");
     var tok = try lx.rescanRegexp(0);
     defer freeToken(&lx, &tok);
-    try std.testing.expectEqual(t.Kind.regexp, tok.val);
+    try std.testing.expectEqual(t.Kind.regexp, tok.kind);
     try std.testing.expectEqualStrings("a[bc]\\/d", tok.payload.regexp.pattern);
     try std.testing.expectEqualStrings("gi", tok.payload.regexp.flags);
 }
@@ -494,11 +494,11 @@ test "F1.2: regex literal may begin with equals after slash rescan" {
     var lx = env.lexer("/=/g");
     var div_assign = try lx.next();
     defer freeToken(&lx, &div_assign);
-    try std.testing.expectEqual(t.Kind.div_assign, div_assign.val);
+    try std.testing.expectEqual(t.Kind.div_assign, div_assign.kind);
 
     var tok = try lx.rescanRegexp(lx.mark_pos);
     defer freeToken(&lx, &tok);
-    try std.testing.expectEqual(t.Kind.regexp, tok.val);
+    try std.testing.expectEqual(t.Kind.regexp, tok.kind);
     try std.testing.expectEqualStrings("=", tok.payload.regexp.pattern);
     try std.testing.expectEqualStrings("g", tok.payload.regexp.flags);
 }
@@ -512,7 +512,7 @@ test "F1.3: private name keeps the # prefix in the atom" {
     var lx = env.lexer("#secret");
     var tok = try lx.next();
     defer freeToken(&lx, &tok);
-    try std.testing.expectEqual(t.Kind.private_name, tok.val);
+    try std.testing.expectEqual(t.Kind.private_name, tok.kind);
     try std.testing.expectEqualStrings("#secret", env.rt.atoms.name(tok.payload.ident.atom).?);
 }
 
@@ -523,7 +523,7 @@ test "F1.3: unicode escape inside identifier is decoded into the atom" {
     var lx = env.lexer("\\u0061sync");
     var tok = try lx.next();
     defer freeToken(&lx, &tok);
-    try std.testing.expectEqual(t.Kind.ident, tok.val);
+    try std.testing.expectEqual(t.Kind.ident, tok.kind);
     try std.testing.expect(tok.payload.ident.has_escape);
     try std.testing.expectEqualStrings("async", env.rt.atoms.name(tok.payload.ident.atom).?);
 }
@@ -535,7 +535,7 @@ test "F1.3: escaped keyword spelling is treated as identifier (per spec)" {
     var lx = env.lexer("\\u0069f"); // \u0069f = "if"
     var tok = try lx.next();
     defer freeToken(&lx, &tok);
-    try std.testing.expectEqual(t.Kind.ident, tok.val); // not TOK_IF
+    try std.testing.expectEqual(t.Kind.ident, tok.kind); // not TOK_IF
     try std.testing.expectEqualStrings("if", env.rt.atoms.name(tok.payload.ident.atom).?);
 }
 
@@ -546,7 +546,7 @@ test "F1.3: raw Unicode identifier start accepts ID_Start and rejects emoji" {
     var good = env.lexer("\xCF\x80");
     var good_tok = try good.next();
     defer freeToken(&good, &good_tok);
-    try std.testing.expectEqual(t.Kind.ident, good_tok.val);
+    try std.testing.expectEqual(t.Kind.ident, good_tok.kind);
     try std.testing.expectEqualStrings("\xCF\x80", env.rt.atoms.name(good_tok.payload.ident.atom).?);
 
     var bad = env.lexer("\xF0\x9F\x98\x80");
@@ -602,7 +602,7 @@ test "F1: end-to-end lex of a small program" {
         \\
     );
 
-    const expected = [_]t.TokenKind{
+    const expected = [_]t.Kind{
         .kw_const,    .ident,  .assign,    .number,    .semicolon,
         .kw_function, .ident,  .lparen,    .ident,     .comma,
         .ident,       .rparen, .lbrace,    .kw_return, .ident,
@@ -613,7 +613,7 @@ test "F1: end-to-end lex of a small program" {
     for (expected) |want| {
         var tok = try lx.next();
         defer freeToken(&lx, &tok);
-        try std.testing.expectEqual(want, tok.val);
+        try std.testing.expectEqual(want, tok.kind);
     }
 }
 
@@ -625,21 +625,21 @@ test "F1: HTML comments are stripped in script mode but rejected in module mode"
         var lx = env.lexer("a <!-- comment\nb");
         var a = try lx.next();
         defer freeToken(&lx, &a);
-        try std.testing.expectEqual(t.Kind.ident, a.val);
+        try std.testing.expectEqual(t.Kind.ident, a.kind);
         var b = try lx.next();
         defer freeToken(&lx, &b);
-        try std.testing.expectEqual(t.Kind.ident, b.val);
+        try std.testing.expectEqual(t.Kind.ident, b.kind);
     }
     {
         var lx = env.lexer("a <!-- comment\nb");
         lx.is_module = true;
         var a = try lx.next();
         defer freeToken(&lx, &a);
-        try std.testing.expectEqual(t.Kind.ident, a.val);
+        try std.testing.expectEqual(t.Kind.ident, a.kind);
         // In module mode `<` is a punctuator, so the next token is `<`.
         var lt = try lx.next();
         defer freeToken(&lx, &lt);
-        try std.testing.expectEqual(t.Kind.lt, lt.val);
+        try std.testing.expectEqual(t.Kind.lt, lt.kind);
     }
 }
 
@@ -650,67 +650,7 @@ test "F1: hashbang at start of file is skipped, but not later" {
     var lx = env.lexer("#!/usr/bin/env zjs\n42");
     var tok = try lx.next();
     defer freeToken(&lx, &tok);
-    try std.testing.expectEqual(t.Kind.number, tok.val);
-}
-
-test "F1.5: keyword block atom layout matches quickjs-atom.h ordering" {
-    var env = try LexerTestEnv.init();
-    defer env.deinit();
-
-    // Walk every keyword TOK_* and verify the keywordAtom() result
-    // resolves to the expected predefined-atom string.
-    const expected = [_]struct { val: t.TokenKind, name: []const u8 }{
-        .{ .val = .kw_null, .name = "null" },
-        .{ .val = .kw_false, .name = "false" },
-        .{ .val = .kw_true, .name = "true" },
-        .{ .val = .kw_if, .name = "if" },
-        .{ .val = .kw_else, .name = "else" },
-        .{ .val = .kw_return, .name = "return" },
-        .{ .val = .kw_var, .name = "var" },
-        .{ .val = .kw_this, .name = "this" },
-        .{ .val = .kw_delete, .name = "delete" },
-        .{ .val = .kw_void, .name = "void" },
-        .{ .val = .kw_typeof, .name = "typeof" },
-        .{ .val = .kw_new, .name = "new" },
-        .{ .val = .kw_in, .name = "in" },
-        .{ .val = .kw_instanceof, .name = "instanceof" },
-        .{ .val = .kw_do, .name = "do" },
-        .{ .val = .kw_while, .name = "while" },
-        .{ .val = .kw_for, .name = "for" },
-        .{ .val = .kw_break, .name = "break" },
-        .{ .val = .kw_continue, .name = "continue" },
-        .{ .val = .kw_switch, .name = "switch" },
-        .{ .val = .kw_case, .name = "case" },
-        .{ .val = .kw_default, .name = "default" },
-        .{ .val = .kw_throw, .name = "throw" },
-        .{ .val = .kw_try, .name = "try" },
-        .{ .val = .kw_catch, .name = "catch" },
-        .{ .val = .kw_finally, .name = "finally" },
-        .{ .val = .kw_function, .name = "function" },
-        .{ .val = .kw_debugger, .name = "debugger" },
-        .{ .val = .kw_with, .name = "with" },
-        .{ .val = .kw_class, .name = "class" },
-        .{ .val = .kw_const, .name = "const" },
-        .{ .val = .kw_enum, .name = "enum" },
-        .{ .val = .kw_export, .name = "export" },
-        .{ .val = .kw_extends, .name = "extends" },
-        .{ .val = .kw_import, .name = "import" },
-        .{ .val = .kw_super, .name = "super" },
-        .{ .val = .kw_implements, .name = "implements" },
-        .{ .val = .kw_interface, .name = "interface" },
-        .{ .val = .kw_let, .name = "let" },
-        .{ .val = .kw_package, .name = "package" },
-        .{ .val = .kw_private, .name = "private" },
-        .{ .val = .kw_protected, .name = "protected" },
-        .{ .val = .kw_public, .name = "public" },
-        .{ .val = .kw_static, .name = "static" },
-        .{ .val = .kw_yield, .name = "yield" },
-        .{ .val = .kw_await, .name = "await" },
-    };
-    for (expected) |e| {
-        const ka = t.keywordAtom(e.val);
-        try std.testing.expectEqualStrings(e.name, env.rt.atoms.name(ka).?);
-    }
+    try std.testing.expectEqual(t.Kind.number, tok.kind);
 }
 
 const TestEnv = ParserTestEnv;
@@ -4980,7 +4920,7 @@ test "F6: identifier arrow lookahead preserves trivia and line terminators" {
         defer lx.deinit();
         var ident = try lx.next();
         defer lx.freeToken(&ident);
-        try std.testing.expectEqual(t.Kind.ident, ident.val);
+        try std.testing.expectEqual(t.Kind.ident, ident.kind);
         try std.testing.expectEqual(case[1], lx.simpleNextIsArrowNoLineTerminator());
     }
 
@@ -5016,7 +4956,7 @@ test "F6: parenthesized arrow lookahead skips only context-free source" {
         defer lx.deinit();
         var open = try lx.next();
         defer lx.freeToken(&open);
-        try std.testing.expectEqual(t.Kind.lparen, open.val);
+        try std.testing.expectEqual(t.Kind.lparen, open.kind);
         try std.testing.expectEqual(@as(?bool, case[1]), lx.simpleCurrentParenIsArrowHead());
     }
 
@@ -5030,7 +4970,7 @@ test "F6: parenthesized arrow lookahead skips only context-free source" {
         defer lx.deinit();
         var open = try lx.next();
         defer lx.freeToken(&open);
-        try std.testing.expectEqual(t.Kind.lparen, open.val);
+        try std.testing.expectEqual(t.Kind.lparen, open.kind);
         try std.testing.expectEqual(@as(?bool, null), lx.simpleCurrentParenIsArrowHead());
     }
 
@@ -13461,7 +13401,7 @@ pub const phase_ownership = struct {
             try parser_core.parseDirectives(&self.state);
             try parser_core.parseProgramStatements(&self.state, .{ .func = true, .func_with_label = true, .other = true });
             try self.state.emitReturnUndefined();
-            try std.testing.expectEqual(t.Kind.eof, self.state.token.val);
+            try std.testing.expectEqual(t.Kind.eof, self.state.token.kind);
         }
 
         pub fn deinit(self: *Window) void {

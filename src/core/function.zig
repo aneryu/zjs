@@ -159,9 +159,14 @@ fn nativeFunctionWithClass(
     name: []const u8,
     length: i32,
 ) !JSValue {
-    const function_object = try Object.createWithOwnPropertyCapacity(rt, class_id, prototype, 2);
-    try publishNativeFunctionMetadata(rt, function_object, name, length);
-    return function_object.value();
+    var values = [_]JSValue{if (prototype) |object| object.value() else JSValue.nullValue()};
+    const slots: []JSValue = &values;
+    const slices = [_]runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    const function_object = try Object.createWithOwnPropertyCapacity(rt, class_id, if (values[0].is(.object)) Object.fromHeader(values[0].refHeader().?) else null, 2);
+    return publishNativeFunctionMetadata(rt, function_object, name, length);
 }
 
 /// Construct a true QuickJS C_FUNCTION. The realm owner is installed before
@@ -186,39 +191,34 @@ pub fn nativeFunctionWithPrototypeAndCapacity(
 ) !JSValue {
     std.debug.assert(capacity >= 2);
     const rt = realm.runtime;
-    const function_object = try Object.createWithOwnPropertyCapacity(rt, class.ids.c_function, prototype, capacity);
+    var values = [_]JSValue{if (prototype) |object| object.value() else JSValue.nullValue()};
+    const slots: []JSValue = &values;
+    const slices = [_]runtime.ValueRootSlice{.{ .mutable = &slots }};
+    const headers = [_]runtime.HeaderRootValue{.{ .header = &realm.header }};
+    var roots = runtime.ValueRootFrame{ .slices = &slices, .headers = &headers };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    const function_object = try Object.createWithOwnPropertyCapacity(rt, class.ids.c_function, if (values[0].is(.object)) Object.fromHeader(values[0].refHeader().?) else null, capacity);
     function_object.setNativeFunctionRealm(realm);
-    try publishNativeFunctionMetadata(rt, function_object, name, length);
-    return function_object.value();
+    return publishNativeFunctionMetadata(rt, function_object, name, length);
 }
 
-/// Name, length, and dispatch-atom intern can collect. Exact-mark tests do
-/// not treat the Zig `*Object` as a root unless it is named here; CLI STW
-/// keeps conservative as backup for this scalar frame.
+/// Metadata publication can collect. Root the function and its name in all
+/// builds, refresh the owner after allocation, and return the updated value.
 fn publishNativeFunctionMetadata(
     rt: *JSRuntime,
     function_object: *Object,
     name: []const u8,
     length: i32,
-) !void {
-    if (comptime runtime.value_root_frames_enabled) {
-        var holder: ?*Object = function_object;
-        var obj_roots = runtime.rootObjects(.{&holder});
-        obj_roots.activate(rt);
-        defer obj_roots.deactivate(rt);
-        return publishNativeFunctionMetadataWork(rt, function_object, name, length);
-    }
-    return publishNativeFunctionMetadataWork(rt, function_object, name, length);
-}
-
-fn publishNativeFunctionMetadataWork(
-    rt: *JSRuntime,
-    function_object: *Object,
-    name: []const u8,
-    length: i32,
-) !void {
+) !JSValue {
+    var values = [_]JSValue{ function_object.value(), JSValue.undefinedValue() };
+    const slots: []JSValue = &values;
+    const slices = [_]runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
     const length_key = atom.predefinedId("length", .string).?;
-    try function_object.defineOwnPropertyAssumingNew(rt, length_key, Descriptor.data(JSValue.int32(length), .{ .configurable = true }));
+    try Object.fromHeader(values[0].refHeader().?).defineOwnPropertyAssumingNew(rt, length_key, Descriptor.data(JSValue.int32(length), .{ .configurable = true }));
 
     const name_string = if (name.len == 0)
         try rt.emptyString()
@@ -226,14 +226,15 @@ fn publishNativeFunctionMetadataWork(
         try string.String.createAscii(rt, name)
     else
         try string.String.createUtf8(rt, name);
-    const name_value = name_string.value();
+    values[1] = name_string.value();
 
     const name_key = atom.predefinedId("name", .string).?;
-    try function_object.defineOwnPropertyAssumingNew(rt, name_key, Descriptor.data(name_value, .{ .configurable = true }));
+    try Object.fromHeader(values[0].refHeader().?).defineOwnPropertyAssumingNew(rt, name_key, Descriptor.data(values[1], .{ .configurable = true }));
 
     const dispatch_atom = try rt.internAtom(name);
     // TGC S3 §2.3: this stores an atom id into a published function payload.
-    function_object.nativeDispatchNameSlot().* = dispatch_atom;
+    Object.fromHeader(values[0].refHeader().?).nativeDispatchNameSlot().* = dispatch_atom;
+    return values[0];
 }
 
 /// Construct a C_FUNCTION_DATA-style callable with the construction realm's
@@ -268,10 +269,17 @@ pub fn nativeFunctionForGlobal(rt: *JSRuntime, global: *Object, name: []const u8
 /// caller can write `nativeFunctionIdSlot` without a second Get.
 pub fn defineNativeMethod(realm: *RealmContext, target: *Object, name: []const u8, length: i32) !JSValue {
     const rt = realm.runtime;
+    var values = [_]JSValue{ target.value(), JSValue.undefinedValue() };
+    const slots: []JSValue = &values;
+    const slices = [_]runtime.ValueRootSlice{.{ .mutable = &slots }};
+    const headers = [_]runtime.HeaderRootValue{.{ .header = &realm.header }};
+    var roots = runtime.ValueRootFrame{ .slices = &slices, .headers = &headers };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
     const function_proto = realm.cached_function_proto orelse return error.InvalidBuiltinRegistry;
-    const method = try nativeDataFunctionWithPrototype(rt, function_proto, name, length);
-    try defineMethodData(rt, target, name, method, true, false, true);
-    return method;
+    values[1] = try nativeDataFunctionWithPrototype(rt, function_proto, name, length);
+    try defineMethodData(rt, Object.fromHeader(values[0].refHeader().?), name, values[1], true, false, true);
+    return values[1];
 }
 
 fn defineMethodData(
@@ -283,9 +291,10 @@ fn defineMethodData(
     enumerable: bool,
     configurable: bool,
 ) !void {
-    var target_value = target.value();
-    var rooted_value = value;
-    var root_frame = runtime.rootValues(.{ &target_value, &rooted_value });
+    var values = [_]JSValue{ target.value(), value };
+    const slots: []JSValue = &values;
+    const slices = [_]runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var root_frame = runtime.ValueRootFrame{ .slices = &slices };
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
@@ -295,5 +304,5 @@ fn defineMethodData(
     var key_roots = runtime.rootAtoms(.{&key});
     key_roots.activate(rt);
     defer key_roots.deactivate(rt);
-    try target.defineOwnProperty(rt, key, Descriptor.data(rooted_value, .{ .writable = writable, .enumerable = enumerable, .configurable = configurable }));
+    try Object.fromHeader(values[0].refHeader().?).defineOwnProperty(rt, key, Descriptor.data(values[1], .{ .writable = writable, .enumerable = enumerable, .configurable = configurable }));
 }

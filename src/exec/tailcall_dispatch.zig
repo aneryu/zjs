@@ -232,7 +232,8 @@ pub const Vm = struct {
         self.property_holder = undefined;
         self.property_atom = undefined;
         self.local_fast_blocked = undefined;
-        self.return_value = undefined;
+        // Traced from the owning Machine (`inline_calls.traceMachine`).
+        self.return_value = JSValue.undefinedValue();
         self.return_action = undefined;
         self.return_payload = undefined;
         self.pending_error = undefined;
@@ -2927,9 +2928,8 @@ pub fn opPutVarRef(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
     std.debug.assert(vm.var_refs_base == vm.frame.var_refs.ptr);
     const cell = vm.var_refs_base[idx];
     cell.pvalue.* = (sp - 1)[0];
-    // The cell owns this slot and outlives the frame: the same barrier
-    // `VarRef.setVarRefValue` takes, written directly here.
-    vm.ctx.runtime.gc.generationalBarrier(&cell.header, (sp - 1)[0].cycleMarkHeader());
+    // The same barrier `VarRef.setVarRefValue` takes, written directly here.
+    vm.ctx.runtime.gc.generationalBarrier(cell.slotOwner(), (sp - 1)[0].cycleMarkHeader());
     return cont(pc + advance, sp - 1, var_buf, vm);
 }
 
@@ -2949,8 +2949,8 @@ pub fn op_put_var_ref_check(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue
     // qjs set_value: the displaced value is the OLD cell value, never the
     // operand slot, so no stack shrink is needed before it dies.
     cell.pvalue.* = (sp - 1)[0];
-    // See the barrier in the opPutVarRef family: the cell owns this slot.
-    vm.ctx.runtime.gc.generationalBarrier(&cell.header, (sp - 1)[0].cycleMarkHeader());
+    // The same barrier `VarRef.setVarRefValue` takes, written directly here.
+    vm.ctx.runtime.gc.generationalBarrier(cell.slotOwner(), (sp - 1)[0].cycleMarkHeader());
     return cont(pc + 3, sp - 1, var_buf, vm);
 }
 
@@ -2973,9 +2973,8 @@ pub fn opSetVarRef(pc: [*]const u8, sp: [*]JSValue, var_buf: [*]JSValue, vm: *Vm
     std.debug.assert(vm.var_refs_base == vm.frame.var_refs.ptr);
     const cell = vm.var_refs_base[idx];
     cell.pvalue.* = (sp - 1)[0];
-    // The cell owns this slot and outlives the frame: the same barrier
-    // `VarRef.setVarRefValue` takes, written directly here.
-    vm.ctx.runtime.gc.generationalBarrier(&cell.header, (sp - 1)[0].cycleMarkHeader());
+    // The same barrier `VarRef.setVarRefValue` takes, written directly here.
+    vm.ctx.runtime.gc.generationalBarrier(cell.slotOwner(), (sp - 1)[0].cycleMarkHeader());
     return cont(pc + advance, sp, var_buf, vm);
 }
 
@@ -5867,13 +5866,6 @@ inline fn reloadAfterPop(vm: *Vm, caller_entry: ?*inline_calls.Entry) Regs {
 /// outcome switch stays inline; the `.returned` / `.tail` arms are outlined so
 /// their temporaries do not enlarge every driver entry.
 pub fn runDispatchLoop(vm: *Vm) HostError!void {
-    // `return_value` carries a completed call's result across the outcome
-    // switch below, and nothing else holds it: the callee's frame and operand
-    // stack -- which are roots -- are gone by then. A non-moving collector
-    // never noticed, because the object stayed where the dead frame left it.
-    var return_value_root = core.runtime.rootValues(.{&vm.return_value});
-    return_value_root.activate(vm.ctx.runtime);
-    defer return_value_root.deactivate(vm.ctx.runtime);
     // qjs prologue hoist: `var_refs = p->u.func.var_refs`.
     vm.var_refs_base = vm.frame.var_refs.ptr;
     vm.local_fast_blocked = vm.machine.depth == 0 and vm.machine.l0.stop_before_pc != null;
@@ -6312,7 +6304,6 @@ comptime {
     _ = &runDispatchLoop;
     _ = dispatch_table;
 }
-
 
 // ----- merged from vm_profile.zig -----
 // Per-opcode profiling support for the tail-call threaded dispatcher.

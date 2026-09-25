@@ -81,12 +81,20 @@ pub const CallSite = struct {
     /// of `initInternal` -- 300 bytes through q registers per builtin call.
     lean: inline_calls.LeanFrame,
     lean_state: enum(u8) { unknown, none, ready },
-    /// Host sites pin callee/receiver through the runtime's persistent root
-    /// ledger; engine-internal sites leave both empty (the callee is already
-    /// rooted by the operand window or the algorithm's owned list).
+    /// Host sites retain global/callee/receiver through movable persistent
+    /// slots; refresh snapshots before use. Internal sites use the in-place
+    /// writable frame below instead of allocating persistent slots.
     pins: Pins = .{},
+    internal_roots: struct {
+        values: [3]JSValue = undefined,
+        view: []JSValue = &.{},
+        slices: [1]core.runtime.ValueRootSlice = undefined,
+        frame: core.runtime.ValueRootFrame = .{},
+        active: bool = false,
+    } = .{},
 
     const Pins = struct {
+        global: core.JSValueHandle = .{},
         callee: core.JSValueHandle = .{},
         this_value: core.JSValueHandle = .{},
     };
@@ -104,13 +112,13 @@ pub const CallSite = struct {
         site.pins.callee = try core.JSValueHandle.init(ctx.runtime, callee);
         errdefer site.pins.callee.deinit();
         site.pins.this_value = try core.JSValueHandle.init(ctx.runtime, this_value);
+        errdefer site.pins.this_value.deinit();
+        site.pins.global = try core.JSValueHandle.init(ctx.runtime, global.value());
         return site;
     }
 
-    /// Engine-internal constructor (the former `SyncInternalCallSite.init`):
-    /// no pin, the callee/receiver are rooted by the caller for the site's
-    /// lifetime. `caller_function`/`caller_frame` feed the root-path
-    /// fallback's backtrace attribution exactly as before.
+    /// Construct an inactive internal site. Immediately call activateRoots at
+    /// its final address, then defer deinit. Do not copy an activated site.
     pub inline fn initInternal(
         ctx: *core.JSContext,
         output: ?*std.Io.Writer,
@@ -152,9 +160,41 @@ pub const CallSite = struct {
     }
 
     pub fn deinit(self: *CallSite) void {
+        if (self.internal_roots.active) {
+            self.internal_roots.frame.deactivate(self.ctx.runtime);
+            self.internal_roots.active = false;
+        }
+        self.pins.global.deinit();
         self.pins.this_value.deinit();
         self.pins.callee.deinit();
         self.route = .generic;
+    }
+
+    /// Allocation-free, in-place registration of actual writable root slots.
+    /// Rooting a caller's copy alone cannot update this site's cached values.
+    pub fn activateRoots(self: *CallSite) void {
+        std.debug.assert(!self.internal_roots.active and self.pins.global.slot == null);
+        const roots = &self.internal_roots;
+        roots.values = .{ self.global.value(), self.this_value, self.callee };
+        roots.view = &roots.values;
+        roots.slices[0] = .{ .mutable = &roots.view };
+        roots.frame = .{ .slices = &roots.slices };
+        roots.frame.activate(self.ctx.runtime);
+        roots.active = true;
+    }
+
+    fn refreshRoots(self: *CallSite) void {
+        std.debug.assert(self.internal_roots.active or self.pins.global.slot != null);
+        const values = if (self.internal_roots.active) self.internal_roots.values else [_]JSValue{ self.pins.global.get(), self.pins.this_value.get(), self.pins.callee.get() };
+        const global = core.Object.fromHeader(values[0].refHeader().?);
+        const receiver = values[1];
+        const callee = values[2];
+        if (global == self.global and callee.same(self.callee) and receiver.same(self.this_value)) return;
+        self.global = global;
+        self.callee = callee;
+        self.this_value = receiver;
+        self.route = resolveRoute(self.ctx, self.output, global, receiver, callee);
+        self.lean_state = .unknown;
     }
 
     /// Call with the site's receiver. Every call polls the interrupt once,
@@ -168,7 +208,8 @@ pub const CallSite = struct {
     /// a native algorithm's loop body does not absorb the call's spill set;
     /// `call` is the by-value convenience wrapper.
     pub noinline fn callInto(self: *CallSite, args: []const JSValue, out: *JSValue) HostError!void {
-        try exception_ops.pollInterrupt(self.ctx, self.global);
+        self.refreshRoots();
+        try pollCallInterrupt(self.ctx, self.global, self.this_value, self.callee, args);
         switch (self.route) {
             .bytecode => |*route| return enterBytecode(null, self.ctx, self.output, self.global, route, &route.target, &self.this_value, &self.callee, args, self.caller_function, self.caller_frame, self.leanFrame(route), out),
             .generic => {},
@@ -238,7 +279,8 @@ pub const CallSite = struct {
     /// immutable template. `this_value` must be rooted by the caller for the
     /// duration of the call.
     pub noinline fn callWithThisInto(self: *CallSite, this_value: JSValue, args: []const JSValue, out: *JSValue) HostError!void {
-        try exception_ops.pollInterrupt(self.ctx, self.global);
+        self.refreshRoots();
+        try pollCallInterrupt(self.ctx, self.global, this_value, self.callee, args);
         switch (self.route) {
             .bytecode => |*route| {
                 var target = route.target;
@@ -316,6 +358,18 @@ pub inline fn callOnceInto(
     }
 }
 
+/// Protect raw ABI snapshots only across the pre-dispatch callback. Once
+/// dispatched, the callee/frame owns its roots and may permit relocation.
+/// Extending this pin through execution would suppress that handoff.
+fn pollCallInterrupt(ctx: *core.JSContext, global: *core.Object, this_value: JSValue, callee: JSValue, args: []const JSValue) HostError!void {
+    const values = [_]JSValue{ global.value(), this_value, callee };
+    const slices = [_]core.runtime.ValueRootSlice{ .{ .borrowed = &values }, .{ .borrowed = args } };
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(ctx.runtime);
+    defer roots.deactivate(ctx.runtime);
+    try exception_ops.pollInterrupt(ctx, global);
+}
+
 inline fn callOnceIntoInternal(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -327,7 +381,7 @@ inline fn callOnceIntoInternal(
     caller_frame: ?*frame_mod.Frame,
     out: *JSValue,
 ) HostError!void {
-    try exception_ops.pollInterrupt(ctx, global);
+    try pollCallInterrupt(ctx, global, this_value, callee, args);
     if (inline_calls.activeInvocation(ctx.runtime)) |active| {
         // Nested host -> JS from inside a running callback: the callee is
         // resolved per call (the one-shot cache below belongs to the idle
@@ -587,7 +641,9 @@ pub const HostInvocation = struct {
     /// `one_shot_pin` is what makes the cached facts sound across calls: the
     /// callee object (and through its FunctionBytecode, its Realm) cannot be
     /// collected and have its address reused under a stale resolution. It is
-    /// released when the cached callee changes and at `destroy`.
+    /// released when the cached callee changes and at `destroy`. Callables
+    /// are never nursery-allocated, so the copying nursery cannot move the
+    /// callee under the address-keyed cache either (asserted on resolve).
     ///
     /// Re-targeting can never race a live call: the cache is read ONLY from
     /// the arm of `call_site.callOnceInto` that requires no active
@@ -730,6 +786,9 @@ pub const HostInvocation = struct {
         self.one_shot_pin.deinit();
         self.one_shot_pin = .{};
         const resolved = inline_calls.resolveInlineFunction(global, callee) orelse return null;
+        // The cache keys on the callee's address; only plain objects and
+        // arrays are nursery-allocated, so a callable never moves.
+        std.debug.assert(!core.gc.Registry.isNurseryHeader(callee.cycleMarkHeader().?));
         // Pin before publishing the resolution: the cached CallFacts and
         // Realm belong to this exact callee object.
         self.one_shot_pin = core.JSValueHandle.init(rt, callee) catch return null;
@@ -774,6 +833,9 @@ pub const HostInvocation = struct {
         std.debug.assert(rt.current_backtrace_frame == &self.backtrace_frame);
         rt.active_invocation = null;
         rt.current_backtrace_frame = self.backtrace_frame.previous;
+        // The idle Machine is not traced; a result left here would dangle by
+        // the next publish, which traces it again.
+        self.machine.vm.return_value = core.JSValue.undefinedValue();
         if (comptime builtin.mode == .Debug or builtin.mode == .ReleaseSafe) self.published = false;
     }
 };

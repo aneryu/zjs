@@ -1,7 +1,7 @@
 # Public API Contract
 
 This document is the active public Zig API authority for embedders. Keep it in
-sync with `src/root.zig`, `src/js_context.zig`, and `src/native.zig`. The
+sync with `src/root.zig` and `src/js_context.zig`. The
 name lists in `tests/embedding_examples.zig` are the executable check:
 adding or removing an embedder name must update those arrays in the same
 commit. They are not a freeze of the API, and they are not the removed
@@ -32,6 +32,16 @@ The public names are:
 Context's Realm-local `Math.random` generator. If omitted, Realm construction
 uses the platform wall clock; zero is remapped to one because the xorshift
 generator cannot leave the zero state.
+
+`Runtime.Options.diagnostic_clock` optionally supplies a
+`Runtime.DiagnosticClock` (`context`, `nowNanos`) for compile/eval, Context
+construction, and GC diagnostic durations. With no hook, duration fields stay
+zero; counters still work. The hook returns monotonic nanoseconds on the Runtime
+owner thread and may be called during GC. Its borrowed context must outlive the
+Runtime; it must not allocate, reenter the engine, or mutate Runtime state.
+Elapsed durations saturate at zero if the clock moves backwards. GC scheduling
+and Realm random seeding do not use this hook. The bundled CLI installs its
+host clock when GC statistics or opcode profiling are requested.
 
 `Context.defineFunction` / `createFunction` take `fn (*Call) E!Value`
 directly. `Context.defineScriptArgs` installs the CLI `scriptArgs` global.
@@ -327,8 +337,13 @@ self-destruct spelling is gone.
 
 `Value.String` is a JavaScript string view. Tag checks, contiguous
 latin1/utf16 unit views, callback-scoped UTF-8 borrows, and owned UTF-8
-conversion are distinct operations. `asString()` is a tag check; it does not run
-ECMAScript `ToString`.
+conversion are distinct operations. The legacy `asString()` does not run
+ECMAScript `ToString`, but it may materialize a rope, allocate and collect;
+exhausted OOM retries panic. Keep the source rooted while acquiring and using
+this borrowed view. `Value.String.fromFlatValue` is the allocation-free flat
+projection. Use `Context.toOwnedUtf8` for owned text without implicit rope
+materialization; internal fallible materialization uses rooted
+`core.string.ensureFlat` inputs and outputs.
 
 `Value.Bytes` is the public byte view for ArrayBuffer and typed-array
 backing memory. `Value.Bytes.Store` supports owned and shared stores with
@@ -343,7 +358,7 @@ A native function is a plain Zig function wrapped at comptime into a
 `NativeEntry`, and the VM dispatches an embedder function exactly like a
 builtin (see [API boundary](api-boundary.md)). There is no
 registry lookup, per-call arena, handle scope, or marshalling framework on
-the call path. `src/native.zig` builds that thunk; embedders do not import
+the call path. `src/js_context.zig` builds that thunk; embedders do not import
 it.
 
 ```zig

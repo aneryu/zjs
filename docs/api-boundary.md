@@ -18,9 +18,9 @@ surface exposes engine primitives while keeping host policy outside core.
 `Runtime`, `Context`, `Value`, and `Call`. The same file
 re-exports engine layers for the CLI, test262, and in-tree tests.
 
-`src/js_context.zig` is the host `Context` facade. `src/native.zig` builds
+`src/js_context.zig` is the host `Context` facade and builds
 the comptime thunk used by `Context.defineFunction`. There is no landed
-`src/kernel/` directory; earlier "kernel API" language maps to these files
+`src/kernel/` directory; earlier "kernel API" language maps to this file
 plus `src/root.zig`.
 
 `src/host/` is the internal `zjs_host` module used by the two bundled
@@ -35,8 +35,8 @@ repository and is an embedder of `Context.defineFunction` like any other.
 
 - `src/core/` must not depend on CLI policy, test262 harness glue, plugin
   loaders, JSI/FFI policy, event-loop policy, or product-runtime APIs.
-- Public embedding APIs are added through `src/root.zig`, `src/js_context.zig`,
-  or `src/native.zig`. Layer re-exports on `src/root.zig`
+- Public embedding APIs are added through `src/root.zig` and `src/js_context.zig`.
+  Layer re-exports on `src/root.zig`
   (`core`, `exec`, `parser`, `JSRuntime`, …) are for in-tree hosts, not a
   second embedder surface.
 - New runtime features should depend on core primitives. Core must not depend

@@ -1,8 +1,8 @@
-//! Pure number-parsing primitives shared by the `Number.parseInt`/`parseFloat`
+//! Number-parsing primitives shared by the `Number.parseInt`/`parseFloat`
 //! and global `parseInt`/`parseFloat` fast paths and their bare-runtime
-//! fallbacks. These are ASCII -> f64 arithmetic parsers with zero exec/VM
-//! dependencies: they only reach `std`, the `libs/{number_format,bigint,unicode}`
-//! helpers, and core value/string/object plumbing. The realm-coercing record
+//! fallbacks. The byte parsers are pure ASCII -> f64 arithmetic. Value adapters
+//! may grow native snapshots, and array rendering can materialize AUTOINIT and
+//! collect. This module has zero exec/VM dependencies. The realm-coercing record
 //! handler and the `Number.prototype.*` formatting methods live in
 //! `src/exec/number_ops.zig`.
 
@@ -13,9 +13,21 @@ const std = @import("std");
 /// QuickJS source map: global parseInt / Number.parseInt. This is still the
 /// narrow subset used by transitional `parse_int` bytecode.
 pub fn parseIntValue(rt: *core.JSRuntime, input: core.JSValue, radix_value: ?core.JSValue) !f64 {
-    if (input.isString()) {
-        const radix = if (radix_value) |value| toInt32(try toNumber(rt, value)) else 0;
-        const str = input.asStringBody().?;
+    var values = [_]core.JSValue{ input, radix_value orelse core.JSValue.undefinedValue() };
+    const live: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &live }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+
+    // Bare-runtime array rendering can materialize inherited AUTOINIT values.
+    // Keep both pending inputs alive, including radix during input rendering.
+    const input_is_string = values[0].isString();
+    var radix: i32 = if (input_is_string) toInt32(try toNumber(rt, values[1])) else 0;
+    if (core.string.asFlat(values[0])) |str| {
+        var borrow = core.runtime.NoGcScope{};
+        borrow.activate(rt);
+        defer borrow.deactivate();
         switch (str.resolveData()) {
             .latin1 => |bytes| return parseIntLatin1Bytes(bytes, radix),
             .utf16 => {},
@@ -24,9 +36,9 @@ pub fn parseIntValue(rt: *core.JSRuntime, input: core.JSValue, radix_value: ?cor
 
     var bytes = std.ArrayList(u8).empty;
     defer bytes.deinit(rt.nativeAllocator());
-    try core.value_string.appendValueString(rt, &bytes, input, .{ .unwrap_wrappers = true });
+    try core.value_string.appendValueString(rt, &bytes, values[0], .{ .unwrap_wrappers = true });
 
-    const radix = if (radix_value) |value| toInt32(try toNumber(rt, value)) else 0;
+    if (!input_is_string) radix = toInt32(try toNumber(rt, values[1]));
     // appendValueString emits UTF-8 (qjs JS_ToCStringLen2, quickjs.c);
     // trim UTF-8 whitespace first, then scan the remainder as already-decoded
     // code units. parseIntLatin1Bytes itself treats each byte as a latin1
@@ -37,8 +49,10 @@ pub fn parseIntValue(rt: *core.JSRuntime, input: core.JSValue, radix_value: ?cor
 /// QuickJS source map: global parseFloat / Number.parseFloat. This is still the
 /// narrow subset used by transitional `parse_float` bytecode.
 pub fn parseFloatValue(rt: *core.JSRuntime, input: core.JSValue) !f64 {
-    if (input.isString()) {
-        const str = input.asStringBody().?;
+    if (core.string.asFlat(input)) |str| {
+        var borrow = core.runtime.NoGcScope{};
+        borrow.activate(rt);
+        defer borrow.deactivate();
         switch (str.resolveData()) {
             .latin1 => |bytes| return parseFloatLatin1Bytes(bytes),
             .utf16 => {},

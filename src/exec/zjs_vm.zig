@@ -130,6 +130,9 @@ pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
     // accessors can resolve that private association, but public Runtime/GC
     // traversal cannot observe it until finishConstruction's commit below.
     ctx.global = global_object;
+    // A minor during bootstrap can promote the realm before the stores that
+    // follow; a child realm is not a root, so each store takes the barrier.
+    ctx.runtime.gc.generationalBarrier(&ctx.header, global_object.gcHeader());
     errdefer {
         ctx.rollbackIntrinsicBootstrap();
         ctx.global = null;
@@ -148,9 +151,11 @@ pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
             ctx.runtime,
             global_object,
         ) catch null;
+        if (ctx.preallocated_oom_error) |value| ctx.runtime.gc.generationalBarrier(&ctx.header, value.cycleMarkHeader());
     }
     const next_eval = try global_object.getProperty(core.atom.predefinedId("eval", .string).?);
     ctx.eval_function = next_eval;
+    ctx.runtime.gc.generationalBarrier(&ctx.header, next_eval.cycleMarkHeader());
     try ctx.finishConstruction();
     return global_object;
 }
@@ -160,6 +165,7 @@ pub fn contextGlobal(ctx: *core.JSContext) !*core.Object {
 /// and the three exit-behaviour flags of `env` are consulted; the remaining
 /// fields are owned by the canonical root builder.
 pub fn runWithArgs(env: CallEnv) !core.JSValue {
+    env.ctx.runtime.assertExecutionAllowed();
     const ctx = env.ctx;
     const result = if (!env.function.isModule())
         runCanonicalRootWithArgs(env)
@@ -310,6 +316,7 @@ fn unpinGlobalForInvocation(env: CallEnv, pinned: ?*core.Object) void {
 }
 
 pub fn runWithCallEnv(env: CallEnv) HostError!core.JSValue {
+    env.ctx.runtime.assertExecutionAllowed();
     const pinned_global = pinGlobalForInvocation(env);
     defer unpinGlobalForInvocation(env, pinned_global);
     if (env.generator_state != null and !env.call_depth_precharged) {
@@ -336,6 +343,7 @@ pub fn runWithCallEnv(env: CallEnv) HostError!core.JSValue {
 /// already completed. This named boundary prevents cross-Realm calls from
 /// charging both caller and callee before the body starts.
 pub fn runWithCallEnvAfterInterruptPoll(env: CallEnv) HostError!core.JSValue {
+    env.ctx.runtime.assertExecutionAllowed();
     // QuickJS performs the bytecode-frame stack guard in the caller Realm
     // immediately after the caller-side interrupt poll, and only then switches
     // to b->realm. Keep both the error prototype and precedence identical.

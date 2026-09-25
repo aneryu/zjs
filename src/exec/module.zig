@@ -331,6 +331,7 @@ fn ensureModuleCaptureCells(
                     closure,
                 );
                 object.replaceModuleCaptureSlotOwned(
+                    ctx.runtime,
                     index,
                     cell,
                 ) catch |err| {
@@ -340,7 +341,7 @@ fn ensureModuleCaptureCells(
             .module_decl => {
                 if (slots[index] != null) continue;
                 const cell = try createModuleDeclarationCell(ctx, closure);
-                object.replaceModuleCaptureSlotOwned(index, cell) catch |err| {
+                object.replaceModuleCaptureSlotOwned(ctx.runtime, index, cell) catch |err| {
                     return err;
                 };
             },
@@ -580,6 +581,7 @@ fn wireModuleImports(state: *LinkState, record: *core.module.ModuleRecord) !void
         const binding = try expectResolvedExport(state, dependency, entry.import_name);
         const owned_cell = try importBindingCell(state.ctx, binding);
         object.replaceModuleCaptureSlotOwned(
+            state.ctx.runtime,
             entry.var_idx,
             owned_cell,
         ) catch |err| {
@@ -626,6 +628,7 @@ fn retainLocalExports(
         if (record.retainedExportCellValue(@intCast(index)) != null) continue;
         const cell = slots[entry.var_idx] orelse return error.InvalidBytecode;
         record.publishRetainedExportCellNoFail(
+            ctx.runtime,
             @intCast(index),
             cell.valueRef(),
         );
@@ -1199,7 +1202,7 @@ fn ensureSyntheticDefaultCell(
         core.JSValue.uninitialized(),
     );
     cell.is_lexical = true;
-    record.publishRetainedExportCellNoFail(export_index, cell.valueRef());
+    record.publishRetainedExportCellNoFail(ctx.runtime, export_index, cell.valueRef());
 }
 
 fn syntheticDefaultExportIndex(

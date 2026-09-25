@@ -6,16 +6,21 @@
 //! plus a 48-bit payload, where `index` packs Kind densely into 1..15 by
 //! skipping the unused −5 hole. `tagOf` recovers Kind by arithmetic; tracer
 //! ownership is one unsigned range on the raw word. Kind numbers stay the
-//! tagged-era i32 space for switches. This core leaf cannot depend on exec
-//! or binding.
+//! tagged-era i32 space for switches. The pure word kernel lives in
+//! value_encoding.zig; this facade also retains compatibility heap projections
+//! and semantic helpers. Neither layer depends on exec or binding.
 
 const std = @import("std");
 
 const bignum = @import("../libs/bigint.zig");
 const gc = @import("gc.zig");
+const heap_refs = @import("heap_ref.zig");
+const heap_layout = @import("value_heap_layout.zig");
+const encoding = @import("value_encoding.zig");
 const string_mod = @import("string.zig");
 
 pub const JSValue = extern struct {
+    pub const HeapRef = heap_refs.HeapRef;
     /// Semantic tag numbers for `is` / `as` / `from` and `tagOf()`. The stored
     /// word is NaN-boxed; call sites write `v.is(.int)` / `v.as(.int)`, not
     /// `isInt` / `asInt32` / `Tag.int`.
@@ -64,20 +69,15 @@ pub const JSValue = extern struct {
     pub const short_big_int_min: i64 = -(@as(i64, 1) << (short_big_int_bits - 1));
     pub const short_big_int_max: i64 = (@as(i64, 1) << (short_big_int_bits - 1)) - 1;
 
-    const payload_bits: u16 = short_big_int_bits;
-    const payload_mask: u64 = (@as(u64, 1) << payload_bits) - 1;
+    const payload_bits: u16 = heap_refs.payload_bits;
+    const payload_mask: u64 = heap_refs.payload_mask;
     /// Inclusive max of a float word. Equal to −Inf; the `0xFFF0_xxxx`
     /// hole above it is not a boxed encoding.
-    const float_max: u64 = 0xFFF0_0000_0000_0000;
-    const canonical_nan: u64 = 0x7FF8_0000_0000_0000;
-    /// Boxed prefix = `prefix_base + boxedIndex(kind)`. Index 0 is the
-    /// float/hole band, not a boxed kind.
-    const prefix_base: u64 = 0xFFF0;
-    const first_boxed: u64 = 0xFFF1_0000_0000_0000;
+    const float_max = encoding.float_max;
+    const first_boxed = encoding.first_boxed;
     /// First non-tracer boxed kind (int). Tracer-owned is
     /// `[first_boxed, tracer_owned_end)` = prefixes 0xFFF1..0xFFF7.
-    const tracer_owned_end: u64 = 0xFFF8_0000_0000_0000;
-    const inf_bits: u64 = 0x7FF0_0000_0000_0000;
+    const tracer_owned_end = encoding.heap_end;
 
     bits: u64,
 
@@ -97,23 +97,12 @@ pub const JSValue = extern struct {
         std.debug.assert(abi_encoding_revision == 2);
     }
 
-    fn boxedIndex(comptime kind: Kind) u64 {
-        const n = @intFromEnum(kind);
-        if (n == @intFromEnum(Kind.float64)) {
-            @compileError("float64 is stored as IEEE bits, not a boxed prefix");
-        }
-        // Kind skips −5 so the 15 live boxed kinds pack densely into
-        // 0xFFF1..0xFFFF. Kinds before the hole (−8..−6) take one extra slot.
-        return @intCast(8 + n + @as(i32, @intFromBool(n < @intFromEnum(Kind.big_int))));
-    }
-
     fn boxedPrefix(comptime kind: Kind) u64 {
-        return prefix_base + boxedIndex(kind);
+        return encoding.boxedPrefix(@intFromEnum(kind));
     }
 
     fn box(comptime kind: Kind, raw: u64) u64 {
-        std.debug.assert(raw <= payload_mask);
-        return (boxedPrefix(kind) << payload_bits) | raw;
+        return encoding.box(@intFromEnum(kind), raw);
     }
 
     fn Payload(comptime kind: Kind) type {
@@ -136,7 +125,7 @@ pub const JSValue = extern struct {
                 std.debug.assert(shortBigIntFits(value));
                 break :blk @as(u64, @bitCast(value)) & payload_mask;
             },
-            .object, .module, .big_int, .string, .symbol, .string_rope, .function_bytecode => @intFromPtr(value) & payload_mask,
+            .object, .module, .big_int, .string, .symbol, .string_rope, .function_bytecode => heap_refs.encode(heap_layout.reference(value)),
             .null_value, .undefined_value, .uninitialized, .exception => 0,
         };
     }
@@ -147,24 +136,17 @@ pub const JSValue = extern struct {
             .boolean => payload != 0,
             .float64 => @bitCast(payload),
             .short_big_int => @as(i64, @bitCast(payload << 16)) >> 16,
-            .object, .module, .big_int, .string, .symbol, .string_rope, .function_bytecode => ptrFromPayload(gc.Header, payload).?,
+            .object, .module, .big_int, .string, .symbol, .string_rope, .function_bytecode => heap_layout.bodyFromPayload(gc.Header, payload).?,
             .null_value, .undefined_value, .uninitialized, .exception => {},
         };
     }
 
     fn payloadFromI32(value: i32) u64 {
-        const bits: u32 = @bitCast(value);
-        return bits;
+        return encoding.intPayload(value);
     }
 
     fn payloadAsI32(payload: u64) i32 {
-        const bits: u32 = @truncate(payload);
-        return @bitCast(bits);
-    }
-
-    fn ptrFromPayload(comptime T: type, payload: u64) ?*T {
-        if (payload == 0) return null;
-        return @ptrFromInt(payload);
+        return encoding.intFromPayload(payload);
     }
 
     pub inline fn shortBigIntFits(value: i128) bool {
@@ -172,8 +154,7 @@ pub const JSValue = extern struct {
     }
 
     pub inline fn is(self: JSValue, comptime kind: Kind) bool {
-        if (comptime kind == .float64) return self.bits <= float_max;
-        return (self.bits >> payload_bits) == comptime boxedPrefix(kind);
+        return encoding.isKind(self.bits, @intFromEnum(kind));
     }
 
     pub fn as(self: JSValue, comptime kind: Kind) ?Payload(kind) {
@@ -184,15 +165,13 @@ pub const JSValue = extern struct {
 
     pub fn from(comptime kind: Kind, value: Payload(kind)) JSValue {
         if (comptime kind == .float64) {
-            const bits: u64 = @bitCast(value);
-            if ((bits & 0x7FFF_FFFF_FFFF_FFFF) > inf_bits) return .{ .bits = canonical_nan };
-            return .{ .bits = bits };
+            return .{ .bits = encoding.floatWord(value) };
         }
         return .{ .bits = box(kind, encode(kind, value)) };
     }
 
     inline fn payloadBits(self: JSValue) u64 {
-        return self.bits & payload_mask;
+        return encoding.payload(self.bits);
     }
 
     pub fn int32(v: i32) JSValue {
@@ -270,10 +249,7 @@ pub const JSValue = extern struct {
     }
 
     pub inline fn tagOf(self: JSValue) i32 {
-        if (self.bits <= float_max) return Tag.float64;
-        const index: i32 = @intCast((self.bits >> payload_bits) - prefix_base);
-        // index 1..3 = kinds −8..−6; index 4..15 = kinds −4..7.
-        return index - 8 - @as(i32, @intFromBool(index < 4));
+        return encoding.tagOf(self.bits);
     }
 
     pub fn isNumber(self: JSValue) bool {
@@ -335,7 +311,7 @@ pub const JSValue = extern struct {
 
     pub fn asSymbolBody(self: JSValue) ?*@import("symbol.zig").Symbol {
         if (!self.is(.symbol)) return null;
-        return ptrFromPayload(@import("symbol.zig").Symbol, self.payloadBits());
+        return heap_layout.bodyFromPayload(@import("symbol.zig").Symbol, self.payloadBits());
     }
 
     /// Extract a BigInt value as a signed i64. Handles BOTH the inline
@@ -387,6 +363,10 @@ pub const JSValue = extern struct {
         return @intCast(offset);
     }
 
+    /// Legacy materializing view, not a pure tag projection. Ropes may allocate
+    /// and collect; exhausted OOM retries panic. Keep the source rooted while
+    /// acquiring and using the borrowed view. Prefer String.fromFlatValue for
+    /// a pure projection, or string.ensureFlat for fallible materialization.
     pub fn asString(self: JSValue) ?String {
         return String.fromValue(self);
     }
@@ -397,7 +377,7 @@ pub const JSValue = extern struct {
     /// string. Flat strings return their body directly; Symbols are rejected.
     pub fn asStringBody(self: JSValue) ?*string_mod.String {
         switch (self.tagOf()) {
-            Tag.string => return ptrFromPayload(string_mod.String, self.payloadBits()),
+            Tag.string => return heap_layout.bodyFromPayload(string_mod.String, self.payloadBits()),
             Tag.string_rope => {
                 const node = self.ropeBody() orelse return null;
                 return node.flattenInfallible();
@@ -411,7 +391,7 @@ pub const JSValue = extern struct {
     /// Used by the rope-internal walkers that already discriminate on tag.
     pub fn asStringBodyRaw(self: JSValue) ?*string_mod.String {
         switch (self.tagOf()) {
-            Tag.string => return ptrFromPayload(string_mod.String, self.payloadBits()),
+            Tag.string => return heap_layout.bodyFromPayload(string_mod.String, self.payloadBits()),
             else => return null,
         }
     }
@@ -419,7 +399,7 @@ pub const JSValue = extern struct {
     /// The `StringRope` behind a `.string_rope` value (null otherwise).
     pub fn ropeBody(self: JSValue) ?*string_mod.StringRope {
         if (!self.is(.string_rope)) return null;
-        return ptrFromPayload(string_mod.StringRope, self.payloadBits());
+        return heap_layout.bodyFromPayload(string_mod.StringRope, self.payloadBits());
     }
 
     pub fn asBytes(self: JSValue) Bytes.Error!Bytes {
@@ -428,7 +408,7 @@ pub const JSValue = extern struct {
 
     pub fn refHeader(self: JSValue) ?*gc.Header {
         return switch (self.tagOf()) {
-            Tag.big_int, Tag.object, Tag.module => ptrFromPayload(gc.Header, self.payloadBits()),
+            Tag.big_int, Tag.object, Tag.module => heap_layout.bodyFromPayload(gc.Header, self.payloadBits()),
             else => null,
         };
     }
@@ -439,12 +419,12 @@ pub const JSValue = extern struct {
         std.debug.assert(self.is(.object));
         const payload = self.payloadBits();
         std.debug.assert(payload != 0);
-        return @ptrFromInt(payload);
+        return heap_layout.bodyFromPayload(gc.Header, payload).?;
     }
 
     pub fn stringHeader(self: JSValue) ?*gc.Header {
         return switch (self.tagOf()) {
-            Tag.string, Tag.string_rope => ptrFromPayload(gc.Header, self.payloadBits()),
+            Tag.string, Tag.string_rope => heap_layout.bodyFromPayload(gc.Header, self.payloadBits()),
             else => null,
         };
     }
@@ -456,38 +436,50 @@ pub const JSValue = extern struct {
     pub inline fn stringHeaderAssumeStringLike(self: JSValue) *gc.Header {
         const tag = self.tagOf();
         std.debug.assert(tag == Tag.string or tag == Tag.string_rope);
-        return ptrFromPayload(gc.Header, self.payloadBits()).?;
+        return heap_layout.bodyFromPayload(gc.Header, self.payloadBits()).?;
     }
 
     /// Header of a `.function_bytecode` value. Not a generic JS object.
     pub fn functionBytecodeHeader(self: JSValue) ?*gc.Header {
         if (!self.is(.function_bytecode)) return null;
-        return ptrFromPayload(gc.Header, self.payloadBits());
+        return heap_layout.bodyFromPayload(gc.Header, self.payloadBits());
     }
 
-    /// `JS_MarkValue` filter widened by one tag: OBJECT /
-    /// FUNCTION_BYTECODE / MODULE plus heap BIG_INT, which is a leaf on
-    /// `lists.objects` since S1-c (qjs keeps BigInt refcounted; zjs traces it).
-    /// Boxed prefixes 0xFFF1..0xFFF7 are that tag set; one unsigned range on
-    /// the raw word.
+    /// Compatibility Header projection; new value consumers use the opaque
+    /// heapReference and enter the layout layer only when needed.
     pub inline fn cycleMarkHeader(self: JSValue) ?*gc.Header {
-        if (!self.isTracerOwned()) return null;
-        return ptrFromPayload(gc.Header, self.payloadBits());
+        return heap_layout.header(self.heapReference() orelse return null);
     }
 
-    /// The same value naming a relocated body. Only the payload changes: a
-    /// copying collector moves the allocation without changing what the value
-    /// IS, so the tag prefix is carried over rather than recomputed.
+    /// Pure encoding projection. No metadata access, allocation or rooting;
+    /// the tag does not prove that the address belongs to a live heap cell.
+    pub inline fn heapReference(self: JSValue) ?HeapRef {
+        if (!self.isHeapReference()) return null;
+        return heap_refs.decode(self.payloadBits());
+    }
+
+    pub inline fn fromHeapReference(comptime kind: Kind, reference: HeapRef) JSValue {
+        comptime switch (kind) {
+            .symbol, .string, .string_rope, .big_int, .module, .function_bytecode, .object => {},
+            else => @compileError("fromHeapReference requires a heap kind"),
+        };
+        return .{ .bits = box(kind, heap_refs.encode(reference)) };
+    }
+
+    /// Compatibility relocation spelling. Internal collectors use the
+    /// carrier-checked value_heap_layout.relocate bridge instead.
     pub inline fn withTracedHeader(self: JSValue, header: *gc.Header) JSValue {
-        std.debug.assert(self.isTracerOwned());
-        return .{ .bits = (self.bits & ~payload_mask) | @intFromPtr(header) };
+        return heap_layout.replacePayload(self, heap_layout.reference(header));
     }
 
-    /// Whether the tracing collector owns this value's lifetime: exactly the
-    /// tag set `cycleMarkHeader` accepts. Store/barrier fast paths use the
-    /// negation (both sides immediate → skip rooting and the generational barrier).
+    /// Compatibility name for the heap-reference tag category. This does not
+    /// establish liveness, ownership, or membership in a particular Runtime.
     pub inline fn isTracerOwned(self: JSValue) bool {
-        return self.bits >= first_boxed and self.bits < tracer_owned_end;
+        return self.isHeapReference();
+    }
+
+    pub inline fn isHeapReference(self: JSValue) bool {
+        return encoding.isHeapReference(self.bits);
     }
 
     pub fn same(self: JSValue, other: JSValue) bool {
@@ -611,8 +603,7 @@ fn bigIntParts(value: JSValue, scratch: *[2]bignum.Limb) ?BigIntParts {
         };
     }
     if (value.isBigInt() and value.refHeader() != null) {
-        const header = value.refHeader().?;
-        const big: *@import("bigint.zig").BigInt = @alignCast(@fieldParentPtr("header", header));
+        const big = heap_layout.bigIntBody(value.heapReference().?);
         return .{ .negative = big.negative(), .limbs = big.limbs() };
     }
     return null;
@@ -815,6 +806,57 @@ test "float construction is valid" {
 
     const nan_value = JSValue.float64(@bitCast(@as(u64, 0x7FF8_0000_0000_0042)));
     try t.expect(std.math.isNan(nan_value.as(.float64).?));
+}
+
+test "heap reference codec rejects invalid addresses without truncation" {
+    const t = std.testing;
+    try t.expectEqual(@sizeOf(usize), @sizeOf(heap_refs.HeapRef));
+    try t.expectError(error.NullHeapAddress, heap_refs.fromAddress(0));
+    try t.expectError(error.UnalignedHeapAddress, heap_refs.fromAddress(9));
+    try t.expectError(error.HeapAddressOutOfRange, heap_refs.fromAddress(@as(usize, 1) << 48));
+    const maximum: usize = @intCast(heap_refs.payload_mask & ~@as(u64, 7));
+    const reference = try heap_refs.fromAddress(maximum);
+    try t.expectEqual(maximum, heap_refs.encode(reference));
+    try t.expectEqual(reference, heap_refs.decode(maximum).?);
+}
+
+test "heap reference round trips all tags and preserves relocation bits" {
+    const t = std.testing;
+    const first = try heap_refs.fromAddress(0x1000);
+    const second = try heap_refs.fromAddress(0x2000);
+    inline for ([_]JSValue.Kind{ .symbol, .string, .string_rope, .big_int, .module, .function_bytecode, .object }) |kind| {
+        const value = JSValue.fromHeapReference(kind, first);
+        try t.expect(value.isHeapReference());
+        try t.expectEqual(first, value.heapReference().?);
+        try t.expectEqual(@intFromEnum(kind), value.tagOf());
+        const moved = heap_layout.replacePayload(value, second);
+        try t.expectEqual(second, moved.heapReference().?);
+        try t.expectEqual(value.bits & ~heap_refs.payload_mask, moved.bits & ~heap_refs.payload_mask);
+        try t.expectEqual(value.tagOf(), moved.tagOf());
+        try t.expectEqual(value.bits, JSValue.from(kind, heap_layout.header(first)).bits);
+    }
+    for ([_]JSValue{ JSValue.int32(-1), JSValue.boolean(true), JSValue.nullValue(), JSValue.undefinedValue(), JSValue.uninitialized(), JSValue.exception(), JSValue.catchOffset(10), JSValue.shortBigInt(-1), JSValue.float64(-0.0), JSValue.float64(std.math.nan(f64)) }) |value| {
+        try t.expect(!value.isHeapReference());
+        try t.expect(value.heapReference() == null);
+    }
+}
+
+test "heap reference encoding guards remain active" {
+    if (std.c.getenv("ZJS_VALUE_ENCODING_INJECT")) |raw| {
+        const mode = std.mem.span(raw);
+        if (std.mem.eql(u8, mode, "1")) {
+            const illegal: *gc.Header = @ptrFromInt(@as(usize, 1) << 48);
+            std.mem.doNotOptimizeAway(JSValue.object(illegal));
+        }
+        if (std.mem.eql(u8, mode, "2")) {
+            const illegal: heap_refs.HeapRef = @ptrFromInt(@as(usize, 1) << 48);
+            std.mem.doNotOptimizeAway(heap_layout.replacePayload(JSValue.fromHeapReference(.object, try heap_refs.fromAddress(8)), illegal));
+        }
+        if (std.mem.eql(u8, mode, "4")) {
+            const illegal = JSValue{ .bits = JSValue.box(.object, 9) };
+            std.mem.doNotOptimizeAway(illegal.refHeader());
+        }
+    }
 }
 
 test "cycleMarkHeader matches JS_MarkValue tag set" {

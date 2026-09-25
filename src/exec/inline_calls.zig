@@ -1342,6 +1342,9 @@ pub const Machine = struct {
     vm: tailcall_dispatch.Vm,
     pub fn init(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, l0: *L0State) Machine {
         if (comptime builtin.is_test) TestMetricStorage.metrics.machine_inits += 1;
+        // `global` is cached untraced here and in the Vm: realm globals are
+        // built with the nursery suspended and never move.
+        std.debug.assert(!core.gc.Registry.isNurseryHeader(global.gcHeader()));
         var machine: Machine = .{
             .ctx = ctx,
             .output = output,
@@ -4810,10 +4813,20 @@ pub const Machine = struct {
 
         dying.deinitForTailReplacement(self.ctx);
         entry.prev = dying_prev;
+        // The retired caller published its argument window in this very Stack;
+        // the replacement reuses the slot, so the window must not outlive it.
+        self.forgetPendingCallRegion(&dying.stack);
         dying.* = entry.*;
         self.top = dying;
         self.depth -= 1;
         return dying;
+    }
+
+    /// A retired Entry's Stack slot will be reused; a pending call window
+    /// naming it would otherwise match a later frame whose top happens to sit
+    /// at the same address, and the tracer would read dead slots.
+    inline fn forgetPendingCallRegion(self: *Machine, stack: *const stack_mod.Stack) void {
+        if (self.pending_call_region.stack == stack) self.pending_call_region.len = 0;
     }
 
     /// Retire the top inline frame through the single qjs-style `done:`
@@ -4849,6 +4862,7 @@ pub const Machine = struct {
         // Unlink — qjs `rt->current_stack_frame = sf->prev_frame;` at the
         // done: epilogue.
         self.top = dying.prev;
+        self.forgetPendingCallRegion(&dying.stack);
         return continuation;
     }
 
@@ -4882,6 +4896,7 @@ pub const Machine = struct {
         self.ctx.runtime.active_bytecode_stack_bytes -= chain_budget.planned_stack_bytes;
         self.depth -= 1;
         self.top = dying.prev;
+        self.forgetPendingCallRegion(&dying.stack);
         return continuation;
     }
 
@@ -4911,6 +4926,7 @@ pub const Machine = struct {
         // Unlink — qjs `rt->current_stack_frame = sf->prev_frame;` at the
         // done: epilogue.
         self.top = dying.prev;
+        self.forgetPendingCallRegion(&dying.stack);
     }
 
     /// Retire an abruptly-completed or tail-replaced frame.
@@ -4964,6 +4980,7 @@ pub const Machine = struct {
         rt.active_bytecode_stack_bytes -= chain_budget.planned_stack_bytes;
         self.depth -= 1;
         self.top = dying.prev;
+        self.forgetPendingCallRegion(&dying.stack);
     }
 
     /// Fence return of a lean frame (`LeanFrame`): geometry and ownership
@@ -4987,6 +5004,7 @@ pub const Machine = struct {
         vm_call.leaveInlineCallDepthBytesRt(rt, dying.frame.planned_stack_bytes);
         self.depth -= 1;
         self.top = dying.prev;
+        self.forgetPendingCallRegion(&dying.stack);
     }
 
     /// Retire the proven ordinary empty-leaf return without materializing its
@@ -5016,6 +5034,7 @@ pub const Machine = struct {
         vm_call.leaveInlineCallDepthBytesRt(rt, dying_stack_bytes);
         self.depth -= 1;
         self.top = dying.prev;
+        self.forgetPendingCallRegion(&dying.stack);
     }
 
     /// Exact-args twin of `popReturnedEmptyLeaf`. Its inline epilogue adds
@@ -5045,6 +5064,7 @@ pub const Machine = struct {
         vm_call.leaveInlineCallDepthBytesRt(rt, dying_stack_bytes);
         self.depth -= 1;
         self.top = dying.prev;
+        self.forgetPendingCallRegion(&dying.stack);
     }
 
     /// Forwarded-leaf twin of `popReturnedEmptyLeaf` (O3). Its inline
@@ -5070,6 +5090,7 @@ pub const Machine = struct {
         vm_call.leaveInlineCallDepthBytesRt(rt, dying_stack_bytes);
         self.depth -= 1;
         self.top = dying.prev;
+        self.forgetPendingCallRegion(&dying.stack);
     }
 
     /// Pop the top inline frame after a completed return. Ordinary calls push
@@ -5152,6 +5173,7 @@ pub const Machine = struct {
         // Unlink — qjs `rt->current_stack_frame = sf->prev_frame;` at the
         // done: epilogue.
         self.top = dying.prev;
+        self.forgetPendingCallRegion(&dying.stack);
         if (fallback.is(.undefined_value)) return result;
         if (result.is(.object)) {
             return result;
@@ -5360,6 +5382,10 @@ fn traceMachine(machine: *Machine, visitor: *RootVisitor) RootTraceError!void {
     const rt = machine.ctx.runtime;
     const pending = &machine.pending_call_region;
     try machine.async_completions.trace(visitor);
+    // A completed call's result crosses the dispatch outcome switch here,
+    // after the callee's frame and operand stack are gone. The Machine may
+    // be heap-resident (HostInvocation), out of reach of the stack scan.
+    try visitor.value(&machine.vm.return_value);
     try traceFrame(rt, machine.l0.level.frame, visitor);
     try traceStack(machine.l0.level.stack, pending, visitor);
     // A generator/module shell stays deliberately unpublished (off

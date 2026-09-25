@@ -3215,17 +3215,17 @@ fn constructCompiledLiteralInRealm(
     const realm = rt.contextForGlobal(global) orelse return error.TypeError;
     const initial_shape = realm.regexp_shape orelse return error.TypeError;
 
-    var source_val = source;
-    var compiled_root = compiled_value;
-    var root_frame = core.runtime.rootValues(.{ &source_val, &compiled_root });
+    var values = [_]core.JSValue{ global.value(), source, compiled_value, core.JSValue.undefinedValue() };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var root_frame = core.runtime.ValueRootFrame{ .slices = &slices };
     root_frame.activate(rt);
     defer root_frame.deactivate(rt);
 
-    const object = try core.Object.createRegExpFromShape(rt, initial_shape);
-    errdefer core.Object.destroyFromHeader(rt, object.gcHeader());
-    try object.setRegexpSource(rt, source_val);
-    try object.setRegexpCompiledBytecodeString(rt, compiled_string);
-    return object.value();
+    values[3] = (try core.Object.createRegExpFromShape(rt, initial_shape)).value();
+    try core.Object.fromHeader(values[3].refHeader().?).setRegexpSource(rt, values[1]);
+    try core.Object.fromHeader(values[3].refHeader().?).setRegexpCompiledBytecodeString(rt, core.string.asFlat(values[2]).?);
+    return values[3];
 }
 
 pub noinline fn pushLiteral(vm: *Vm) HostError!void {

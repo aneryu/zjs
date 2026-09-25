@@ -651,12 +651,22 @@ pub const Queue = struct {
         self: *Queue,
         context: *core.JSContext,
         waiter: *anyopaque,
-        promise: core.JSValue,
+        promise: *core.JSValue,
         runner: AtomicsWaiterPayload.Runner,
         destroyer: AtomicsWaiterPayload.Destroyer,
     ) !void {
+        // The waiter has left the global registry but is not owned by a job
+        // yet. Root its real slot (including relocation on a failed enqueue)
+        // and its stable Realm throughout queue growth. A mutable window links
+        // in non-test builds too; scalar root helpers do not.
+        var values: []core.JSValue = @as([*]core.JSValue, @ptrCast(promise))[0..1];
+        const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &values }};
+        const headers = [_]core.runtime.HeaderRootValue{.{ .header = &context.header }};
+        var roots = core.runtime.ValueRootFrame{ .slices = &slices, .headers = &headers };
+        roots.activate(self.runtime);
+        defer roots.deactivate(self.runtime);
         try self.ensureAdditionalCapacity(1);
-        self.enqueuePrepared(Job.initAtomicsWaiter(context, waiter, promise, runner, destroyer));
+        self.enqueuePrepared(Job.initAtomicsWaiter(context, waiter, promise.*, runner, destroyer));
     }
 
     pub fn enqueueFinalization(

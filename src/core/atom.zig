@@ -1301,16 +1301,16 @@ pub const AtomTable = struct {
         for (&self.predefined_bodies, predefined_atoms) |*slot, pre| {
             const body = slot.* orelse continue;
             var value = if (pre.kind == .string) JSValue.string(body) else JSValue.symbol(body);
+            defer slot.* = value.cycleMarkHeader();
             try visitor.value(&value);
-            slot.* = value.cycleMarkHeader();
         }
         for (self.entries) |*entry| {
             if (!entry.occupied or !isValueSymbolKind(entry.kind)) continue;
             if (entry.host_pins == 0 and !entry.registry_managed_symbol) continue;
             const body = entry.body orelse continue;
             var value = JSValue.symbol(body);
+            defer entry.body = value.cycleMarkHeader();
             try visitor.value(&value);
-            entry.body = value.cycleMarkHeader();
         }
     }
 
@@ -1323,8 +1323,8 @@ pub const AtomTable = struct {
             if (!entry.occupied or !isValueSymbolKind(entry.kind)) continue;
             if (entry.body == null) continue;
             var value = JSValue.symbol(entry.body.?);
+            defer entry.body = value.cycleMarkHeader();
             try visitor.value(&value);
-            entry.body = value.cycleMarkHeader();
         }
     }
 
@@ -2765,6 +2765,46 @@ test "atom table interns predefined dynamic and integer atoms" {
     }
     _ = rt.collectForTest();
     try std.testing.expect(rt.atoms.name(second) == null);
+}
+
+test "root adapter atom bodies write back before propagating visitor failure" {
+    for (0..4) |mode| {
+        for ([_]bool{ false, true }) |fail| {
+            const rt = try JSRuntime.create(std.testing.allocator, .{});
+            defer rt.destroy();
+            const id = switch (mode) {
+                0 => predefinedId("Symbol.iterator", .symbol).?,
+                2 => try rt.atoms.internRegisteredValueSymbol("root-adapter-original"),
+                else => try rt.atoms.newValueSymbol("root-adapter-original"),
+            };
+            const original = try rt.atoms.symbolValue(rt, id);
+            if (mode == 1) rt.atoms.pinForHost(id);
+            defer if (mode == 1) rt.atoms.unpinForHost(id);
+            const replacement_id = try rt.atoms.newValueSymbol("root-adapter-replacement");
+            const replacement = try rt.atoms.symbolValue(rt, replacement_id);
+            const slot = if (mode == 0) &rt.atoms.predefined_bodies[id.raw() - 1] else &rt.atoms.findDynamic(id).?.body;
+            // This probe simulates relocation with a distinct allocation. Put
+            // back the real identity before the atom table/heap are destroyed.
+            defer slot.* = original.cycleMarkHeader();
+            const Probe = struct {
+                original: JSValue,
+                replacement: JSValue,
+                fail: bool,
+                fn value(raw: *anyopaque, stored: *JSValue) runtime_mod.RootTraceError!void {
+                    const self: *@This() = @ptrCast(@alignCast(raw));
+                    if (!stored.same(self.original)) return;
+                    stored.* = self.replacement;
+                    if (self.fail) return error.PayloadMarkFailed;
+                }
+                fn object(_: *anyopaque, _: *?*@import("object.zig").Object) runtime_mod.RootTraceError!void {}
+            };
+            var probe = Probe{ .original = original, .replacement = replacement, .fail = fail };
+            var visitor = runtime_mod.RootVisitor{ .readonly = .observe, .context = &probe, .visit_value = Probe.value, .visit_object = Probe.object };
+            const result = if (mode == 3) rt.atoms.traceYoungSymbolBodies(&visitor) else rt.atoms.traceRoots(&visitor);
+            if (fail) try std.testing.expectError(error.PayloadMarkFailed, result) else try result;
+            try std.testing.expectEqual(replacement.cycleMarkHeader(), slot.*);
+        }
+    }
 }
 
 test "symbol atoms are unique even with the same description" {

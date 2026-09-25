@@ -110,14 +110,14 @@ fn awaitUsingDeclarationStart(s: *State) bool {
     var using_token = s.lex.next() catch return false;
     defer s.lex.freeToken(&using_token);
     if (s.lex.gotLineTerminator()) return false;
-    if (using_token.val != .ident) return false;
+    if (using_token.kind != .ident) return false;
     if (using_token.payload.ident.has_escape) return false;
     if (!identifiers.atomNameEquals(s, using_token.payload.ident.atom, "using")) return false;
 
     var binding_token = s.lex.next() catch return false;
     defer s.lex.freeToken(&binding_token);
     if (s.lex.gotLineTerminator()) return false;
-    return tokenKindCanStartUsingBinding(s, binding_token.val);
+    return tokenKindCanStartUsingBinding(s, binding_token.kind);
 }
 
 fn directUsingDeclarationKind(s: *State) ?DisposalHint {
@@ -126,7 +126,7 @@ fn directUsingDeclarationKind(s: *State) ?DisposalHint {
     return null;
 }
 
-fn tokenKindCanStartUsingBinding(s: *State, kind: tok.TokenKind) bool {
+fn tokenKindCanStartUsingBinding(s: *State, kind: tok.Kind) bool {
     return kind == .ident or
         (kind == .kw_await and identifiers.canUseAwaitAsIdentifier(s)) or
         (kind == .kw_yield and !s.ctx.in_generator and !(s.is_strict or s.curFunc().is_strict_mode)) or
@@ -603,7 +603,7 @@ fn parseThrowStatement(s: *State) Error!void {
     _ = try s.expectSemicolon();
 }
 
-fn parseVariableStatement(s: *State, tok_kind: tok.TokenKind, decl_mask: DeclMask) Error!void {
+fn parseVariableStatement(s: *State, tok_kind: tok.Kind, decl_mask: DeclMask) Error!void {
     if (tok_kind == .kw_let and canTreatLetAsExpressionStatement(s, decl_mask)) {
         try parseLetKeywordExpressionStatement(s);
         return;
@@ -1423,7 +1423,7 @@ pub fn canTreatLetAsExpressionStatement(s: *State, decl_mask: DeclMask) bool {
     defer lookahead.restoreLexerCursorSnapshot(s, saved_cursor);
     var peek_token = s.lex.next() catch return false;
     defer s.lex.freeToken(&peek_token);
-    const val = peek_token.val;
+    const val = peek_token.kind;
     if (val == .lbracket) {
         // `let [` is a syntax restriction: it never introduces an
         // ExpressionStatement.
@@ -1478,7 +1478,7 @@ fn parseLetKeywordExpressionStatement(s: *State) Error!void {
 /// variable is attached at the function's var/arg scope (level 0)
 /// per QuickJS hoisting rules; for `let`/`const`, it attaches at the
 /// current lexical scope.
-pub fn needVarReference(s: *State, var_tok: tok.TokenKind) bool {
+pub fn needVarReference(s: *State, var_tok: tok.Kind) bool {
     if (var_tok != .kw_var) return false;
 
     const fd = s.curFunc();
@@ -1489,7 +1489,7 @@ pub fn needVarReference(s: *State, var_tok: tok.TokenKind) bool {
     return is_global_var and !s.lex.is_module;
 }
 
-pub fn parseVar(s: *State, declared_tok: tok.TokenKind, export_decl: bool, parse_flags: ParseFlags) Error!void {
+pub fn parseVar(s: *State, declared_tok: tok.Kind, export_decl: bool, parse_flags: ParseFlags) Error!void {
     // TypeScript `namespace N { var x }`: tsc scopes the binding to the
     // namespace's IIFE, so it is lowered as a block-level `let` here.
     const var_tok = if (s.ctx.in_namespace and declared_tok == .kw_var) .kw_let else declared_tok;
@@ -1507,7 +1507,7 @@ pub fn parseVar(s: *State, declared_tok: tok.TokenKind, export_decl: bool, parse
         const binding_identifier = identifiers.isIdentifierLikeToken(s);
         if (binding_identifier or sloppy_keyword_var) {
             // Simple identifier binding
-            const token_atom = if (s.peekKind() == .ident) s.token.payload.ident.atom else tok.keywordAtom(s.peekKind());
+            const token_atom = if (s.peekKind() == .ident) s.token.payload.ident.atom else s.peekKind().keywordAtom();
             // qjs js_parse_var takes its own `name` reference before
             // next_token frees the identifier token (quickjs.c:
             // Keep that owner through this declarator.
@@ -1736,7 +1736,7 @@ fn parseForInOfUsingTarget(s: *State, using_kind: DisposalHint, target: *ForInOf
 }
 
 /// `for (var|let|const binding in/of ...)`.
-fn parseForInOfDeclarationTarget(s: *State, var_tok: tok.TokenKind, target: *ForInOfTarget) Error!void {
+fn parseForInOfDeclarationTarget(s: *State, var_tok: tok.Kind, target: *ForInOfTarget) Error!void {
     try s.advance();
     const is_lexical = var_tok == .kw_let or var_tok == .kw_const;
     const is_const = var_tok == .kw_const;
@@ -1791,7 +1791,7 @@ fn parseForInOfDeclarationTarget(s: *State, var_tok: tok.TokenKind, target: *For
 }
 
 /// `for (lhs in/of ...)` with an assignment target or a pattern.
-fn parseForInOfExpressionTarget(s: *State, var_tok: tok.TokenKind, is_for_await: bool, expr_label: compiler.LabelId, assign_label: compiler.LabelId, target: *ForInOfTarget) Error!void {
+fn parseForInOfExpressionTarget(s: *State, var_tok: tok.Kind, is_for_await: bool, expr_label: compiler.LabelId, assign_label: compiler.LabelId, target: *ForInOfTarget) Error!void {
     if (!is_for_await and var_tok == .ident and
         !s.token.payload.ident.has_escape and
         identifiers.atomNameEquals(s, s.token.payload.ident.atom, "async") and

@@ -7,7 +7,6 @@
 
 const std = @import("std");
 const gc = @import("gc.zig");
-const profile = @import("profile.zig");
 const runtime_mod = @import("../runtime.zig");
 const JSRuntime = runtime_mod.JSRuntime;
 const PollMode = gc.PollMode;
@@ -18,6 +17,7 @@ pub fn continuePoll(
     roots: ?*const ValueRootFrame,
     mode: PollMode,
 ) gc.CollectionError!gc.CollectionResult {
+    self.assertGCAllowed();
     // A morgue can only be non-empty if a collection was interrupted
     // mid-destruction by an allocation failure; finish it before starting
     // anything new. Destruction is irreversible.
@@ -99,10 +99,10 @@ pub fn continuePoll(
         self.gc_running = true;
         defer self.gc_running = false;
         self.sampleAllocationPeak();
-        const started = profile.nowNanos();
+        const started = self.diagnosticNanos();
         if (@import("gc_trace_stw.zig").collectMinor(self, roots, mode.rootScan()) catch null) |freed| {
             self.gc.stats.collections += 1;
-            const ended = profile.nowNanos();
+            const ended = self.diagnosticNanos();
             const elapsed = if (ended > started) ended - started else 0;
             // Tracked separately from the major distribution: a minor
             // is judged on being short, and averaging it with
@@ -139,7 +139,7 @@ pub fn continuePoll(
             // It also advances `Heap.clock_ns`, which is what makes
             // the idle gates measure real idleness again instead of
             // ageing against a clock that only ticked 24 times.
-            _ = self.gc.block_heap.releaseFreeBlockPages(ended);
+            _ = self.gc.block_heap.releaseFreeBlockPages(gc.schedulingNanos());
             const result: gc.CollectionResult = .{
                 .freed_objects = freed,
                 .duration_ns = elapsed,
@@ -232,7 +232,7 @@ pub fn finishDoomed(self: *JSRuntime, last_slice_ns: u64) gc.CollectionResult {
     self.gc.morgue.destroyed = 0;
     self.gc.recordCycleSuccess(result);
     resetThreshold(self);
-    _ = self.gc.block_heap.releaseFreeBlockPages(profile.nowNanos());
+    _ = self.gc.block_heap.releaseFreeBlockPages(gc.schedulingNanos());
     return result;
 }
 

@@ -435,6 +435,7 @@ pub fn atomicsWakeWaiters(key: AtomicsWaiterKey, count: usize) usize {
 
 pub fn processExpiredAtomicsWaiters(ctx: *core.JSContext) !void {
     ctx.runtime.assertOwnerThread();
+    ctx.runtime.roots.assertMutable();
     const io = atomicsWaiterIo();
     while (true) {
         const now = std.Io.Timestamp.now(io, .awake);
@@ -484,7 +485,7 @@ pub fn processExpiredAtomicsWaiters(ctx: *core.JSContext) !void {
         waiter_ctx.runtime.job_queue.enqueueAtomicsWaiter(
             waiter_ctx,
             waiter,
-            waiter.promise.?,
+            &waiter.promise.?,
             promise_ops.atomicsRunAsyncWaiterCompletion,
             promise_ops.atomicsDestroyAsyncWaiterOpaque,
         ) catch |err| {
@@ -579,6 +580,7 @@ pub fn runNextAtomicsHostCompletion(ctx: *core.JSContext, block_indefinite: bool
 
 pub fn cleanupAtomicsWaitersForContext(ctx: *core.JSContext) void {
     ctx.runtime.assertOwnerThread();
+    ctx.runtime.roots.assertMutable();
     const io = atomicsWaiterIo();
     while (true) {
         atomics_waiter_mutex.lockUncancelable(io);
@@ -640,6 +642,10 @@ pub fn atomicsWaitForNotification(rt: *core.JSRuntime, key: AtomicsWaiterKey, ti
 }
 
 pub fn atomicsLinkWaiter(waiter: *AtomicsWaiter) void {
+    if (atomicsAsyncWaiterRuntime(waiter)) |rt| {
+        rt.assertOwnerThread();
+        rt.roots.assertMutable();
+    }
     waiter.linked = true;
     waiter.next = null;
     if (atomics_waiters == null) {
@@ -652,6 +658,10 @@ pub fn atomicsLinkWaiter(waiter: *AtomicsWaiter) void {
 }
 
 pub fn atomicsUnlinkWaiter(waiter: *AtomicsWaiter) void {
+    if (atomicsAsyncWaiterRuntime(waiter)) |rt| {
+        rt.assertOwnerThread();
+        rt.roots.assertMutable();
+    }
     if (!waiter.linked) return;
     var previous: ?*AtomicsWaiter = null;
     var cursor = atomics_waiters;
@@ -1126,6 +1136,7 @@ pub fn atomicsDestroyAsyncWaiter(waiter: *AtomicsWaiter) void {
     const ctx = waiter.realm.borrow().?;
     const rt = ctx.runtime;
     rt.assertOwnerThread();
+    rt.roots.assertMutable();
     atomicsReleaseWaiterKey(&waiter.key);
     waiter.realm.deinit();
     rt.nativeAllocator().destroy(waiter);
@@ -1145,26 +1156,40 @@ pub fn atomicsRunAsyncWaiterCompletion(
     ctx: *core.JSContext,
     payload: *const jobs_mod.AtomicsWaiterPayload,
 ) core.errors.RuntimeError!void {
+    return runAsyncWaiterCompletionRooted(ctx, payload) catch |err| switch (err) {
+        error.RootGenerationExhausted => error.OutOfMemory,
+        error.RootAlreadyActive, error.RootMutationDuringCollection, error.WrongRuntime, error.InactiveRoot, error.InvalidRootIndex => std.debug.panic("waitAsync completion root contract: {s}", .{@errorName(err)}),
+        else => |other| other,
+    };
+}
+
+fn runAsyncWaiterCompletionRooted(ctx: *core.JSContext, payload: *const jobs_mod.AtomicsWaiterPayload) !void {
     const waiter: *AtomicsWaiter = @ptrCast(@alignCast(payload.waiter));
     std.debug.assert(waiter.realm.borrow() == ctx);
     ctx.runtime.assertOwnerThread();
-    const promise = payload.promise;
-    const promise_object = objectFromValue(promise) orelse return error.TypeError;
+    var roots = core.runtime.ExactValueRoots(2){};
+    try roots.activate(ctx.runtime);
+    defer roots.deactivate();
+    const promise_root = try roots.ref(0);
+    const result_root = try roots.ref(1);
+    try promise_root.set(ctx.runtime, payload.promise);
+    var promise_object = objectFromValue(try promise_root.get(ctx.runtime)) orelse return error.TypeError;
     if (promise_object.class_id != core.class.ids.promise) return error.TypeError;
     if (promise_object.promiseResultSlot().* != null) {
         ctx.runtime.job_queue.releaseUnlinkedEntrySlot();
         return;
     }
     const result = if (waiter.completion == .notified) "ok" else "timed-out";
-    const result_value = try value_ops.createStringValue(ctx.runtime, result);
-    var prepared_job = jobs_mod.Job.initPromise(ctx, promise);
+    try result_root.set(ctx.runtime, try value_ops.createStringValue(ctx.runtime, result));
+    // End the borrowed object view at string allocation, then derive it from
+    // the collector-updated root before touching any Promise fields.
+    promise_object = objectFromValue(try promise_root.get(ctx.runtime)) orelse return error.TypeError;
+    const result_value = try result_root.get(ctx.runtime);
+    var prepared_job = jobs_mod.Job.initPromise(ctx, try promise_root.get(ctx.runtime));
     var prepared_job_owned = true;
     errdefer if (prepared_job_owned) prepared_job.deinit();
 
-    const result_slot = promise_object.promiseResultSlot();
-
     var reaction_arg_value: ?core.JSValue = null;
-    const reaction_arg_slot = promise_object.promiseReactionArgSlot();
     const needs_reaction_arg = promise_object.promiseReactionCallback() != null and promise_object.promiseReactionArg() == null;
     if (needs_reaction_arg) {
         reaction_arg_value = result_value;
@@ -1179,11 +1204,11 @@ pub fn atomicsRunAsyncWaiterCompletion(
         // first reaction. The callback receives the settle value via the reaction
         // arg below, which is where `result_value` ends up.
     } else {
-        result_slot.* = result_value;
+        try promise_object.setPromiseResult(ctx.runtime, result_value);
         promise_object.promiseIsRejectedSlot().* = false;
     }
     if (reaction_arg_value) |value| {
-        reaction_arg_slot.* = value;
+        try promise_object.setPromiseReactionArg(ctx.runtime, value);
         reaction_arg_value = null;
     }
     ctx.runtime.job_queue.enqueueUnlinkedEntrySlot(prepared_job);
@@ -1198,18 +1223,47 @@ pub fn atomicsWaitAsync(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const view_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const view = try atomicsTypedArray(view_value, true);
+    return waitAsyncRooted(ctx, output, global, args, caller_function, caller_frame) catch |err| switch (err) {
+        error.RootGenerationExhausted => error.OutOfMemory,
+        error.RootAlreadyActive, error.RootMutationDuringCollection, error.WrongRuntime, error.InactiveRoot, error.InvalidRootIndex => std.debug.panic("waitAsync input root contract: {s}", .{@errorName(err)}),
+        else => |other| other,
+    };
+}
+
+fn waitAsyncRooted(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    args: []const core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) !core.JSValue {
+    const rt = ctx.runtime;
+    var roots = core.runtime.ExactValueRoots(6){};
+    try roots.activate(rt);
+    defer roots.deactivate();
+    const global_root = try roots.ref(0);
+    const view_root = try roots.ref(1);
+    const index_root = try roots.ref(2);
+    const expected_root = try roots.ref(3);
+    const timeout_root = try roots.ref(4);
+    const promise_root = try roots.ref(5);
+    try global_root.set(rt, global.value());
+    try view_root.set(rt, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
+    try index_root.set(rt, if (args.len >= 2) args[1] else core.JSValue.undefinedValue());
+    try expected_root.set(rt, if (args.len >= 3) args[2] else core.JSValue.undefinedValue());
+    try timeout_root.set(rt, if (args.len >= 4) args[3] else core.JSValue.float64(std.math.nan(f64)));
+    var view = try atomicsTypedArray(try view_root.get(rt), true);
     if ((try atomicsBufferObject(view)).class_id != core.class.ids.shared_array_buffer) return error.TypeError;
-    const index_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
-    const index = try atomicsValidateAccess(ctx, output, global, view, index_value, caller_function, caller_frame);
-    const expected_arg = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
+    const index = try atomicsValidateAccess(ctx, output, objectFromValue(try global_root.get(rt)).?, view, try index_root.get(rt), caller_function, caller_frame);
+    view = try atomicsTypedArray(try view_root.get(rt), true);
+    const expected_arg = try expected_root.get(rt);
     const expected = if (atomicsTypedArrayIsBigInt(view))
-        try toBigIntBitsForAtomics(ctx, output, global, expected_arg, caller_function, caller_frame)
+        try toBigIntBitsForAtomics(ctx, output, objectFromValue(try global_root.get(rt)).?, expected_arg, caller_function, caller_frame)
     else
-        try toInt32BitsForAtomics(ctx, output, global, expected_arg, caller_function, caller_frame);
-    const timeout_arg = if (args.len >= 4) args[3] else core.JSValue.float64(std.math.nan(f64));
-    const timeout = try toNumberForAtomics(ctx, output, global, timeout_arg, caller_function, caller_frame);
+        try toInt32BitsForAtomics(ctx, output, objectFromValue(try global_root.get(rt)).?, expected_arg, caller_function, caller_frame);
+    const timeout = try toNumberForAtomics(ctx, output, objectFromValue(try global_root.get(rt)).?, try timeout_root.get(rt), caller_function, caller_frame);
+    view = try atomicsTypedArray(try view_root.get(rt), true);
     try atomicsValidateIndex(ctx.runtime, view, index);
     const bytes = try atomicsElementBytes(view, index);
     const current = atomicsReadBits(view, bytes);
@@ -1222,7 +1276,14 @@ pub fn atomicsWaitAsync(
         return atomicsWaitAsyncResult(ctx, false, result);
     }
 
-    const promise = try core.promise.constructWithPrototype(ctx, promisePrototypeFromGlobal(ctx.runtime, global));
+    // Finish the byte-view borrow before Promise allocation. The retained
+    // shared-store identity and offset remain valid independently of the view.
+    var key = try atomicsWaiterKey(view, bytes);
+    atomicsRetainWaiterKey(key);
+    var key_owned = true;
+    defer if (key_owned) atomicsReleaseWaiterKey(&key);
+    const promise = try core.promise.constructWithPrototype(ctx, promisePrototypeFromGlobal(rt, objectFromValue(try global_root.get(rt)).?));
+    try promise_root.set(rt, promise);
     if (objectFromValue(promise)) |promise_object| {
         promise_object.promiseAtomicsWaitAsyncSlot().* = true;
     }
@@ -1230,15 +1291,14 @@ pub fn atomicsWaitAsync(
         std.Io.Timestamp.now(atomicsWaiterIo(), .awake).addDuration(std.Io.Duration.fromMilliseconds(timeout_ms))
     else
         null;
-    const key = try atomicsWaiterKey(view, bytes);
     const waiter = try ctx.runtime.nativeAllocator().create(AtomicsWaiter);
-    atomicsRetainWaiterKey(key);
     waiter.* = .{
         .key = key,
-        .promise = promise,
+        .promise = try promise_root.get(rt),
         .realm = core.RealmRef.retain(ctx),
         .deadline = deadline,
     };
+    key_owned = false;
     var waiter_owned = true;
     errdefer if (waiter_owned) atomicsDestroyAsyncWaiter(waiter);
 
@@ -1246,7 +1306,8 @@ pub fn atomicsWaitAsync(
     // fallible allocation before linking the node into the cross-runtime
     // waiter registry; otherwise an OOM here leaves an unreachable Promise and
     // RealmRef behind until context teardown.
-    const result = try atomicsWaitAsyncResult(ctx, true, promise);
+    const result = try atomicsWaitAsyncResult(ctx, true, try promise_root.get(rt));
+    waiter.promise = try promise_root.get(rt);
     atomicsLinkAsyncWaiter(waiter);
     waiter_owned = false;
     return result;
@@ -1255,6 +1316,7 @@ pub fn atomicsWaitAsync(
 pub fn atomicsLinkAsyncWaiter(waiter: *AtomicsWaiter) void {
     const ctx = waiter.realm.borrow().?;
     ctx.runtime.assertOwnerThread();
+    ctx.runtime.roots.assertMutable();
     if (comptime core.runtime.value_root_frames_enabled) installWaitAsyncRootAdapter();
     const io = atomicsWaiterIo();
     atomics_ops.atomics_waiter_mutex.lockUncancelable(io);
@@ -1268,10 +1330,287 @@ fn installWaitAsyncRootAdapter() void {
     core.runtime.trace_atomics_wait_async = traceWaitAsyncRoots;
 }
 
+test "waitAsync completion remembers a newly allocated result on an aged promise" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt, .{});
+    defer ctx.destroy();
+    var roots = core.runtime.ExactValueRoots(1){};
+    try roots.activate(rt);
+    defer roots.deactivate();
+    const promise_root = try roots.ref(0);
+    const promise = try core.Object.create(rt, core.class.ids.promise, null);
+    try promise_root.set(rt, promise.value());
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(!promise.gcHeader().metaConst().flags.young);
+    const waiter = try rt.nativeAllocator().create(AtomicsWaiter);
+    waiter.* = .{ .key = .{ .offset_or_ptr = 0 }, .promise = promise.value(), .realm = core.RealmRef.retain(ctx), .completion = .timed_out };
+    defer atomicsDestroyAsyncWaiter(waiter);
+    try rt.job_queue.enqueuePromise(ctx, core.JSValue.int32(0));
+    var placeholder = rt.job_queue.takeFirst().?;
+    placeholder.deinit();
+    rt.job_queue.reserveUnlinkedEntrySlot();
+    const payload = jobs_mod.AtomicsWaiterPayload{
+        .runner = atomicsRunAsyncWaiterCompletion,
+        .destroyer = atomicsDestroyAsyncWaiterOpaque,
+        .waiter = waiter,
+        .promise = promise.value(),
+    };
+    try atomicsRunAsyncWaiterCompletion(ctx, &payload);
+    const result_header = promise.promiseResult().?.cycleMarkHeader().?;
+    try std.testing.expect(result_header.metaConst().flags.young);
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    try std.testing.expect(rt.gc.containsHeader(result_header));
+    try std.testing.expect(promise.promiseResult().?.asStringBodyRaw().?.eqlBytes("timed-out"));
+}
+
+test "waitAsync detached handoff remains rooted during queue allocation" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt, .{});
+    defer ctx.destroy();
+    const promise = try core.Object.create(rt, core.class.ids.promise, null);
+    const header = promise.gcHeader();
+    const waiter = try rt.nativeAllocator().create(AtomicsWaiter);
+    waiter.* = .{ .key = .{ .offset_or_ptr = @intFromPtr(ctx) }, .promise = promise.value(), .realm = core.RealmRef.retain(ctx), .completion = .notified };
+    atomicsLinkAsyncWaiter(waiter);
+    defer cleanupAtomicsWaitersForContext(ctx);
+    const Probe = struct {
+        rt: *core.JSRuntime,
+        called: bool = false,
+        failed: bool = false,
+        fn collect(raw: ?*anyopaque, _: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            if (self.called) return;
+            self.called = true;
+            _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch {
+                self.failed = true;
+            };
+        }
+    };
+    var probe = Probe{ .rt = rt };
+    const previous_probe = rt.gc.heap_budget.probe;
+    const previous_context = rt.gc.heap_budget.probe_ctx;
+    rt.gc.heap_budget.probe = Probe.collect;
+    rt.gc.heap_budget.probe_ctx = &probe;
+    defer {
+        rt.gc.heap_budget.probe = previous_probe;
+        rt.gc.heap_budget.probe_ctx = previous_context;
+    }
+    try processExpiredAtomicsWaiters(ctx);
+    const alive = rt.gc.containsHeader(header);
+    var job = rt.job_queue.takeFirst().?;
+    job.deinit();
+    try std.testing.expect(probe.called and !probe.failed);
+    try std.testing.expect(alive);
+}
+
+test "waitAsync failed handoff relinks a relocated value then retries" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    const rt = try core.JSRuntime.create(failing.allocator(), .{});
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt, .{});
+    defer ctx.destroy();
+    for (0..4) |index| try rt.job_queue.enqueuePromise(ctx, core.JSValue.int32(@intCast(index)));
+    rt.gc.nursery.enabled = true;
+    // Promise's current variable-size carrier does not use the nursery.
+    // Exercise this generic root slot with a movable Object; drop the typed
+    // job after handoff rather than running Promise settlement on that object.
+    const promise = try core.Object.createPlainObject(rt, null);
+    try std.testing.expect(core.gc.Registry.isNurseryHeader(promise.gcHeader()));
+    const before = @intFromPtr(promise.gcHeader());
+    const waiter = try rt.nativeAllocator().create(AtomicsWaiter);
+    waiter.* = .{ .key = .{ .offset_or_ptr = @intFromPtr(ctx) }, .promise = promise.value(), .realm = core.RealmRef.retain(ctx), .completion = .notified };
+    atomicsLinkAsyncWaiter(waiter);
+    defer cleanupAtomicsWaitersForContext(ctx);
+    const Probe = struct {
+        rt: *core.JSRuntime,
+        failing: *std.testing.FailingAllocator,
+        called: bool = false,
+        failed: bool = false,
+        fn collect(raw: ?*anyopaque, _: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            if (self.called) return;
+            self.called = true;
+            _ = core.gc_trace_stw.collectMinor(self.rt, null, .declared_only) catch {
+                self.failed = true;
+                return;
+            };
+            // Fail queue backing allocation only after relocation completed.
+            self.failing.fail_index = self.failing.alloc_index;
+        }
+    };
+    var probe = Probe{ .rt = rt, .failing = &failing };
+    const previous_probe = rt.gc.heap_budget.probe;
+    const previous_context = rt.gc.heap_budget.probe_ctx;
+    rt.gc.heap_budget.probe = Probe.collect;
+    rt.gc.heap_budget.probe_ctx = &probe;
+    defer {
+        failing.fail_index = std.math.maxInt(usize);
+        rt.gc.heap_budget.probe = previous_probe;
+        rt.gc.heap_budget.probe_ctx = previous_context;
+    }
+    try std.testing.expectError(error.OutOfMemory, processExpiredAtomicsWaiters(ctx));
+    failing.fail_index = std.math.maxInt(usize);
+    rt.gc.heap_budget.probe = previous_probe;
+    rt.gc.heap_budget.probe_ctx = previous_context;
+    try std.testing.expect(probe.called and !probe.failed);
+    try std.testing.expect(waiter.linked);
+    try std.testing.expectEqual(AtomicsWaiterCompletion.notified, waiter.completion);
+    const moved = waiter.promise.?.heapReference().?;
+    try std.testing.expect(@intFromPtr(moved) != before);
+    try std.testing.expect(rt.gc.containsHeader(waiter.promise.?.cycleMarkHeader().?));
+    try std.testing.expectEqual(@as(usize, 4), rt.job_queue.jobs.len);
+    try processExpiredAtomicsWaiters(ctx);
+    try std.testing.expectEqual(@as(usize, 5), rt.job_queue.jobs.len);
+    try std.testing.expectEqual(moved, rt.job_queue.jobs[4].payload.atomics_waiter.promise.heapReference().?);
+    while (rt.job_queue.takeFirst()) |job_value| {
+        var job = job_value;
+        job.deinit();
+    }
+}
+
+test "waitAsync root trace repairs original slots outside the waiter lock" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt, .{});
+    defer ctx.destroy();
+    const other_rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer other_rt.destroy();
+    const other_ctx = try core.JSContext.create(other_rt, .{});
+    defer other_ctx.destroy();
+    var expected: [17]*core.JSValue = undefined;
+    var first_waiter: ?*AtomicsWaiter = null;
+    defer cleanupAtomicsWaitersForContext(ctx);
+    defer cleanupAtomicsWaitersForContext(other_ctx);
+    for (&expected, 0..) |*slot, index| {
+        const waiter = try rt.nativeAllocator().create(AtomicsWaiter);
+        waiter.* = .{ .key = .{ .offset_or_ptr = @intFromPtr(ctx) }, .promise = core.JSValue.int32(@intCast(index)), .realm = core.RealmRef.retain(ctx) };
+        atomicsLinkAsyncWaiter(waiter);
+        slot.* = &waiter.promise.?;
+        if (index == 0) first_waiter = waiter;
+    }
+    const foreign = try other_rt.nativeAllocator().create(AtomicsWaiter);
+    foreign.* = .{ .key = .{ .offset_or_ptr = @intFromPtr(other_ctx) }, .promise = core.JSValue.int32(99), .realm = core.RealmRef.retain(other_ctx) };
+    atomicsLinkAsyncWaiter(foreign);
+    const Probe = struct {
+        expected: []const *core.JSValue,
+        ctx: *core.JSContext,
+        waiter: *AtomicsWaiter,
+        visits: usize = 0,
+        slots_match: bool = true,
+        lock_free: bool = true,
+        fail_after: ?usize = null,
+        fail_header: bool = false,
+        fn header(raw: *anyopaque, _: *const core.gc.Header) core.runtime.RootTraceError!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (!atomics_waiter_mutex.tryLock()) return error.PayloadMarkFailed;
+            atomics_waiter_mutex.unlock(atomicsWaiterIo());
+            if (self.fail_header) return error.OutOfMemory;
+        }
+        fn value(raw: *anyopaque, slot: *core.JSValue) core.runtime.RootTraceError!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (std.c.getenv("ZJS_WAITER_TRACE_INJECT")) |raw_mode| {
+                const mode = std.fmt.parseInt(u8, std.mem.span(raw_mode), 10) catch 0;
+                switch (mode) {
+                    1 => cleanupAtomicsWaitersForContext(self.ctx),
+                    2 => processExpiredAtomicsWaiters(self.ctx) catch return error.PayloadMarkFailed,
+                    3 => atomicsUnlinkWaiter(self.waiter),
+                    4 => atomicsDestroyAsyncWaiter(self.waiter),
+                    5 => atomicsLinkAsyncWaiter(self.waiter),
+                    6 => atomicsLinkWaiter(self.waiter),
+                    else => {},
+                }
+            }
+            self.slots_match = self.slots_match and self.visits < self.expected.len and slot == self.expected[self.visits];
+            if (atomics_waiter_mutex.tryLock()) {
+                atomics_waiter_mutex.unlock(atomicsWaiterIo());
+            } else self.lock_free = false;
+            self.visits += 1;
+            slot.* = core.JSValue.int32(73);
+            if (self.fail_after == self.visits) return error.OutOfMemory;
+        }
+        fn object(_: *anyopaque, _: *?*core.Object) core.runtime.RootTraceError!void {}
+    };
+    var probe = Probe{ .expected = &expected, .ctx = ctx, .waiter = first_waiter.? };
+    var visitor = core.runtime.RootVisitor{ .readonly = .observe, .context = &probe, .visit_value = Probe.value, .visit_object = Probe.object, .visit_header = Probe.header };
+    try traceWaitAsyncRoots(rt, &visitor);
+    try std.testing.expectEqual(expected.len, probe.visits);
+    try std.testing.expect(probe.slots_match);
+    try std.testing.expect(probe.lock_free);
+    for (expected) |slot| try std.testing.expectEqual(@as(?i32, 73), slot.as(.int));
+    try std.testing.expectEqual(@as(?i32, 99), foreign.promise.?.as(.int));
+    const native_before = rt.diagnostics.allocations.allocated_bytes;
+    for (expected) |slot| slot.* = core.JSValue.int32(0);
+    probe.visits = 0;
+    probe.fail_after = 3;
+    try std.testing.expectError(error.OutOfMemory, traceWaitAsyncRoots(rt, &visitor));
+    try std.testing.expectEqual(@as(usize, 3), probe.visits);
+    try std.testing.expectEqual(native_before, rt.diagnostics.allocations.allocated_bytes);
+    try std.testing.expect(!rt.roots.isTracing());
+    for (expected, 0..) |slot, index| try std.testing.expectEqual(@as(?i32, if (index < 3) 73 else 0), slot.as(.int));
+    probe.visits = 0;
+    probe.fail_header = true;
+    try std.testing.expectError(error.OutOfMemory, traceWaitAsyncRoots(rt, &visitor));
+    try std.testing.expectEqual(@as(usize, 0), probe.visits);
+    try std.testing.expect(!rt.roots.isTracing());
+    try std.testing.expectEqual(native_before, rt.diagnostics.allocations.allocated_bytes);
+    probe.fail_header = false;
+    rt.setNativeBytesLimitForTest(native_before);
+    defer rt.setNativeBytesLimitForTest(null);
+    try std.testing.expectError(error.OutOfMemory, traceWaitAsyncRoots(rt, &visitor));
+    try std.testing.expectEqual(@as(usize, 0), probe.visits);
+    try std.testing.expect(!rt.roots.isTracing());
+    try std.testing.expectEqual(native_before, rt.diagnostics.allocations.allocated_bytes);
+}
+
+test "waitAsync root trace follows nursery relocation and foreign notification" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt, .{});
+    defer ctx.destroy();
+    rt.gc.nursery.enabled = true;
+    const promise = try core.Object.createPlainObject(rt, null);
+    const before = @intFromPtr(promise.gcHeader());
+    try std.testing.expect(core.gc.Registry.isNurseryHeader(promise.gcHeader()));
+    const waiter = try rt.nativeAllocator().create(AtomicsWaiter);
+    waiter.* = .{ .key = .{ .offset_or_ptr = @intFromPtr(ctx) }, .promise = promise.value(), .realm = core.RealmRef.retain(ctx) };
+    atomicsLinkAsyncWaiter(waiter);
+    defer cleanupAtomicsWaitersForContext(ctx);
+    _ = try core.gc_trace_stw.collectMinor(rt, null, .declared_only);
+    const moved = waiter.promise.?.heapReference().?;
+    try std.testing.expect(@intFromPtr(moved) != before);
+    try std.testing.expect(rt.gc.containsHeader(waiter.promise.?.cycleMarkHeader().?));
+    const Probe = struct {
+        key: AtomicsWaiterKey,
+        notified: usize = 0,
+        fn notify(self: *@This()) void {
+            self.notified = atomicsWakeWaiters(self.key, 1);
+        }
+        fn value(raw: *anyopaque, _: *core.JSValue) core.runtime.RootTraceError!void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (!atomics_waiter_mutex.tryLock()) return error.PayloadMarkFailed;
+            atomics_waiter_mutex.unlock(atomicsWaiterIo());
+            const thread = std.Thread.spawn(.{}, notify, .{self}) catch return error.PayloadMarkFailed;
+            thread.join();
+        }
+        fn object(_: *anyopaque, _: *?*core.Object) core.runtime.RootTraceError!void {}
+    };
+    var probe = Probe{ .key = waiter.key };
+    var visitor = core.runtime.RootVisitor{ .readonly = .observe, .context = &probe, .visit_value = Probe.value, .visit_object = Probe.object };
+    try traceWaitAsyncRoots(rt, &visitor);
+    try std.testing.expectEqual(@as(usize, 1), probe.notified);
+    try std.testing.expectEqual(AtomicsWaiterCompletion.notified, waiter.completion);
+    try std.testing.expectEqual(moved, waiter.promise.?.heapReference().?);
+}
+
 fn traceWaitAsyncRoots(rt_opaque: *anyopaque, visitor: *core.runtime.RootVisitor) core.runtime.RootTraceError!void {
     const rt: *core.JSRuntime = @ptrCast(@alignCast(rt_opaque));
+    rt.assertOwnerThread();
+    rt.roots.beginTrace();
+    defer rt.roots.endTrace();
     const io = atomicsWaiterIo();
-    var storage: [16]core.JSValue = undefined;
+    var storage: [16]*AtomicsWaiter = undefined;
 
     atomics_ops.atomics_waiter_mutex.lockUncancelable(io);
     var count: usize = 0;
@@ -1282,8 +1621,10 @@ fn traceWaitAsyncRoots(rt_opaque: *anyopaque, visitor: *core.runtime.RootVisitor
     atomics_ops.atomics_waiter_mutex.unlock(io);
     if (count == 0) return;
 
-    const extra: []core.JSValue = if (count > storage.len)
-        try rt.nativeAllocator().alloc(core.JSValue, count)
+    // This allocator does not invoke GC/probes. Only this Runtime's owner
+    // can add/remove its async nodes, and the trace window rejects reentry.
+    const extra: []*AtomicsWaiter = if (count > storage.len)
+        try rt.nativeAllocator().alloc(*AtomicsWaiter, count)
     else
         &.{};
     defer if (extra.len != 0) rt.nativeAllocator().free(extra);
@@ -1294,34 +1635,139 @@ fn traceWaitAsyncRoots(rt_opaque: *anyopaque, visitor: *core.runtime.RootVisitor
     cursor = atomics_ops.atomics_waiters;
     while (cursor) |waiter| : (cursor = waiter.next) {
         if (atomicsAsyncWaiterRuntime(waiter) != rt) continue;
-        // The waiter's realm is a plain traced edge now; report it here
-        // (under the list lock) since the waiter itself is native memory.
-        if (waiter.realm.borrow()) |ctx| {
-            atomics_ops.atomics_waiter_mutex.unlock(io);
-            try visitor.constHeader(&ctx.header);
-            atomics_ops.atomics_waiter_mutex.lockUncancelable(io);
-        }
-        const promise = waiter.promise orelse continue;
-        if (filled == buf.len) break;
-        buf[filled] = promise;
+        // Snapshot nodes, never next pointers or copied values: foreign
+        // runtimes may change the global list as soon as we release its lock.
+        if (filled == buf.len) @panic("async waiter population changed during tracing");
+        buf[filled] = waiter;
         filled += 1;
     }
     atomics_ops.atomics_waiter_mutex.unlock(io);
 
-    for (buf[0..filled]) |*promise| try visitor.value(promise);
+    if (filled != count) @panic("async waiter population changed during tracing");
+    for (buf[0..filled]) |waiter| {
+        // Realm allocations are currently stable. The Promise may move, so
+        // report the actual node slot. No callback runs under the list lock.
+        try visitor.constHeader(&waiter.realm.borrow().?.header);
+        try visitor.value(&waiter.promise.?);
+    }
 }
 
 pub fn atomicsWaitAsyncResult(ctx: *core.JSContext, is_async: bool, value: core.JSValue) !core.JSValue {
-    var rooted_value = value;
-    var root_frame = core.runtime.rootValues(.{&rooted_value});
-    root_frame.activate(ctx.runtime);
-    defer root_frame.deactivate(ctx.runtime);
+    return waitAsyncResultRooted(ctx, is_async, value) catch |err| switch (err) {
+        error.RootGenerationExhausted => error.OutOfMemory,
+        error.RootAlreadyActive, error.RootMutationDuringCollection, error.WrongRuntime, error.InactiveRoot, error.InvalidRootIndex => std.debug.panic("waitAsync result root contract: {s}", .{@errorName(err)}),
+        else => |other| other,
+    };
+}
 
+fn waitAsyncResultRooted(ctx: *core.JSContext, is_async: bool, value: core.JSValue) !core.JSValue {
+    var roots = core.runtime.ExactValueRoots(2){};
+    try roots.activate(ctx.runtime);
+    defer roots.deactivate();
+    const input = try roots.ref(0);
+    const output = try roots.ref(1);
+    try input.set(ctx.runtime, value);
     const result = try core.Object.create(ctx.runtime, core.class.ids.object, null);
+    try output.set(ctx.runtime, result.value());
     errdefer core.Object.destroyFromHeader(ctx.runtime, result.gcHeader());
+    // Property definition still borrows its receiver and descriptor across
+    // allocation. Pin this window until that lower-level API accepts roots.
+    var pin = try core.runtime.pinHeaderForNative(ctx.runtime, result.gcHeader());
+    defer pin.deinit();
+    var input_pin = try core.runtime.pinValueForNative(ctx.runtime, try input.get(ctx.runtime));
+    defer if (input_pin) |*held| held.deinit();
     try defineValueProperty(ctx.runtime, result, core.atom.ids.async_, core.JSValue.boolean(is_async));
-    try defineValueProperty(ctx.runtime, result, core.atom.ids.value, rooted_value);
-    return result.value();
+    try defineValueProperty(ctx.runtime, result, core.atom.ids.value, try input.get(ctx.runtime));
+    return output.get(ctx.runtime);
+}
+
+test "waitAsync result construction roots and pins survive allocation GC" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt, .{});
+    defer ctx.destroy();
+    rt.gc.nursery.enabled = true;
+    const input = try core.Object.createPlainObject(rt, null);
+    const before_pins = rt.gc.pins.count();
+    const Probe = struct {
+        rt: *core.JSRuntime,
+        calls: usize = 0,
+        busy: bool = false,
+        failed: bool = false,
+        fn collect(raw: ?*anyopaque, _: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            if (self.busy) return;
+            self.busy = true;
+            defer self.busy = false;
+            self.calls += 1;
+            _ = self.rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only) catch {
+                self.failed = true;
+            };
+        }
+    };
+    var probe = Probe{ .rt = rt };
+    const old_probe = rt.gc.heap_budget.probe;
+    const old_context = rt.gc.heap_budget.probe_ctx;
+    rt.gc.heap_budget.probe = Probe.collect;
+    rt.gc.heap_budget.probe_ctx = &probe;
+    defer {
+        rt.gc.heap_budget.probe = old_probe;
+        rt.gc.heap_budget.probe_ctx = old_context;
+    }
+    const result_value = try atomicsWaitAsyncResult(ctx, true, input.value());
+    const result = objectFromValue(result_value).?;
+    const stored = try result.getProperty(core.atom.ids.value);
+    try std.testing.expect(probe.calls > 0 and !probe.failed);
+    try std.testing.expect(rt.gc.containsHeader(stored.cycleMarkHeader().?));
+    try std.testing.expectEqual(@as(?bool, true), (try result.getProperty(core.atom.ids.async_)).as(.boolean));
+    try std.testing.expectEqual(before_pins, rt.gc.pins.count());
+    try std.testing.expect(rt.roots.active_exact_roots == null);
+}
+
+test "waitAsync result allocation failures unwind construction roots and pins" {
+    var failures: usize = 0;
+    var succeeded = false;
+    for (0..128) |offset| {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        const rt = try core.JSRuntime.create(failing.allocator(), .{});
+        defer rt.destroy();
+        const ctx = try core.JSContext.create(rt, .{});
+        defer ctx.destroy();
+        var roots = core.runtime.ExactValueRoots(1){};
+        try roots.activate(rt);
+        defer roots.deactivate();
+        const input = try roots.ref(0);
+        try input.set(rt, (try core.Object.createPlainObject(rt, null)).value());
+        const root_head = rt.active_value_roots;
+        const pins_before = rt.gc.pins.count();
+        failing.fail_index = failing.alloc_index + offset;
+        const result = atomicsWaitAsyncResult(ctx, true, try input.get(rt));
+        failing.fail_index = std.math.maxInt(usize);
+        if (result) |_| {
+            succeeded = true;
+        } else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            failures += 1;
+        }
+        try std.testing.expectEqual(pins_before, rt.gc.pins.count());
+        try std.testing.expect(rt.active_value_roots == root_head);
+        _ = try rt.tryRunObjectCycleRemovalWithValueRoots(null, .declared_only);
+        try std.testing.expect(rt.gc.containsHeader((try input.get(rt)).cycleMarkHeader().?));
+        if (succeeded) break;
+    }
+    try std.testing.expect(succeeded and failures > 0);
+}
+
+test "waitAsync result root admission failure leaves no pins or roots" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const ctx = try core.JSContext.create(rt, .{});
+    defer ctx.destroy();
+    rt.roots.exact_root_generation = std.math.maxInt(u64);
+    const before_pins = rt.gc.pins.count();
+    try std.testing.expectError(error.OutOfMemory, atomicsWaitAsyncResult(ctx, false, core.JSValue.int32(1)));
+    try std.testing.expectEqual(before_pins, rt.gc.pins.count());
+    try std.testing.expect(rt.roots.active_exact_roots == null);
 }
 
 test "atomicsWaitAsyncResult roots direct function bytecode value while creating result object" {

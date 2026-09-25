@@ -960,11 +960,18 @@ pub fn defineNativeMethodsAssumingNew(rt: *core.JSRuntime, target: *core.Object,
 }
 
 fn defineNativeMethodsAssumingNewWithRealm(rt: *core.JSRuntime, target: *core.Object, methods: []const Method, realm_global: ?*core.Object) !void {
+    if (methods.len == 0) return;
+    // The table installer borrows raw receivers across both capacity growth
+    // and dynamic atom interning, outside the individual property transactions.
+    const values = [_]core.JSValue{ target.value(), if (realm_global) |global| global.value() else core.JSValue.undefinedValue() };
+    const slices = [_]core.runtime.ValueRootSlice{.{ .borrowed = &values }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
     // Translate to the on-disk property.Flags packed-struct representation that
     // `defineAutoInitProperty` writes into the property table.
     const flags = core.property.Flags.data(method_flags);
-    if (methods.len != 0) try target.reserveOwnPropertyCapacityAssumingPlain(rt, target.shape_ref.prop_count + methods.len);
-    if (methods.len == 0) return;
+    try target.reserveOwnPropertyCapacityAssumingPlain(rt, target.shape_ref.prop_count + methods.len);
     const realm = try bootstrapPropertyRealm(rt, target, realm_global);
     for (methods) |*method| {
         const key = try temporaryStringAtom(rt, method.name);
@@ -3221,6 +3228,7 @@ pub const Intrinsics = struct {
         );
         _ = try global.ensureGlobalPayload(rt);
         context.global = global;
+        rt.gc.generationalBarrier(&context.header, global.gcHeader());
         try context.installStandardGlobals(global);
         return .{ .context = context, .global = global };
     }

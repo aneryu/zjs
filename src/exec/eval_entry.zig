@@ -11,7 +11,6 @@ const atomics_ops = @import("atomics_ops.zig");
 const bytecode = @import("../bytecode.zig");
 const core = @import("../core/root.zig");
 const parser = @import("../parser.zig");
-const platform_clock = @import("../platform_clock.zig");
 const call = @import("call.zig");
 const call_runtime = @import("call_runtime.zig");
 const error_stack_ops = @import("exception_ops.zig");
@@ -89,7 +88,7 @@ noinline fn prepareRootFunction(
     var prepared: PreparedRoot = .{};
 
     var compile_timing: bytecode.CompileTiming = .{};
-    const compile_start = platform_clock.monotonicNanos();
+    const compile_start = if (options.timing != null) ctx.runtime.diagnosticNanos() else 0;
     var compiled = try parser.compile(.{
         .realm = ctx,
         .policy = .{ .runtime_strict = options.runtime_strict },
@@ -106,7 +105,7 @@ noinline fn prepareRootFunction(
         .return_completion = options.mode == .script,
     });
     if (options.timing) |timing| {
-        const compile_ns = platform_clock.elapsedNanosSince(compile_start);
+        const compile_ns = ctx.runtime.diagnosticElapsedSince(compile_start);
         timing.parse_ns += compile_ns;
         timing.compile_ns += compile_ns;
         timing.compile_frontend_ns += compile_timing.frontend_ns;
@@ -127,7 +126,7 @@ noinline fn prepareRootFunction(
         return error.SyntaxError;
     }
     prepared.first_execute_start = if (options.mode != .module and options.timing != null)
-        platform_clock.monotonicNanos()
+        ctx.runtime.diagnosticNanos()
     else
         0;
     if (options.mode == .module) {
@@ -171,7 +170,7 @@ noinline fn prepareRootFunction(
     // JS_EvalFunctionInternal first calls js_closure. Move the Result's sole FB
     // owner into that object. Module roots were moved as one artifact into their
     // record above and linkModule published the persistent function/captures.
-    const root_function_publish_start = if (prepared.module_record == null and options.timing != null) platform_clock.monotonicNanos() else 0;
+    const root_function_publish_start = if (prepared.module_record == null and options.timing != null) ctx.runtime.diagnosticNanos() else 0;
     if (prepared.module_record == null) {
         const root_function = prepared.function orelse return error.InvalidBytecode;
         const root_realm = root_function.realmContext() orelse return error.InvalidBuiltinRegistry;
@@ -186,7 +185,7 @@ noinline fn prepareRootFunction(
         );
         prepared.root_function_object = object_ops.objectFromValue(prepared.root_function_value) orelse return error.InvalidBytecode;
         if (options.timing) |timing| {
-            timing.root_function_publish_ns += platform_clock.elapsedNanosSince(root_function_publish_start);
+            timing.root_function_publish_ns += ctx.runtime.diagnosticElapsedSince(root_function_publish_start);
         }
     }
 
@@ -247,7 +246,7 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
         break :blk value;
     } else blk: {
         const root_function = function orelse return error.InvalidBytecode;
-        const vm_start = platform_clock.monotonicNanos();
+        const vm_start = if (options.timing != null) ctx.runtime.diagnosticNanos() else 0;
         var stack = stack_mod.Stack.init(rt, ctx.stackLimit());
         defer stack.deinit(rt);
         try stack.reserveAdditional(root_function.stack_size);
@@ -298,12 +297,12 @@ pub fn eval(ctx: *core.JSContext, source_text: []const u8, options: core.context
                 .is_eval_code = is_eval_code,
             });
         } else return error.InvalidBytecode;
-        if (options.timing) |timing| timing.vm_run_ns += platform_clock.elapsedNanosSince(vm_start);
+        if (options.timing) |timing| timing.vm_run_ns += ctx.runtime.diagnosticElapsedSince(vm_start);
         break :blk value;
     };
     if (module_record == null) {
         if (options.timing) |timing| {
-            timing.first_execute_ns += platform_clock.elapsedNanosSince(first_execute_start);
+            timing.first_execute_ns += ctx.runtime.diagnosticElapsedSince(first_execute_start);
         }
     }
     return drainAndFinish(ctx, options, result);
@@ -339,12 +338,12 @@ noinline fn drainAndFinish(
     completion_roots.activate(rt);
     defer completion_roots.deactivate(rt);
 
-    const jobs_start = platform_clock.monotonicNanos();
+    const jobs_start = if (options.timing != null) ctx.runtime.diagnosticNanos() else 0;
     const previous_output = rt.microtasks.output;
     rt.microtasks.output = options.output;
     defer rt.microtasks.output = previous_output;
     try rt.runAutomaticMicrotasks();
-    if (options.timing) |timing| timing.promise_jobs_ns += platform_clock.elapsedNanosSince(jobs_start);
+    if (options.timing) |timing| timing.promise_jobs_ns += ctx.runtime.diagnosticElapsedSince(jobs_start);
 
     if (options.mode == .script and
         (options.discard_script_result or !options.return_completion))
@@ -367,7 +366,7 @@ fn runEvalModule(
     var resume_value: ?core.JSValue = null;
 
     while (true) {
-        const vm_start = platform_clock.monotonicNanos();
+        const vm_start = if (timing != null) ctx.runtime.diagnosticNanos() else 0;
         const result = module_mod.runModuleEvaluationStep(
             ctx,
             record,
@@ -375,7 +374,7 @@ fn runEvalModule(
             module_state,
             resume_value,
         ) catch |err| return module_graph.moduleResolutionError(err);
-        if (timing) |item| item.vm_run_ns += platform_clock.elapsedNanosSince(vm_start);
+        if (timing) |item| item.vm_run_ns += ctx.runtime.diagnosticElapsedSince(vm_start);
         if (resume_value) |_| {
             resume_value = null;
         }
@@ -424,9 +423,9 @@ fn waitForModuleAwaitReaction(
 
     while (reaction.promiseResult() == null) {
         const progressed = progress: {
-            const jobs_start = platform_clock.monotonicNanos();
+            const jobs_start = if (timing != null) ctx.runtime.diagnosticNanos() else 0;
             defer if (timing) |item| {
-                item.promise_jobs_ns += platform_clock.elapsedNanosSince(jobs_start);
+                item.promise_jobs_ns += ctx.runtime.diagnosticElapsedSince(jobs_start);
             };
             switch (try promise_ops.drainOnePendingJob(ctx, output, global)) {
                 .success => break :progress true,
