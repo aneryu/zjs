@@ -649,7 +649,9 @@ fn createChildFunction(s: *State, parent_fd: *function_def_mod.FunctionDef, func
     else
         s.currentSourcePosition();
     const child_name = entry.name orelse if (entry.is_decl) s.root_name else atom_module.ids.empty_string;
-    const child = try ChildFunction.create(s, parent_fd, child_name, child_source);
+    var child = try ChildFunction.create(s, parent_fd, child_name, child_source);
+    // The caller's `errdefer child.discard(s)` only exists once this returns.
+    errdefer child.discard(s);
     const child_fd = child.fd;
     child_fd.parent_parameter_environment_only = s.ctx.in_parameter_initializer;
     child_fd.is_strict_mode = parent_fd.is_strict_mode or s.is_strict or s.lex.is_strict_mode;

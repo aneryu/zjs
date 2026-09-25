@@ -850,6 +850,13 @@ pub const State = struct {
     /// a nested function. Mirrors the parent link setup in
     /// `js_new_function_def`.
     pub fn pushFunction(self: *State, fd: *function_def_mod.FunctionDef) Error!void {
+        // Allocate everything before publishing `fd` on the stack: a failure
+        // must leave the stack unchanged, because the caller still owns `fd`
+        // and discards it, while `deinit` frees whatever the stack names.
+        // A builder already attached to `fd` is released with it.
+        if (fd.builder == null) {
+            try self.ensureBuilderForFd(fd);
+        }
         const old_len = self.cur_func_stack.len;
         const new_len = self.cur_func_stack.len + 1;
 
@@ -874,9 +881,6 @@ pub const State = struct {
 
         self.cur_func_stack = self.cur_func_stack.ptr[0..new_len];
         self.cur_func_stack[old_len] = fd;
-        if (fd.builder == null) {
-            try self.ensureBuilderForFd(fd);
-        }
     }
 
     /// Pop the current FunctionDef from the stack. Called when exiting

@@ -3033,8 +3033,12 @@ test "dense parameter arrays spread reserves one backing cell for a known dense 
 }
 
 test "dense parameter arrays spread reserve OOM preserves iterator progress and retries" {
-    const js = helpers.sharedTestEngine();
-    defer helpers.endSharedTest();
+    // A fresh engine: the reserve arm is taken only when the iterator's
+    // `next` is the builtin %ArrayIteratorPrototype%.next, which earlier tests
+    // may have replaced on the shared engine. The leak census runs every test
+    // twice in one process, and its second run took the per-item path.
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
     var source = try js.evalWithOptions("Array(1024).fill(37).values()", .{ .filename = "<repl>" });
     var target_value = core.JSValue.undefinedValue();
     var roots = core.runtime.rootValues(.{ &source, &target_value });

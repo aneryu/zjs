@@ -563,7 +563,12 @@ fn runSnippet(allocator: std.mem.Allocator, snippet: Snippet) !void {
     };
     try expectValue(value, snippet.expect);
 
-    if (snippet.drain_jobs) try wrapper.runJobs(null);
+    if (snippet.drain_jobs) {
+        // `runJobs` drains microtasks only; Atomics.waitAsync completion is
+        // host work (the event loop drives it), so step it here the same way.
+        try wrapper.runJobs(null);
+        while (try zjs.exec.atomics_ops.runNextAtomicsHostCompletion(ctx, false)) try wrapper.runJobs(null);
+    }
     if (snippet.collect_cycles) _ = rt.collectForTest();
 
     if (snippet.post_source) |post_source| {
