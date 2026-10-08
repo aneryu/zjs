@@ -205,15 +205,17 @@ pub fn compute(bytecode: []const u8, options: Options) Error!u16 {
     scratch.len = bytecode.len;
     const scratch_slices = scratch.slice();
 
-    const stack_level_tab = scratch_slices.items(.stack_level);
-    bulk_memory.fillByte(std.mem.sliceAsBytes(stack_level_tab), 0xff);
-    const catch_pos_tab = scratch_slices.items(.catch_pos);
+    var work = Worklist{
+        .stack_level_tab = scratch_slices.items(.stack_level),
+        .catch_pos_tab = scratch_slices.items(.catch_pos),
+        .pending_pc = scratch_slices.items(.pending_pc),
+        .pending_len = 0,
+    };
+    bulk_memory.fillByte(std.mem.sliceAsBytes(work.stack_level_tab), 0xff);
     // Match QuickJS compute_stack_size: catch_pos_tab does not need a
     // sentinel fill. `seed` publishes catch_pos before it publishes the pc
     // to pending_pc, and every later read is guarded by a visited
     // stack_level_tab entry.
-    const pending_pc = scratch_slices.items(.pending_pc);
-    var pending_len: usize = 0;
     var final_validator: ?FinalArtifactValidator = if (options.final_artifact) |config|
         .{ .config = config }
     else
@@ -225,31 +227,26 @@ pub fn compute(bytecode: []const u8, options: Options) Error!u16 {
     var final_artifact_invalid = false;
 
     // Seed: entry pc=0 with stack level 0.
-    try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, 0, 0, -1);
+    try work.seed(0, 0, -1);
 
     var stack_len_max: u16 = 0;
 
-    while (pending_len != 0) {
+    while (work.pending_len != 0) {
         if (options.interrupt_runtime) |rt| try rt.interrupt.pollNativeWork();
-        pending_len -= 1;
-        const pos = pending_pc[pending_len];
-        var stack_len = stack_level_tab[pos];
-        var catch_pos = catch_pos_tab[pos];
+        work.pending_len -= 1;
+        const pos = work.pending_pc[work.pending_len];
+        var stack_len = work.stack_level_tab[pos];
+        var catch_pos = work.catch_pos_tab[pos];
         // F0b: one structured decode per instruction. Nothing below reads
         // a payload byte by hand, and the control-flow switch keys on the
         // logical form rather than the physical id -- which is the point:
         // a reclaimed or re-encoded id must not silently change what this
         // pass believes an instruction is.
-        const h = opcode.decode.headerAt(.final, bytecode, pos) catch |err| switch (err) {
-            error.InvalidOpcode => return error.InvalidOpcode,
-            error.BytecodeOverflow => return error.BytecodeOverflow,
-        };
+        const h = try opcode.decode.headerAt(.final, bytecode, pos);
         if (!final_artifact_invalid) {
             if (final_validator) |*validator| {
-                validator.validateBefore(bytecode, pos) catch |err| switch (err) {
-                    error.InvalidFinalArtifact => final_artifact_invalid = true,
-                    else => return err,
-                };
+                validator.validateBefore(bytecode, pos) catch |err|
+                    try noteFinalArtifactError(&final_artifact_invalid, err);
             }
         }
         if (h.form == .invalid) return error.InvalidOpcode;
@@ -263,10 +260,7 @@ pub fn compute(bytecode: []const u8, options: Options) Error!u16 {
         // expression, and `using`/`dyn_env_probe` read their operand
         // table -- the three special cases this pass used to carry are
         // now one call.
-        const effect = opcode.decode.stackEffect(h, bytecode) catch |err| switch (err) {
-            error.InvalidOpcode => return error.InvalidOpcode,
-            error.BytecodeOverflow => return error.BytecodeOverflow,
-        };
+        const effect = try opcode.decode.stackEffect(h, bytecode);
         const n_pop: u32 = effect.pop;
         const n_push: u32 = effect.push;
         // Two opcodes carry their stack effect in an operand byte instead
@@ -293,10 +287,8 @@ pub fn compute(bytecode: []const u8, options: Options) Error!u16 {
         if (!final_artifact_invalid) {
             if (final_validator) |*validator| {
                 if (validator.pc == pos) {
-                    validator.validateKnownInstruction(bytecode, h) catch |err| switch (err) {
-                        error.InvalidFinalArtifact => final_artifact_invalid = true,
-                        else => return err,
-                    };
+                    validator.validateKnownInstruction(bytecode, h) catch |err|
+                        try noteFinalArtifactError(&final_artifact_invalid, err);
                 }
             }
         }
@@ -321,16 +313,16 @@ pub fn compute(bytecode: []const u8, options: Options) Error!u16 {
             => continue,
             .goto, .goto16, .goto8 => {
                 const target = try opcode.decode.targetOfLabel(h, bytecode, 0);
-                try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len, catch_pos);
+                try work.seed(target, stack_len, catch_pos);
                 continue;
             },
             .if_true, .if_false, .if_true8, .if_false8 => {
                 const target = try opcode.decode.targetOfLabel(h, bytecode, 0);
-                try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len, catch_pos);
+                try work.seed(target, stack_len, catch_pos);
             },
             .gosub => {
                 const target = try opcode.decode.targetOfLabel(h, bytecode, 0);
-                try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len + 1, catch_pos);
+                try work.seed(target, stack_len + 1, catch_pos);
             },
             .dyn_env_probe => {
                 const target = try opcode.decode.targetOfLabel(h, bytecode, 1);
@@ -338,11 +330,11 @@ pub fn compute(bytecode: []const u8, options: Options) Error!u16 {
                 const branch_level = @as(i32, stack_len) + delta;
                 if (branch_level < 0) return error.StackUnderflow;
                 if (branch_level > JS_STACK_SIZE_MAX) return error.StackOverflow;
-                try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, @intCast(branch_level), catch_pos);
+                try work.seed(target, @intCast(branch_level), catch_pos);
             },
             .@"catch" => {
                 const target = try opcode.decode.targetOfLabel(h, bytecode, 0);
-                try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, target, stack_len, catch_pos);
+                try work.seed(target, stack_len, catch_pos);
                 catch_pos = @intCast(pos);
             },
             .for_of_start, .for_await_of_start => catch_pos = @intCast(pos),
@@ -355,57 +347,61 @@ pub fn compute(bytecode: []const u8, options: Options) Error!u16 {
                     },
                     else => stack_len,
                 };
-                catch_pos = maybePopCatchPos(bytecode, stack_level_tab, catch_pos_tab, catch_pos, catch_level);
+                catch_pos = maybePopCatchPos(bytecode, work.stack_level_tab, work.catch_pos_tab, catch_pos, catch_level);
             },
             .nip_catch => {
                 if (catch_pos < 0) return error.InvalidOpcode;
                 const catch_idx: usize = @intCast(catch_pos);
-                stack_len = stack_level_tab[catch_idx];
+                stack_len = work.stack_level_tab[catch_idx];
                 if (!opcode.decode.matchesFormAt(bytecode, @intCast(catch_idx), .@"catch")) stack_len += 1;
                 stack_len += 1;
-                catch_pos = catch_pos_tab[catch_idx];
+                catch_pos = work.catch_pos_tab[catch_idx];
             },
             else => {},
         }
 
         // Fall-through.
-        try seed(stack_level_tab, catch_pos_tab, pending_pc, &pending_len, pos_next, stack_len, catch_pos);
+        try work.seed(pos_next, stack_len, catch_pos);
     }
 
     if (!final_artifact_invalid) {
         if (final_validator) |*validator| {
-            validator.finish(bytecode) catch |err| switch (err) {
-                error.InvalidFinalArtifact => final_artifact_invalid = true,
-                else => return err,
-            };
+            validator.finish(bytecode) catch |err|
+                try noteFinalArtifactError(&final_artifact_invalid, err);
         }
     }
     if (final_artifact_invalid) return error.InvalidFinalArtifact;
     return stack_len_max;
 }
 
-fn seed(
+const Worklist = struct {
     stack_level_tab: []u16,
     catch_pos_tab: []i32,
     pending_pc: []u32,
-    pending_len: *usize,
-    pos: u32,
-    stack_len: u16,
-    catch_pos: i32,
-) Error!void {
-    if (pos == stack_level_tab.len) return error.ReachableFalloff;
-    if (pos > stack_level_tab.len) return error.BytecodeOverflow;
-    const existing = stack_level_tab[pos];
-    if (existing == STACK_LEVEL_UNVISITED) {
-        stack_level_tab[pos] = stack_len;
-        catch_pos_tab[pos] = catch_pos;
-        std.debug.assert(pending_len.* < pending_pc.len);
-        pending_pc[pending_len.*] = pos;
-        pending_len.* += 1;
-    } else if (existing != stack_len) {
-        return error.StackMismatch;
-    } else if (catch_pos_tab[pos] != catch_pos) {
-        return error.StackMismatch;
+    pending_len: usize,
+
+    fn seed(self: *Worklist, pos: u32, stack_len: u16, catch_pos: i32) Error!void {
+        if (pos == self.stack_level_tab.len) return error.ReachableFalloff;
+        if (pos > self.stack_level_tab.len) return error.BytecodeOverflow;
+        const existing = self.stack_level_tab[pos];
+        if (existing == STACK_LEVEL_UNVISITED) {
+            self.stack_level_tab[pos] = stack_len;
+            self.catch_pos_tab[pos] = catch_pos;
+            std.debug.assert(self.pending_len < self.pending_pc.len);
+            self.pending_pc[self.pending_len] = pos;
+            self.pending_len += 1;
+        } else if (existing != stack_len) {
+            return error.StackMismatch;
+        } else if (self.catch_pos_tab[pos] != catch_pos) {
+            return error.StackMismatch;
+        }
+    }
+};
+
+fn noteFinalArtifactError(invalid: *bool, err: Error) Error!void {
+    switch (err) {
+        error.InvalidFinalArtifact => invalid.* = true,
+        else => return err,
     }
 }
 

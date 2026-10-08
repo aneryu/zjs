@@ -988,10 +988,7 @@ fn matchPropTable(code_point: u21, prop: Prop) bool {
 
 fn matchCaseMask(code_point: u21, case_mask: u32) bool {
     if (case_mask == 0) return false;
-    var mask = std.EnumSet(RunType).initEmpty();
-    for (run_types_by_case, 0..) |run_types, i| {
-        if (((case_mask >> @intCast(i)) & 1) != 0) mask.setUnion(run_types);
-    }
+    const mask = caseMaskRunTypes(case_mask);
     for (case_conv_table1) |v| {
         const run: CaseRun = @bitCast(v);
         const code: u32 = run.code;
@@ -1074,10 +1071,6 @@ fn matchProp(code_point: u21, prop: Prop) bool {
     }
 
     return matchPropTable(code_point, prop);
-}
-
-fn isSupportedProperty(prop: Prop) bool {
-    return isSupported(prop);
 }
 
 fn matchScript(code_point: u21, script_idx: Script, is_ext: bool) bool {
@@ -1188,7 +1181,7 @@ fn matchScript(code_point: u21, script_idx: Script, is_ext: bool) bool {
 pub fn isSupportedUnicodePropertyExpression(name: []const u8) bool {
     return switch (parsePropertyExpression(name) orelse return false) {
         .script, .gc_mask => true,
-        .prop_idx => |prop| isSupportedProperty(prop),
+        .prop_idx => |prop| isSupported(prop),
     };
 }
 
@@ -1196,7 +1189,7 @@ pub fn isUnicodePropertyMatches(code_point: u21, name: []const u8) bool {
     return switch (parsePropertyExpression(name) orelse return false) {
         .script => |script| matchScript(code_point, script.idx, script.is_ext),
         .gc_mask => |mask| matchGeneralCategory(code_point, mask),
-        .prop_idx => |prop_idx| isSupportedProperty(prop_idx) and matchProp(code_point, prop_idx),
+        .prop_idx => |prop_idx| isSupported(prop_idx) and matchProp(code_point, prop_idx),
     };
 }
 
@@ -1733,6 +1726,14 @@ const run_types_by_case = [3]std.EnumSet(RunType){
     .initMany(&.{ .l, .lf, .ul, .lsu, .u2l_399_ext2, .lf_ext, .lf_ext2 }),
     .initMany(&.{ .uf, .lf, .ul, .lsu, .u2l_399_ext2, .lf_ext, .lf_ext2, .uf_d20, .uf_d1_ext, .uf_ext2, .uf_ext3 }),
 };
+
+fn caseMaskRunTypes(case_mask: u32) std.EnumSet(RunType) {
+    var mask = std.EnumSet(RunType).initEmpty();
+    for (run_types_by_case, 0..) |run_types, i| {
+        if (((case_mask >> @intCast(i)) & 1) != 0) mask.setUnion(run_types);
+    }
+    return mask;
+}
 
 /// The three conversions libunicode's `lre_case_conv` selects with 0/1/2.
 pub const CaseConv = enum {
@@ -2623,10 +2624,7 @@ fn unicodeCase1(allocator: std.mem.Allocator, case_mask: u32) std.mem.Allocator.
     if (case_mask == 0) return cr;
     try cr.points.ensureTotalCapacity(allocator, case_conv_table1.len * 2);
 
-    var mask = std.EnumSet(RunType).initEmpty();
-    for (run_types_by_case, 0..) |run_types, i| {
-        if (((case_mask >> @intCast(i)) & 1) != 0) mask.setUnion(run_types);
-    }
+    const mask = caseMaskRunTypes(case_mask);
     for (case_conv_table1) |v| {
         const run: CaseRun = @bitCast(v);
         var code: u32 = run.code;

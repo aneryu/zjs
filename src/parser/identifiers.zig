@@ -63,7 +63,7 @@ pub inline fn strictUnresolvedAssignmentNeedsReference(s: *State, atom_id: Atom,
     // A compound assignment or an update operator reads the target first,
     // and that read already throws for an unresolvable strict reference.
     if (keep) return false;
-    if (!(s.is_strict or s.curFunc().is_strict_mode)) return false;
+    if (!s.isStrict()) return false;
     if (s.is_eval or s.lex.is_module or s.curFunc().is_module) return false;
     if (s.cur_func_stack.len != 0) return false;
     return !hasKnownBinding(s, atom_id);
@@ -120,7 +120,7 @@ pub fn isStrictModeReservedWord(name: []const u8) bool {
 pub noinline fn escapedIdentifierIsReservedWordForBinding(s: *State, atom_id: Atom, has_escape: bool) bool {
     if (!has_escape) return false;
     const name = s.atoms.name(atom_id) orelse return false;
-    const strict = s.is_strict or s.curFunc().is_strict_mode;
+    const strict = s.isStrict();
     return std.mem.eql(u8, name, "null") or
         std.mem.eql(u8, name, "false") or
         std.mem.eql(u8, name, "true") or
@@ -202,14 +202,14 @@ pub fn canUseAwaitAsIdentifier(s: *State) bool {
 pub fn isIdentifierLikeToken(s: *State) bool {
     return s.peekKind() == .ident or
         (s.peekKind() == .kw_await and canUseAwaitAsIdentifier(s)) or
-        (s.peekKind() == .kw_yield and !s.ctx.in_generator and !(s.is_strict or s.curFunc().is_strict_mode)) or
+        (s.peekKind() == .kw_yield and !s.ctx.in_generator and !s.isStrict()) or
         isSloppyFutureReservedBindingToken(s) or
-        (!(s.is_strict or s.curFunc().is_strict_mode) and
+        (!s.isStrict() and
             (s.peekKind() == .kw_static or s.peekKind() == .kw_let));
 }
 
 pub fn isSloppyFutureReservedBindingToken(s: *State) bool {
-    return !(s.is_strict or s.curFunc().is_strict_mode) and isSloppyFutureReservedToken(s.peekKind());
+    return !s.isStrict() and isSloppyFutureReservedToken(s.peekKind());
 }
 
 pub fn isSloppyFutureReservedToken(kind: tok.Kind) bool {
@@ -255,6 +255,13 @@ pub fn identifierLikeHasInvalidEscapeForBinding(s: *State) bool {
 
 pub fn atomNameEquals(s: *State, atom_id: Atom, name: []const u8) bool {
     return if (s.atoms.name(atom_id)) |atom_name| std.mem.eql(u8, atom_name, name) else false;
+}
+
+/// Unescaped identifier whose atom text is `name`.
+pub fn tokenIsPlainName(s: *State, token: *const tok.Token, name: []const u8) bool {
+    return token.kind == .ident and
+        !token.payload.ident.has_escape and
+        atomNameEquals(s, token.payload.ident.atom, name);
 }
 
 /// B.3.2.3: a direct eval does not hoist a block function `F` when a

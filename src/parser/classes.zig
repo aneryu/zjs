@@ -70,17 +70,17 @@ fn parseClassElement(s: *State) Error!void {
     const modifiers = try parseClassElementModifiers(s);
     if (modifiers.is_declare) return typescript.tsSkipDeclaredField(s);
     if (s.peekKind() == .ident and s.isIdent("accessor")) {
-        const next = s.peekNext();
+        const next = try s.peekNext();
         if (!next.line_terminator and typescript.tsCanFollowClassModifier(next.kind))
             return s.failWithMessage(null, "auto-accessors ('accessor') are not supported");
     }
-    if (s.peekKind() == .lbracket and typescript.tsIndexSignatureAhead(s)) return typescript.tsSkipIndexSignature(s);
+    if (s.peekKind() == .lbracket and try typescript.tsIndexSignatureAhead(s)) return typescript.tsSkipIndexSignature(s);
 
     const element_source_start = s.currentFunctionSourceStart();
     const method_kind_override = try parseClassMethodPrefix(s);
     // After `async` or `*`, `get`/`set` can only be the method name.
     if (method_kind_override == null) {
-        if (classAccessorKind(s)) |is_getter| return parseClassAccessor(s, is_getter, modifiers.is_abstract, element_source_start);
+        if (try classAccessorKind(s)) |is_getter| return parseClassAccessor(s, is_getter, modifiers.is_abstract, element_source_start);
     }
     if (s.peekKind() == .private_name) return parseClassPrivateElement(s, modifiers.is_abstract, method_kind_override, element_source_start);
     if (s.peekKind() == .lbracket) {
@@ -136,7 +136,7 @@ fn parseClassElementModifiers(s: *State) Error!ClassElementModifiers {
                 .none;
         }
         if (word == .none) break;
-        const next_peek = s.peekNext();
+        const next_peek = try s.peekNext();
         const next = next_peek.kind;
         const has_lt = next_peek.line_terminator;
         if (word != .static and has_lt) break;
@@ -156,7 +156,7 @@ fn parseClassElementModifiers(s: *State) Error!ClassElementModifiers {
 fn parseClassMethodPrefix(s: *State) Error!?ParseFunctionKind {
     var method_kind_override: ?ParseFunctionKind = null;
     const async_is_modifier = s.peekKind() == .ident and s.isIdent("async") and blk: {
-        const next = s.peekNext();
+        const next = try s.peekNext();
         // `async [no LineTerminator here]`: after a newline, `async` is a
         // field name and ASI ends the element.
         if (next.line_terminator) break :blk false;
@@ -352,13 +352,13 @@ fn parseClassNamedElement(s: *State, prop_atom: Atom, is_abstract: bool, method_
     }
 }
 
-fn classAccessorKind(s: *State) ?bool {
+fn classAccessorKind(s: *State) Error!?bool {
     if (!(s.peekKind() == .ident and (s.isIdent("get") or s.isIdent("set")))) return null;
 
     // ClassElement has no [no LineTerminator here] after `get`/`set`:
     // `get\nx(){}` is still an accessor. `get\n*g(){}` cannot be one, so
     // ASI makes `get` a field followed by a generator method.
-    const next_peek = s.peekNext();
+    const next_peek = try s.peekNext();
     const next = next_peek.kind;
     if (next_peek.line_terminator and next == .star) return null;
     if (next == .lparen or
@@ -662,7 +662,7 @@ fn createClassFieldsInitFunction(s: *State, include_instance_brand_prologue: boo
         try v2b.bindLabel(skip);
         v2b.invalidateLastOpcode();
     }
-    const cpool_idx = std.math.cast(u16, try parent_fd.appendCpool(JSValue.undefinedValue())) orelse return error.BytecodeOverflow;
+    const cpool_idx = try functions.reserveChildCpoolSlot(parent_fd);
     child_fd.parent_cpool_idx = cpool_idx;
     try parent_fd.addChild(child_fd);
     const child_index: u16 = @intCast(parent_fd.child_list.len - 1);
@@ -886,6 +886,9 @@ fn prescanClassBody(s: *State, bound_start: usize, parameter_properties: *std.Ar
     var paren_depth: usize = 0;
     var bracket_depth: usize = 0;
     var prev_kind: tok.Kind = .eof;
+    var before_previous: ?tok.Kind = null;
+    var for_head = lookahead.ForHeadDelim.init(s.scratch);
+    defer for_head.deinit();
     var prev_line: u32 = 0;
     var prev_is_static = false;
     // A `#x` met only after a line break: an element name (the previous
@@ -925,18 +928,12 @@ fn prescanClassBody(s: *State, bound_start: usize, parameter_properties: *std.Ar
         }
         prev_line = scan_token.line_num;
 
+        if (try lookahead.skipOpaqueLiteral(s, scan_token, prev_kind)) |skipped| {
+            before_previous = prev_kind;
+            prev_kind = skipped;
+            continue;
+        }
         switch (k) {
-            .slash, .div_assign => {
-                if (try lookahead.skipRegexpInPredeclareScan(s, prev_kind)) {
-                    prev_kind = .regexp;
-                    continue;
-                }
-            },
-            .template => {
-                try lookahead.skipTemplateInPredeclareScan(s, scan_token);
-                prev_kind = .template;
-                continue;
-            },
             .lbrace => brace_depth += 1,
             .rbrace => {
                 brace_depth -= 1;
@@ -952,7 +949,10 @@ fn prescanClassBody(s: *State, bound_start: usize, parameter_properties: *std.Ar
             },
             else => {},
         }
-        prev_kind = k;
+        const at_for_head = for_head.atForHead();
+        try for_head.onToken(k, prev_kind, before_previous);
+        before_previous = prev_kind;
+        prev_kind = lookahead.contextualOfKind(s, &scan_token, prev_kind, at_for_head);
     }
 }
 
@@ -1274,9 +1274,7 @@ fn emitClassDeclaration(s: *State, class_name: Atom, parsed: *ParsedClass) Error
     // the binding visible from heritage/body code; final scope-entry
     // lowering still establishes the outer LET's TDZ before runtime
     // evaluation starts.
-    if (s.top_level_lexical_as_module_ref and s.atProgramBodyScope() and identifiers.hasKnownBinding(s, class_name)) {
-        return s.failNamed("redeclaration of '{s}'", "redeclaration", class_name);
-    }
+    try declarations.rejectModuleRefRedeclaration(s, class_name);
     switch (try declarations.defineVar(s, class_name, .let_)) {
         .local => |idx| class_decl_local_idx = idx,
         .global => top_level_class_binding = true,
@@ -1484,7 +1482,7 @@ fn appendDefaultClassConstructor(s: *State, name_atom: Atom, class_position: Sou
         // completes with return_undef after instance field setup.
         try v2b.emitOp(opcode.op.return_undef);
     }
-    const cpool_idx = std.math.cast(u16, try parent_fd.appendCpool(JSValue.undefinedValue())) orelse return error.BytecodeOverflow;
+    const cpool_idx = try functions.reserveChildCpoolSlot(parent_fd);
     child_fd.parent_cpool_idx = cpool_idx;
     try parent_fd.addChild(child_fd);
     return cpool_idx;

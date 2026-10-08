@@ -956,6 +956,12 @@ pub const State = struct {
         return self.cur_func_stack[self.cur_func_stack.len - 1];
     }
 
+    /// Script/module strictness or the function currently being parsed.
+    /// `curFunc` only reads the function stack.
+    pub inline fn isStrict(self: *State) bool {
+        return self.is_strict or self.curFunc().is_strict_mode;
+    }
+
     /// Push a new FunctionDef onto the stack. Called when entering
     /// a nested function. Mirrors the parent link setup in
     /// `js_new_function_def`.
@@ -1584,9 +1590,9 @@ pub const State = struct {
         try emitter.emitControlThroughFinally(s, .{ .kind = .@"continue", .label_atom = s.resolveLabelAlias(atom_id) });
     }
 
-    pub fn labelStartAtom(s: *State) ?Atom {
+    pub fn labelStartAtom(s: *State) Error!?Atom {
         if (!identifiers.isIdentifierLikeToken(s)) return null;
-        if (s.peekNextKind() != .colon) return null;
+        if (try s.peekNextKind() != .colon) return null;
         const kind = s.peekKind();
         const atom_id = identifiers.identifierLikeAtom(s);
         if (kind == .ident and identifiers.escapedIdentifierIsReservedWordForCurrentContext(s, atom_id, s.token.payload.ident.has_escape)) return null;
@@ -1598,7 +1604,7 @@ pub const State = struct {
             (s.ctx.in_async and identifiers.atomNameEquals(s, atom_id, "await")) or
             (s.ctx.in_class_static_block and identifiers.atomNameEquals(s, atom_id, "await")) or
             (s.ctx.in_generator and identifiers.atomNameEquals(s, atom_id, "yield")) or
-            ((s.is_strict or s.curFunc().is_strict_mode) and identifiers.atomNameEquals(s, atom_id, "yield"));
+            (s.isStrict() and identifiers.atomNameEquals(s, atom_id, "yield"));
     }
 
     fn deinitCurrentControlFrames(s: *State) void {
@@ -1728,19 +1734,17 @@ pub const State = struct {
 
     /// Peek at the next token kind without consuming the current token.
     /// Saves and restores lexer position so the cached token stays valid.
-    pub fn peekNextKind(s: *State) tok.Kind {
-        return s.peekNext().kind;
+    pub fn peekNextKind(s: *State) Error!tok.Kind {
+        return (try s.peekNext()).kind;
     }
 
-    pub fn peekNextIsOfToken(s: *State) bool {
+    pub fn peekNextIsOfToken(s: *State) Error!bool {
         const saved_cursor = lookahead.takeLexerCursorSnapshot(s);
         defer lookahead.restoreLexerCursorSnapshot(s, saved_cursor);
-        var peek_token = s.lex.next() catch return false;
+        var peek_token = try lookahead.peekAhead(s) orelse return false;
         defer s.lex.freeToken(&peek_token);
         if (peek_token.kind == .kw_of) return true;
-        return peek_token.kind == .ident and
-            !peek_token.payload.ident.has_escape and
-            identifiers.atomNameEquals(s, peek_token.payload.ident.atom, "of");
+        return identifiers.tokenIsPlainName(s, &peek_token, "of");
     }
 
     pub const PeekedToken = struct {
@@ -1755,11 +1759,11 @@ pub const State = struct {
     };
 
     /// The kind of the token after the current one, and whether a line
-    /// terminator precedes it. Lexer errors read as end of input.
-    pub fn peekNext(s: *State) PeekedToken {
+    /// terminator precedes it. A non-fatal lexer error reads as end of input.
+    pub fn peekNext(s: *State) Error!PeekedToken {
         const saved_cursor = lookahead.takeLexerCursorSnapshot(s);
         defer lookahead.restoreLexerCursorSnapshot(s, saved_cursor);
-        var peek_token = s.lex.next() catch return .{ .kind = .eof, .line_terminator = false };
+        var peek_token = try lookahead.peekAhead(s) orelse return .{ .kind = .eof, .line_terminator = false };
         defer s.lex.freeToken(&peek_token);
         return .{ .kind = peek_token.kind, .line_terminator = s.lex.gotLineTerminator() };
     }
@@ -1769,23 +1773,11 @@ pub const State = struct {
     /// without one are handed to the real for-in/of parser, which owns the
     /// grammar and diagnostics. This remains separate until the unified
     /// scanner can preserve the production CodeLoad layout gate.
-    pub fn forHeadHasNoTopLevelSemicolon(s: *State) bool {
-        const saved_cursor = lookahead.takeLexerCursorSnapshot(s);
+    pub fn forHeadHasNoTopLevelSemicolon(s: *State) Error!bool {
         // The scan consumes `s.token` while advancing. Keep an independent
         // owner for the token restored at the end.
-        const saved_token = s.lex.dupToken(s.token) catch return false;
-        defer {
-            s.lex.freeToken(&s.token);
-            lookahead.restoreLexerCursorSnapshot(s, saved_cursor);
-            s.token = saved_token;
-        }
-
-        const advanceLocal = struct {
-            fn call(state: *State) bool {
-                state.lex.nextIntoReplacing(&state.token) catch return false;
-                return true;
-            }
-        }.call;
+        const guard = lookahead.TokenScanGuard.begin(s) orelse return error.OutOfMemory;
+        defer guard.restore(s);
 
         var paren_depth: usize = 0;
         var bracket_depth: usize = 0;
@@ -1794,18 +1786,19 @@ pub const State = struct {
         while (true) {
             const kind = s.peekKind();
             if (kind == .eof) return false;
-            if (kind == .template) {
-                lookahead.skipTemplateInPredeclareScan(s, s.token) catch return false;
-                if (!advanceLocal(s)) return false;
-                previous_token_kind = .template;
-                continue;
-            }
-            if (identifiers.tokenCanStartSlashRegexp(kind) and
-                (lookahead.skipRegexpInPredeclareScan(s, previous_token_kind) catch return false))
-            {
-                if (!advanceLocal(s)) return false;
-                previous_token_kind = .regexp;
-                continue;
+            // A template lex error abandons the pre-scan so the real for
+            // parser reports it. A slash that fails to rescan stays division
+            // and the scan continues. OutOfMemory is never either of those.
+            if (kind == .template or identifiers.tokenCanStartSlashRegexp(kind)) {
+                const skipped = lookahead.skipOpaqueLiteral(s, s.token, previous_token_kind) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => if (kind == .template) return false else null,
+                };
+                if (skipped) |next_kind| {
+                    if (!try lookahead.TokenScanGuard.advance(s)) return false;
+                    previous_token_kind = next_kind;
+                    continue;
+                }
             }
 
             switch (kind) {
@@ -1828,9 +1821,24 @@ pub const State = struct {
                 .semicolon => if (paren_depth == 0 and bracket_depth == 0 and brace_depth == 0) return false,
                 else => {},
             }
-            previous_token_kind = kind;
-            if (!advanceLocal(s)) return false;
+            previous_token_kind = forHeadSlashPrevious(s, previous_token_kind, paren_depth, bracket_depth, brace_depth);
+            if (!try lookahead.TokenScanGuard.advance(s)) return false;
         }
+    }
+
+    /// Inside `for (`, an unescaped `of` after a finished left-hand side is
+    /// the contextual keyword (`for (x of /a;b/)`). A leading `of / 2` is
+    /// division. The shared kind table cannot tell those apart.
+    fn forHeadSlashPrevious(
+        s: *State,
+        previous: ?tok.Kind,
+        paren_depth: usize,
+        bracket_depth: usize,
+        brace_depth: usize,
+    ) tok.Kind {
+        // The opening `(` is already consumed, so depth 0 is the for head.
+        const at_for_head = paren_depth == 0 and bracket_depth == 0 and brace_depth == 0;
+        return lookahead.contextualOfKind(s, &s.token, previous, at_for_head);
     }
 
     /// Check the still-unparsed RHS of an assignment for a direct eval
@@ -1844,23 +1852,18 @@ pub const State = struct {
     /// as the declaration pre-scan, and stops at the current expression's
     /// top-level boundary. Nested function bodies are not part of the
     /// current function's direct-eval environment.
-    pub fn rhsContainsDirectEval(s: *State) bool {
+    pub fn rhsContainsDirectEval(s: *State) Error!bool {
         // A scan that found no direct eval covers every scan starting inside
         // its range: such a scan stops at or before the same boundary. This
         // keeps `x = a = a = ... = 1` chains linear.
         const start = s.token.start;
         if (start >= s.direct_eval_free_start and start < s.direct_eval_free_end) return false;
-        const saved_cursor = lookahead.takeLexerCursorSnapshot(s);
         // The scan advances past the current token and releases its atom.
         // Keep an independent owner for the token restored at the end;
         // copying the token struct would restore a dead identifier atom.
-        const saved_token = s.lex.dupToken(s.token) catch return false;
-        defer {
-            s.lex.freeToken(&s.token);
-            lookahead.restoreLexerCursorSnapshot(s, saved_cursor);
-            s.token = saved_token;
-        }
-        const found = scanRhsForDirectEval(s);
+        const guard = lookahead.TokenScanGuard.begin(s) orelse return error.OutOfMemory;
+        defer guard.restore(s);
+        const found = try scanRhsForDirectEval(s);
         if (!found) {
             s.direct_eval_free_start = start;
             s.direct_eval_free_end = s.token.start;
@@ -1868,14 +1871,7 @@ pub const State = struct {
         return found;
     }
 
-    fn scanRhsForDirectEval(s: *State) bool {
-        const advanceLocal = struct {
-            fn call(state: *State) bool {
-                state.lex.nextIntoReplacing(&state.token) catch return false;
-                return true;
-            }
-        }.call;
-
+    fn scanRhsForDirectEval(s: *State) Error!bool {
         var paren_depth: usize = 0;
         var bracket_depth: usize = 0;
         var brace_depth: usize = 0;
@@ -1892,26 +1888,37 @@ pub const State = struct {
             if (kind == .eof) return false;
 
             if (kind == .template) {
-                if (templateContainsDirectEval(s, s.token)) return true;
+                if (try templateContainsDirectEval(s, s.token)) return true;
                 eval_candidate = false;
                 previous_token_kind = .template;
-                if (!advanceLocal(s)) return false;
+                if (!try lookahead.TokenScanGuard.advance(s)) return false;
                 continue;
             }
             if (kind == .kw_function) {
-                lookahead.skipFunctionInPredeclareScan(s, previous_token_kind) catch return false;
+                lookahead.skipFunctionInPredeclareScan(s, previous_token_kind) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    // The nested body did not lex. Abandon this pre-scan;
+                    // the real parser reports the failure.
+                    else => return false,
+                };
                 eval_candidate = false;
                 previous_token_kind = .kw_function;
-                if (!advanceLocal(s)) return false;
+                if (!try lookahead.TokenScanGuard.advance(s)) return false;
                 continue;
             }
-            if ((kind == .slash or kind == .div_assign) and
-                (lookahead.skipRegexpInPredeclareScan(s, previous_token_kind) catch false))
-            {
-                eval_candidate = false;
-                previous_token_kind = .regexp;
-                if (!advanceLocal(s)) return false;
-                continue;
+            // A failed regexp rescan is division (`catch false` before).
+            // OutOfMemory still aborts the pre-scan.
+            if (identifiers.tokenCanStartSlashRegexp(kind)) {
+                const skipped = lookahead.skipOpaqueLiteral(s, s.token, previous_token_kind) catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => null,
+                };
+                if (skipped) |next_kind| {
+                    eval_candidate = false;
+                    previous_token_kind = next_kind;
+                    if (!try lookahead.TokenScanGuard.advance(s)) return false;
+                    continue;
+                }
             }
 
             if (eval_candidate and kind == .lparen) return true;
@@ -1922,12 +1929,10 @@ pub const State = struct {
             {
                 paren_depth -= 1;
                 previous_token_kind = kind;
-                if (!advanceLocal(s)) return false;
+                if (!try lookahead.TokenScanGuard.advance(s)) return false;
                 continue;
             }
-            if (kind == .ident and
-                !s.token.payload.ident.has_escape and
-                identifiers.atomNameEquals(s, s.token.payload.ident.atom, "eval") and
+            if (identifiers.tokenIsPlainName(s, &s.token, "eval") and
                 previous_token_kind != .dot)
             {
                 eval_candidate = true;
@@ -1957,11 +1962,11 @@ pub const State = struct {
                 else => {},
             }
             previous_token_kind = kind;
-            if (!advanceLocal(s)) return false;
+            if (!try lookahead.TokenScanGuard.advance(s)) return false;
         }
     }
 
-    fn templateContainsDirectEval(s: *State, first: tok.Token) bool {
+    fn templateContainsDirectEval(s: *State, first: tok.Token) Error!bool {
         // Nested substitutions recurse. Out of native stack, answer the
         // conservative "may contain eval" (the reference form stays correct).
         if (s.runtime) |rt| {
@@ -1978,33 +1983,41 @@ pub const State = struct {
             var previous_token_kind: ?tok.Kind = .lbrace;
             var eval_candidate = false;
             while (true) {
-                var scan_token = s.lex.next() catch return false;
+                var scan_token = s.lex.next() catch |err| switch (err) {
+                    error.OutOfMemory => return error.OutOfMemory,
+                    else => return false,
+                };
                 defer s.lex.freeToken(&scan_token);
                 const kind = scan_token.kind;
                 if (kind == .eof) return false;
                 if (kind == .kw_function) {
-                    lookahead.skipFunctionInPredeclareScan(s, previous_token_kind) catch return false;
+                    lookahead.skipFunctionInPredeclareScan(s, previous_token_kind) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => return false,
+                    };
                     eval_candidate = false;
                     previous_token_kind = .kw_function;
                     continue;
                 }
                 if (kind == .template) {
-                    if (templateContainsDirectEval(s, scan_token)) return true;
+                    if (try templateContainsDirectEval(s, scan_token)) return true;
                     eval_candidate = false;
                     previous_token_kind = .template;
                     continue;
                 }
-                if ((kind == .slash or kind == .div_assign) and
-                    (lookahead.skipRegexpInPredeclareScan(s, previous_token_kind) catch false))
-                {
-                    eval_candidate = false;
-                    previous_token_kind = .regexp;
-                    continue;
+                if (identifiers.tokenCanStartSlashRegexp(kind)) {
+                    const skipped = lookahead.skipOpaqueLiteral(s, scan_token, previous_token_kind) catch |err| switch (err) {
+                        error.OutOfMemory => return error.OutOfMemory,
+                        else => null,
+                    };
+                    if (skipped) |next_kind| {
+                        eval_candidate = false;
+                        previous_token_kind = next_kind;
+                        continue;
+                    }
                 }
                 if (eval_candidate and kind == .lparen) return true;
-                if (kind == .ident and
-                    !scan_token.payload.ident.has_escape and
-                    identifiers.atomNameEquals(s, scan_token.payload.ident.atom, "eval") and
+                if (identifiers.tokenIsPlainName(s, &scan_token, "eval") and
                     previous_token_kind != .dot)
                 {
                     eval_candidate = true;
@@ -2025,7 +2038,10 @@ pub const State = struct {
             }
 
             var next_part: tok.Token = undefined;
-            s.lex.nextTemplatePartAfterBraceInto(&next_part) catch return false;
+            s.lex.nextTemplatePartAfterBraceInto(&next_part) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                else => return false,
+            };
             defer s.lex.freeToken(&next_part);
             const part = next_part.payload.str.template orelse return false;
             switch (part) {
@@ -2055,7 +2071,7 @@ pub const State = struct {
     /// TypeScript parameter-property modifier at the current token. The
     /// word is a modifier only when a binding follows it, so a parameter
     /// named `readonly` still parses.
-    pub fn isParameterModifier(s: *State) bool {
+    pub fn isParameterModifier(s: *State) Error!bool {
         const k = s.peekKind();
         var is_word = k == .kw_public or k == .kw_private or k == .kw_protected;
         if (!is_word and k == .ident and !s.token.payload.ident.has_escape) {
@@ -2067,7 +2083,7 @@ pub const State = struct {
                 std.mem.eql(u8, ident_str, "override");
         }
         if (!is_word) return false;
-        const next = s.peekNextKind();
+        const next = try s.peekNextKind();
         return typescript.tsKindIsIdentifierLike(next) or next == .kw_this or next == .lbrace or next == .lbracket or
             next == .ellipsis or next == .kw_public or next == .kw_private or
             next == .kw_protected;
@@ -2077,7 +2093,7 @@ pub const State = struct {
         return s.peekKind() == .kw_of or s.isIdent("of");
     }
 
-    pub fn canTreatLetAsForInitializerExpression(s: *State) bool {
+    pub fn canTreatLetAsForInitializerExpression(s: *State) Error!bool {
         if (s.peekKind() != .kw_let) return false;
         // qjs calls is_let(s, DECL_MASK_OTHER) for the for-initializer and
         // the for-in/of head.

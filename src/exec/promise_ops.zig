@@ -2225,6 +2225,24 @@ pub fn promiseConstructorRealmGlobal(constructor_value: core.JSValue, fallback_g
     return fallback_global;
 }
 
+fn combinatorInvokeThen(
+    ctx: *core.JSContext,
+    output: ?*std.Io.Writer,
+    global: *core.Object,
+    constructor_value: core.JSValue,
+    promise_resolve: core.JSValue,
+    value: core.JSValue,
+    on_fulfilled: core.JSValue,
+    on_rejected: core.JSValue,
+    caller_function: ?*const bytecode.FunctionBytecode,
+    caller_frame: ?*frame_mod.Frame,
+) HostError!void {
+    const next_promise = try callValueOrBytecodeRoot(ctx, output, global, constructor_value, promise_resolve, &.{value}, caller_function, caller_frame);
+    const then_value = try getValueProperty(ctx, output, global, next_promise, core.atom.ids.then, caller_function, caller_frame);
+    if (!isCallableValue(then_value)) return error.NotAFunction;
+    _ = try callValueOrBytecodeRoot(ctx, output, global, next_promise, then_value, &.{ on_fulfilled, on_rejected }, caller_function, caller_frame);
+}
+
 pub fn promiseCombinatorCall(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -2299,21 +2317,6 @@ pub fn promiseCombinatorCall(
             (try state_object.promiseCombinatorRemainingSlot(ctx.runtime)).* = remaining + 1;
         }
 
-        const next_promise = callValueOrBytecodeRoot(ctx, output, global, constructor_value, promise_resolve, &.{step_value}, caller_function, caller_frame) catch |err| {
-            try iterator_ops.iteratorCloseForThrow(ctx, output, global, iterator_value);
-            return rejectCombinator(ctx, output, global, &capability, err, caller_function, caller_frame);
-        };
-
-        const then_key = core.atom.ids.then;
-        const then_value = getValueProperty(ctx, output, global, next_promise, then_key, caller_function, caller_frame) catch |err| {
-            try iterator_ops.iteratorCloseForThrow(ctx, output, global, iterator_value);
-            return rejectCombinator(ctx, output, global, &capability, err, caller_function, caller_frame);
-        };
-        if (!isCallableValue(then_value)) {
-            try iterator_ops.iteratorCloseForThrow(ctx, output, global, iterator_value);
-            return rejectCombinator(ctx, output, global, &capability, error.NotAFunction, caller_function, caller_frame);
-        }
-
         const on_fulfilled = switch (mode) {
             .all => try promiseCombinatorCallback(ctx.runtime, global, .all_resolve, state.?, index),
             .all_settled => try promiseCombinatorCallback(ctx.runtime, global, .all_settled_fulfill, state.?, index),
@@ -2325,8 +2328,7 @@ pub fn promiseCombinatorCall(
             .any => try promiseCombinatorCallback(ctx.runtime, global, .any_reject, state.?, index),
             .race => capability.reject,
         };
-
-        _ = callValueOrBytecodeRoot(ctx, output, global, next_promise, then_value, &.{ on_fulfilled, on_rejected }, caller_function, caller_frame) catch |err| {
+        combinatorInvokeThen(ctx, output, global, constructor_value, promise_resolve, step_value, on_fulfilled, on_rejected, caller_function, caller_frame) catch |err| {
             try iterator_ops.iteratorCloseForThrow(ctx, output, global, iterator_value);
             return rejectCombinator(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
@@ -2417,18 +2419,6 @@ pub fn promiseKeyedCombinatorCall(
         try promiseSetArrayIndex(ctx.runtime, values, index, core.JSValue.undefinedValue());
         (try state.promiseCombinatorRemainingSlot(ctx.runtime)).* = remaining + 1;
 
-        const next_promise = callValueOrBytecodeRoot(ctx, output, global, constructor_value, promise_resolve, &.{step_value}, caller_function, caller_frame) catch |err| {
-            return rejectCombinator(ctx, output, global, &capability, err, caller_function, caller_frame);
-        };
-
-        const then_key = core.atom.ids.then;
-        const then_value = getValueProperty(ctx, output, global, next_promise, then_key, caller_function, caller_frame) catch |err| {
-            return rejectCombinator(ctx, output, global, &capability, err, caller_function, caller_frame);
-        };
-        if (!isCallableValue(then_value)) {
-            return rejectCombinator(ctx, output, global, &capability, error.NotAFunction, caller_function, caller_frame);
-        }
-
         const on_fulfilled = if (all_settled)
             try promiseCombinatorCallback(ctx.runtime, global, .all_settled_keyed_fulfill, state, index)
         else
@@ -2437,8 +2427,7 @@ pub fn promiseKeyedCombinatorCall(
             try promiseCombinatorCallback(ctx.runtime, global, .all_settled_keyed_reject, state, index)
         else
             capability.reject;
-
-        _ = callValueOrBytecodeRoot(ctx, output, global, next_promise, then_value, &.{ on_fulfilled, on_rejected }, caller_function, caller_frame) catch |err| {
+        combinatorInvokeThen(ctx, output, global, constructor_value, promise_resolve, step_value, on_fulfilled, on_rejected, caller_function, caller_frame) catch |err| {
             return rejectCombinator(ctx, output, global, &capability, err, caller_function, caller_frame);
         };
         index += 1;

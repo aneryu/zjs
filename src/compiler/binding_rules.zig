@@ -2323,8 +2323,14 @@ fn discoverParentScopedSource(
     return .{ .argument_environment_only = var_idx == function_bytecode.arg_scope_end };
 }
 
-fn ensureParentArgumentsBinding(parent: *function_def_mod.FunctionDef) Error!u16 {
-    return try parent.ensureArgumentsBinding();
+pub fn remapArgumentsArgumentBindingError(
+    err: error{ OutOfMemory, BytecodeOverflow, InvalidScope },
+) error{ OutOfMemory, BytecodeOverflow, InvalidBytecode } {
+    return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.BytecodeOverflow => error.BytecodeOverflow,
+        error.InvalidScope => error.InvalidBytecode,
+    };
 }
 
 fn ensureCurrentPseudoBinding(
@@ -2388,9 +2394,7 @@ noinline fn resolveBindingTopologyAfterCurrentMiss(
     // is the single point that can append a demand-created special local.
     if (try ensureCurrentPseudoBinding(fd, atom_id)) |idx| return .{ .local = idx };
     if (atom_id == atom.ids.arguments and fd.has_arguments_binding) {
-        const idx_i32 = try fd.ensureArgumentsBinding();
-        if (idx_i32 < 0 or idx_i32 > std.math.maxInt(u16)) return error.BytecodeOverflow;
-        return .{ .local = @intCast(idx_i32) };
+        return .{ .local = try fd.ensureArgumentsBinding() };
     }
     if (fd.is_named_func_expr and atom_id == fd.func_name) {
         return .{ .local = try fd.ensureFuncExprSelfBinding() };
@@ -2437,11 +2441,7 @@ noinline fn resolveBindingTopologyAfterCurrentMiss(
             parent.func_type != .class_static_init)
         {
             _ = try parent.ensureArgumentsBinding();
-            parent.ensureArgumentsArgumentBinding() catch |err| return switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
-                error.BytecodeOverflow => error.BytecodeOverflow,
-                error.InvalidScope => error.InvalidBytecode,
-            };
+            parent.ensureArgumentsArgumentBinding() catch |err| return remapArgumentsArgumentBindingError(err);
             const parameter_arguments_idx = if (parent.hasExplicitArgumentsVar())
                 parent.arguments_arg_idx
             else
@@ -2483,7 +2483,7 @@ noinline fn resolveBindingTopologyAfterCurrentMiss(
         }
 
         if (atom_id == atom.ids.arguments and parent.has_arguments_binding) {
-            const local_idx = try ensureParentArgumentsBinding(parent);
+            const local_idx = try parent.ensureArgumentsBinding();
             return .{ .closure = try threadParentLocalSource(fd, parent, local_idx) };
         }
 

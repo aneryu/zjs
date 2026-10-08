@@ -379,66 +379,71 @@ fn dateCall(
     native_magic: i32,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
+    const callable_global = try builtin_dispatch.activeGlobalOrNull(host_call);
+    const id: u32 = host_call.magic;
+    if (id == @intFromEnum(ConstructorMethod.construct)) return dateConstructorCall(host_call);
+    if (isInternalBodyCall(host_call)) {
+        return dateInternalBodyCall(host_call.ctx.runtime, id, host_call.this_value, host_call.args);
+    }
+    return dateStaticOrPrototypeCall(host_call, callable_global);
+}
+
+/// Engine-internal dispatch arm: the exec date VM-coercion glue
+/// (`exec/date_ops.zig`, plus the `Date.now` fusion and the static
+/// fall-throughs) has already coerced its arguments and routes the *pure body*
+/// through the table here so VM coercion stays on the same record boundary. It is
+/// gated on `func_obj == null and global == null`, the contract those call
+/// sites use; other direct callers pass `func_obj == null` while threading
+/// the realm `global` and raw args, so they must instead fall through to the
+/// coercing dispatcher below. This
+/// deliberately bypasses the prototype dispatcher
+/// (`object_ops.datePrototypeMethod`) — routing back through it would
+/// re-enter this record (the dispatcher's own body call is one of the
+/// converted sites) and recurse, and the glue already performed the
+/// dispatcher's coercion/capture work.
+fn isInternalBodyCall(host_call: builtin_dispatch.NativeCall) bool {
+    return host_call.func_obj == null and host_call.global == null and !host_call.is_constructor;
+}
+
+fn dateConstructorCall(host_call: builtin_dispatch.NativeCall) HostError!core.JSValue {
+    // `new Date(...)` arrives through the construct record path
+    // (`exec/construct.zig`) with `is_constructor` set and the resolved
+    // instance prototype in `new_target`; `Date(...)` called as a function
+    // returns the current time string (QuickJS js_date_constructor with
+    // `new_target == undefined`).
+    if (host_call.is_constructor) return constructWithPrototype(host_call.ctx.runtime, host_call.args, host_call.new_target);
+    return call(host_call.ctx.runtime);
+}
+
+fn dateStaticOrPrototypeCall(host_call: builtin_dispatch.NativeCall, callable_global: ?*core.Object) HostError!core.JSValue {
     const ctx = host_call.ctx;
-    const callable_global: ?*core.Object = if (host_call.func_obj != null) blk: {
-        const realm = try builtin_dispatch.callableRealm(host_call);
-        std.debug.assert(realm.realm == ctx);
-        break :blk realm.global;
-    } else host_call.global;
     const output = host_call.output;
     const id: u32 = host_call.magic;
     const args = host_call.args;
     const caller_function = builtin_dispatch.callerBytecode(host_call);
     const caller_frame = builtin_dispatch.callerFrame(host_call);
 
-    if (id == @intFromEnum(ConstructorMethod.construct)) {
-        // `new Date(...)` arrives through the construct record path
-        // (`exec/construct.zig`) with `is_constructor` set and the resolved
-        // instance prototype in `new_target`; `Date(...)` called as a function
-        // returns the current time string (QuickJS js_date_constructor with
-        // `new_target == undefined`).
-        if (host_call.is_constructor) return constructWithPrototype(ctx.runtime, args, host_call.new_target);
-        return call(ctx.runtime);
-    }
-
-    // Engine-internal dispatch arm: the exec date VM-coercion glue
-    // (`exec/date_ops.zig`, plus the `Date.now` fusion and the static
-    // fall-throughs) has already coerced its arguments and routes the *pure body*
-    // through the table here so VM coercion stays on the same record boundary. It is
-    // gated on `func_obj == null and global == null`, the contract those call
-    // sites use; other direct callers pass `func_obj == null` while threading
-    // the realm `global` and raw args, so they must instead fall through to the
-    // coercing dispatcher below. This
-    // deliberately bypasses the prototype dispatcher
-    // (`object_ops.datePrototypeMethod`) — routing back through it would
-    // re-enter this record (the dispatcher's own body call is one of the
-    // converted sites) and recurse, and the glue already performed the
-    // dispatcher's coercion/capture work.
-    if (host_call.func_obj == null and host_call.global == null and !host_call.is_constructor) {
-        return dateInternalBodyCall(ctx.runtime, id, host_call.this_value, args);
-    }
-
     if (id == @intFromEnum(PrototypeMethod.to_primitive)) {
-        const active_global = callable_global orelse return error.TypeError;
+        const active_global = callable_global orelse return error.InvalidBuiltinRegistry;
         return dateToPrimitiveCall(ctx, output, active_global, host_call.this_value, args, caller_function, caller_frame);
     }
     if (id == @intFromEnum(StaticMethod.utc)) {
-        const active_global = callable_global orelse return error.TypeError;
+        const active_global = callable_global orelse return error.InvalidBuiltinRegistry;
         return dateUtcCall(ctx, output, active_global, args);
     }
     if (id == @intFromEnum(StaticMethod.parse)) {
         // js_Date_parse ToString-coerces its argument (never
         // a TypeError arity/type gate); the coercion runs in VM context so a
         // user `toString`/`Symbol.toPrimitive` executes with the caller frame.
-        const active_global = callable_global orelse return error.TypeError;
+        const active_global = callable_global orelse return error.InvalidBuiltinRegistry;
         const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
         const string_value = try string_ops.toStringForAnnexB(ctx, output, active_global, input, caller_function, caller_frame);
         return core.JSValue.float64(parseDateString(string_value));
     }
     if (std.enums.fromInt(PrototypeMethod, id)) |method| {
-        const active_global = callable_global orelse return error.TypeError;
+        const active_global = callable_global orelse return error.InvalidBuiltinRegistry;
         switch (method) {
-            // Only reachable through the engine-internal arm above.
+            // Only reachable through `isInternalBodyCall`.
             .set_year_with_captured_ms, .set_parts_with_captured_ms => return error.TypeError,
             else => {},
         }
@@ -1121,6 +1126,22 @@ fn writeYearPadded4(w: *std.Io.Writer, y: i64) !void {
     }
 }
 
+/// Longest `toString` form (`fmt` 1, `part` 3):
+/// `Www Mmm dd yyyyyyy HH:MM:SS GMT±hhhhmm`.
+/// Year width 7 is a TimeClip instant (±8.64e15 ms): years -271821..275760,
+/// sign plus six digits, for both `writeYearPadded4` and the ISO expanded
+/// year. The local-offset hour field is pinned at four digits; real zones
+/// use two. Calendar numbers stay within two digits and names within three.
+const date_string_year_width = 7;
+const date_string_tz_hour_width = 4;
+const date_string_max_len = 3 + 1 + 3 + 1 + 2 + 1 + date_string_year_width + 1 +
+    8 + 1 + 3 + 1 + date_string_tz_hour_width + 2;
+const date_string_buffer_len = 64;
+
+comptime {
+    std.debug.assert(date_string_max_len <= date_string_buffer_len);
+}
+
 /// Mirrors qjs get_date_string.
 /// fmt: 0 toUTCString / 1 toString / 2 toISOString / 3 toLocaleString.
 /// part: 1 = date, 2 = time, 3 = both. NaN: fmt 2 raises RangeError, others
@@ -1148,7 +1169,7 @@ fn getDateStringValue(rt: *core.JSRuntime, ms: f64, magic: u32) !core.JSValue {
     const wd: usize = @intFromFloat(fields.get(.weekday));
     const tz: i64 = @intFromFloat(fields.get(.tz_minutes));
 
-    var buffer: [64]u8 = undefined;
+    var buffer: [date_string_buffer_len]u8 = undefined;
     var w = std.Io.Writer.fixed(&buffer);
 
     writeDateString(&w, fmt, part, y, mon, d, h, m, s, msec, wd, tz) catch unreachable;
@@ -1156,9 +1177,9 @@ fn getDateStringValue(rt: *core.JSRuntime, ms: f64, magic: u32) !core.JSValue {
     return str.value();
 }
 
-/// Every Date string form is shorter than the fixed 64-byte caller buffer, so
-/// the writer's capacity error is a local invariant rather than an engine
-/// transport error.
+/// Every Date string form is at most `date_string_max_len` bytes, which fits
+/// the fixed caller buffer, so the writer's capacity error is a local
+/// invariant rather than an engine transport error.
 fn writeDateString(
     w: *std.Io.Writer,
     fmt: u32,

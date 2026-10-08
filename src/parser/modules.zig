@@ -44,7 +44,7 @@ pub fn parseImport(s: *State) Error!void {
     var default_local_name: ?Atom = null;
 
     // TypeScript `import type ...`: no runtime import at all.
-    if (s.isIdent("type") and typescript.tsImportTypeModifier(s)) {
+    if (s.isIdent("type") and try typescript.tsImportTypeModifier(s)) {
         try s.advance();
         return typescript.tsSkipTypeOnlyImport(s);
     }
@@ -109,7 +109,7 @@ pub fn parseImport(s: *State) Error!void {
         while (s.peekKind() != .rbrace and s.peekKind() != .eof) {
             // TypeScript `import { type X }`: the specifier is erased.
             var type_only = false;
-            if (s.isIdent("type") and typescript.tsSpecifierTypeModifier(s)) {
+            if (s.isIdent("type") and try typescript.tsSpecifierTypeModifier(s)) {
                 try s.advance();
                 type_only = true;
             }
@@ -190,9 +190,15 @@ fn moduleHasExportName(record: *const bytecode_module.Record, export_name: Atom)
     return false;
 }
 
+fn rejectDuplicateExport(s: *State, record: *const bytecode_module.Record, export_name: Atom) Error!void {
+    if (moduleHasExportName(record, export_name)) {
+        return s.failNamed("duplicate export '{s}'", "duplicate export", export_name);
+    }
+}
+
 pub fn addModuleExportName(s: *State, export_name: Atom, local_name: Atom) Error!void {
     const record = s.ensureModule();
-    if (moduleHasExportName(record, export_name)) return s.failNamed("duplicate export '{s}'", "duplicate export", export_name);
+    try rejectDuplicateExport(s, record, export_name);
     try record.addExport(export_name, local_name);
 }
 
@@ -280,22 +286,23 @@ fn ensureModuleDefaultExportBinding(s: *State) Error!void {
     }
 }
 
+const IndirectExportKind = enum { named, namespace };
+
 fn addModuleIndirectExport(
     s: *State,
     request_index: u32,
     export_name: Atom,
     import_name: Atom,
-    is_namespace: bool,
+    kind: IndirectExportKind,
 ) Error!void {
     const record = s.ensureModule();
-    if (moduleHasExportName(record, export_name)) return s.failNamed("duplicate export '{s}'", "duplicate export", export_name);
-    try record.addIndirectExport(request_index, export_name, import_name, is_namespace);
+    try rejectDuplicateExport(s, record, export_name);
+    try record.addIndirectExport(request_index, export_name, import_name, kind == .namespace);
 }
 
 fn addModuleStarExport(s: *State, request_index: u32, export_name: Atom) Error!void {
     const record = s.ensureModule();
-    if (export_name != atom_star and moduleHasExportName(record, export_name))
-        return s.failNamed("duplicate export '{s}'", "duplicate export", export_name);
+    if (export_name != atom_star) try rejectDuplicateExport(s, record, export_name);
     try record.addStarExport(request_index, export_name);
 }
 
@@ -340,7 +347,7 @@ pub fn parseExport(s: *State) Error!void {
     if (next_tok == .assign) {
         return s.failWithMessage(null, "'export =' is not supported; use ESM export");
     }
-    if (s.isIdent("as") and typescript.tsPeekNextIsIdent(s, "namespace", false)) {
+    if (s.isIdent("as") and try typescript.tsPeekNextIsIdent(s, "namespace", false)) {
         // `export as namespace X;` (UMD global): type-level only.
         try s.advance();
         try s.advance();
@@ -350,7 +357,7 @@ pub fn parseExport(s: *State) Error!void {
         return;
     }
     if (s.isIdent("type")) {
-        const after_type_peek = s.peekNext();
+        const after_type_peek = try s.peekNext();
         const after_type = after_type_peek.kind;
         const has_lt = after_type_peek.line_terminator;
         if (after_type == .lbrace or after_type == .star) {
@@ -359,20 +366,20 @@ pub fn parseExport(s: *State) Error!void {
         }
         if (!has_lt and typescript.tsKindIsIdentifierLike(after_type)) return typescript.tsParseTypeAliasDeclaration(s);
     }
-    if (next_tok == .kw_interface and typescript.tsDeclarationStart(s) == .interface) return typescript.tsParseInterfaceDeclaration(s);
-    if (typescript.tsDeclarationStart(s) == .ambient) return typescript.tsParseAmbientDeclaration(s);
-    if (s.isIdent("abstract") and nextOnSameLineIs(s, .kw_class)) {
+    if (next_tok == .kw_interface and try typescript.tsDeclarationStart(s) == .interface) return typescript.tsParseInterfaceDeclaration(s);
+    if (try typescript.tsDeclarationStart(s) == .ambient) return typescript.tsParseAmbientDeclaration(s);
+    if (s.isIdent("abstract") and try nextOnSameLineIs(s, .kw_class)) {
         try s.advance();
         return parseExportedClass(s, false);
     }
-    if (next_tok == .kw_enum or (next_tok == .kw_const and s.peekNextKind() == .kw_enum)) {
+    if (next_tok == .kw_enum or (next_tok == .kw_const and try s.peekNextKind() == .kw_enum)) {
         if (next_tok == .kw_const) try s.advance();
         try typescript.parseEnumDeclaration(s);
         const name_atom = s.last_declared_atom orelse return Error.ParserInvariant;
         try addMergeableModuleExportName(s, name_atom);
         return;
     }
-    if (typescript.tsDeclarationStart(s) == .namespace) {
+    if (try typescript.tsDeclarationStart(s) == .namespace) {
         try typescript.parseNamespaceDeclaration(s);
         const name_atom = s.last_declared_atom orelse return Error.ParserInvariant;
         try addMergeableModuleExportName(s, name_atom);
@@ -380,7 +387,7 @@ pub fn parseExport(s: *State) Error!void {
     }
     if (next_tok == .kw_import) {
         // `export import x = A.B;`
-        if (!typescript.tsImportAliasAhead(s)) return s.failExpectedDescription("import alias");
+        if (!try typescript.tsImportAliasAhead(s)) return s.failExpectedDescription("import alias");
         try s.advance();
         return typescript.tsParseImportAlias(s, true);
     }
@@ -400,7 +407,7 @@ pub fn parseExport(s: *State) Error!void {
     const source_start = s.currentFunctionSourceStart();
     if (next_tok == .kw_function) return parseExportedFunction(s, .normal, source_start, false);
     if (next_tok == .kw_class) return parseExportedClass(s, false);
-    if (next_tok == .ident and s.isIdent("async") and nextOnSameLineIs(s, .kw_function)) {
+    if (next_tok == .ident and s.isIdent("async") and try nextOnSameLineIs(s, .kw_function)) {
         try s.advance(); // consume async
         return parseExportedFunction(s, .async, source_start, false);
     }
@@ -409,23 +416,23 @@ pub fn parseExport(s: *State) Error!void {
 
 /// `async function` / `abstract class` modifiers apply only with no line
 /// terminator before the keyword ([no LineTerminator here]).
-fn nextOnSameLineIs(s: *State, kind: tok.Kind) bool {
-    const next = s.peekNext();
+fn nextOnSameLineIs(s: *State, kind: tok.Kind) Error!bool {
+    const next = try s.peekNext();
     return next.kind == kind and !next.line_terminator;
 }
 
 /// `export default <class | function | async function | expression>`.
 fn parseExportDefault(s: *State) Error!void {
     try s.advance();
-    if (s.isIdent("abstract") and nextOnSameLineIs(s, .kw_class)) try s.advance();
-    if (s.peekKind() == .kw_interface and typescript.tsDeclarationStart(s) == .interface) {
+    if (s.isIdent("abstract") and try nextOnSameLineIs(s, .kw_class)) try s.advance();
+    if (s.peekKind() == .kw_interface and try typescript.tsDeclarationStart(s) == .interface) {
         return typescript.tsParseInterfaceDeclaration(s);
     }
     const source_start = s.currentFunctionSourceStart();
     switch (s.peekKind()) {
         .kw_class => return parseExportedClass(s, true),
         .kw_function => return parseExportedFunction(s, .normal, source_start, true),
-        .ident => if (s.isIdent("async") and nextOnSameLineIs(s, .kw_function)) {
+        .ident => if (s.isIdent("async") and try nextOnSameLineIs(s, .kw_function)) {
             try s.advance();
             return parseExportedFunction(s, .async, source_start, true);
         },
@@ -441,7 +448,7 @@ fn parseExportDefault(s: *State) Error!void {
 /// exported under its own name, or under `default`; an anonymous default
 /// declaration uses the `*default*` carrier.
 fn parseExportedFunction(s: *State, func_kind: ParseFunctionKind, source_start: FunctionSourceStart, is_default: bool) Error!void {
-    const name_atom = exportDefaultFunctionName(s);
+    const name_atom = try exportDefaultFunctionName(s);
     if (is_default and name_atom == null) {
         try functions.parseAnonymousDefaultFunctionDecl(s, func_kind, source_start);
         if (s.ts_last_decl_was_signature) return;
@@ -455,7 +462,7 @@ fn parseExportedFunction(s: *State, func_kind: ParseFunctionKind, source_start: 
 /// `export [default] class [name]`; an anonymous default class is stored
 /// through the `*default*` binding like a default expression.
 fn parseExportedClass(s: *State, is_default: bool) Error!void {
-    if (is_default and !hasExportDefaultClassName(s)) {
+    if (is_default and !try hasExportDefaultClassName(s)) {
         _ = try classes.parseClass(s, false);
         try functions.setObjectName(s, atom_default);
         return bindDefaultExportValue(s);
@@ -481,7 +488,7 @@ fn parseExportList(s: *State) Error!void {
     while (s.peekKind() != .rbrace and s.peekKind() != .eof) {
         // TypeScript `export { type X }`: the specifier is erased.
         var type_only = false;
-        if (s.isIdent("type") and typescript.tsSpecifierTypeModifier(s)) {
+        if (s.isIdent("type") and try typescript.tsSpecifierTypeModifier(s)) {
             try s.advance();
             type_only = true;
             saw_type_only_specifier = true;
@@ -530,7 +537,7 @@ fn parseExportList(s: *State) Error!void {
     if (s.isIdent("from")) {
         const request_index = try parseFromClause(s);
         for (export_specs.items) |entry| {
-            try addModuleIndirectExport(s, request_index, entry.export_name, entry.import_name, false);
+            try addModuleIndirectExport(s, request_index, entry.export_name, entry.import_name, .named);
         }
     } else {
         for (export_specs.items) |entry| {
@@ -559,7 +566,7 @@ fn parseExportStar(s: *State) Error!void {
     }
     const request_index = try parseFromClause(s);
     if (is_namespace) {
-        try addModuleIndirectExport(s, request_index, export_name, atom_star, true);
+        try addModuleIndirectExport(s, request_index, export_name, atom_star, .namespace);
     } else {
         try addModuleStarExport(s, request_index, export_name);
     }
@@ -572,7 +579,7 @@ fn parseExportStar(s: *State) Error!void {
 /// by this function's own `defer`, but post-TGC S3-c the id itself stays
 /// rooted by the enclosing `CompileAtomScope`, so it is borrowed, not owned:
 /// the caller does not free. Same contract as `moduleImportNameAtom`.
-fn exportDefaultFunctionName(s: *State) ?Atom {
+fn exportDefaultFunctionName(s: *State) Error!?Atom {
     const saved_cursor = lookahead.takeLexerCursorSnapshot(s);
     // The position restore must be armed before the fallible scan: `nextInto()`
     // moves `pos` past the peeked token before it can fail (the identifier
@@ -582,10 +589,10 @@ fn exportDefaultFunctionName(s: *State) ?Atom {
     // would resume on `(` and report a spurious SyntaxError instead of
     // letting the allocation failure propagate.
     defer lookahead.restoreLexerCursorSnapshot(s, saved_cursor);
-    var first = s.lex.next() catch return null;
+    var first = try lookahead.peekAhead(s) orelse return null;
     defer s.lex.freeToken(&first);
     if (first.kind == .star) {
-        var second = s.lex.next() catch return null;
+        var second = try lookahead.peekAhead(s) orelse return null;
         defer s.lex.freeToken(&second);
         if (second.kind == .ident) return second.payload.ident.atom;
         return null;
@@ -596,12 +603,12 @@ fn exportDefaultFunctionName(s: *State) ?Atom {
 
 /// Return whether `export default class` has a declaration name. The
 /// lookahead token is released here; `parseClass` returns the real owner.
-fn hasExportDefaultClassName(s: *State) bool {
+fn hasExportDefaultClassName(s: *State) Error!bool {
     const saved_cursor = lookahead.takeLexerCursorSnapshot(s);
     // Same ordering contract as `exportDefaultFunctionName`: arm the
     // position restore before the fallible peek.
     defer lookahead.restoreLexerCursorSnapshot(s, saved_cursor);
-    var name = s.lex.next() catch return false;
+    var name = try lookahead.peekAhead(s) orelse return false;
     defer s.lex.freeToken(&name);
     return name.kind == .ident;
 }

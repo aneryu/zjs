@@ -137,7 +137,7 @@ pub fn setWithReceiver(
         if (object.proxyTarget() != null) {
             return try object_ops.proxySetValueProperty(ctx, output, global, receiver_value, object, atom_id, set_value, caller_function, caller_frame);
         }
-        if (core.object.isTypedArrayObject(object)) {
+        if (core.typed_array.isTypedArrayObject(object)) {
             if (try array_ops.typedArrayNumericSet(ctx, output, global, object, receiver_value, atom_id, set_value, caller_function, caller_frame)) |ok| return ok;
         }
         if (try array_ops.typedArrayPrototypeSet(ctx, output, global, receiver_value, object.getPrototype(), atom_id, set_value, caller_function, caller_frame)) |ok| return ok;

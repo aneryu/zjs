@@ -1075,6 +1075,26 @@ const Resolver = struct {
         return label_index;
     }
 
+    inline fn readU16Operand(self: *const Resolver, position: u32, comptime size: u32, comptime off: u32) Error!u16 {
+        comptime if (off + 2 > size) @compileError("u16 operand exceeds instruction");
+        const pc: usize = @intCast(position);
+        return std.mem.readInt(u16, self.code[pc + off ..][0..2], .little);
+    }
+
+    inline fn atomLabelIndex(
+        self: *const Resolver,
+        position: u32,
+        instruction: TempInstruction,
+        op_id: u8,
+    ) Error!?u32 {
+        const format = if (instruction.is_temp)
+            opcode.formatOfPhase1(op_id)
+        else
+            opcode.formatOf(op_id);
+        if (format != .atom_label_u8 and format != .atom_label_u16) return null;
+        return try self.labelAt(position, 5);
+    }
+
     fn passBindsAt(self: *Resolver, input_pos: u32) Error!void {
         if (self.next_bind_offset != input_pos) {
             if (self.next_bind_offset < input_pos) return error.InvalidBytecode;
@@ -1175,15 +1195,17 @@ const Resolver = struct {
         return lo;
     }
 
+    const StartBinds = enum { blocking, transparent };
+
     fn hasBindInRange(
         self: *const Resolver,
         start: u32,
         end: u32,
-        transparent_start_binds: bool,
+        start_binds: StartBinds,
     ) bool {
         var index = self.firstBindAtOrAfter(start);
         while (index < self.binds.len and self.binds[index].input_offset < end) : (index += 1) {
-            if (!transparent_start_binds or self.binds[index].input_offset != start)
+            if (start_binds == .blocking or self.binds[index].input_offset != start)
                 return true;
         }
         return false;
@@ -1222,7 +1244,7 @@ const Resolver = struct {
         {
             return null;
         }
-        if (self.hasBindInRange(tail_offset + 1, tail_end, false))
+        if (self.hasBindInRange(tail_offset + 1, tail_end, .blocking))
             return null;
 
         const binding_is_global = switch (binding) {
@@ -1276,7 +1298,7 @@ const Resolver = struct {
         self: *Resolver,
         start: u32,
         expected_op: ?u8,
-        transparent_start_binds: bool,
+        start_binds: StartBinds,
     ) Error!?BranchDropMatch {
         if (start >= self.code.len) return null;
         const branch_op = self.code[start];
@@ -1289,7 +1311,7 @@ const Resolver = struct {
         if (drop_pos >= self.code.len) return null;
         if (self.code[drop_pos] != op.drop) return null;
         const after = drop_pos + 1;
-        if (self.hasBindInRange(start, after, transparent_start_binds)) return null;
+        if (self.hasBindInRange(start, after, start_binds)) return null;
         return .{
             .branch_op = branch_op,
             .label_index = try self.labelAt(start, 1),
@@ -1306,8 +1328,8 @@ const Resolver = struct {
         if (start >= self.code.len) return null;
         if (self.code[start] != op.dup) return null;
         const branch_start = start + 1;
-        const tail = (try self.matchBranchDrop(branch_start, expected_branch, true)) orelse return null;
-        if (self.hasBindInRange(start, tail.after, true)) return null;
+        const tail = (try self.matchBranchDrop(branch_start, expected_branch, .transparent)) orelse return null;
+        if (self.hasBindInRange(start, tail.after, .transparent)) return null;
         return tail;
     }
 
@@ -1327,7 +1349,7 @@ const Resolver = struct {
         if (branch_size != 5 or branch_size > self.code.len - start)
             return error.InvalidBytecode;
         const after = start + branch_size;
-        if (self.hasBindInRange(start, after, true)) return null;
+        if (self.hasBindInRange(start, after, .transparent)) return null;
         return .{ .label_index = try self.labelAt(start, 1), .after = after };
     }
 
@@ -1388,7 +1410,7 @@ const Resolver = struct {
         const after = drop_pos + 1;
         if (self.hasSourceTransitionAt(start) or self.hasSourceTransitionAt(drop_pos))
             return null;
-        if (self.hasBindInRange(start, after, false)) return null;
+        if (self.hasBindInRange(start, after, .blocking)) return null;
         return .{ .middle_op = middle_op, .drop_pos = drop_pos, .after = after };
     }
 
@@ -1447,15 +1469,8 @@ const Resolver = struct {
                         _ = try self.product.updateLabel(label_index, -1);
                     }
                 },
-                else => {
-                    const format = if (instruction.is_temp)
-                        opcode.formatOfPhase1(op_id)
-                    else
-                        opcode.formatOf(op_id);
-                    if (format == .atom_label_u8 or format == .atom_label_u16) {
-                        const label_index = try self.labelAt(position, 5);
-                        _ = try self.product.updateLabel(label_index, -1);
-                    }
+                else => if (try self.atomLabelIndex(position, instruction, op_id)) |label_index| {
+                    _ = try self.product.updateLabel(label_index, -1);
                 },
             }
             // phase1Instruction proved this cursor advance is within the
@@ -1709,7 +1724,7 @@ const Resolver = struct {
 
                 // qjs:34466-34496.
                 op.dup => {
-                    if (try self.matchBranchDrop(position_next, null, false)) |first| {
+                    if (try self.matchBranchDrop(position_next, null, .blocking)) |first| {
                         var target_position = try self.getLabelPos(first.label_index);
                         var chain_count: u8 = 0;
                         while (try self.matchDupBranchDrop(target_position, first.branch_op)) |chain| {
@@ -1787,9 +1802,8 @@ const Resolver = struct {
                 // qjs:34247-34255.
                 op.eval => {
                     if (instruction.size != 5) return error.InvalidBytecode;
-                    const pc: usize = @intCast(position);
-                    const call_argc = std.mem.readInt(u16, self.code[pc + 1 ..][0..2], .little);
-                    const scope = std.mem.readInt(u16, self.code[pc + 3 ..][0..2], .little);
+                    const call_argc = try self.readU16Operand(position, 5, 1);
+                    const scope = try self.readU16Operand(position, 5, 3);
                     try rules.markEvalCapturedVariables(fd, scope);
                     const encoded_head = try rules.encodeEvalScopeHead(fd, scope);
                     var rewritten: [5]u8 = undefined;
@@ -1802,8 +1816,7 @@ const Resolver = struct {
                 // qjs:34257-34262.
                 op.apply_eval => {
                     if (instruction.size != 3) return error.InvalidBytecode;
-                    const pc: usize = @intCast(position);
-                    const scope = std.mem.readInt(u16, self.code[pc + 1 ..][0..2], .little);
+                    const scope = try self.readU16Operand(position, 3, 1);
                     try rules.markEvalCapturedVariables(fd, scope);
                     const encoded_head = try rules.encodeEvalScopeHead(fd, scope);
                     var rewritten: [3]u8 = undefined;
@@ -1860,8 +1873,7 @@ const Resolver = struct {
                 // qjs:34398-34430.
                 op.enter_scope => {
                     if (instruction.size != 3) return error.InvalidBytecode;
-                    const pc: usize = @intCast(position);
-                    const scope = std.mem.readInt(u16, self.code[pc + 1 ..][0..2], .little);
+                    const scope = try self.readU16Operand(position, 3, 1);
                     if (scope == fd.body_scope) try self.emitBodyHoists();
                     try self.writeEnterScopeRefresh(scope);
                 },
@@ -1869,19 +1881,13 @@ const Resolver = struct {
                 // qjs:34432-34448.
                 op.leave_scope => {
                     if (instruction.size != 3) return error.InvalidBytecode;
-                    const pc: usize = @intCast(position);
-                    const scope = std.mem.readInt(u16, self.code[pc + 1 ..][0..2], .little);
+                    const scope = try self.readU16Operand(position, 3, 1);
                     try self.writeLeaveScopeClose(scope);
                 },
 
                 // qjs:34517-34520.
                 else => {
-                    const format = if (instruction.is_temp)
-                        opcode.formatOfPhase1(op_id)
-                    else
-                        opcode.formatOf(op_id);
-                    if (format == .atom_label_u8 or format == .atom_label_u16)
-                        _ = try self.labelAt(position, 5);
+                    _ = try self.atomLabelIndex(position, instruction, op_id);
                     try self.copyInputInstruction(position, instruction, input_atom);
                 },
             }

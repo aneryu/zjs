@@ -396,24 +396,32 @@ pub const Registry = struct {
         self.gc_registry.addInitializedShape(&shape_ref.header, shape_ref.accountedAllocationSize());
     }
 
+    const ShapePublication = enum { published, reserved };
+
+    fn createObjectRootImpl(self: *Registry, rt: *JSRuntime, proto: ?*Object, capacity: ?usize, comptime publication: ShapePublication) !*Shape {
+        if (capacity) |property_capacity| {
+            if (property_capacity == 0) return self.createObjectRootImpl(rt, proto, null, publication);
+            return self.findRootShape(proto, property_capacity) orelse self.createShapeImpl(rt, proto, property_capacity, publication);
+        }
+        return self.findRootShape(proto, null) orelse self.createShapeImpl(rt, proto, initial_prop_size, publication);
+    }
+
     pub fn createObjectRoot(self: *Registry, rt: *JSRuntime, proto: ?*Object) !*Shape {
-        return self.findRootShape(proto, null) orelse self.createShapeImpl(rt, proto, initial_prop_size, true);
+        return self.createObjectRootImpl(rt, proto, null, .published);
     }
 
     /// Reserve/initialize a root shape without publishing it onto the GC list.
     /// Object constructors collect, then `publish`, then register the object.
     pub fn createObjectRootReserved(self: *Registry, rt: *JSRuntime, proto: ?*Object) !*Shape {
-        return self.findRootShape(proto, null) orelse self.createShapeImpl(rt, proto, initial_prop_size, false);
+        return self.createObjectRootImpl(rt, proto, null, .reserved);
     }
 
     pub fn createObjectRootWithPropertyCapacity(self: *Registry, rt: *JSRuntime, proto: ?*Object, property_capacity: usize) !*Shape {
-        if (property_capacity == 0) return self.createObjectRoot(rt, proto);
-        return self.findRootShape(proto, property_capacity) orelse self.createShapeImpl(rt, proto, property_capacity, true);
+        return self.createObjectRootImpl(rt, proto, property_capacity, .published);
     }
 
     pub fn createObjectRootWithPropertyCapacityReserved(self: *Registry, rt: *JSRuntime, proto: ?*Object, property_capacity: usize) !*Shape {
-        if (property_capacity == 0) return self.createObjectRootReserved(rt, proto);
-        return self.findRootShape(proto, property_capacity) orelse self.createShapeImpl(rt, proto, property_capacity, false);
+        return self.createObjectRootImpl(rt, proto, property_capacity, .reserved);
     }
 
     /// A shared empty root shape for `proto`, marked shared on a hit. With a
@@ -448,13 +456,13 @@ pub const Registry = struct {
     }
 
     pub fn createShape(self: *Registry, rt: *JSRuntime, proto: ?*Object) !*Shape {
-        return self.createShapeImpl(rt, proto, initial_prop_size, true);
+        return self.createShapeImpl(rt, proto, initial_prop_size, .published);
     }
 
     /// One GC allocation: the struct plus its inline FAM (qjs js_new_shape),
     /// hashed and linked; `publish` also puts it on the GC list, otherwise
     /// the caller publishes it once its owner exists.
-    fn createShapeImpl(self: *Registry, rt: *JSRuntime, proto: ?*Object, property_capacity: usize, comptime publish_now: bool) !*Shape {
+    fn createShapeImpl(self: *Registry, rt: *JSRuntime, proto: ?*Object, property_capacity: usize, comptime publication: ShapePublication) !*Shape {
         std.debug.assert(property_capacity != 0);
         const bucket_count: usize = @max(initial_hash_size, nextPowerOfTwo(property_capacity + 1));
         const fam_bytes = famRegionBytes(property_capacity, bucket_count);
@@ -472,7 +480,7 @@ pub const Registry = struct {
         @memset(shape.hashBuckets(), no_property_index);
         try self.link(shape, true);
         errdefer self.unlink(shape);
-        if (publish_now) self.gc_registry.addInitializedShape(&shape.header, shape.accountedAllocationSize());
+        if (publication == .published) self.gc_registry.addInitializedShape(&shape.header, shape.accountedAllocationSize());
         return shape;
     }
 

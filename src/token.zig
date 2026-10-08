@@ -202,6 +202,78 @@ pub const Kind = enum(u8) {
     }
 };
 
+/// Whether `/` or `/=` after `prev` starts a regular expression literal.
+/// `null` is the start of input. `.kw_of` is intentionally absent: the lexer
+/// keeps `of` as `.ident`, so `for (x of /re/)` and `of / g` are the same
+/// kind until a caller has classified the contextual keyword.
+pub fn slashAfterStartsRegexp(prev: ?Kind) bool {
+    const previous = prev orelse return true;
+    return switch (previous) {
+        .lparen,
+        .lbracket,
+        .lbrace,
+        .comma,
+        .semicolon,
+        .colon,
+        .question,
+        .assign,
+        .bang,
+        .tilde,
+        .plus,
+        .minus,
+        .star,
+        .percent,
+        .amp,
+        .pipe,
+        .caret,
+        .arrow,
+        .lte,
+        .gte,
+        .eq,
+        .strict_eq,
+        .neq,
+        .strict_neq,
+        .shl,
+        .sar,
+        .shr,
+        .land,
+        .lor,
+        .pow,
+        .double_question_mark,
+        .question_mark_dot,
+        .mul_assign,
+        .div_assign,
+        .mod_assign,
+        .plus_assign,
+        .minus_assign,
+        .shl_assign,
+        .sar_assign,
+        .shr_assign,
+        .and_assign,
+        .xor_assign,
+        .or_assign,
+        .pow_assign,
+        .land_assign,
+        .lor_assign,
+        .double_question_mark_assign,
+        .kw_return,
+        .kw_case,
+        .kw_throw,
+        .kw_delete,
+        .kw_void,
+        .kw_typeof,
+        .kw_new,
+        .kw_in,
+        .kw_instanceof,
+        .kw_do,
+        .kw_else,
+        .kw_yield,
+        .kw_await,
+        => true,
+        else => false,
+    };
+}
+
 pub const TemplatePart = enum(u8) {
     no_substitution, // `...`
     head, // `... ${

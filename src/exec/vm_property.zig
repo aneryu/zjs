@@ -829,15 +829,15 @@ inline fn typedArrayIntrinsicNamedValue(
     atom_id: core.Atom,
 ) ?PropertyFastValue {
     if (atom_id == core.atom.ids.length) {
-        const length = core.object.typedArrayLength(rt, receiver) catch return null;
+        const length = core.typed_array.typedArrayLength(rt, receiver) catch return null;
         return .{ .owned = array_ops.lengthIndexValue(@intCast(length)) };
     }
     if (atom_id == atom_byte_length) {
-        const length = core.object.typedArrayByteLength(rt, receiver) catch return null;
+        const length = core.typed_array.typedArrayByteLength(rt, receiver) catch return null;
         return .{ .owned = array_ops.lengthIndexValue(length) };
     }
     if (atom_id == atom_byte_offset) {
-        const offset = core.object.typedArrayEffectiveByteOffset(receiver) catch return null;
+        const offset = core.typed_array.typedArrayEffectiveByteOffset(receiver) catch return null;
         return .{ .owned = array_ops.lengthIndexValue(offset) };
     }
     return null;
@@ -952,7 +952,7 @@ pub inline fn getLengthActionForFastPath(rt: *core.JSRuntime, receiver: core.JSV
         // prototype chain for this non-numeric name. The helper recognizes the
         // unmodified intrinsic accessor without calling it, but custom/null/
         // Proxy prototype chains keep their observable lookup semantics.
-        if (core.object.isTypedArrayObject(object)) {
+        if (core.typed_array.isTypedArrayObject(object)) {
             const expected_id = typedArrayAccessorMethodId(core.atom.ids.length).?;
             // The intrinsic getter's brand check applies to the original
             // receiver, not to the typed-array object where prototype walking
@@ -1694,7 +1694,10 @@ fn throwGlobalTdzReferenceError(
     return err;
 }
 
-fn throwConstAssignment(
+/// Named read-only binding: "'name' is read-only", then the opcode catch
+/// target. The unnamed text "invalid assignment to const variable" is
+/// `exception_ops.throwInvalidConstVariable`.
+fn throwReadOnlyNamedBinding(
     ctx: *core.JSContext,
     name: core.Atom,
     output: ?*std.Io.Writer,
@@ -1751,7 +1754,7 @@ fn getVarFromGlobalObject(
                 if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
                 return err;
             };
-            return error.ReferenceError;
+            unreachable;
         }
         break :value try object_ops.getValueProperty(ctx, output, global, global_value, atom_id, function, frame);
     };
@@ -1848,7 +1851,7 @@ pub noinline fn getVar(vm: *Vm, opc: u8) HostError!void {
         if (!has_global_binding) {
             if (opc != op.get_var) break :value core.JSValue.undefinedValue();
             _ = exception_ops.throwReferenceErrorNotDefined(ctx, global, atom_id) catch |err| return catchVmError(vm, err);
-            return error.ReferenceError;
+            unreachable;
         }
         break :value try object_ops.getValueProperty(ctx, output, global, global_value, atom_id, function, frame);
     };
@@ -1891,7 +1894,7 @@ pub noinline fn putVar(vm: *Vm) HostError!void {
                         return try throwGlobalTdzReferenceError(ctx, atom_id, output, global, stack, frame, catch_target);
                     }
                     // qjs JS_ThrowTypeErrorReadOnly.
-                    return try throwConstAssignment(ctx, atom_id, output, global, stack, frame, catch_target);
+                    return try throwReadOnlyNamedBinding(ctx, atom_id, output, global, stack, frame, catch_target);
                 }
                 // Non-lexical cell: fall to the global-object set below.
             } else if (core.VarRef.fromValue(current) == null and
@@ -1929,7 +1932,7 @@ pub noinline fn putVar(vm: *Vm) HostError!void {
         const has_global_binding = object_ops.hasValueProperty(ctx, output, global, global, atom_id, function, frame) catch |err| return catchVmError(vm, err);
         if (!has_global_binding and (runtime_strict or strict_unresolved_get_var)) {
             _ = exception_ops.throwReferenceErrorNotDefined(ctx, global, atom_id) catch |err| return catchVmError(vm, err);
-            return error.ReferenceError;
+            unreachable;
         }
     }
     if (is_eval_code and
@@ -2242,7 +2245,7 @@ pub noinline fn checkedLocVm(vm: *Vm, opc: u8) HostError!void {
             }
             const value = try stack.pop();
             if (idx < function.varDefs().len and function.varDefs()[idx].isConst()) {
-                return try throwConstAssignment(ctx, localName(function, idx), output, global, stack, frame, catch_target);
+                return try throwReadOnlyNamedBinding(ctx, localName(function, idx), output, global, stack, frame, catch_target);
             }
             frame.locals[idx] = value;
         },
@@ -2287,18 +2290,19 @@ pub fn varRef(
 ) !void {
     switch (opc) {
         op.get_var_ref, op.get_var_ref_check => {
-            if (frame.pc + 2 > function.byteCode().len) return error.TypeError;
+            // A missing operand is corrupt bytecode, not a user TypeError.
+            if (frame.pc + 2 > function.byteCode().len) return error.InvalidBytecode;
             const idx = readInt(u16, function.byteCode()[frame.pc..][0..2]);
             if (try tryFastDirectVarRefGet(function, frame, stack, idx, 2)) return;
             if (try property_ops.execGetVarRefMaybeTdz(ctx, output, function, frame, stack, idx, 2, catch_target, global)) return;
         },
         op.put_var_ref, op.put_var_ref_check, op.put_var_ref_check_init => {
-            if (frame.pc + 2 > function.byteCode().len) return error.TypeError;
+            if (frame.pc + 2 > function.byteCode().len) return error.InvalidBytecode;
             const idx = readInt(u16, function.byteCode()[frame.pc..][0..2]);
             try property_ops.execPutVarRef(ctx, function, global, frame, stack, idx, 2, opc);
         },
         op.set_var_ref => {
-            if (frame.pc + 2 > function.byteCode().len) return error.TypeError;
+            if (frame.pc + 2 > function.byteCode().len) return error.InvalidBytecode;
             try property_ops.execSetVarRef(ctx, frame, stack, readInt(u16, function.byteCode()[frame.pc..][0..2]), 2, opc);
         },
 
@@ -2489,7 +2493,7 @@ fn dynEnvProbeAccess(
             if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
             return err;
         };
-        return error.ReferenceError;
+        unreachable;
     }
     switch (flags.kind) {
         .read => {
@@ -2611,8 +2615,7 @@ fn makeVarRef(
                     };
                     if (is_uninitialized) return exception_ops.throwTdzReferenceError(ctx, atom_id);
                     if (!flags.writable) {
-                        _ = try exception_ops.throwTypeErrorMessage(ctx, global, "invalid assignment to const variable");
-                        return error.TypeError;
+                        return exception_ops.throwInvalidConstVariable(ctx, global);
                     }
                     break :object_value env.value();
                 }
@@ -2646,7 +2649,7 @@ fn getRefValue(
         // then the undefined base reports the identifier.
         const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key, function, frame);
         _ = try exception_ops.throwReferenceErrorNotDefined(ctx, global, atom_id);
-        return error.ReferenceError;
+        unreachable;
     }
     if (varRefCellFromValue(obj) != null) {
         const value = property_ops.adapterValueBorrow(obj);
@@ -2663,7 +2666,7 @@ fn getRefValue(
     if (!still_exists) {
         if (function.isStrictMode() or function.runtimeStrictMode()) {
             _ = try exception_ops.throwReferenceErrorNotDefined(ctx, global, atom_id);
-            return error.ReferenceError;
+            unreachable;
         }
         try stack.push(core.JSValue.undefinedValue());
         return;
@@ -2694,7 +2697,7 @@ fn putRefValue(
             // qjs OP_put_ref_value.
             const atom_id = try object_ops.toPropertyKeyAtom(ctx, output, global, key, function, frame);
             _ = try exception_ops.throwReferenceErrorNotDefined(ctx, global, atom_id);
-            return error.ReferenceError;
+            unreachable;
         }
         const global_value = global.value();
         obj = global_value;
@@ -2704,8 +2707,7 @@ fn putRefValue(
             if (!runtime_strict) {
                 return;
             }
-            _ = try exception_ops.throwTypeErrorMessage(ctx, global, "invalid assignment to const variable");
-            return error.TypeError;
+            return exception_ops.throwInvalidConstVariable(ctx, global);
         }
         // SetMutableBinding on an uninitialized binding (a `let` in its TDZ
         // reached through a `with` reference) throws.
@@ -2714,8 +2716,7 @@ fn putRefValue(
             return exception_ops.throwTdzReferenceError(ctx, atom_id);
         }
         if (cell.varRefIsConstSlot().*) {
-            _ = try exception_ops.throwTypeErrorMessage(ctx, global, "invalid assignment to const variable");
-            return error.TypeError;
+            return exception_ops.throwInvalidConstVariable(ctx, global);
         }
         var ref_slot = obj;
         property_ops.replaceAdapterOwned(ctx, &ref_slot, value);
@@ -2726,7 +2727,7 @@ fn putRefValue(
     const still_exists = try object_ops.hasValueProperty(ctx, output, global, object, atom_id, function, frame);
     if (!still_exists and runtime_strict) {
         _ = try exception_ops.throwReferenceErrorNotDefined(ctx, global, atom_id);
-        return error.ReferenceError;
+        unreachable;
     }
     _ = try object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame);
 }
@@ -2774,7 +2775,7 @@ fn dynEnvProbeStore(
             if (try call_runtime.handleCatchableRuntimeError(ctx, output, stack, frame, catch_target, global, err)) return;
             return err;
         };
-        return error.ReferenceError;
+        unreachable;
     }
     const value = try stack.pop();
     _ = object_ops.setValueProperty(ctx, output, global, obj, atom_id, value, function, frame) catch |err| {

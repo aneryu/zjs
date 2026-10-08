@@ -172,10 +172,11 @@ pub const StringRope = struct {
         return self.extensible and self.buffer != null;
     }
 
-    /// Materializes this rope into a flat `*String`, caching its owned value in
-    /// `left` and releasing the former children and tail. Returns a BORROWED
-    /// pointer to the cached flat string, kept alive by the rope. Idempotent. On allocation failure the
-    /// rope is left untouched.
+    /// Materializes this rope into a flat `*String` and caches that value in
+    /// `left`, releasing the old child nodes and the tail buffer by dropping
+    /// those edges. Returns a BORROWED pointer to the cached flat string, kept
+    /// alive by the rope. Idempotent. On allocation failure the rope is left
+    /// untouched.
     pub fn flatten(self: *StringRope) !*String {
         if (self.flatString()) |flat| return flat;
         const rt = self.rt;
@@ -212,8 +213,8 @@ pub const StringRope = struct {
     }
 
     /// Infallible flatten used by borrowed-slice readers that cannot propagate
-    /// errors (`resolveData`). On OOM it runs object-cycle removal to reclaim
-    /// memory and retries once; a second failure is fatal.
+    /// errors (`resolveData`). On OOM it calls `collectFull` and retries once;
+    /// a second failure is fatal.
     pub fn flattenInfallible(self: *StringRope) *String {
         return self.flatten() catch {
             _ = self.rt.collectFull() catch {}; // engine-frames-active trigger
@@ -673,7 +674,7 @@ pub const String = struct {
     /// Code units `createValueAsciiCaseMapped` maps between interrupt polls.
     const ascii_case_slice = 1 << 16;
 
-    pub fn createValueAsciiCaseMapped(rt: *JSRuntime, input: JSValue, to_lower: bool) !?*String {
+    pub fn createValueAsciiCaseMapped(rt: *JSRuntime, input: JSValue, mode: enum { lower, upper }) !?*String {
         if (!input.isString()) return error.TypeError;
         const runtime_mod = @import("../runtime.zig");
         var values = [_]JSValue{input};
@@ -715,7 +716,10 @@ pub const String = struct {
                     const slice = rest[0..@min(rest.len, ascii_case_slice)];
                     for (slice) |unit| {
                         const byte: u8 = @intCast(unit);
-                        out[offset] = if (to_lower) unicode.toLowerAscii(byte) else unicode.toUpperAscii(byte);
+                        out[offset] = switch (mode) {
+                            .lower => unicode.toLowerAscii(byte),
+                            .upper => unicode.toUpperAscii(byte),
+                        };
                         offset += 1;
                     }
                     try rt.interrupt.pollNativeBulkWork(slice.len);
@@ -771,11 +775,6 @@ pub const String = struct {
         return createRopeNode(rt, left, right, left_info, right_info);
     }
 
-    /// Name kept for the QJS `js_new_string_rope(ctx, op1, op2)` call sites
-    /// that used to transfer owners. Under the tracing collector construction
-    /// neither retains nor releases, so this is `createRope` itself.
-    pub const createRopeOwned = createRope;
-
     /// Creates a rope and applies the same depth cap and Fibonacci-bucket
     /// rebalance as QuickJS `js_new_string_rope`. The inputs are borrowed; the
     /// returned value owns its complete tree.
@@ -785,11 +784,6 @@ pub const String = struct {
         if (node.depth <= rope_max_depth) return rope_value;
 
         return rebalanceRope(rt, rope_value);
-    }
-
-    /// Legacy spelling; tracing construction neither consumes nor releases inputs.
-    pub fn createBalancedRopeOwned(rt: *JSRuntime, left: JSValue, right: JSValue) !JSValue {
-        return createBalancedRope(rt, left, right);
     }
 
     /// Content hash accessor (qjs `JSString.hash`). Computes on first demand;
@@ -1565,13 +1559,6 @@ const rope_bucket_len = [_]usize{
 
 const RopeBuckets = [rope_bucket_len.len]JSValue;
 
-/// Builds one raw rope value over two string values -- the value-typed
-/// spelling of `createRope`, matching QJS's `js_new_string_rope`. No ownership
-/// moves: the new node's edges are traced.
-fn createOwnedRope(rt: *JSRuntime, left: JSValue, right: JSValue) !JSValue {
-    return (try String.createRopeOwned(rt, left, right)).value();
-}
-
 /// Inserts one flat leaf into the Fibonacci buckets. The leaf ends up owned by
 /// a bucket (or by a rope built from one); nothing is released on either path.
 fn addRopeRebalanceLeaf(rt: *JSRuntime, buckets: *RopeBuckets, owned_leaf: JSValue) !void {
@@ -1593,7 +1580,7 @@ fn addRopeRebalanceLeaf(rt: *JSRuntime, buckets: *RopeBuckets, owned_leaf: JSVal
         if (!bucket.is(.undefined_value)) {
             buckets[bucket_index] = JSValue.undefinedValue();
             if (!values[1].is(.undefined_value)) {
-                values[1] = try createOwnedRope(rt, bucket, values[1]);
+                values[1] = (try String.createRope(rt, bucket, values[1])).value();
             } else {
                 values[1] = bucket;
             }
@@ -1601,7 +1588,7 @@ fn addRopeRebalanceLeaf(rt: *JSRuntime, buckets: *RopeBuckets, owned_leaf: JSVal
     }
 
     if (!values[1].is(.undefined_value)) {
-        values[1] = try createOwnedRope(rt, values[1], values[0]);
+        values[1] = (try String.createRope(rt, values[1], values[0])).value();
     } else {
         values[1] = values[0];
     }
@@ -1610,7 +1597,7 @@ fn addRopeRebalanceLeaf(rt: *JSRuntime, buckets: *RopeBuckets, owned_leaf: JSVal
     while (!buckets[bucket_index].is(.undefined_value)) : (bucket_index += 1) {
         const bucket = buckets[bucket_index];
         buckets[bucket_index] = JSValue.undefinedValue();
-        values[1] = try createOwnedRope(rt, bucket, values[1]);
+        values[1] = (try String.createRope(rt, bucket, values[1])).value();
     }
     std.debug.assert(bucket_index < buckets.len);
     buckets[bucket_index] = values[1];
@@ -1707,7 +1694,7 @@ fn rebalanceRope(rt: *JSRuntime, rope: JSValue) !JSValue {
         if (bucket.is(.undefined_value)) continue;
         entry.* = JSValue.undefinedValue();
         if (!values[1].is(.undefined_value)) {
-            values[1] = try createOwnedRope(rt, bucket, values[1]);
+            values[1] = (try String.createRope(rt, bucket, values[1])).value();
         } else {
             values[1] = bucket;
         }
@@ -2750,7 +2737,8 @@ fn testReentrantTailCopy(mode: enum { flatten, concat, slice, suffix, lower, upp
         },
         .slice => try output.set(rt, (try String.createValueSlice(rt, try input.get(rt), 9, 5)).value()),
         .suffix => try output.set(rt, (try String.createValueAsciiSuffix(rt, try input.get(rt), "y")).value()),
-        .lower, .upper => try output.set(rt, (try String.createValueAsciiCaseMapped(rt, try input.get(rt), mode == .lower)).?.value()),
+        .lower => try output.set(rt, (try String.createValueAsciiCaseMapped(rt, try input.get(rt), .lower)).?.value()),
+        .upper => try output.set(rt, (try String.createValueAsciiCaseMapped(rt, try input.get(rt), .upper)).?.value()),
         .flatten => try ensureFlat(rt, input.readOnly(), output),
         .append, .append_wide => try output.set(rt, (try appendTailBufferRope(rt, (try input.get(rt)).ropeBody().?, asFlat(try right.get(rt)).?)).value()),
     }

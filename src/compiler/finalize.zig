@@ -55,11 +55,34 @@ fn isVarInArgumentScope(vd: function_def_mod.VarDef) bool {
         vd.var_kind == .function_name;
 }
 
+fn isScopeZeroNamedVar(vd: function_def_mod.VarDef) bool {
+    return vd.scope_level == 0 and vd.var_name != atom.ids.ret and vd.var_name != atom.null_atom;
+}
+
+fn remapThreadClosureError(err: binding_rules.Error) FinalizeError {
+    return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.BytecodeOverflow => error.BytecodeOverflow,
+        else => error.InvalidBytecode,
+    };
+}
+
+fn ensureThisFamilyBindings(fd: *function_def_mod.FunctionDef) FinalizeError!void {
+    _ = try fd.ensureThisBinding();
+    _ = try fd.ensureNewTargetBinding();
+    if (fd.is_derived_class_constructor) {
+        _ = try fd.ensureThisActiveFunctionBinding();
+    }
+    if (fd.has_home_object) _ = try fd.ensureHomeObjectBinding();
+}
+
+const ParentLocalCapture = enum { keep_kind, normalize_unscoped };
+
 fn captureEvalParentLocal(
     target: *function_def_mod.FunctionDef,
     owner: *function_def_mod.FunctionDef,
     local_idx: usize,
-    normalize_unscoped: bool,
+    capture: ParentLocalCapture,
 ) FinalizeError!void {
     if (local_idx > std.math.maxInt(u16)) return error.BytecodeOverflow;
     const source_idx: u16 = @intCast(local_idx);
@@ -70,7 +93,7 @@ fn captureEvalParentLocal(
     // a named function's own name: InstantiateOrdinaryFunctionExpression makes
     // it an immutable binding (§15.2.5), and an eval below must not change that
     // (QuickJS's add_eval_variables drops the protection).
-    const keeps_kind = !normalize_unscoped or vd.var_kind == .function_name;
+    const keeps_kind = capture == .keep_kind or vd.var_kind == .function_name;
     _ = binding_rules.threadClosureSource(
         target,
         owner,
@@ -84,11 +107,7 @@ fn captureEvalParentLocal(
             .var_name = vd.var_name,
         }),
         .local,
-    ) catch |err| return switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.BytecodeOverflow => error.BytecodeOverflow,
-        else => error.InvalidBytecode,
-    };
+    ) catch |err| return remapThreadClosureError(err);
 }
 
 fn captureEvalParentArg(
@@ -116,11 +135,7 @@ fn captureEvalParentArg(
             .var_name = arg.var_name,
         }),
         .arg,
-    ) catch |err| return switch (err) {
-        error.OutOfMemory => error.OutOfMemory,
-        error.BytecodeOverflow => error.BytecodeOverflow,
-        else => error.InvalidBytecode,
-    };
+    ) catch |err| return remapThreadClosureError(err);
 }
 
 /// Whether scope `level` of `fd` lies in its parameter scope (scope 1 when
@@ -158,30 +173,19 @@ fn addEvalVariables(fd: *function_def_mod.FunctionDef) FinalizeError!void {
     }
 
     var has_this_binding = fd.has_this_binding;
-    if (has_this_binding) {
-        _ = try fd.ensureThisBinding();
-        _ = try fd.ensureNewTargetBinding();
-        if (fd.is_derived_class_constructor) {
-            _ = try fd.ensureThisActiveFunctionBinding();
-        }
-        if (fd.has_home_object) _ = try fd.ensureHomeObjectBinding();
-    }
+    if (has_this_binding) try ensureThisFamilyBindings(fd);
     var has_arguments_binding = fd.has_arguments_binding;
     if (has_arguments_binding) {
         _ = try fd.ensureArgumentsBinding();
         if (fd.has_parameter_expressions) {
-            fd.ensureArgumentsArgumentBinding() catch |err| return switch (err) {
-                error.OutOfMemory => error.OutOfMemory,
-                error.BytecodeOverflow => error.BytecodeOverflow,
-                error.InvalidScope => error.InvalidBytecode,
-            };
+            fd.ensureArgumentsArgumentBinding() catch |err| return binding_rules.remapArgumentsArgumentBindingError(err);
         }
     }
     if (fd.is_named_func_expr) _ = try fd.ensureFuncExprSelfBinding();
 
     for (fd.args, 0..) |_, arg_idx| try fd.captureArg(arg_idx);
     for (fd.vars, 0..) |vd, local_idx| {
-        if (vd.scope_level != 0 or vd.var_name == atom.ids.ret or vd.var_name == atom.null_atom) continue;
+        if (!isScopeZeroNamedVar(vd)) continue;
         try fd.captureLocal(local_idx);
     }
 
@@ -190,12 +194,7 @@ fn addEvalVariables(fd: *function_def_mod.FunctionDef) FinalizeError!void {
     while (maybe_parent) |parent| {
         if (parent.finalization_state != .prepared) return error.InvalidBytecode;
         if (!has_this_binding and parent.has_this_binding) {
-            _ = try parent.ensureThisBinding();
-            _ = try parent.ensureNewTargetBinding();
-            if (parent.is_derived_class_constructor) {
-                _ = try parent.ensureThisActiveFunctionBinding();
-            }
-            if (parent.has_home_object) _ = try parent.ensureHomeObjectBinding();
+            try ensureThisFamilyBindings(parent);
             has_this_binding = true;
         }
         if (!has_arguments_binding and parent.has_arguments_binding) {
@@ -204,11 +203,7 @@ fn addEvalVariables(fd: *function_def_mod.FunctionDef) FinalizeError!void {
             // parameter scope (FunctionDeclarationInstantiation step 22.f),
             // where only the argument-scope alias is visible.
             if (parent.has_parameter_expressions and inParameterScope(parent, visible_scope)) {
-                parent.ensureArgumentsArgumentBinding() catch |err| return switch (err) {
-                    error.OutOfMemory => error.OutOfMemory,
-                    error.BytecodeOverflow => error.BytecodeOverflow,
-                    error.InvalidScope => error.InvalidBytecode,
-                };
+                parent.ensureArgumentsArgumentBinding() catch |err| return binding_rules.remapArgumentsArgumentBindingError(err);
             }
             has_arguments_binding = true;
         }
@@ -224,7 +219,7 @@ fn addEvalVariables(fd: *function_def_mod.FunctionDef) FinalizeError!void {
                 return error.InvalidBytecode;
             }
             visited += 1;
-            try captureEvalParentLocal(fd, parent, @intCast(scope_idx), false);
+            try captureEvalParentLocal(fd, parent, @intCast(scope_idx), .keep_kind);
             scope_idx = parent.vars[@intCast(scope_idx)].scope_next;
         }
 
@@ -239,13 +234,13 @@ fn addEvalVariables(fd: *function_def_mod.FunctionDef) FinalizeError!void {
                 try captureEvalParentArg(fd, parent, arg_idx);
             }
             for (parent.vars, 0..) |vd, local_idx| {
-                if (vd.scope_level != 0 or vd.var_name == atom.ids.ret or vd.var_name == atom.null_atom) continue;
-                try captureEvalParentLocal(fd, parent, local_idx, true);
+                if (!isScopeZeroNamedVar(vd)) continue;
+                try captureEvalParentLocal(fd, parent, local_idx, .normalize_unscoped);
             }
         } else {
             for (parent.vars, 0..) |vd, local_idx| {
                 if (vd.scope_level == 0 and isVarInArgumentScope(vd)) {
-                    try captureEvalParentLocal(fd, parent, local_idx, true);
+                    try captureEvalParentLocal(fd, parent, local_idx, .normalize_unscoped);
                 }
             }
         }
@@ -263,11 +258,7 @@ fn addEvalVariables(fd: *function_def_mod.FunctionDef) FinalizeError!void {
                     @intCast(closure_idx),
                     cv,
                     .ref,
-                ) catch |err| return switch (err) {
-                    error.OutOfMemory => error.OutOfMemory,
-                    error.BytecodeOverflow => error.BytecodeOverflow,
-                    else => error.InvalidBytecode,
-                };
+                ) catch |err| return remapThreadClosureError(err);
             }
         }
 
@@ -520,16 +511,16 @@ fn createFunctionBytecodeAfterChildren(
     // artifact allocation. Source and pc2line remain independent moved
     // owners, matching QuickJS's debug-tail ownership.
     if (lowered.code.len == 0) return error.InvalidBytecode;
-    const layout = try fb_mod.FunctionLayout.init(
-        true,
-        true,
-        fd.cpool.len,
-        fd.args.len,
-        fd.vars.len,
-        fd.closure_var.len,
-        lowered.code.len,
-        lowered.prop_site_count,
-    );
+    const layout = try fb_mod.FunctionLayout.init(.{
+        .has_debug = true,
+        .has_extension = true,
+        .cpool_count = fd.cpool.len,
+        .arg_count = fd.args.len,
+        .var_count = fd.vars.len,
+        .closure_var_count = fd.closure_var.len,
+        .byte_code_len = lowered.code.len,
+        .prop_site_count = lowered.prop_site_count,
+    });
 
     // Every fallible artifact allocation happens before owner commit.
     const fb = try fb_mod.FunctionBytecode.createProductionShell(rt, layout);

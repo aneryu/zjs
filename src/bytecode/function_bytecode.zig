@@ -596,6 +596,7 @@ pub const FunctionBytecodeImpl = extern struct {
     }
 
     pub fn layout(self: *const FunctionBytecodeImpl) function_bytecode.FunctionLayout {
+        // Counts are seeded from a layout init() already accepted, so fromFunction cannot fail.
         return function_bytecode.FunctionLayout.fromFunction(self) catch unreachable;
     }
 
@@ -1077,16 +1078,16 @@ pub const FunctionBytecodeImpl = extern struct {
     pub fn createFixture(rt: *runtime.JSRuntime, options: FixtureOptions) !*FunctionBytecodeImpl {
         if (options.defined_arg_count > options.arg_count) return error.BytecodeOverflow;
         const has_extension = options.has_extension or options.script_or_module != atom.null_atom;
-        const layout_value = try function_bytecode.FunctionLayout.init(
-            options.has_debug,
-            has_extension,
-            options.cpool_count,
-            options.arg_count,
-            options.var_count,
-            options.closure_var_count,
-            options.byte_code.len,
-            options.prop_site_count,
-        );
+        const layout_value = try function_bytecode.FunctionLayout.init(.{
+            .has_debug = options.has_debug,
+            .has_extension = has_extension,
+            .cpool_count = options.cpool_count,
+            .arg_count = options.arg_count,
+            .var_count = options.var_count,
+            .closure_var_count = options.closure_var_count,
+            .byte_code_len = options.byte_code.len,
+            .prop_site_count = options.prop_site_count,
+        });
         const fb = try createRaw(rt, layout_value);
         var raw_owned = true;
         errdefer if (raw_owned) rt.gc.destroyWithFam(FunctionBytecodeImpl, fb, layout_value.famBytes());
@@ -1324,7 +1325,7 @@ pub const FunctionLayout = struct {
     prop_sites_off: ?usize,
     total_size: usize,
 
-    pub fn init(
+    pub const Shape = struct {
         has_debug: bool,
         has_extension: bool,
         cpool_count: usize,
@@ -1333,7 +1334,17 @@ pub const FunctionLayout = struct {
         closure_var_count: usize,
         byte_code_len: usize,
         prop_site_count: usize,
-    ) error{BytecodeOverflow}!@This() {
+    };
+
+    pub fn init(shape: Shape) error{BytecodeOverflow}!@This() {
+        const has_debug = shape.has_debug;
+        const has_extension = shape.has_extension;
+        const cpool_count = shape.cpool_count;
+        const arg_count = shape.arg_count;
+        const var_count = shape.var_count;
+        const closure_var_count = shape.closure_var_count;
+        const byte_code_len = shape.byte_code_len;
+        const prop_site_count = shape.prop_site_count;
         if (arg_count > std.math.maxInt(u16) or var_count > std.math.maxInt(u16) or
             cpool_count > std.math.maxInt(i32) or closure_var_count > std.math.maxInt(i32) or
             byte_code_len > std.math.maxInt(i32) or
@@ -1400,30 +1411,30 @@ pub const FunctionLayout = struct {
         // the tail behind it is known. Read it through the slot-free
         // layout rather than `hotExtension()`: the empty-code arm of
         // that accessor comes back through `layout()`.
-        const base = try init(
-            fb.hasDebug(),
-            fb.hasExtension(),
-            @intCast(fb.cpool_count),
-            fb.arg_count,
-            fb.var_count,
-            @intCast(fb.closure_var_count),
-            @intCast(fb.byte_code_len),
-            0,
-        );
+        const base = try init(.{
+            .has_debug = fb.hasDebug(),
+            .has_extension = fb.hasExtension(),
+            .cpool_count = @intCast(fb.cpool_count),
+            .arg_count = fb.arg_count,
+            .var_count = fb.var_count,
+            .closure_var_count = @intCast(fb.closure_var_count),
+            .byte_code_len = @intCast(fb.byte_code_len),
+            .prop_site_count = 0,
+        });
         const hot_off = base.hot_off orelse return base;
         const bytes: [*]const u8 = @ptrCast(fb);
         const hot: *align(1) const FunctionBytecodeHotExtension = @ptrCast(bytes + hot_off);
         if (hot.prop_site_count == 0) return base;
-        return init(
-            base.has_debug,
-            base.has_extension,
-            base.cpool_count,
-            base.arg_count,
-            base.var_count,
-            base.closure_var_count,
-            base.byte_code_len,
-            hot.prop_site_count,
-        );
+        return init(.{
+            .has_debug = base.has_debug,
+            .has_extension = base.has_extension,
+            .cpool_count = base.cpool_count,
+            .arg_count = base.arg_count,
+            .var_count = base.var_count,
+            .closure_var_count = base.closure_var_count,
+            .byte_code_len = base.byte_code_len,
+            .prop_site_count = hot.prop_site_count,
+        });
     }
 
     pub inline fn famBytes(self: @This()) usize {

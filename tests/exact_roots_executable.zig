@@ -2134,7 +2134,7 @@ fn verifyIteratorCloseExceptionMode(comptime mode: enum { single, all, normal })
                 .single => zjs.exec.iterator_ops.iteratorCloseWithCompletionAndPropagate(ctx, null, global, inputs[0], error.JSException, null, null),
                 .all => zjs.exec.iterator_ops.iteratorZipCloseAllAndPropagate(ctx, null, global, core.Object.fromHeader(inputs[1].refHeader().?), 2, error.JSException, inputs[2], null, null),
                 .normal => normal: {
-                    var completion = zjs.exec.iterator_ops.IteratorZipCompletion.initNormal();
+                    var completion = zjs.exec.iterator_ops.IteratorCloseCompletion.initNormal();
                     completion.activateRoots(rt);
                     defer completion.deinit(rt);
                     try zjs.exec.iterator_ops.iteratorZipCloseAllWithCompletion(ctx, null, global, &completion, core.Object.fromHeader(inputs[1].refHeader().?), 2, null, null);

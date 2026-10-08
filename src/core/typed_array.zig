@@ -16,8 +16,7 @@
 //! fast paths).
 //!
 //! The storage-shape predicates (`isTypedArrayObject`, `typedArrayLength`,
-//! `typedArrayCanonicalNumericIndex`, ...) live in
-//! `object.zig`; this module imports and re-uses them. The pure view-construction
+//! `typedArrayCanonicalNumericIndex`, ...) live in this file. The pure view-construction
 //! primitives (`typedArrayConstructWithOptions` / `...FullBufferOwned` /
 //! `dataViewConstruct`) live here: they shape internal slots over an existing ArrayBuffer using
 //! only positional-arg index coercion (`toIndexUsize`, primitive-only) and run no
@@ -31,6 +30,8 @@
 
 const std = @import("std");
 
+const array = @import("array.zig");
+const atom = @import("atom.zig");
 const bigint = @import("bigint.zig");
 const class = @import("class.zig");
 const Kind = @import("typed_array_names.zig").Kind;
@@ -47,6 +48,102 @@ const JSRuntime = @import("../runtime.zig").JSRuntime;
 const Object = object.Object;
 
 const AppendStringError = value_string.AppendStringError;
+
+// --- TypedArray storage-shape predicates ------------------------------------
+//
+// QuickJS source map: the typed-array length/bounds/detach helpers live in the
+// engine core (quickjs.c), with builtins as clients. These are thin predicates
+// over the core typed-array storage slots (`Object.typedArrayBuffer()`,
+// `typedArrayByteOffset()`, `typedArrayElementSize()`, `typedArrayFixedLength()`,
+// `arrayBufferDetached()`, ...). The element read/write value coercion and the
+// buffer storage operations live below. `src/exec/buffer_ops.zig` owns the
+// JS-visible record surface that uses both.
+
+pub fn isTypedArrayObject(obj: *const Object) bool {
+    const payload = obj.typedArrayPayloadFast() orelse return false;
+    return payload.buffer != null and payload.element_size != 0;
+}
+
+pub fn typedArrayOutOfBounds(obj: *Object) !bool {
+    const payload = obj.typedArrayPayloadFast() orelse return error.TypeError;
+    const backing = payload.backing_payload orelse return error.TypeError;
+    if (payload.byte_offset > backing.bytes.len) return true;
+    if (payload.fixed_length) |fixed| {
+        const bytes = std.math.mul(usize, fixed, payload.element_size) catch return true;
+        return bytes > backing.bytes.len - payload.byte_offset;
+    }
+    return false;
+}
+
+pub fn typedArrayDetached(obj: *Object) !bool {
+    const payload = obj.typedArrayPayloadFast() orelse return error.TypeError;
+    const backing = payload.backing_payload orelse return error.TypeError;
+    return backing.detached;
+}
+
+pub fn typedArrayLength(rt: *JSRuntime, obj: *Object) !u32 {
+    _ = rt;
+    const payload = obj.typedArrayPayloadFast() orelse return error.TypeError;
+    if (payload.element_size == 0 or payload.buffer == null or payload.backing_payload == null) return error.TypeError;
+    return payload.live_length;
+}
+
+pub fn typedArrayByteLength(rt: *JSRuntime, obj: *Object) !usize {
+    const length = try typedArrayLength(rt, obj);
+    return @as(usize, length) * obj.typedArrayElementSize();
+}
+
+pub fn typedArrayEffectiveByteOffset(obj: *Object) !usize {
+    if (try typedArrayDetached(obj)) return 0;
+    if (try typedArrayOutOfBounds(obj)) return 0;
+    return obj.typedArrayByteOffset();
+}
+
+pub fn typedArrayIndexValid(rt: *JSRuntime, obj: *Object, index: u32) !bool {
+    _ = rt;
+    const payload = obj.typedArrayPayloadFast() orelse return error.TypeError;
+    if (payload.element_size == 0 or payload.buffer == null or payload.backing_payload == null) return error.TypeError;
+    return index < payload.live_length;
+}
+
+pub const TypedArrayCanonicalIndex = union(enum) {
+    none,
+    invalid,
+    index: u32,
+};
+
+pub fn typedArrayCanonicalNumericIndex(rt: *JSRuntime, atom_id: atom.Atom) !TypedArrayCanonicalIndex {
+    if (array.arrayIndexFromAtom(rt.atoms, atom_id)) |index| return .{ .index = index };
+    if (rt.atoms.kind(atom_id) != .string) return .none;
+    const name = rt.atoms.name(atom_id) orelse return .none;
+    if (name.len == 0) return .none;
+    if (std.mem.eql(u8, name, "-0")) return .invalid;
+
+    // CanonicalNumericIndexString: ToString(ToNumber(name)) must give name back.
+    const number: f64 = value_format.parseJsNumber(name);
+
+    var buf: [64]u8 = undefined;
+    const printed = if (std.math.isNan(number))
+        "NaN"
+    else if (std.math.isPositiveInf(number))
+        "Infinity"
+    else if (std.math.isNegativeInf(number))
+        "-Infinity"
+    else
+        value_format.formatFiniteNumberAssumeCapacity(&buf, number);
+    if (!std.mem.eql(u8, name, printed)) return .none;
+    if (!std.math.isFinite(number) or @trunc(number) != number or number < 0 or number > @as(f64, @floatFromInt(std.math.maxInt(u32)))) return .invalid;
+    return .{ .index = @intFromFloat(number) };
+}
+
+/// IsTypedArrayFixedLength: false for a length-tracking view or any view on
+/// a resizable (non-shared) ArrayBuffer.
+pub fn typedArrayIsFixedLength(obj: *Object) bool {
+    const payload = obj.typedArrayPayloadFast() orelse return true;
+    if (payload.fixed_length == null) return false;
+    const backing = payload.backing_payload orelse return true;
+    return backing.max_byte_length == null or backing.shared_store != null;
+}
 
 // --- ArrayBuffer construction / storage helpers (engine core) ---------------
 

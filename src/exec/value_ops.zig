@@ -16,6 +16,11 @@ const std = @import("std");
 
 const AppendStringError = core.value_string.AppendStringError;
 
+/// `args[index]`, or `undefined` when the argument was not passed.
+pub inline fn argOrUndefined(args: []const core.JSValue, index: usize) core.JSValue {
+    return if (index < args.len) args[index] else core.JSValue.undefinedValue();
+}
+
 pub fn binary(rt: *core.JSRuntime, op: u8, a: core.JSValue, b: core.JSValue) !core.JSValue {
     if (op == bytecode.opcode.op.add and (a.isString() or b.isString())) return stringAdd(rt, a, b);
     if (a.is(.symbol) or b.is(.symbol)) return error.SymbolToNumber;
@@ -993,7 +998,7 @@ fn stringAddStringsOwned(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) 
                         // the source node's cached representation.
                         values[2] = node.left;
                         values[3] = try concatFlatStringBodiesOwned(rt, right_string, b_string);
-                        return core.string.String.createBalancedRopeOwned(rt, values[2], values[3]);
+                        return core.string.String.createBalancedRope(rt, values[2], values[3]);
                     }
                 }
             }
@@ -1034,14 +1039,14 @@ fn stringAddStringsOwned(rt: *core.JSRuntime, a: core.JSValue, b: core.JSValue) 
                     if (left_string.len() <= core.string.String.rope_short_len) {
                         values[2] = node.right;
                         values[3] = try concatFlatStringBodiesOwned(rt, a_string, left_string);
-                        return core.string.String.createBalancedRopeOwned(rt, values[3], values[2]);
+                        return core.string.String.createBalancedRope(rt, values[3], values[2]);
                     }
                 }
             }
         }
     }
 
-    return core.string.String.createBalancedRopeOwned(rt, values[0], values[1]);
+    return core.string.String.createBalancedRope(rt, values[0], values[1]);
 }
 
 fn concatFlatStringBodiesOwned(
@@ -1342,10 +1347,7 @@ pub fn toLengthIndexSlow(ctx: *core.JSContext, output: ?*std.Io.Writer, global: 
 /// "cannot convert bigint to number". Always returns an int32 or float64.
 fn toNumberRejectingBigInt(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Object, value: core.JSValue) !core.JSValue {
     const primitive = try toPrimitiveForNumber(ctx, output, global, value);
-    if (primitive.isBigInt()) {
-        _ = try throwTypeErrorMessage(ctx, global, "cannot convert bigint to number");
-        return error.TypeError;
-    }
+    if (primitive.isBigInt()) return throwTypeErrorMessage(ctx, global, "cannot convert bigint to number");
     return toNumberValue(ctx.runtime, primitive);
 }
 

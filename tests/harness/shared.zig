@@ -59,12 +59,6 @@ pub fn expectPrintsTs(source: []const u8, expected: []const u8) !void {
 }
 
 var shared_engine_storage: ?TestEngine = null;
-var shared_engine_baseline_property_count: usize = 0;
-var shared_engine_baseline_shape_prop_count: usize = 0;
-var shared_engine_baseline_shape_hash: u32 = 0;
-var shared_engine_baseline_shape_deleted_count: usize = 0;
-var shared_engine_baseline_properties: ?[]core.property.Entry = null;
-var shared_engine_baseline_shape_props: ?[]core.shape.Property = null;
 // A Slot.dup of a VARREF retains the same mutable cell. Keep its original
 // contents separately so deleting a baseline global cannot corrupt the
 // snapshot by parking that shared cell at UNINITIALIZED.
@@ -74,14 +68,33 @@ const SharedBaselineVarRef = struct {
     is_const: bool,
     is_deletable: bool,
 };
-var shared_engine_baseline_var_refs: ?[]?SharedBaselineVarRef = null;
+const Baseline = struct {
+    property_count: usize = 0,
+    shape_prop_count: usize = 0,
+    shape_hash: u32 = 0,
+    shape_deleted_count: usize = 0,
+    properties: ?[]core.property.Entry = null,
+    shape_props: ?[]core.shape.Property = null,
+    var_refs: ?[]?SharedBaselineVarRef = null,
+    allocation_count: usize = 0,
+    allocated_bytes: usize = 0,
+    module_count: usize = 0,
+};
+var shared_engine_baseline: Baseline = .{};
 // Fresh three-pass census after Q4b: 814 warmed zero-module observations had
 // allocation-count p95 0 and max 7. One extra allocation is the safety margin.
 const shared_engine_allocation_tolerance: usize = 8;
-var shared_engine_baseline_allocation_count: usize = 0;
-var shared_engine_baseline_allocated_bytes: usize = 0;
-var shared_engine_baseline_module_count: usize = 0;
 var shared_engine_teardown_registered: bool = false;
+
+fn clearPendingState(eng: *TestEngine) void {
+    if (eng.context.hasException()) _ = eng.context.takeException();
+    if (eng.context.hasUnhandledRejection()) _ = eng.context.takeUnhandledRejection();
+}
+
+fn mustPageAlloc(comptime T: type, n: usize) []T {
+    return std.heap.page_allocator.alloc(T, n) catch |err|
+        std.debug.panic("page_allocator.alloc: {s}", .{@errorName(err)});
+}
 
 const test_runner_root = @import("root");
 
@@ -103,7 +116,8 @@ fn runnerTestName() []const u8 {
 
 pub fn sharedTestEngine() *TestEngine {
     if (shared_engine_storage == null) {
-        shared_engine_storage = TestEngine.init(std.heap.page_allocator) catch unreachable;
+        shared_engine_storage = TestEngine.init(std.heap.page_allocator) catch |err|
+            std.debug.panic("TestEngine.init: {s}", .{@errorName(err)});
         const eng = &shared_engine_storage.?;
         // Force the global object build (`installHostGlobals`) by
         // running an empty eval. This lets us snapshot the post-install
@@ -111,32 +125,27 @@ pub fn sharedTestEngine() *TestEngine {
         // remove user-added globals (`var x = ...`, `function f() {}`,
         // ...) without rebuilding the entire standard-globals
         // namespace.
-        _ = eng.eval(";") catch unreachable;
-        if (eng.context.hasException()) {
-            _ = eng.context.takeException();
-        }
-        if (eng.context.hasUnhandledRejection()) {
-            _ = eng.context.takeUnhandledRejection();
-        }
+        _ = eng.eval(";") catch |err| std.debug.panic("baseline eval: {s}", .{@errorName(err)});
+        clearPendingState(eng);
         if (eng.context.global) |g| {
-            shared_engine_baseline_property_count = g.shape_ref.prop_count;
-            shared_engine_baseline_shape_prop_count = g.shape_ref.prop_count;
-            shared_engine_baseline_shape_hash = g.shape_ref.hash;
-            shared_engine_baseline_shape_deleted_count = g.shape_ref.deletedPropCount();
+            shared_engine_baseline.property_count = g.shape_ref.prop_count;
+            shared_engine_baseline.shape_prop_count = g.shape_ref.prop_count;
+            shared_engine_baseline.shape_hash = g.shape_ref.hash;
+            shared_engine_baseline.shape_deleted_count = g.shape_ref.deletedPropCount();
 
             // Snapshot the baseline property entries (value slots only;
             // key atoms and flags are snapshotted with the shape props
             // below).
-            shared_engine_baseline_properties = std.heap.page_allocator.alloc(core.property.Entry, g.shape_ref.prop_count) catch unreachable;
-            shared_engine_baseline_var_refs = std.heap.page_allocator.alloc(?SharedBaselineVarRef, g.shape_ref.prop_count) catch unreachable;
-            @memset(shared_engine_baseline_var_refs.?, null);
+            shared_engine_baseline.properties = mustPageAlloc(core.property.Entry, g.shape_ref.prop_count);
+            shared_engine_baseline.var_refs = mustPageAlloc(?SharedBaselineVarRef, g.shape_ref.prop_count);
+            @memset(shared_engine_baseline.var_refs.?, null);
             for (g.propertyEntries(), 0..) |entry, idx| {
                 // Dup the slot using its kind (read from the shape flags); the
                 // value cell is untagged so dup/destroy need the flags.
-                shared_engine_baseline_properties.?[idx] = .{ .slot = entry.slot };
+                shared_engine_baseline.properties.?[idx] = .{ .slot = entry.slot };
                 if (g.propFlagsAt(idx).isVarRef()) {
                     const cell = entry.slot.var_ref;
-                    shared_engine_baseline_var_refs.?[idx] = .{
+                    shared_engine_baseline.var_refs.?[idx] = .{
                         .value = cell.varRefValue(),
                         .is_lexical = cell.is_lexical,
                         .is_const = cell.varRefIsConstSlot().*,
@@ -145,16 +154,16 @@ pub fn sharedTestEngine() *TestEngine {
                 }
             }
 
-            shared_engine_baseline_shape_props = std.heap.page_allocator.alloc(core.shape.Property, g.shape_ref.prop_count) catch unreachable;
+            shared_engine_baseline.shape_props = mustPageAlloc(core.shape.Property, g.shape_ref.prop_count);
             for (g.shape_ref.props()[0..g.shape_ref.prop_count], 0..) |prop, idx| {
-                shared_engine_baseline_shape_props.?[idx] = prop;
-                shared_engine_baseline_shape_props.?[idx].hash_next = core.shape.no_property_index;
+                shared_engine_baseline.shape_props.?[idx] = prop;
+                shared_engine_baseline.shape_props.?[idx].hash_next = core.shape.no_property_index;
             }
         }
         _ = eng.runtime.collectForTest() catch |err| std.debug.panic("collectForTest: {s}", .{@errorName(err)});
-        shared_engine_baseline_allocation_count = eng.runtime.allocation_diagnostics.allocation_count;
-        shared_engine_baseline_allocated_bytes = eng.runtime.allocation_diagnostics.allocated_bytes;
-        shared_engine_baseline_module_count = eng.context.modules.count();
+        shared_engine_baseline.allocation_count = eng.runtime.allocation_diagnostics.allocation_count;
+        shared_engine_baseline.allocated_bytes = eng.runtime.allocation_diagnostics.allocated_bytes;
+        shared_engine_baseline.module_count = eng.context.modules.count();
         registerSharedEngineProcessTeardown();
     }
     return &shared_engine_storage.?;
@@ -189,22 +198,22 @@ pub fn deinitSharedTestEngine() void {
 }
 
 fn releaseSharedEngineBaselineSnapshot() void {
-    if (shared_engine_baseline_var_refs) |var_refs| {
+    if (shared_engine_baseline.var_refs) |var_refs| {
         std.heap.page_allocator.free(var_refs);
-        shared_engine_baseline_var_refs = null;
+        shared_engine_baseline.var_refs = null;
     }
-    if (shared_engine_baseline_properties) |baselines| {
+    if (shared_engine_baseline.properties) |baselines| {
         std.heap.page_allocator.free(baselines);
-        shared_engine_baseline_properties = null;
+        shared_engine_baseline.properties = null;
     }
-    if (shared_engine_baseline_shape_props) |baseline_shape_props| {
+    if (shared_engine_baseline.shape_props) |baseline_shape_props| {
         std.heap.page_allocator.free(baseline_shape_props);
-        shared_engine_baseline_shape_props = null;
+        shared_engine_baseline.shape_props = null;
     }
-    shared_engine_baseline_property_count = 0;
-    shared_engine_baseline_shape_prop_count = 0;
-    shared_engine_baseline_shape_hash = 0;
-    shared_engine_baseline_shape_deleted_count = 0;
+    shared_engine_baseline.property_count = 0;
+    shared_engine_baseline.shape_prop_count = 0;
+    shared_engine_baseline.shape_hash = 0;
+    shared_engine_baseline.shape_deleted_count = 0;
 }
 
 pub fn endSharedTest() void {
@@ -214,9 +223,9 @@ pub fn endSharedTest() void {
     const allocation_count = eng.runtime.allocation_diagnostics.allocation_count;
     const allocated_bytes = eng.runtime.allocation_diagnostics.allocated_bytes;
     const module_count = eng.context.modules.count();
-    const count_delta = @as(i128, @intCast(allocation_count)) - @as(i128, @intCast(shared_engine_baseline_allocation_count));
-    const bytes_delta = @as(i128, @intCast(allocated_bytes)) - @as(i128, @intCast(shared_engine_baseline_allocated_bytes));
-    const module_delta = @as(i128, @intCast(module_count)) - @as(i128, @intCast(shared_engine_baseline_module_count));
+    const count_delta = @as(i128, @intCast(allocation_count)) - @as(i128, @intCast(shared_engine_baseline.allocation_count));
+    const bytes_delta = @as(i128, @intCast(allocated_bytes)) - @as(i128, @intCast(shared_engine_baseline.allocated_bytes));
+    const module_delta = @as(i128, @intCast(module_count)) - @as(i128, @intCast(shared_engine_baseline.module_count));
     const test_name = runnerTestName();
     const current_pass = runnerPass();
 
@@ -237,9 +246,9 @@ pub fn endSharedTest() void {
     // module-registry growth is the sole unbounded owner and is accounted by
     // its own monotonic count; every other test must stay within the measured
     // bounded property-capacity noise floor.
-    const module_count_grew = module_count > shared_engine_baseline_module_count;
+    const module_count_grew = module_count > shared_engine_baseline.module_count;
     if (current_pass != 0 and !module_count_grew) {
-        const limit = std.math.add(usize, shared_engine_baseline_allocation_count, shared_engine_allocation_tolerance) catch std.math.maxInt(usize);
+        const limit = std.math.add(usize, shared_engine_baseline.allocation_count, shared_engine_allocation_tolerance) catch std.math.maxInt(usize);
         if (allocation_count > limit) {
             std.debug.panic(
                 "shared-test leak gate: test=\"{s}\" count_delta={d} bytes_delta={d} module_count={} module_delta={d} baseline_count={} observed_count={} tolerance={}",
@@ -249,7 +258,7 @@ pub fn endSharedTest() void {
                     bytes_delta,
                     module_count,
                     module_delta,
-                    shared_engine_baseline_allocation_count,
+                    shared_engine_baseline.allocation_count,
                     allocation_count,
                     shared_engine_allocation_tolerance,
                 },
@@ -257,36 +266,27 @@ pub fn endSharedTest() void {
         }
     }
 
-    shared_engine_baseline_allocation_count = @max(shared_engine_baseline_allocation_count, allocation_count);
-    shared_engine_baseline_allocated_bytes = @max(shared_engine_baseline_allocated_bytes, allocated_bytes);
-    shared_engine_baseline_module_count = @max(shared_engine_baseline_module_count, module_count);
+    shared_engine_baseline.allocation_count = @max(shared_engine_baseline.allocation_count, allocation_count);
+    shared_engine_baseline.allocated_bytes = @max(shared_engine_baseline.allocated_bytes, allocated_bytes);
+    shared_engine_baseline.module_count = @max(shared_engine_baseline.module_count, module_count);
 }
 
 fn resetSharedEngineAfterTest(eng: *TestEngine) void {
     // Clear any exception still sitting on the context from a test
     // that returned via `try` without explicitly taking it.
-    if (eng.context.hasException()) {
-        _ = eng.context.takeException();
-    }
-    if (eng.context.hasUnhandledRejection()) {
-        _ = eng.context.takeUnhandledRejection();
-    }
+    clearPendingState(eng);
     // Drain pending jobs so the next test starts with an empty queue;
     // tests that schedule a promise via `Promise.resolve(...)` and
     // return without awaiting would otherwise leak the job into the
     // next test.
     if (eng.context.global != null) {
-        while (true) switch (exec.promise_ops.drainOnePendingJob(eng.context, null) catch break) {
+        while (true) switch (exec.promise_ops.drainOnePendingJob(eng.context, null) catch |err|
+            std.debug.panic("drainOnePendingJob: {s}", .{@errorName(err)})) {
             .empty, .exception => break,
             .success => {},
         };
     }
-    if (eng.context.hasException()) {
-        _ = eng.context.takeException();
-    }
-    if (eng.context.hasUnhandledRejection()) {
-        _ = eng.context.takeUnhandledRejection();
-    }
+    clearPendingState(eng);
     exec.zjs_vm.cleanupAtomicsWaitersForContext(eng.context);
     if (eng.context.global) |global| {
         // Reset global lexical bindings (let / const) so the next
@@ -312,13 +312,14 @@ fn resetSharedEngineAfterTest(eng: *TestEngine) void {
         // parallel arrays entirely from the snapshot.
         // This also removes user-added globals without assuming baseline indices
         // survived a compacting delete.
-        const baseline = shared_engine_baseline_property_count;
-        global.reserveOwnPropertyCapacity(eng.runtime, baseline) catch unreachable;
+        const baseline = shared_engine_baseline.property_count;
+        global.reserveOwnPropertyCapacity(eng.runtime, baseline) catch |err|
+            std.debug.panic("reserveOwnPropertyCapacity: {s}", .{@errorName(err)});
 
         // Restore baseline properties to their original states.
-        if (shared_engine_baseline_properties) |baselines| {
+        if (shared_engine_baseline.properties) |baselines| {
             for (baselines, 0..) |base, idx| {
-                if (shared_engine_baseline_var_refs.?[idx]) |state| {
+                if (shared_engine_baseline.var_refs.?[idx]) |state| {
                     // Restore the snapshot cell before publishing another ref
                     // to it in the rebuilt property array.
                     const cell = base.slot.var_ref;
@@ -331,14 +332,14 @@ fn resetSharedEngineAfterTest(eng: *TestEngine) void {
             }
         }
 
-        if (shared_engine_baseline_shape_props) |baseline_shape_props| {
+        if (shared_engine_baseline.shape_props) |baseline_shape_props| {
             eng.runtime.shapes.restorePropertyLayout(
                 eng.runtime,
                 &global.shape_ref,
-                baseline_shape_props[0..shared_engine_baseline_shape_prop_count],
-                shared_engine_baseline_shape_hash,
-                shared_engine_baseline_shape_deleted_count,
-            ) catch unreachable;
+                baseline_shape_props[0..shared_engine_baseline.shape_prop_count],
+                shared_engine_baseline.shape_hash,
+                shared_engine_baseline.shape_deleted_count,
+            ) catch |err| std.debug.panic("restorePropertyLayout: {s}", .{@errorName(err)});
         }
     }
     _ = eng.runtime.collectForTest() catch |err| std.debug.panic("collectForTest: {s}", .{@errorName(err)});

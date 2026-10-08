@@ -140,12 +140,12 @@ pub fn typedArrayElement(name: []const u8) ?TypedArrayElement {
 }
 
 pub fn constructTypedArrayTypedArrayInput(rt: *core.JSRuntime, prototype: ?*core.Object, array_buffer_prototype: *core.Object, element: TypedArrayElement, source: *core.Object) !core.JSValue {
-    if (try core.object.typedArrayDetached(source)) return error.TypedArrayOutOfBounds;
-    if (try core.object.typedArrayOutOfBounds(source)) return error.TypedArrayOutOfBounds;
+    if (try core.typed_array.typedArrayDetached(source)) return error.TypedArrayOutOfBounds;
+    if (try core.typed_array.typedArrayOutOfBounds(source)) return error.TypedArrayOutOfBounds;
     // InitializeTypedArrayFromTypedArray: content types must match even for
     // an empty source.
     if (source.typedArrayKind().isBigInt() != element.kind.isBigInt()) return error.TypedArrayContentTypeMismatch;
-    const length = try core.object.typedArrayLength(rt, source);
+    const length = try core.typed_array.typedArrayLength(rt, source);
     const byte_length = @as(usize, length) * element.size; // length is a u32
     var backing_buffer = core.JSValue.undefinedValue();
     var object_value = core.JSValue.undefinedValue();

@@ -65,11 +65,11 @@ extern "c" fn getpid() c_int;
 pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
     const io = init.io;
-    const args = try cli_process.argsToSlice(arena, init.minimal.args);
+    const args = try init.minimal.args.toSlice(arena);
 
     var config = parseArgs(args[1..]) catch |err| {
-        try cli_process.printErrorJoin(io, &.{ "run-test262: ", @errorName(err), "\n" });
-        try printUsage(io);
+        cli_process.printErrorJoin(io, &.{ "run-test262: ", @errorName(err), "\n" });
+        printUsage(io);
         std.process.exit(2);
     };
 
@@ -80,10 +80,8 @@ pub fn main(init: std.process.Init) !void {
         config.timeout_ms = 20_000;
     }
 
-    var summary = runSelectedTests(init.gpa, io, config, "zig-out/bin/zjs") catch |err| {
-        try cli_process.printErrorJoin(io, &.{ "run-test262: unable to run tests: ", @errorName(err), "\n" });
-        std.process.exit(1);
-    };
+    var summary = runSelectedTests(init.gpa, io, config, "zig-out/bin/zjs") catch |err|
+        cli_process.fatal(io, 1, &.{ "run-test262: unable to run tests: ", @errorName(err), "\n" });
     defer summary.deinit(init.gpa);
 
     try printSummary(io, summary);
@@ -91,8 +89,8 @@ pub fn main(init: std.process.Init) !void {
     std.process.exit(if (has_unexpected) 1 else 0);
 }
 
-fn printUsage(io: std.Io) !void {
-    try cli_process.printError(io, runner_options.usage);
+fn printUsage(io: std.Io) void {
+    cli_process.printError(io, runner_options.usage);
 }
 
 fn printSummary(io: std.Io, summary: ExecutionSummary) !void {
@@ -117,6 +115,7 @@ fn printSummary(io: std.Io, summary: ExecutionSummary) !void {
 }
 
 const stderr_storage_len = 2048;
+const embedded_module_source_limit = 16 * 1024 * 1024;
 
 pub const SelectionSummary = struct {
     total_tests: usize = 0,
@@ -191,7 +190,7 @@ const WorkerShared = struct {
     verbose: u8,
     timeout_ms: ?u32,
     global_module: bool,
-    reporter: ?*Reporter,
+    reporter: *Reporter,
     /// `Progress: n/N` lines every 1000 tests, only when stderr is a
     /// terminal. Under the build graph stderr is a pipe the runner echoes
     /// back verbatim under a "failed command" heading whenever it is
@@ -226,11 +225,11 @@ const WorkerThreadContext = struct {
 };
 
 pub fn runSelectedTests(allocator: std.mem.Allocator, io: std.Io, config: Config, zjs_path: []const u8) !ExecutionSummary {
-    return runSelectedTestsWithReporterMode(allocator, io, config, zjs_path, false);
+    return runSelectedTestsWithReporterMode(allocator, io, config, zjs_path, .normal);
 }
 
 fn runSelectedTestsQuiet(allocator: std.mem.Allocator, io: std.Io, config: Config, zjs_path: []const u8) !ExecutionSummary {
-    return runSelectedTestsWithReporterMode(allocator, io, config, zjs_path, true);
+    return runSelectedTestsWithReporterMode(allocator, io, config, zjs_path, .quiet);
 }
 
 fn runSelectedTestsWithReporterMode(
@@ -238,10 +237,12 @@ fn runSelectedTestsWithReporterMode(
     io: std.Io,
     config: Config,
     zjs_path: []const u8,
-    quiet_reporter: bool,
+    reporter_mode: Reporter.Mode,
 ) !ExecutionSummary {
     var prepared = try prepareSelection(allocator, io, config);
-    errdefer prepared.deinit(allocator);
+    // `summary` takes the path strings; the reset leaves `prepared.summary`
+    // empty, so this defer frees only the name lists.
+    defer prepared.deinit(allocator);
 
     var known_errors = try loadKnownErrors(allocator, io, prepared.summary.errorfile);
     defer known_errors.deinit();
@@ -256,10 +257,7 @@ fn runSelectedTestsWithReporterMode(
     const harness_prelude = try makeHarnessPrelude(allocator, io, summary.selection.harnessdir);
     defer allocator.free(harness_prelude);
 
-    var reporter = if (quiet_reporter)
-        Reporter.initQuiet(allocator, config.reports_dir)
-    else
-        Reporter.init(allocator, config.reports_dir);
+    var reporter = Reporter.initWithMode(allocator, config.reports_dir, reporter_mode);
     defer reporter.deinit();
 
     const engine_path = config.engine_path orelse zjs_path;
@@ -295,52 +293,14 @@ fn runSelectedTestsWithReporterMode(
         .reporter = &reporter,
         .show_progress = std.Io.File.stderr().isTty(io) catch false,
     };
-    if (worker_count == 1) {
-        try runWorkerLoop(
-            &worker_shared,
-            test_allocator,
-            &summary,
-            &current_failures,
-        );
-    } else {
-        var results = try allocator.alloc(WorkerResult, worker_count);
-        defer allocator.free(results);
-        var contexts = try allocator.alloc(WorkerThreadContext, worker_count);
-        defer allocator.free(contexts);
-        var threads = try allocator.alloc(std.Thread, worker_count);
-        defer allocator.free(threads);
-
-        for (results) |*result| result.* = WorkerResult.init(test_allocator);
-        defer for (results) |*result| result.deinit();
-
-        {
-            var spawned: usize = 0;
-            errdefer {
-                var i: usize = 0;
-                while (i < spawned) : (i += 1) threads[i].join();
-            }
-            while (spawned < worker_count) : (spawned += 1) {
-                contexts[spawned] = .{
-                    .allocator = test_allocator,
-                    .shared = &worker_shared,
-                    .result = &results[spawned],
-                };
-                threads[spawned] = try std.Thread.spawn(.{}, WorkerThreadContext.run, .{&contexts[spawned]});
-            }
-        }
-
-        for (threads) |thread| thread.join();
-
-        for (results) |*result| {
-            if (result.err) |err| return err;
-            summary.passed += result.passed;
-            summary.failed += result.failed;
-            summary.known_failures += result.known_failures;
-            summary.fixed += result.fixed;
-            summary.selection.skipped_by_feature += result.skipped_by_feature;
-            for (result.current_failures.items) |failure| try current_failures.append(failure);
-        }
-    }
+    try runWorkerPool(
+        allocator,
+        test_allocator,
+        &worker_shared,
+        worker_count,
+        &summary,
+        &current_failures,
+    );
 
     if (config.update_errors and summary.selection.errorfile != null) {
         var merged_failures = try mergeKnownErrorsForUpdate(allocator, known_errors, prepared.tests, current_failures);
@@ -350,9 +310,59 @@ fn runSelectedTestsWithReporterMode(
 
     try reporter.flush(io);
 
-    prepared.tests.deinit();
-    prepared.skipped_features.deinit();
     return summary;
+}
+
+fn runWorkerPool(
+    allocator: std.mem.Allocator,
+    test_allocator: std.mem.Allocator,
+    worker_shared: *const WorkerShared,
+    worker_count: usize,
+    summary: *ExecutionSummary,
+    current_failures: *NameList,
+) !void {
+    if (worker_count == 1) {
+        try runWorkerLoop(worker_shared, test_allocator, summary, current_failures);
+        return;
+    }
+
+    var results = try allocator.alloc(WorkerResult, worker_count);
+    defer allocator.free(results);
+    var contexts = try allocator.alloc(WorkerThreadContext, worker_count);
+    defer allocator.free(contexts);
+    var threads = try allocator.alloc(std.Thread, worker_count);
+    defer allocator.free(threads);
+
+    for (results) |*result| result.* = WorkerResult.init(test_allocator);
+    defer for (results) |*result| result.deinit();
+
+    {
+        var spawned: usize = 0;
+        errdefer {
+            var i: usize = 0;
+            while (i < spawned) : (i += 1) threads[i].join();
+        }
+        while (spawned < worker_count) : (spawned += 1) {
+            contexts[spawned] = .{
+                .allocator = test_allocator,
+                .shared = worker_shared,
+                .result = &results[spawned],
+            };
+            threads[spawned] = try std.Thread.spawn(.{}, WorkerThreadContext.run, .{&contexts[spawned]});
+        }
+    }
+
+    for (threads) |thread| thread.join();
+
+    for (results) |*result| {
+        if (result.err) |err| return err;
+        summary.passed += result.passed;
+        summary.failed += result.failed;
+        summary.known_failures += result.known_failures;
+        summary.fixed += result.fixed;
+        summary.selection.skipped_by_feature += result.skipped_by_feature;
+        for (result.current_failures.items) |failure| try current_failures.append(failure);
+    }
 }
 
 fn runWorkerLoop(
@@ -376,17 +386,9 @@ fn runWorkerLoop(
         const index = shared.next_index.fetchAdd(1, .monotonic);
         if (index >= shared.tests.len) break;
         if (shared.show_progress and index > 0 and index % 1000 == 0) {
-            if (shared.reporter) |reporter| {
-                reporter.lockedPrint(shared.io, "Progress: {d}/{d} tests ({d}%)\n", .{ index, shared.tests.len, index * 100 / shared.tests.len }) catch {};
-            } else {
-                var progress_buf: [96]u8 = undefined;
-                const progress = std.fmt.bufPrint(
-                    &progress_buf,
-                    "Progress: {d}/{d} tests ({d}%)\n",
-                    .{ index, shared.tests.len, index * 100 / shared.tests.len },
-                ) catch "Progress\n";
-                cli_process.printError(shared.io, progress) catch {};
-            }
+            reportLine(shared.reporter, shared.io, "Progress: {d}/{d} tests ({d}%)\n", .{
+                index, shared.tests.len, index * 100 / shared.tests.len,
+            }) catch {};
         }
         const test_path = shared.tests[index];
 
@@ -397,23 +399,14 @@ fn runWorkerLoop(
 
             var stderr_text: []const u8 = "";
             var stderr_storage: [stderr_storage_len]u8 = undefined;
-            const res = runOneTest(
-                arena_allocator,
-                shared.io,
-                shared.engine_path,
-                shared.use_external_engine,
-                &harness_cache,
-                shared.harness_prelude,
-                test_path,
-                index,
-                shared.verbose,
-                shared.timeout_ms,
-                shared.global_module,
-                shared.skipped_features,
-                shared.reporter,
-                &stderr_storage,
-                &stderr_text,
-            ) catch |err| {
+            const res = runOneTest(shared, .{
+                .allocator = arena_allocator,
+                .harness_cache = &harness_cache,
+                .test_path = test_path,
+                .test_index = index,
+                .stderr_storage = &stderr_storage,
+                .stderr_out = &stderr_text,
+            }) catch |err| {
                 run_err = err;
                 break :blk .{ .skipped, false };
             };
@@ -423,19 +416,15 @@ fn runWorkerLoop(
             }
 
             const known = runner_known_errors.contains(shared.known_errors, test_path);
-            if (shared.reporter) |r| {
-                r.recordResult(shared.io, test_path, res, stderr_text, known) catch |err| {
-                    run_err = err;
-                    break :blk .{ .skipped, false };
-                };
-            }
+            shared.reporter.recordResult(shared.io, test_path, res, stderr_text, known) catch |err| {
+                run_err = err;
+                break :blk .{ .skipped, false };
+            };
             break :blk .{ res, known };
         };
 
         if (run_err) |err| {
-            if (shared.reporter) |r| {
-                r.lockedPrint(shared.io, "test262 worker error: {s}: {s}\n", .{ test_path, @errorName(err) }) catch {};
-            }
+            reportLine(shared.reporter, shared.io, "test262 worker error: {s}: {s}\n", .{ test_path, @errorName(err) }) catch {};
             return err;
         }
 
@@ -534,7 +523,7 @@ fn requireTest262Roots(io: std.Io, tests: NameList) !void {
     for (tests.items) |test_path| {
         if (!std.fs.path.isAbsolute(test_path)) continue;
         _ = runner_source.requireTest262RelativePath(test_path) catch |err| {
-            try cli_process.printErrorJoin(io, &.{
+            cli_process.printErrorJoin(io, &.{
                 "run-test262: ",
                 test_path,
                 " is not inside a test262 checkout; exclude rules and the override manifest cannot be applied\n",
@@ -560,39 +549,35 @@ fn enumerateTests(allocator: std.mem.Allocator, io: std.Io, tests: *NameList, ro
     }
 }
 
-fn runOneTest(
+/// Per-test inputs that are not already on `WorkerShared`.
+const OneTest = struct {
     allocator: std.mem.Allocator,
-    io: std.Io,
-    engine_path: []const u8,
-    use_external_engine: bool,
     harness_cache: *HarnessCache,
-    harness_prelude: []const u8,
     test_path: []const u8,
     test_index: usize,
-    verbose: u8,
-    timeout_ms: ?u32,
-    global_module: bool,
-    skipped_features: NameList,
-    reporter: ?*Reporter,
     stderr_storage: *[stderr_storage_len]u8,
     stderr_out: *[]const u8,
-) !TestRunResult {
-    const started = std.Io.Clock.Timestamp.now(io, .awake);
-    if (std.c.getenv("ZJS_T262_TRACE") != null) std.debug.print("[{d}] {s}\n", .{ test_index, test_path });
-    const test_source = try readTestSource(allocator, io, test_path);
-    defer allocator.free(test_source);
+};
 
-    var metadata = try parseMetadataText(allocator, test_source);
-    defer metadata.deinit(allocator);
-    if (metadata.skippedFeature(skipped_features)) |feature| {
-        if (reporter) |r| try r.recordSkippedFeature(io, feature);
+fn runOneTest(shared: *const WorkerShared, one: OneTest) !TestRunResult {
+    const started = std.Io.Clock.Timestamp.now(shared.io, .awake);
+    if (std.c.getenv("ZJS_T262_TRACE") != null) {
+        reportLine(shared.reporter, shared.io, "[{d}] {s}\n", .{ one.test_index, one.test_path }) catch {};
+    }
+    const test_source = try readTestSource(one.allocator, shared.io, one.test_path, shared.reporter);
+    defer one.allocator.free(test_source);
+
+    var metadata = try parseMetadataText(one.allocator, test_source);
+    defer metadata.deinit(one.allocator);
+    if (metadata.skippedFeature(shared.skipped_features)) |feature| {
+        try shared.reporter.recordSkippedFeature(shared.io, feature);
         return .skipped;
     }
 
-    const run_as_module = global_module or metadata.hasFlag("module");
+    const run_as_module = shared.global_module or metadata.hasFlag("module");
 
-    const source = try makeTestSourceFromBytes(allocator, harness_cache, harness_prelude, test_source, metadata);
-    defer allocator.free(source);
+    const source = try makeTestSourceFromBytes(one.allocator, one.harness_cache, shared.harness_prelude, test_source, metadata);
+    defer one.allocator.free(source);
 
     var stderr: []const u8 = "";
     // Mirrors qjs run-test262.c:1805: the main test agent defaults to
@@ -604,24 +589,34 @@ fn runOneTest(
     // default fails every wait/notify agent test.
     const can_block = !metadata.hasFlag("CanBlockIsFalse");
     const is_async = metadata.hasFlag("async");
-    const exited_zero = if (use_external_engine)
-        try runExternalEngine(allocator, io, engine_path, source, test_path, test_index, run_as_module, can_block, is_async, timeout_ms, stderr_storage, &stderr)
+    const exited_zero = if (shared.use_external_engine)
+        try runExternalEngine(shared, .{
+            .allocator = one.allocator,
+            .source = source,
+            .test_path = one.test_path,
+            .test_index = one.test_index,
+            .run_as_module = run_as_module,
+            .can_block = can_block,
+            .is_async = is_async,
+            .stderr_storage = one.stderr_storage,
+            .stderr_out = &stderr,
+        })
     else
-        try runEmbeddedEngine(allocator, io, source, test_path, run_as_module, can_block, is_async, stderr_storage, &stderr);
-    const elapsed_ms: i64 = started.durationTo(std.Io.Clock.Timestamp.now(io, .awake)).raw.toMilliseconds();
+        try runEmbeddedEngine(one.allocator, shared.io, source, one.test_path, run_as_module, can_block, is_async, one.stderr_storage, &stderr);
+    const elapsed_ms: i64 = started.durationTo(std.Io.Clock.Timestamp.now(shared.io, .awake)).raw.toMilliseconds();
     const passed = if (metadata.negative) |negative|
         negativeResultMatches(negative, exited_zero, stderr)
     else
         exited_zero;
-    const is_slow = if (timeout_ms) |timeout| elapsed_ms >= @as(i64, timeout) else false;
+    const is_slow = if (shared.timeout_ms) |timeout| elapsed_ms >= @as(i64, timeout) else false;
     const result: TestRunResult = if (passed) .passed else .failed;
 
-    if (verbose > 1 or is_slow) {
-        try printRunResult(io, reporter, test_path, result, elapsed_ms, stderr);
-    } else if (result == .failed and verbose != 0) {
-        try printFailure(io, reporter, test_path, stderr);
+    if (shared.verbose > 1 or is_slow) {
+        try printRunResult(shared.io, shared.reporter, one.test_path, result, elapsed_ms, stderr);
+    } else if (result == .failed and shared.verbose != 0) {
+        try printFailure(shared.io, shared.reporter, one.test_path, stderr);
     }
-    stderr_out.* = stderr;
+    one.stderr_out.* = stderr;
     return result;
 }
 
@@ -656,18 +651,21 @@ fn runEmbeddedEngine(
     // and qjs's run-test262 providing the module loader): [async] dynamic-import
     // tests are SCRIPTS, so import() must work in script mode. The state must
     // outlive eval + the job drain below (the import job resolves in runJobs).
+    const module_env: zjs.exec.module_graph.ModuleEnv = .{
+        .io = io,
+        .allocator = allocator,
+        .max_source_size = embedded_module_source_limit,
+    };
     var dynamic_import_state = zjs.exec.module_graph.DynamicImportState{
         .runtime = ctx.runtimePtr(),
         .output = &output,
-        .io = io,
-        .allocator = allocator,
-        .max_source_size = 16 * 1024 * 1024,
+        .env = module_env,
     };
     defer dynamic_import_state.deinit();
     var dynamic_import_scope = try zjs.exec.module_graph.installDynamicImport(&dynamic_import_state);
     defer dynamic_import_scope.deinit();
     var value = (if (run_as_module)
-        zjs.exec.module_graph.evalModuleGraph(ctx.runtimePtr(), ctx.core, source, &output, path, io, allocator, 16 * 1024 * 1024)
+        zjs.exec.module_graph.evalModuleGraph(ctx.runtimePtr(), ctx.core, source, &output, path, module_env)
     else
         ctx.eval(source, .{
             .mode = .script,
@@ -799,88 +797,91 @@ fn exceptionStringProperty(rt: *zjs.JSRuntime, ctx: *zjs.JSContext, value: zjs.J
     return bytes;
 }
 
-fn runExternalEngine(
+/// One external-engine invocation. Shared runner fields stay on `WorkerShared`.
+const ExternalEngineRun = struct {
     allocator: std.mem.Allocator,
-    io: std.Io,
-    engine_path: []const u8,
     source: []const u8,
     test_path: []const u8,
     test_index: usize,
     run_as_module: bool,
     can_block: bool,
     is_async: bool,
-    timeout_ms: ?u32,
     stderr_storage: *[stderr_storage_len]u8,
     stderr_out: *[]const u8,
-) !bool {
+};
+
+fn runExternalEngine(shared: *const WorkerShared, run: ExternalEngineRun) !bool {
     // Write the assembled test source to tmpfs when available. This avoids a
     // real disk write per test and is significantly faster than the workspace
     // `.zig-cache/` directory under heavy parallelism. Fallback path stays in
     // `.zig-cache/` so Windows/non-tmpfs systems still work.
     var temp_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const temp_path = blk: {
-        if (run_as_module) {
-            break :blk try moduleTempTestPath(&temp_buf, test_path, test_index);
+        if (run.run_as_module) {
+            break :blk try moduleTempTestPath(&temp_buf, run.test_path, run.test_index);
         }
-        if (std.Io.Dir.cwd().access(io, "/dev/shm", .{})) |_| {
-            break :blk try tempTestPathShm(&temp_buf, test_path, test_index);
+        if (std.Io.Dir.cwd().access(shared.io, "/dev/shm", .{})) |_| {
+            break :blk try tempTestPathShm(&temp_buf, run.test_path, run.test_index);
         } else |_| {
-            std.Io.Dir.cwd().createDirPath(io, ".zig-cache") catch {};
-            break :blk try tempTestPath(&temp_buf, test_path, test_index);
+            std.Io.Dir.cwd().createDirPath(shared.io, ".zig-cache") catch {};
+            break :blk try tempTestPath(&temp_buf, run.test_path, run.test_index);
         }
     };
-    if (run_as_module) try prepareModuleTempTree(io, temp_path, test_path);
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = temp_path, .data = source });
-    defer if (run_as_module) {
+    if (run.run_as_module) try prepareModuleTempTree(shared.io, temp_path, run.test_path);
+    try std.Io.Dir.cwd().writeFile(shared.io, .{ .sub_path = temp_path, .data = run.source });
+    defer if (run.run_as_module) {
         if (std.fs.path.dirname(temp_path)) |temp_dir| {
-            std.Io.Dir.cwd().deleteTree(io, temp_dir) catch {};
+            std.Io.Dir.cwd().deleteTree(shared.io, temp_dir) catch {};
         }
     } else {
-        std.Io.Dir.cwd().deleteFile(io, temp_path) catch {};
+        std.Io.Dir.cwd().deleteFile(shared.io, temp_path) catch {};
     };
 
-    const argv_script = [_][]const u8{ engine_path, "-s", temp_path };
-    const argv_script_can_block = [_][]const u8{ engine_path, "--can-block", "-s", temp_path };
-    const argv_module = [_][]const u8{ engine_path, "-m", temp_path };
-    const argv_module_can_block = [_][]const u8{ engine_path, "--can-block", "-m", temp_path };
-    const timeout: std.Io.Timeout = if (timeout_ms) |ms|
-        if (ms > 0) .{ .duration = .{
-            .raw = std.Io.Duration.fromMilliseconds(@intCast(ms)),
-            .clock = .awake,
-        } } else .none
+    var argv_storage: [4][]const u8 = undefined;
+    var argc: usize = 0;
+    argv_storage[argc] = shared.engine_path;
+    argc += 1;
+    if (run.can_block) {
+        argv_storage[argc] = "--can-block";
+        argc += 1;
+    }
+    argv_storage[argc] = if (run.run_as_module) "-m" else "-s";
+    argc += 1;
+    argv_storage[argc] = temp_path;
+    argc += 1;
+    const timeout: std.Io.Timeout = if ((shared.timeout_ms orelse 0) == 0)
+        .none
     else
-        .none;
+        .{ .duration = .{
+            .raw = std.Io.Duration.fromMilliseconds(@intCast(shared.timeout_ms.?)),
+            .clock = .awake,
+        } };
 
-    const result = std.process.run(allocator, io, .{
-        .argv = if (run_as_module)
-            if (can_block) &argv_module_can_block else &argv_module
-        else if (can_block)
-            &argv_script_can_block
-        else
-            &argv_script,
+    const result = std.process.run(run.allocator, shared.io, .{
+        .argv = argv_storage[0..argc],
         .stdout_limit = .limited(1024 * 1024),
         .stderr_limit = .limited(1024 * 1024),
         .timeout = timeout,
     }) catch |err| switch (err) {
         error.Timeout => {
-            stderr_out.* = try std.fmt.bufPrint(stderr_storage, "timed out after {d}ms", .{timeout_ms.?});
+            run.stderr_out.* = try std.fmt.bufPrint(run.stderr_storage, "timed out after {d}ms", .{shared.timeout_ms.?});
             return false;
         },
         else => {
-            stderr_out.* = try std.fmt.bufPrint(stderr_storage, "spawn failed: {s}", .{@errorName(err)});
+            run.stderr_out.* = try std.fmt.bufPrint(run.stderr_storage, "spawn failed: {s}", .{@errorName(err)});
             return false;
         },
     };
-    defer allocator.free(result.stdout);
-    defer allocator.free(result.stderr);
+    defer run.allocator.free(result.stdout);
+    defer run.allocator.free(result.stderr);
 
-    stderr_out.* = copyStderr(stderr_storage, result.stderr);
+    run.stderr_out.* = copyStderr(run.stderr_storage, result.stderr);
     const exited_zero = switch (result.term) {
         .exited => |code| code == 0,
         else => false,
     };
-    if (exited_zero and is_async and !asyncHarnessCompleted(result.stdout)) {
-        stderr_out.* = copyStderr(stderr_storage, "TypeError: $DONE() not called");
+    if (exited_zero and run.is_async and !asyncHarnessCompleted(result.stdout)) {
+        run.stderr_out.* = copyStderr(run.stderr_storage, "TypeError: $DONE() not called");
         return false;
     }
     return exited_zero;
@@ -918,32 +919,27 @@ fn copyStderr(storage: *[stderr_storage_len]u8, stderr: []const u8) []const u8 {
     return storage[0..len];
 }
 
-fn printRunResult(io: std.Io, reporter: ?*Reporter, test_path: []const u8, result: TestRunResult, elapsed_ms: i64, stderr: []const u8) !void {
+fn stderrDetail(stderr: []const u8) []const u8 {
+    const trimmed = std.mem.trim(u8, stderr, " \t\r\n");
+    return trimmed[0..@min(trimmed.len, Reporter.failure_detail_limit)];
+}
+
+fn reportLine(reporter: *Reporter, io: std.Io, comptime fmt: []const u8, args: anytype) !void {
+    try reporter.lockedPrint(io, fmt, args);
+}
+
+fn printRunResult(io: std.Io, reporter: *Reporter, test_path: []const u8, result: TestRunResult, elapsed_ms: i64, stderr: []const u8) !void {
     const status = switch (result) {
         .passed => "PASS",
         .failed => "FAIL",
         .skipped => "SKIP",
     };
-    const trimmed = std.mem.trim(u8, stderr, " \t\r\n");
-    const limit = @min(trimmed.len, 240);
-    const detail = trimmed[0..limit];
-    if (reporter) |r| {
-        if (result == .passed or detail.len == 0) {
-            try r.lockedPrint(io, "{s} {s} ({d} ms)\n", .{ status, test_path, elapsed_ms });
-        } else {
-            try r.lockedPrint(io, "{s} {s} ({d} ms): {s}\n", .{ status, test_path, elapsed_ms, detail });
-        }
-        return;
-    }
-    var stderr_buf: [4096]u8 = undefined;
-    var stderr_writer = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-    const writer = &stderr_writer.interface;
+    const detail = stderrDetail(stderr);
     if (result == .passed or detail.len == 0) {
-        try writer.print("{s} {s} ({d} ms)\n", .{ status, test_path, elapsed_ms });
+        try reportLine(reporter, io, "{s} {s} ({d} ms)\n", .{ status, test_path, elapsed_ms });
     } else {
-        try writer.print("{s} {s} ({d} ms): {s}\n", .{ status, test_path, elapsed_ms, detail });
+        try reportLine(reporter, io, "{s} {s} ({d} ms): {s}\n", .{ status, test_path, elapsed_ms, detail });
     }
-    try writer.flush();
 }
 
 pub fn negativeResultMatches(negative: NegativeMetadata, exited_zero: bool, stderr: []const u8) bool {
@@ -991,27 +987,13 @@ pub fn tempTestPathShm(buffer: []u8, test_path: []const u8, test_index: usize) !
     });
 }
 
-fn printFailure(io: std.Io, reporter: ?*Reporter, test_path: []const u8, stderr: []const u8) !void {
-    const trimmed = std.mem.trim(u8, stderr, " \t\r\n");
-    const limit = @min(trimmed.len, 240);
-    const detail = trimmed[0..limit];
-    if (reporter) |r| {
-        if (detail.len == 0) {
-            try r.lockedPrint(io, "FAIL {s}\n", .{test_path});
-        } else {
-            try r.lockedPrint(io, "FAIL {s}: {s}\n", .{ test_path, detail });
-        }
-        return;
-    }
-    var stderr_buf: [4096]u8 = undefined;
-    var stderr_writer = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
-    const writer = &stderr_writer.interface;
+fn printFailure(io: std.Io, reporter: *Reporter, test_path: []const u8, stderr: []const u8) !void {
+    const detail = stderrDetail(stderr);
     if (detail.len == 0) {
-        try writer.print("FAIL {s}\n", .{test_path});
+        try reportLine(reporter, io, "FAIL {s}\n", .{test_path});
     } else {
-        try writer.print("FAIL {s}: {s}\n", .{ test_path, detail });
+        try reportLine(reporter, io, "FAIL {s}: {s}\n", .{ test_path, detail });
     }
-    try writer.flush();
 }
 
 test "test262 args parse QuickJS-shaped config and root" {
@@ -1372,6 +1354,8 @@ test "selected known failure that now passes is counted as fixed" {
     defer current.deinit();
 
     var next_index: std.atomic.Value(usize) = .init(0);
+    var reporter = Reporter.initQuiet(std.testing.allocator, null);
+    defer reporter.deinit();
     const worker_shared = WorkerShared{
         .io = std.testing.io,
         .engine_path = "zig-out/bin/zjs",
@@ -1385,7 +1369,7 @@ test "selected known failure that now passes is counted as fixed" {
         .verbose = 0,
         .timeout_ms = null,
         .global_module = false,
-        .reporter = null,
+        .reporter = &reporter,
         .show_progress = false,
     };
     try runWorkerLoop(
@@ -1490,7 +1474,7 @@ test "embedded runner passes async test that completes via $DONE" {
 test "embedded Debug runner executes a representative test262 harness within its native stack budget" {
     const allocator = std.testing.allocator;
     const test_path = "test262/test/language/types/null/S8.2_A1_T1.js";
-    const test_source = try readTestSource(allocator, std.testing.io, test_path);
+    const test_source = try readTestSource(allocator, std.testing.io, test_path, null);
     defer allocator.free(test_source);
     var metadata = try parseMetadataText(allocator, test_source);
     defer metadata.deinit(allocator);

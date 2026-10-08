@@ -75,6 +75,24 @@ fn test262AgentIo() std.Io {
     return std.Io.Threaded.global_single_threaded.io();
 }
 
+const agent_join_grace_ms: usize = 500;
+
+fn test262AgentNote(comptime fmt: []const u8, args: anytype) void {
+    const io = test262AgentIo();
+    var buf: [256]u8 = undefined;
+    var stderr_writer = std.Io.File.stderr().writerStreaming(io, &buf);
+    stderr_writer.interface.print(fmt, args) catch return;
+    stderr_writer.interface.flush() catch return;
+}
+
+/// Caller holds `test262_agents.mutex`.
+fn allAgentsDone(rt: *zjs.JSRuntime) bool {
+    for (test262_agents.agents) |agent| {
+        if (agent.owner_runtime == rt and !agent.thread_done) return false;
+    }
+    return true;
+}
+
 fn test262AgentAppend(agent: *Test262Agent) !void {
     const io = test262AgentIo();
     test262_agents.mutex.lockUncancelable(io);
@@ -231,7 +249,7 @@ pub fn cleanupTest262Agents(rt: *zjs.JSRuntime) usize {
     // Collect every agent runtime owned by `rt` so all of them get their
     // `Atomics.wait` sleepers woken. The inline buffer covers the common case;
     // beyond that we size the scratch to the live agent count. Only if that
-    // allocation fails do we fall back to the inline buffer and let the 500 ms
+    // allocation fails do we fall back to the inline buffer and let the grace
     // poll below wait the stragglers out.
     var agent_runtimes_buf: [16]*zjs.JSRuntime = undefined;
     var agent_runtimes: []*zjs.JSRuntime = &agent_runtimes_buf;
@@ -263,18 +281,27 @@ pub fn cleanupTest262Agents(rt: *zjs.JSRuntime) usize {
     zjs.exec.atomics_ops.wakeAtomicsWaitersForRuntimes(rt, agent_runtimes[0..agent_runtimes_count]);
 
     var attempts: usize = 0;
-    while (attempts < 500) : (attempts += 1) {
+    var all_done = false;
+    while (attempts < agent_join_grace_ms) : (attempts += 1) {
         test262_agents.mutex.lockUncancelable(io);
-        var all_done = true;
-        for (test262_agents.agents) |agent| {
-            if (agent.owner_runtime == rt and !agent.thread_done) {
-                all_done = false;
-                break;
-            }
-        }
+        all_done = allAgentsDone(rt);
         test262_agents.mutex.unlock(io);
         if (all_done) break;
         std.Io.sleep(io, std.Io.Duration.fromMilliseconds(1), .awake) catch {};
+    }
+    if (!all_done) {
+        test262_agents.mutex.lockUncancelable(io);
+        var still_running: usize = 0;
+        for (test262_agents.agents) |agent| {
+            if (agent.owner_runtime == rt and !agent.thread_done) still_running += 1;
+        }
+        test262_agents.mutex.unlock(io);
+        if (still_running != 0) {
+            test262AgentNote("test262: {d} agent(s) still running after {d} ms\n", .{
+                still_running,
+                agent_join_grace_ms,
+            });
+        }
     }
 
     test262_agents.mutex.lockUncancelable(io);
@@ -307,8 +334,14 @@ fn test262AgentRun(agent: *Test262Agent) void {
         test262_agents.mutex.unlock(io);
     }
 
+    agentMain(agent) catch |err| {
+        test262AgentNote("test262 agent: {s}\n", .{@errorName(err)});
+    };
+}
+
+fn agentMain(agent: *Test262Agent) !void {
     const allocator = test262PageAllocator();
-    const rt = zjs.JSRuntime.create(allocator, .{}) catch return;
+    const rt = try zjs.JSRuntime.create(allocator, .{});
     defer rt.destroy();
     rt.host_wait.can_block = true;
     rt.setInterruptHandler(test262AgentInterruptHandler, agent);
@@ -320,23 +353,23 @@ fn test262AgentRun(agent: *Test262Agent) void {
         test262_agents.mutex.unlock(io);
     }
 
-    const ctx = zjs.JSContext.create(rt, .{}) catch return;
+    const ctx = try zjs.JSContext.create(rt, .{});
     defer ctx.destroy();
     var event_loop = runtime_layer.EventLoop.init(ctx, .{});
     event_loop.install();
     defer event_loop.deinit();
     defer zjs.exec.atomics_ops.cleanupAtomicsWaitersForContext(ctx.core);
-    const global = zjs.globalObjectPtr(ctx) catch return;
-    installTest262Globals(rt, ctx, global) catch return;
-    _ = ctx.eval(agent.source, .{
+    const global = try zjs.globalObjectPtr(ctx);
+    try installTest262Globals(rt, ctx, global);
+    _ = try ctx.eval(agent.source, .{
         .mode = .script,
         .filename = "<test262-agent>",
         .discard_script_result = true,
-    }) catch return;
+    });
     // Agent hosts must poll Atomics completions as well as engine jobs.
     // Context.runJobs deliberately only performs a microtask checkpoint.
     while (true) {
-        _ = event_loop.drain() catch return;
+        _ = try event_loop.drain();
         if (test262AgentIsDone(agent)) break;
         std.Io.sleep(test262AgentIo(), std.Io.Duration.fromMilliseconds(1), .awake) catch {};
     }

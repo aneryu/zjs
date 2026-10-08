@@ -34,6 +34,7 @@ const FunctionContext = parse_state.FunctionContext;
 const ClassNamePatch = parse_state.ClassNamePatch;
 const State = parse_state.State;
 const Emitter = emitter.Emitter;
+const strict_non_simple_parameters = "use strict directive is not allowed with non-simple parameters";
 const LValue = expressions.LValue;
 const ObjectPropertyName = expressions.ObjectPropertyName;
 
@@ -240,7 +241,7 @@ pub fn parseFunctionExpr(s: *State, func_kind: ParseFunctionKind, source_start: 
     // The name is BindingIdentifier[?Yield, ?Await] of the function being
     // named, not of the enclosing context: a plain function expression may be
     // called `await` inside an async function, an async one never.
-    const strict = s.is_strict or s.curFunc().is_strict_mode;
+    const strict = s.isStrict();
     const has_name = s.peekKind() == .ident or
         (s.peekKind() == .kw_await and !s.lex.is_module) or
         (s.peekKind() == .kw_yield and !strict) or
@@ -263,7 +264,7 @@ pub fn parseFunctionExpr(s: *State, func_kind: ParseFunctionKind, source_start: 
         owned_name = name_atom;
         if (is_generator and identifiers.atomNameEquals(s, name_atom, "yield")) return s.failUnexpectedToken();
         if (func_kind == .async and identifiers.atomNameEquals(s, name_atom, "await")) return s.failUnexpectedToken();
-        if ((s.is_strict or s.curFunc().is_strict_mode) and
+        if (s.isStrict() and
             (identifiers.atomNameEquals(s, name_atom, "eval") or identifiers.atomNameEquals(s, name_atom, "arguments")))
         {
             return s.failUnexpectedToken();
@@ -421,7 +422,7 @@ fn parseFunctionParameters(
             var has_modifier = false;
             if (func_kind.isConstructor()) {
                 // TypeScript parameter properties `constructor(public x)`.
-                while (s.isParameterModifier()) {
+                while (try s.isParameterModifier()) {
                     has_modifier = true;
                     try s.advance();
                 }
@@ -481,7 +482,7 @@ fn parseNamedParameter(s: *State, list: *ParameterListState, has_modifier: bool)
         }
     }
     const arg_index = list.param_count;
-    const strict_params = s.is_strict or s.curFunc().is_strict_mode;
+    const strict_params = s.isStrict();
     if (func_kind == .set and strict_params and
         (identifiers.atomNameEquals(s, param_atom, "eval") or identifiers.atomNameEquals(s, param_atom, "arguments")))
     {
@@ -743,6 +744,168 @@ fn createChildFunction(s: *State, parent_fd: *function_def_mod.FunctionDef, func
     return child;
 }
 
+const AnnexBEligibility = struct {
+    visible_lexical_blocking_annex_b: bool,
+    is_block_level_function_decl: bool,
+    name_blocks_annex_b_parameter_rule: bool,
+    annex_b_if_function_var: bool,
+    annex_b_block_function_var: bool,
+};
+
+fn annexBEligibility(
+    s: *State,
+    parent_fd: *function_def_mod.FunctionDef,
+    func_kind: ParseFunctionKind,
+    name: Atom,
+    plan: *FunctionDeclPlan,
+) AnnexBEligibility {
+    // qjs find_lexical_decl: in global script/eval
+    // code a top-level let/const lives in global_vars
+    // (JS_CLOSURE_GLOBAL_DECL), not in fd->vars; find_lexical_global_var
+    // consults it so Annex B B.3.3 block functions skip hoisting when a
+    // top-level lexical collides. Required since
+    // top_level_lexical_as_global_ref moves these out of scope vars.
+    // A pair of Annex-B single-statement functions in one
+    // IfStatement shares the wrapper scope above.  The first
+    // declaration is therefore visible here as a lexical
+    // function binding, but it is not the lexical binding
+    // that B.3.3 must protect: the second branch is the
+    // permitted same-scope function redefinition.  A
+    // function declaration from an enclosing scope, and all
+    // ordinary lexical declarations, still block the Annex-B
+    // var copy.
+    // Strict code never copies a block function to a var, and every use
+    // below is decided without this flag there; skip the scope walk,
+    // linear in the visible declarations.
+    const visible_lexical_blocking_annex_b = !parent_fd.is_strict_mode and blk: {
+        const visible_idx = declarations.visibleLexicalScopeVar(s, name) orelse break :blk false;
+        const visible = parent_fd.vars[visible_idx];
+        if (visible.scope_level != parent_fd.scope_level or visible.var_kind != .function_decl) break :blk true;
+        // A same-scope function redefinition: a lexical binding further
+        // out still blocks the var copy (B.3.2.1).
+        const parent_scope = parent_fd.scopes[@intCast(parent_fd.scope_level)].parent;
+        break :blk declarations.visibleLexicalScopeVarFrom(s, name, parent_scope) != null;
+    } or (!parent_fd.is_strict_mode and declarations.findLexicalGlobalVar(s, name));
+    const function_body_scope = parent_fd.body_scope;
+    const is_block_level_function_decl = parent_fd.scope_level > function_body_scope;
+    // QuickJS records a block function's cpool index on its
+    // lexical VarDef and instantiates it while lowering that
+    // block's OP_enter_scope.  Annex-B single-statement `if`
+    // functions are conditional source-position assignments,
+    // not scope-entry declarations.
+    plan.scope_entry_init =
+        is_block_level_function_decl and !s.annex_b_if_function_decl_clause;
+    // Function code with an arguments object never copies a block
+    // `function arguments` to a var (B.3.2.1 step ii: "arguments" is in
+    // parameterNames). An arrow has none, so its copy is made like any
+    // other name; script code has no such exception (B.3.2.2).
+    const arguments_blocks_annex_b = identifiers.atomNameEquals(s, name, "arguments") and
+        !(parent_fd.is_global_var and !s.is_eval) and
+        (if (s.is_eval)
+            !s.eval_in_parameter_initializer and closure.findClosureVarIndex(parent_fd, name) != null
+        else
+            parent_fd.has_arguments_binding);
+    const name_blocks_annex_b_parameter_rule =
+        parent_fd.findArg(name) >= 0 or
+        parent_fd.isPatternParameterName(name) or
+        arguments_blocks_annex_b or
+        identifiers.evalAnnexBBlockedFunctionName(parent_fd, name);
+    const annex_b_var_allowed = !parent_fd.is_strict_mode and
+        func_kind == .normal and
+        !visible_lexical_blocking_annex_b and
+        !name_blocks_annex_b_parameter_rule and
+        !s.ctx.in_namespace;
+    return .{
+        .visible_lexical_blocking_annex_b = visible_lexical_blocking_annex_b,
+        .is_block_level_function_decl = is_block_level_function_decl,
+        .name_blocks_annex_b_parameter_rule = name_blocks_annex_b_parameter_rule,
+        .annex_b_if_function_var = s.annex_b_if_function_decl_clause and annex_b_var_allowed,
+        .annex_b_block_function_var = is_block_level_function_decl and annex_b_var_allowed,
+    };
+}
+
+fn defineFunctionDeclLocal(s: *State, name: Atom, func_kind: ParseFunctionKind) Error!u16 {
+    return switch (try declarations.defineVar(
+        s,
+        name,
+        if (func_kind == .normal) .function_decl else .new_function_decl,
+    )) {
+        .local => |idx| idx,
+        else => unreachable,
+    };
+}
+
+fn defineFunctionDeclVar(
+    s: *State,
+    parent_fd: *function_def_mod.FunctionDef,
+    func_kind: ParseFunctionKind,
+    name: Atom,
+    plan: *FunctionDeclPlan,
+    eligibility: AnnexBEligibility,
+) Error!void {
+    const visible_lexical_blocking_annex_b = eligibility.visible_lexical_blocking_annex_b;
+    const is_block_level_function_decl = eligibility.is_block_level_function_decl;
+    const name_blocks_annex_b_parameter_rule = eligibility.name_blocks_annex_b_parameter_rule;
+    const annex_b_if_function_var = eligibility.annex_b_if_function_var;
+    const annex_b_block_function_var = eligibility.annex_b_block_function_var;
+    // The implicit arguments-object local is a parameter-name
+    // blocker for Annex B, not an earlier block-function
+    // declaration. Treating it as the latter forces the lexical
+    // function initializer to its source position, so a call
+    // before `function arguments(){}` incorrectly observes the
+    // arguments object. Keep the block function in the normal
+    // hoisted lexical-init path; the outer implicit binding stays
+    // in its separate `arguments_var_idx` slot.
+    const implicit_arguments_binding =
+        identifiers.atomNameEquals(s, name, "arguments") and parent_fd.arguments_var_idx != null;
+    const duplicate_hoisted_block_func =
+        is_block_level_function_decl and
+        declarations.scopeHasVar(s, 0, name) and
+        !implicit_arguments_binding;
+    const function_decl_idx: i32 = if (annex_b_if_function_var)
+        try defineAnnexBFunctionVar(s, plan, name)
+    else if (s.annex_b_if_function_decl_clause and func_kind == .normal) blk: {
+        plan.emit_inline = true;
+        plan.skip_init = true;
+        break :blk 0;
+    } else if (annex_b_block_function_var)
+        try defineAnnexBFunctionVar(s, plan, name)
+    else if ((parent_fd.is_strict_mode and is_block_level_function_decl) or
+        (is_block_level_function_decl and s.is_eval) or
+        (is_block_level_function_decl and visible_lexical_blocking_annex_b) or
+        (is_block_level_function_decl and name_blocks_annex_b_parameter_rule) or
+        (is_block_level_function_decl and s.in_switch_case_block_scope) or
+        duplicate_hoisted_block_func)
+    blk: {
+        plan.force_local_init = is_block_level_function_decl and name_blocks_annex_b_parameter_rule;
+        if (plan.force_local_init) {
+            if (findCurrentScopeVar(s, name)) |idx| {
+                parent_fd.vars[idx].tdz_emitted_at_decl = true;
+                break :blk idx;
+            }
+        }
+        const idx = try defineFunctionDeclLocal(s, name, func_kind);
+        if (plan.force_local_init) parent_fd.vars[idx].tdz_emitted_at_decl = true;
+        break :blk idx;
+    } else blk: {
+        if (!is_block_level_function_decl) {
+            plan.body_declaration = true;
+            break :blk -1;
+        }
+        // Non-Annex-B block declarations are lexical.  Async
+        // and generator declarations carry NEW_FUNCTION_DECL;
+        // ordinary functions carry FUNCTION_DECL.
+        break :blk try defineFunctionDeclLocal(s, name, func_kind);
+    };
+    plan.lexical_var_idx = function_decl_idx;
+    plan.emit_inline = plan.emit_inline or
+        duplicate_hoisted_block_func or
+        (is_block_level_function_decl and
+            !plan.force_local_init and
+            !plan.emit_global_inline and
+            parent_fd.vars[@intCast(function_decl_idx)].is_lexical);
+}
+
 /// Decide where a function declaration's binding lives and how its
 /// closure is stored: hoisted var, global declaration, lexical block
 /// binding, or an Annex B copy (qjs js_parse_function_decl2 +
@@ -786,134 +949,8 @@ fn planFunctionDeclaration(s: *State, parent_fd: *function_def_mod.FunctionDef, 
             }
         }
 
-        // qjs find_lexical_decl: in global script/eval
-        // code a top-level let/const lives in global_vars
-        // (JS_CLOSURE_GLOBAL_DECL), not in fd->vars; find_lexical_global_var
-        // consults it so Annex B B.3.3 block functions skip hoisting when a
-        // top-level lexical collides. Required since
-        // top_level_lexical_as_global_ref moves these out of scope vars.
-        // A pair of Annex-B single-statement functions in one
-        // IfStatement shares the wrapper scope above.  The first
-        // declaration is therefore visible here as a lexical
-        // function binding, but it is not the lexical binding
-        // that B.3.3 must protect: the second branch is the
-        // permitted same-scope function redefinition.  A
-        // function declaration from an enclosing scope, and all
-        // ordinary lexical declarations, still block the Annex-B
-        // var copy.
-        // Strict code never copies a block function to a var, and every use
-        // below is decided without this flag there; skip the scope walk,
-        // linear in the visible declarations.
-        const visible_lexical_blocking_annex_b = !parent_fd.is_strict_mode and blk: {
-            const visible_idx = declarations.visibleLexicalScopeVar(s, name) orelse break :blk false;
-            const visible = parent_fd.vars[visible_idx];
-            if (visible.scope_level != parent_fd.scope_level or visible.var_kind != .function_decl) break :blk true;
-            // A same-scope function redefinition: a lexical binding further
-            // out still blocks the var copy (B.3.2.1).
-            const parent_scope = parent_fd.scopes[@intCast(parent_fd.scope_level)].parent;
-            break :blk declarations.visibleLexicalScopeVarFrom(s, name, parent_scope) != null;
-        } or (!parent_fd.is_strict_mode and declarations.findLexicalGlobalVar(s, name));
-        const function_body_scope = parent_fd.body_scope;
-        const is_block_level_function_decl = parent_fd.scope_level > function_body_scope;
-        // QuickJS records a block function's cpool index on its
-        // lexical VarDef and instantiates it while lowering that
-        // block's OP_enter_scope.  Annex-B single-statement `if`
-        // functions are conditional source-position assignments,
-        // not scope-entry declarations.
-        plan.scope_entry_init =
-            is_block_level_function_decl and !s.annex_b_if_function_decl_clause;
-        // Function code with an arguments object never copies a block
-        // `function arguments` to a var (B.3.2.1 step ii: "arguments" is in
-        // parameterNames). An arrow has none, so its copy is made like any
-        // other name; script code has no such exception (B.3.2.2).
-        const arguments_blocks_annex_b = identifiers.atomNameEquals(s, name, "arguments") and
-            !(parent_fd.is_global_var and !s.is_eval) and
-            (if (s.is_eval)
-                !s.eval_in_parameter_initializer and closure.findClosureVarIndex(parent_fd, name) != null
-            else
-                parent_fd.has_arguments_binding);
-        const name_blocks_annex_b_parameter_rule =
-            parent_fd.findArg(name) >= 0 or
-            parent_fd.isPatternParameterName(name) or
-            arguments_blocks_annex_b or
-            identifiers.evalAnnexBBlockedFunctionName(parent_fd, name);
-        const annex_b_var_allowed = !parent_fd.is_strict_mode and
-            func_kind == .normal and
-            !visible_lexical_blocking_annex_b and
-            !name_blocks_annex_b_parameter_rule and
-            !s.ctx.in_namespace;
-        const annex_b_if_function_var = s.annex_b_if_function_decl_clause and annex_b_var_allowed;
-        const annex_b_block_function_var = is_block_level_function_decl and annex_b_var_allowed;
-        // The implicit arguments-object local is a parameter-name
-        // blocker for Annex B, not an earlier block-function
-        // declaration. Treating it as the latter forces the lexical
-        // function initializer to its source position, so a call
-        // before `function arguments(){}` incorrectly observes the
-        // arguments object. Keep the block function in the normal
-        // hoisted lexical-init path; the outer implicit binding stays
-        // in its separate `arguments_var_idx` slot.
-        const implicit_arguments_binding =
-            identifiers.atomNameEquals(s, name, "arguments") and parent_fd.arguments_var_idx != null;
-        const duplicate_hoisted_block_func =
-            is_block_level_function_decl and
-            declarations.scopeHasVar(s, 0, name) and
-            !implicit_arguments_binding;
-        const function_decl_idx: i32 = if (annex_b_if_function_var)
-            try defineAnnexBFunctionVar(s, &plan, name)
-        else if (s.annex_b_if_function_decl_clause and func_kind == .normal) blk: {
-            plan.emit_inline = true;
-            plan.skip_init = true;
-            break :blk 0;
-        } else if (annex_b_block_function_var)
-            try defineAnnexBFunctionVar(s, &plan, name)
-        else if ((parent_fd.is_strict_mode and is_block_level_function_decl) or
-            (is_block_level_function_decl and s.is_eval) or
-            (is_block_level_function_decl and visible_lexical_blocking_annex_b) or
-            (is_block_level_function_decl and name_blocks_annex_b_parameter_rule) or
-            (is_block_level_function_decl and s.in_switch_case_block_scope) or
-            duplicate_hoisted_block_func)
-        blk: {
-            plan.force_local_init = is_block_level_function_decl and name_blocks_annex_b_parameter_rule;
-            if (plan.force_local_init) {
-                if (findCurrentScopeVar(s, name)) |idx| {
-                    parent_fd.vars[idx].tdz_emitted_at_decl = true;
-                    break :blk idx;
-                }
-            }
-            const idx: u16 = switch (try declarations.defineVar(
-                s,
-                name,
-                if (func_kind == .normal) .function_decl else .new_function_decl,
-            )) {
-                .local => |local_idx| local_idx,
-                else => unreachable,
-            };
-            if (plan.force_local_init) parent_fd.vars[idx].tdz_emitted_at_decl = true;
-            break :blk idx;
-        } else blk: {
-            if (!is_block_level_function_decl) {
-                plan.body_declaration = true;
-                break :blk -1;
-            }
-            // Non-Annex-B block declarations are lexical.  Async
-            // and generator declarations carry NEW_FUNCTION_DECL;
-            // ordinary functions carry FUNCTION_DECL.
-            break :blk switch (try declarations.defineVar(
-                s,
-                name,
-                if (func_kind == .normal) .function_decl else .new_function_decl,
-            )) {
-                .local => |idx| idx,
-                else => unreachable,
-            };
-        };
-        plan.lexical_var_idx = function_decl_idx;
-        plan.emit_inline = plan.emit_inline or
-            duplicate_hoisted_block_func or
-            (is_block_level_function_decl and
-                !plan.force_local_init and
-                !plan.emit_global_inline and
-                parent_fd.vars[@intCast(function_decl_idx)].is_lexical);
+        const eligibility = annexBEligibility(s, parent_fd, func_kind, name, &plan);
+        try defineFunctionDeclVar(s, parent_fd, func_kind, name, &plan, eligibility);
     }
     return plan;
 }
@@ -963,7 +1000,7 @@ fn parseFunctionBody(s: *State, func_kind: ParseFunctionKind, entry: FunctionEnt
     if (s.is_strict) s.curFunc().is_strict_mode = true;
     if (s.curFunc().is_strict_mode) {
         if (s.curFunc().has_use_strict and !parameters.has_simple_list)
-            return s.failWithMessage(use_strict_position, "use strict directive is not allowed with non-simple parameters");
+            return s.failWithMessage(use_strict_position, strict_non_simple_parameters);
         if (func_kind.isFunctionKeywordForm()) {
             if (entry.name) |name| {
                 if (identifiers.isInvalidStrictFunctionBindingName(s, name))
@@ -982,7 +1019,7 @@ fn parseFunctionBody(s: *State, func_kind: ParseFunctionKind, entry: FunctionEnt
             func_kind == .method or func_kind == .get or func_kind == .set or
             func_kind == .arrow or
             func_kind.isConstructor() or
-            !parameters.has_simple_list or s.is_strict or s.curFunc().is_strict_mode))
+            !parameters.has_simple_list or s.isStrict()))
         return s.failWithMessage(parameters.duplicate_position, "duplicate parameters are not allowed in this function");
     s.leaveControlBoundary(&control_boundary);
     try emitFallthroughReturn(s, func_kind);
@@ -1010,13 +1047,17 @@ fn emitFallthroughReturn(s: *State, func_kind: ParseFunctionKind) Error!void {
     }
 }
 
+pub fn reserveChildCpoolSlot(parent_fd: *function_def_mod.FunctionDef) Error!u16 {
+    return std.math.cast(u16, try parent_fd.appendCpool(JSValue.undefinedValue())) orelse return error.BytecodeOverflow;
+}
+
 /// Pop the finished child, give it a constant-pool slot, create the
 /// declaration carriers the plan asked for, and emit the closure
 /// expression or declaration initializer in the parent.
 fn finishChildFunction(s: *State, c: *ChildFunction, parent_fd: *function_def_mod.FunctionDef, entry: FunctionEntry, plan: *FunctionDeclPlan, source_start: ?FunctionSourceStart) Error!void {
     if (source_start) |start| try s.captureFunctionSource(s.curFunc(), start.offset);
     c.pop(s);
-    const child_cpool_idx = std.math.cast(u16, try parent_fd.appendCpool(JSValue.undefinedValue())) orelse return error.BytecodeOverflow;
+    const child_cpool_idx = try reserveChildCpoolSlot(parent_fd);
     c.fd.parent_cpool_idx = child_cpool_idx;
 
     // QuickJS creates declaration carriers only after the child has a
@@ -1182,7 +1223,7 @@ pub fn parseArrowFunction(s: *State, func_kind: ParseFunctionKind, source_start:
         if (identifiers.identifierLikeHasInvalidEscapeForBinding(s)) return s.failUnexpectedToken();
         const param_atom = identifiers.identifierLikeAtom(s);
         identifiers.recordInvalidStrictParameterName(s, &invalid_strict_name_position, param_atom);
-        if (s.is_strict or s.curFunc().is_strict_mode) {
+        if (s.isStrict()) {
             try identifiers.rejectInvalidStrictParameterName(s, invalid_strict_name_position);
         }
         _ = try s.curFunc().appendArg(.{
@@ -1201,7 +1242,7 @@ pub fn parseArrowFunction(s: *State, func_kind: ParseFunctionKind, source_start:
         defer parameters.deinit(s);
         has_non_simple_params = !parameters.has_simple_list;
         invalid_strict_name_position = parameters.invalid_strict_name_position;
-        if (s.is_strict or s.curFunc().is_strict_mode) {
+        if (s.isStrict()) {
             try identifiers.rejectInvalidStrictParameterName(s, invalid_strict_name_position);
         }
     }
@@ -1232,8 +1273,8 @@ pub fn parseArrowFunction(s: *State, func_kind: ParseFunctionKind, source_start:
         defer s.use_strict_position = saved_use_strict_position;
         try statements.parseFunctionBodyBlock(s);
         if (has_non_simple_params and s.curFunc().has_use_strict)
-            return s.failWithMessage(s.use_strict_position, "use strict directive is not allowed with non-simple parameters");
-        if (s.is_strict or s.curFunc().is_strict_mode) {
+            return s.failWithMessage(s.use_strict_position, strict_non_simple_parameters);
+        if (s.isStrict()) {
             try identifiers.rejectInvalidStrictParameterName(s, invalid_strict_name_position);
         }
         try emitFallthroughReturn(s, func_kind);
@@ -1253,17 +1294,10 @@ pub fn parseArrowFunction(s: *State, func_kind: ParseFunctionKind, source_start:
     s.leaveControlBoundary(&control_boundary);
 
     if (child) |*c| {
-        try s.captureFunctionSource(s.curFunc(), source_start.offset);
-        c.pop(s);
-        const child_cpool_idx = std.math.cast(u16, try parent_fd.appendCpool(JSValue.undefinedValue())) orelse return error.BytecodeOverflow;
-        c.fd.parent_cpool_idx = child_cpool_idx;
-        try c.adopt(parent_fd);
-        s.last_function_child_index = @intCast(parent_fd.child_list.len - 1);
-        try s.emitFClosure(child_cpool_idx);
-        // Arrows are always syntactically anonymous. Keep their inferred
-        // name out of FunctionDef.func_name and expose only the same
-        // parser placeholder QuickJS uses for ordinary function exprs.
-        try Emitter.opAtom(s, opcode.op.set_name, atom_module.null_atom);
+        // `active` defaults to false, so this is the anonymous-expression
+        // tail: closure plus the parser-only set_name(null) placeholder.
+        var plan: FunctionDeclPlan = .{};
+        try finishChildFunction(s, c, parent_fd, .{}, &plan, source_start);
     }
 }
 
@@ -1369,7 +1403,7 @@ fn checkPatternParameterDuplicate(s: *State, name: Atom) Error!void {
 }
 
 fn definePatternBindingAtom(s: *State, binding: PatternBindingMode, name: Atom) Error!PatternTarget {
-    if ((s.is_strict or s.curFunc().is_strict_mode) and
+    if (s.isStrict() and
         (identifiers.atomNameEquals(s, name, "eval") or identifiers.atomNameEquals(s, name, "arguments")))
     {
         return s.failExpectedDescription("valid strict-mode binding name");
@@ -1385,11 +1419,8 @@ fn definePatternBindingAtom(s: *State, binding: PatternBindingMode, name: Atom) 
     // Imported/module declaration names are not represented in vars until
     // module resolution.  Preserve the same wrapper collision check used
     // by the simple declaration producer before calling defineVar.
-    if ((binding.define_type == .let_ or binding.define_type == .const_) and
-        s.top_level_lexical_as_module_ref and s.atProgramBodyScope() and
-        identifiers.hasKnownBinding(s, name))
-    {
-        return s.failNamed("redeclaration of '{s}'", "redeclaration", name);
+    if (binding.define_type == .let_ or binding.define_type == .const_) {
+        try declarations.rejectModuleRefRedeclaration(s, name);
     }
 
     const defined = try declarations.defineVar(s, name, binding.define_type);
@@ -1545,14 +1576,12 @@ fn objectRestCopyMask(depth: u8) Error!u8 {
 }
 
 fn emitArrayPatternRest(s: *State, target_depth: u8) Error!void {
-    var next: compiler.LabelId = undefined;
-    var done: compiler.LabelId = undefined;
     try Emitter.opU16(s, opcode.op.array_from, 0);
     try Emitter.opI32(s, opcode.op.push_i32, 0);
-    next = try Emitter.newLabel(s);
+    const next = try Emitter.newLabel(s);
     try Emitter.bindRaw(s, next);
     try Emitter.opU8(s, opcode.op.for_of_next, target_depth + 2);
-    done = try Emitter.newLabel(s);
+    const done = try Emitter.newLabel(s);
     try Emitter.jump(s, opcode.op.if_true, done);
     try Emitter.op(s, opcode.op.define_array_el);
     try Emitter.op(s, opcode.op.inc);

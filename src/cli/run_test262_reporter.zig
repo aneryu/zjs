@@ -51,21 +51,30 @@ pub const Reporter = struct {
         skipped: usize = 0,
     };
 
+    pub const Mode = enum { normal, quiet };
+
+    /// Shared cap for a failure line and the runner's stderr detail.
+    pub const failure_detail_limit: usize = 240;
+
     allocator: std.mem.Allocator,
     mutex: std.Io.Mutex = .init,
     reports_dir: ?[]const u8,
-    quiet: bool = false,
+    mode: Mode = .normal,
     failure_log: std.ArrayList(u8) = .empty,
     buckets: [@typeInfo(Bucket).@"enum".fields.len]usize = @splat(0),
     by_dir: std.ArrayList(DirEntry) = .empty,
     skipped_by_feature: std.ArrayList(SkippedFeatureEntry) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, reports_dir: ?[]const u8) Reporter {
-        return .{ .allocator = allocator, .reports_dir = reports_dir };
+        return initWithMode(allocator, reports_dir, .normal);
     }
 
     pub fn initQuiet(allocator: std.mem.Allocator, reports_dir: ?[]const u8) Reporter {
-        return .{ .allocator = allocator, .reports_dir = reports_dir, .quiet = true };
+        return initWithMode(allocator, reports_dir, .quiet);
+    }
+
+    pub fn initWithMode(allocator: std.mem.Allocator, reports_dir: ?[]const u8, mode: Mode) Reporter {
+        return .{ .allocator = allocator, .reports_dir = reports_dir, .mode = mode };
     }
 
     pub fn deinit(self: *Reporter) void {
@@ -80,7 +89,7 @@ pub const Reporter = struct {
     /// must go through this so multi-threaded runs do not interleave
     /// fragments.
     pub fn lockedPrint(self: *Reporter, io: std.Io, comptime fmt: []const u8, args: anytype) !void {
-        if (self.quiet) return;
+        if (self.mode == .quiet) return;
         self.mutex.lockUncancelable(io);
         defer self.mutex.unlock(io);
         var stderr_buf: [4096]u8 = undefined;
@@ -148,7 +157,7 @@ pub const Reporter = struct {
         stderr_text: []const u8,
     ) !void {
         const trimmed = std.mem.trim(u8, stderr_text, " \t\r\n");
-        const limit = @min(trimmed.len, 240);
+        const limit = @min(trimmed.len, failure_detail_limit);
         try self.failure_log.print(self.allocator, "{s}\t{s}\t", .{ test_path, bucket.name() });
         // sanitise newlines/tabs out of the captured stderr fragment.
         for (trimmed[0..limit]) |byte| {

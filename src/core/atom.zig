@@ -2099,6 +2099,7 @@ pub const AtomTable = struct {
         defer self.unpinForHost(atom_id);
         if (atom_id.isTaggedInt()) {
             var buf: [10]u8 = undefined;
+            // A u32 prints in at most 10 decimal digits.
             const text = std.fmt.bufPrint(&buf, "{d}", .{atom_id.toUInt32()}) catch unreachable;
             if (text.len == 1 and text[0] <= 0x7f) {
                 const cached = try rt.singleByteString(text[0]);

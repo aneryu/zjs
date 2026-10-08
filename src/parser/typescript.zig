@@ -26,6 +26,7 @@ const DeclMask = parse_state.DeclMask;
 const State = parse_state.State;
 const ParserSnapshot = lookahead.ParserSnapshot;
 const Emitter = emitter.Emitter;
+const missing_function_implementation = "function implementation is missing or not immediately following the declaration";
 
 /// `namespace N { export <decl> }`: copy the member binding onto the
 /// namespace object right after its declaration.
@@ -174,22 +175,21 @@ fn tsPrescanBody(s: *State, visitor: anytype) Error!void {
 
     var depth: usize = 1;
     var prev_kind: tok.Kind = .lbrace;
+    var before_previous: ?tok.Kind = null;
+    var for_head = lookahead.ForHeadDelim.init(s.scratch);
+    defer for_head.deinit();
     while (true) {
         var scan_token = s.lex.next() catch |err| return lookahead.mapLookaheadLexerError(s, err);
         defer s.lex.freeToken(&scan_token);
         const k = scan_token.kind;
         if (k == .eof) return;
         const after_line_terminator = s.lex.got_lf;
+        if (try lookahead.skipOpaqueLiteral(s, scan_token, prev_kind)) |skipped| {
+            before_previous = prev_kind;
+            prev_kind = skipped;
+            continue;
+        }
         switch (k) {
-            .slash, .div_assign => if (try lookahead.skipRegexpInPredeclareScan(s, prev_kind)) {
-                prev_kind = .regexp;
-                continue;
-            },
-            .template => {
-                try lookahead.skipTemplateInPredeclareScan(s, scan_token);
-                prev_kind = .template;
-                continue;
-            },
             .rbrace, .rparen, .rbracket => {
                 depth -= 1;
                 if (depth == 0) return;
@@ -198,7 +198,10 @@ fn tsPrescanBody(s: *State, visitor: anytype) Error!void {
         }
         try visitor.token(s, &scan_token, depth == 1, after_line_terminator);
         if (k == .lbrace or k == .lparen or k == .lbracket) depth += 1;
-        prev_kind = k;
+        const at_for_head = for_head.atForHead();
+        try for_head.onToken(k, prev_kind, before_previous);
+        before_previous = prev_kind;
+        prev_kind = lookahead.contextualOfKind(s, &scan_token, prev_kind, at_for_head);
     }
 }
 
@@ -229,8 +232,7 @@ const NamespaceVarExportScan = struct {
             }
         }
         // `export declare let x` declares a member too.
-        const declare_after_export = self.prev_export and k == .ident and !t.payload.ident.has_escape and
-            identifiers.atomNameEquals(s, t.payload.ident.atom, "declare");
+        const declare_after_export = self.prev_export and identifiers.tokenIsPlainName(s, t, "declare");
         self.prev_export = k == .kw_export or declare_after_export;
     }
 };
@@ -598,23 +600,22 @@ pub fn tsAtLess(s: *State) bool {
 
 /// Identifier-name test on the token after the current one. `same_line`
 /// additionally rejects a line terminator before that token.
-pub fn tsPeekNextIsIdent(s: *State, name: []const u8, same_line: bool) bool {
+pub fn tsPeekNextIsIdent(s: *State, name: []const u8, same_line: bool) Error!bool {
     const saved_cursor = lookahead.takeLexerCursorSnapshot(s);
     defer lookahead.restoreLexerCursorSnapshot(s, saved_cursor);
-    var next = s.lex.next() catch return false;
+    var next = try lookahead.peekAhead(s) orelse return false;
     defer s.lex.freeToken(&next);
     if (same_line and s.lex.gotLineTerminator()) return false;
-    return next.kind == .ident and !next.payload.ident.has_escape and
-        identifiers.atomNameEquals(s, next.payload.ident.atom, name);
+    return identifiers.tokenIsPlainName(s, &next, name);
 }
 
 /// Kind of the token two positions ahead of the current one.
-fn tsPeekSecondKind(s: *State) tok.Kind {
+fn tsPeekSecondKind(s: *State) Error!tok.Kind {
     const saved_cursor = lookahead.takeLexerCursorSnapshot(s);
     defer lookahead.restoreLexerCursorSnapshot(s, saved_cursor);
-    var first = s.lex.next() catch return .eof;
+    var first = try lookahead.peekAhead(s) orelse return .eof;
     s.lex.freeToken(&first);
-    var second = s.lex.next() catch return .eof;
+    var second = try lookahead.peekAhead(s) orelse return .eof;
     defer s.lex.freeToken(&second);
     return second.kind;
 }
@@ -742,14 +743,14 @@ fn tsParseTypeOrPredicate(s: *State) Error!void {
     s.ts_disallow_conditional = false;
     defer s.ts_disallow_conditional = saved;
     // `x is T` first: a parameter may itself be named `asserts`.
-    if ((s.peekKind() == .kw_this or tsAtTypeName(s)) and tsPeekNextIsIdent(s, "is", true)) {
+    if ((s.peekKind() == .kw_this or tsAtTypeName(s)) and try tsPeekNextIsIdent(s, "is", true)) {
         try s.advance();
         try s.advance();
         try tsParseType(s);
         return;
     }
     if (s.isIdent("asserts")) {
-        const next_peek = s.peekNext();
+        const next_peek = try s.peekNext();
         const next = next_peek.kind;
         const has_lt = next_peek.line_terminator;
         if (!has_lt and (next == .kw_this or tsKindIsIdentifierLike(next))) {
@@ -796,12 +797,12 @@ fn tsParseType(s: *State) Error!void {
 fn tsAtFunctionTypeStart(s: *State) Error!bool {
     const k = s.peekKind();
     if (k == .lt or k == .shl or k == .kw_new) return true;
-    if (s.isIdent("abstract") and s.peekNextKind() == .kw_new) return true;
+    if (s.isIdent("abstract") and try s.peekNextKind() == .kw_new) return true;
     if (k != .lparen) return false;
     // tsc isUnambiguouslyStartOfFunctionType: a parenthesized type such as
     // an arrow's `(): (() => void) => ...` return type must not swallow the
     // arrow's own `=>`.
-    const next = s.peekNextKind();
+    const next = try s.peekNextKind();
     if (next == .rparen or next == .ellipsis) return true;
     if (next == .lbracket or next == .lbrace) {
         const balanced = lookahead.scanBalancedToken(s, false) catch |err| return lookahead.lookaheadErrorAsNoMatch(err);
@@ -926,13 +927,13 @@ fn tsParsePrimaryType(s: *State) Error!void {
         return;
     }
     if (k == .kw_import) return tsParseImportType(s);
-    if (s.isIdent("abstract") and s.peekNextKind() == .kw_new) return tsParseFunctionType(s);
+    if (s.isIdent("abstract") and try s.peekNextKind() == .kw_new) return tsParseFunctionType(s);
     if (tsAtTypeName(s)) return tsParseTypeReference(s);
     return s.failExpectedDescription("type");
 }
 
 pub fn tsParseTypeReference(s: *State) Error!void {
-    const keyword_type = tsAtKeywordTypeName(s) and s.peekNextKind() != .dot;
+    const keyword_type = tsAtKeywordTypeName(s) and try s.peekNextKind() != .dot;
     try tsParseEntityName(s);
     // Keyword types take no type arguments, so `a as number < 5` compares.
     if (!keyword_type) try tsParseTypeReferenceArgumentsOpt(s);
@@ -1071,7 +1072,7 @@ pub fn tsParseTypeParameters(s: *State) Error!void {
                 continue;
             }
             if (s.isIdent("out")) {
-                const next = s.peekNextKind();
+                const next = try s.peekNextKind();
                 if (tsKindIsIdentifierLike(next) or next == .kw_const or next == .kw_in) {
                     try s.advance();
                     continue;
@@ -1101,7 +1102,7 @@ fn tsParseTupleType(s: *State) Error!void {
     while (s.peekKind() != .rbracket) {
         if (s.peekKind() == .eof) return s.failExpectedToken(.rbracket);
         if (s.peekKind() == .ellipsis) try s.advance();
-        if (tsAtTypeName(s) and tsTupleMemberIsNamed(s)) {
+        if (tsAtTypeName(s) and try tsTupleMemberIsNamed(s)) {
             try s.advance();
             if (s.peekKind() == .question) try s.advance();
             try s.expectToken(.colon);
@@ -1114,10 +1115,10 @@ fn tsParseTupleType(s: *State) Error!void {
     try s.expectToken(.rbracket);
 }
 
-fn tsTupleMemberIsNamed(s: *State) bool {
-    const next = s.peekNextKind();
+fn tsTupleMemberIsNamed(s: *State) Error!bool {
+    const next = try s.peekNextKind();
     if (next == .colon) return true;
-    return next == .question and tsPeekSecondKind(s) == .colon;
+    return next == .question and try tsPeekSecondKind(s) == .colon;
 }
 
 /// Object type literal, interface body, or mapped type.
@@ -1145,18 +1146,18 @@ fn tsParseObjectTypeMember(s: *State) Error!void {
         try s.advance();
         return tsParseIndexOrMappedMember(s);
     }
-    if (s.isIdent("readonly") and tsWordIsMemberModifier(s)) try s.advance();
+    if (s.isIdent("readonly") and try tsWordIsMemberModifier(s)) try s.advance();
     const k = s.peekKind();
     if (k == .lbracket) return tsParseIndexOrMappedMember(s);
     if (k == .lparen or k == .lt or k == .shl) return tsParseMethodSignatureRest(s);
     if (k == .kw_new) {
-        const next = s.peekNextKind();
+        const next = try s.peekNextKind();
         if (next == .lparen or next == .lt or next == .shl) {
             try s.advance();
             return tsParseMethodSignatureRest(s);
         }
     }
-    if ((s.isIdent("get") or s.isIdent("set")) and tsWordIsMemberModifier(s)) {
+    if ((s.isIdent("get") or s.isIdent("set")) and try tsWordIsMemberModifier(s)) {
         try s.advance();
         if (s.peekKind() == .lbracket) return tsParseIndexOrMappedMember(s);
     }
@@ -1170,8 +1171,8 @@ fn tsParseObjectTypeMember(s: *State) Error!void {
 
 /// A contextual word (`readonly`, `get`, `set`) is a member modifier only
 /// when a member name follows it on the same line.
-fn tsWordIsMemberModifier(s: *State) bool {
-    const next_peek = s.peekNext();
+fn tsWordIsMemberModifier(s: *State) Error!bool {
+    const next_peek = try s.peekNext();
     const next = next_peek.kind;
     const has_lt = next_peek.line_terminator;
     if (has_lt) return false;
@@ -1189,7 +1190,7 @@ fn tsParseMethodSignatureRest(s: *State) Error!void {
 fn tsParseIndexOrMappedMember(s: *State) Error!void {
     try s.expectToken(.lbracket);
     if (tsAtTypeName(s)) {
-        const next = s.peekNextKind();
+        const next = try s.peekNextKind();
         if (next == .kw_in) {
             try s.advance();
             try s.advance();
@@ -1235,7 +1236,7 @@ fn tsParseSignatureParameters(s: *State) Error!void {
     defer s.ts_disallow_conditional = saved;
     while (s.peekKind() != .rparen) {
         if (s.peekKind() == .eof) return s.failExpectedToken(.rparen);
-        while (s.isParameterModifier()) try s.advance();
+        while (try s.isParameterModifier()) try s.advance();
         if (s.peekKind() == .ellipsis) try s.advance();
         const k = s.peekKind();
         if (k == .kw_this or tsKindIsIdentifierLike(k)) {
@@ -1259,10 +1260,10 @@ const TsDeclarationKind = enum { none, interface, type_alias, ambient, abstract_
 /// Contextual keywords open a declaration only in these shapes, and only
 /// when the next token is on the same line: `interface X`, `type X`,
 /// `declare <decl>`, `abstract class`, `namespace X`, `module X`.
-pub fn tsDeclarationStart(s: *State) TsDeclarationKind {
+pub fn tsDeclarationStart(s: *State) Error!TsDeclarationKind {
     const k = s.peekKind();
     if (k == .kw_interface) {
-        const next_peek = s.peekNext();
+        const next_peek = try s.peekNext();
         const next = next_peek.kind;
         const has_lt = next_peek.line_terminator;
         return if (!has_lt and tsKindIsIdentifierLike(next)) .interface else .none;
@@ -1279,7 +1280,7 @@ pub fn tsDeclarationStart(s: *State) TsDeclarationKind {
         .namespace
     else
         return .none;
-    const next_peek = s.peekNext();
+    const next_peek = try s.peekNext();
     const next = next_peek.kind;
     const has_lt = next_peek.line_terminator;
     if (has_lt) return .none;
@@ -1379,7 +1380,7 @@ fn tsParseAmbientDeclarationBody(s: *State) Error!void {
         },
         .kw_interface => return tsParseInterfaceDeclaration(s),
         else => {
-            if (s.isIdent("abstract") and s.peekNextKind() == .kw_class) {
+            if (s.isIdent("abstract") and try s.peekNextKind() == .kw_class) {
                 try s.advance();
                 return tsParseAmbientClass(s);
             }
@@ -1480,7 +1481,7 @@ pub fn tsSkipFunctionSignature(s: *State) Error!void {
     _ = try s.expectSemicolon();
     const k = s.peekKind();
     if (k != .kw_function and k != .kw_export and k != .kw_default and !s.isIdent("async")) {
-        return s.failWithMessage(null, "function implementation is missing or not immediately following the declaration");
+        return s.failWithMessage(null, missing_function_implementation);
     }
 }
 
@@ -1489,7 +1490,7 @@ pub fn tsSkipMethodSignature(s: *State, is_abstract: bool) Error!void {
     try tsSkipParameterListAndReturnType(s);
     _ = try s.expectSemicolon();
     if (!is_abstract and s.peekKind() == .rbrace) {
-        return s.failWithMessage(null, "function implementation is missing or not immediately following the declaration");
+        return s.failWithMessage(null, missing_function_implementation);
     }
 }
 
@@ -1544,19 +1545,19 @@ pub fn tsCanFollowClassModifier(kind: tok.Kind) bool {
 }
 
 /// Current token is `[`: is this a class index signature `[k: T]: U`?
-pub fn tsIndexSignatureAhead(s: *State) bool {
+pub fn tsIndexSignatureAhead(s: *State) Error!bool {
     return tsIdentifierFollowedByAhead(s, .colon);
 }
 
 /// The two tokens after the current one are an identifier and `kind`.
-fn tsIdentifierFollowedByAhead(s: *State, kind: tok.Kind) bool {
+fn tsIdentifierFollowedByAhead(s: *State, kind: tok.Kind) Error!bool {
     const saved_cursor = lookahead.takeLexerCursorSnapshot(s);
     defer lookahead.restoreLexerCursorSnapshot(s, saved_cursor);
-    var first = s.lex.next() catch return false;
+    var first = try lookahead.peekAhead(s) orelse return false;
     const first_kind = first.kind;
     s.lex.freeToken(&first);
     if (!tsKindIsIdentifierLike(first_kind)) return false;
-    var second = s.lex.next() catch return false;
+    var second = try lookahead.peekAhead(s) orelse return false;
     defer s.lex.freeToken(&second);
     return second.kind == kind;
 }
@@ -1692,7 +1693,7 @@ pub fn tsAtAsOrSatisfies(s: *State) bool {
 }
 
 /// `import` followed by `x =`: an import alias declaration.
-pub fn tsImportAliasAhead(s: *State) bool {
+pub fn tsImportAliasAhead(s: *State) Error!bool {
     return tsIdentifierFollowedByAhead(s, .assign);
 }
 
@@ -1707,9 +1708,7 @@ pub fn tsParseImportAlias(s: *State, export_decl: bool) Error!void {
         return s.failWithMessage(null, "'import x = require()' is not supported; use ESM import");
     }
     if (!identifiers.isIdentifierLikeToken(s)) return s.failExpectedDescription("entity name");
-    if (s.top_level_lexical_as_module_ref and s.atProgramBodyScope() and identifiers.hasKnownBinding(s, alias_atom)) {
-        return s.failNamed("redeclaration of '{s}'", "redeclaration", alias_atom);
-    }
+    try declarations.rejectModuleRefRedeclaration(s, alias_atom);
     _ = try declarations.defineVar(s, alias_atom, .const_);
     // The entity's head is an ordinary reference: a member of an enclosing
     // namespace (from any of its blocks) reads through the namespace object.
@@ -1736,44 +1735,40 @@ pub fn tsParseImportAlias(s: *State, export_decl: bool) Error!void {
 /// the type-only modifier when `{`, `*`, or a binding name follows, except
 /// for the default import that is itself named `type` (`import type from
 /// "m"`, but not `import type from from "m"`).
-pub fn tsImportTypeModifier(s: *State) bool {
+pub fn tsImportTypeModifier(s: *State) Error!bool {
     const saved_cursor = lookahead.takeLexerCursorSnapshot(s);
     defer lookahead.restoreLexerCursorSnapshot(s, saved_cursor);
-    var first = s.lex.next() catch return false;
+    var first = try lookahead.peekAhead(s) orelse return false;
     defer s.lex.freeToken(&first);
     if (first.kind == .lbrace or first.kind == .star) return true;
     if (!tsKindIsIdentifierLike(first.kind)) return false;
-    const first_is_from = first.kind == .ident and !first.payload.ident.has_escape and
-        identifiers.atomNameEquals(s, first.payload.ident.atom, "from");
+    const first_is_from = identifiers.tokenIsPlainName(s, &first, "from");
     if (!first_is_from) return true;
-    var second = s.lex.next() catch return false;
+    var second = try lookahead.peekAhead(s) orelse return false;
     defer s.lex.freeToken(&second);
     if (second.kind == .assign) return true;
-    return second.kind == .ident and !second.payload.ident.has_escape and
-        identifiers.atomNameEquals(s, second.payload.ident.atom, "from");
+    return identifiers.tokenIsPlainName(s, &second, "from");
 }
 
 /// Current token is the identifier `type` at the start of an import or
 /// export specifier. tsc `parseImportOrExportSpecifier`.
-pub fn tsSpecifierTypeModifier(s: *State) bool {
+pub fn tsSpecifierTypeModifier(s: *State) Error!bool {
     const saved_cursor = lookahead.takeLexerCursorSnapshot(s);
     defer lookahead.restoreLexerCursorSnapshot(s, saved_cursor);
-    var first = s.lex.next() catch return false;
+    var first = try lookahead.peekAhead(s) orelse return false;
     defer s.lex.freeToken(&first);
     const first_is_name = modules.isModuleNameToken(first.kind);
     if (!first_is_name) return false;
-    const first_is_as = first.kind == .ident and !first.payload.ident.has_escape and
-        identifiers.atomNameEquals(s, first.payload.ident.atom, "as");
+    const first_is_as = identifiers.tokenIsPlainName(s, &first, "as");
     if (!first_is_as) return true;
     // `{ type as ... }`
-    var second = s.lex.next() catch return false;
+    var second = try lookahead.peekAhead(s) orelse return false;
     defer s.lex.freeToken(&second);
-    const second_is_as = second.kind == .ident and !second.payload.ident.has_escape and
-        identifiers.atomNameEquals(s, second.payload.ident.atom, "as");
+    const second_is_as = identifiers.tokenIsPlainName(s, &second, "as");
     if (second_is_as) {
         // `{ type as as X }` is type-only; `{ type as as }` imports `type`
         // under the local name `as`.
-        var third = s.lex.next() catch return false;
+        var third = try lookahead.peekAhead(s) orelse return false;
         defer s.lex.freeToken(&third);
         return modules.isModuleNameToken(third.kind);
     }

@@ -506,15 +506,16 @@ fn constructorClassPrototypeId(kind: ConstructorKind) ?core.ClassId {
 const global_flags: Flags = .method;
 const method_flags: Flags = .method;
 const prototype_flags: Flags = .none;
-/// `.primitive` native-builtin ids encode `class_tag * 10 + method` (class
-/// tags: 1 number, 2 boolean, 3 bigint, 4 symbol, 5 string; see
-/// `exec/object_ops.primitivePrototypeMethod`). Methods 1/2 are
-/// toString/valueOf; 3 is the constructor-called-as-function path; 4/5 are
-/// the Symbol `description` getter and `[Symbol.toPrimitive]`.
-const primitive_boolean_ctor_call_id: u32 = 23;
-const primitive_symbol_ctor_call_id: u32 = 43;
-const primitive_symbol_description_get_id: u32 = 44;
-const primitive_symbol_to_primitive_id: u32 = 45;
+/// `.primitive` native-builtin ids encode
+/// `PrimitiveClass * primitive_builtin_stride + PrimitiveMethod`
+/// (`object_ops.zig`).
+fn primitiveBuiltinId(class: object_builtin.PrimitiveClass, method: object_builtin.PrimitiveMethod) u32 {
+    return @as(u32, @intCast(@intFromEnum(class))) * @as(u32, @intCast(object_builtin.primitive_builtin_stride)) + @as(u32, @intCast(@intFromEnum(method)));
+}
+const primitive_boolean_ctor_call_id: u32 = primitiveBuiltinId(.boolean, .constructor_call);
+const primitive_symbol_ctor_call_id: u32 = primitiveBuiltinId(.symbol, .constructor_call);
+const primitive_symbol_description_get_id: u32 = primitiveBuiltinId(.symbol, .description_get);
+const primitive_symbol_to_primitive_id: u32 = primitiveBuiltinId(.symbol, .to_primitive);
 
 /// A bootstrap property key taken from a `[]const u8` table field.
 ///

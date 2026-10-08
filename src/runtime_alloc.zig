@@ -240,13 +240,15 @@ pub noinline fn reallocElements(
     return new_buf;
 }
 
+const NativeAccounting = enum { alloc, create };
+
 pub inline fn noteAllocDiagnostics(
     self: *JSRuntime,
-    comptime is_create: bool,
+    comptime kind: NativeAccounting,
 ) void {
     if (comptime diagnostic_accounting_enabled) {
         self.allocation_diagnostics.allocation_count += 1;
-        if (comptime is_create) {
+        if (comptime kind == .create) {
             self.allocation_diagnostics.create_calls += 1;
         } else {
             self.allocation_diagnostics.alloc_calls += 1;
@@ -256,10 +258,10 @@ pub inline fn noteAllocDiagnostics(
     }
 }
 
-pub inline fn noteFreeDiagnostics(self: *JSRuntime, comptime is_destroy: bool) void {
+pub inline fn noteFreeDiagnostics(self: *JSRuntime, comptime kind: NativeAccounting) void {
     if (comptime diagnostic_accounting_enabled) {
         self.allocation_diagnostics.allocation_count -= 1;
-        if (comptime is_destroy) {
+        if (comptime kind == .create) {
             self.allocation_diagnostics.destroy_calls += 1;
         } else {
             self.allocation_diagnostics.free_calls += 1;
@@ -302,28 +304,25 @@ pub fn allocAlignedBytesNoTrigger(self: *JSRuntime, byte_count: usize, alignment
 fn allocAlignedBytesInternal(self: *JSRuntime, byte_count: usize, alignment: std.mem.Alignment, comptime trigger_gc: bool) ![]u8 {
     if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
     if (byte_count == 0) return &.{};
-    return allocAlignedBytesSlow(self, byte_count, alignment, trigger_gc);
+    const ptr = try allocRawSlow(self, byte_count, alignment, trigger_gc, .alloc);
+    return ptr[0..byte_count];
 }
 
 /// Native backing allocation with optional diagnostic limit and probe.
-noinline fn allocAlignedBytesSlow(self: *JSRuntime, byte_count: usize, alignment: std.mem.Alignment, comptime trigger_gc: bool) ![]u8 {
+/// `@returnAddress()` stays in this noinline frame so each caller remains its own rawAlloc site.
+noinline fn allocRawSlow(self: *JSRuntime, byte_count: usize, alignment: std.mem.Alignment, comptime trigger_gc: bool, comptime kind: NativeAccounting) ![*]u8 {
     try checkAllocation(self, byte_count);
-    if (comptime trigger_gc) {
-        self.gc.noteAllocationProbe(byte_count);
-    }
+    if (comptime trigger_gc) self.gc.noteAllocationProbe(byte_count);
     const ptr = self.allocator.rawAlloc(byte_count, alignment, @returnAddress()) orelse
         return error.OutOfMemory;
     creditAlloc(self, byte_count);
-    noteAllocDiagnostics(self, false);
-    return ptr[0..byte_count];
+    noteAllocDiagnostics(self, kind);
+    return ptr;
 }
 
 pub noinline fn freeAlignedBytes(self: *JSRuntime, bytes: []u8, alignment: std.mem.Alignment) void {
     if (bytes.len == 0) return;
-    if (comptime diagnostic_accounting_enabled) {
-        self.allocation_diagnostics.allocation_count -= 1;
-        self.allocation_diagnostics.free_calls += 1;
-    }
+    noteFreeDiagnostics(self, .alloc);
     debitAlloc(self, bytes.len);
     self.allocator.rawFree(bytes, alignment, @returnAddress());
 }
@@ -395,8 +394,8 @@ fn allocTyped(self: *JSRuntime, comptime T: type, count: usize) ![]T {
     if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
     if (count == 0) return &.{};
     const size = std.math.mul(usize, @sizeOf(T), count) catch return error.OutOfMemory;
-    const bytes = try allocAlignedBytesSlow(self, size, std.mem.Alignment.of(T), true);
-    return @as([*]T, @ptrCast(@alignCast(bytes.ptr)))[0..count];
+    const ptr = try allocRawSlow(self, size, std.mem.Alignment.of(T), true, .alloc);
+    return @as([*]T, @ptrCast(@alignCast(ptr)))[0..count];
 }
 
 /// Type-erased native array allocation, paired with freeAlignedBytes.
@@ -404,7 +403,8 @@ pub fn allocElements(self: *JSRuntime, count: usize, elem_size: usize, alignment
     if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
     if (count == 0) return &.{};
     const size = std.math.mul(usize, elem_size, count) catch return error.OutOfMemory;
-    return allocAlignedBytesSlow(self, size, alignment, true);
+    const ptr = try allocRawSlow(self, size, alignment, true, .alloc);
+    return ptr[0..size];
 }
 
 pub inline fn free(self: *JSRuntime, comptime T: type, slice: []T) void {
@@ -425,16 +425,7 @@ pub inline fn createNoTrigger(self: *JSRuntime, comptime T: type) !*T {
 fn createTyped(self: *JSRuntime, comptime T: type, comptime probe: bool) !*T {
     comptime requireNative(T);
     if (comptime oom_coverage_enabled) oom_coverage.record(@returnAddress());
-    return @ptrCast(@alignCast(try createSlow(self, @sizeOf(T), std.mem.Alignment.of(T), probe)));
-}
-
-noinline fn createSlow(self: *JSRuntime, size: usize, alignment: std.mem.Alignment, comptime probe: bool) ![*]u8 {
-    try checkAllocation(self, size);
-    if (comptime probe) self.gc.noteAllocationProbe(size);
-    const ptr = self.allocator.rawAlloc(size, alignment, @returnAddress()) orelse return error.OutOfMemory;
-    creditAlloc(self, size);
-    noteAllocDiagnostics(self, true);
-    return ptr;
+    return @ptrCast(@alignCast(try allocRawSlow(self, @sizeOf(T), std.mem.Alignment.of(T), probe, .create)));
 }
 
 pub inline fn destroy(self: *JSRuntime, comptime T: type, ptr: *T) void {
@@ -444,6 +435,6 @@ pub inline fn destroy(self: *JSRuntime, comptime T: type, ptr: *T) void {
 
 noinline fn destroySlow(self: *JSRuntime, bytes: []u8, alignment: std.mem.Alignment) void {
     debitAlloc(self, bytes.len);
-    noteFreeDiagnostics(self, true);
+    noteFreeDiagnostics(self, .create);
     self.allocator.rawFree(bytes, alignment, @returnAddress());
 }

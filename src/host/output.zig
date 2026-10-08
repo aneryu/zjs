@@ -85,6 +85,58 @@ pub const tests = if (@import("builtin").is_test) struct {
         try std.testing.expectEqual(@as(?i32, 41), (try global.getProperty(first_key)).as(.int));
         try std.testing.expectEqual(@as(usize, 2), Factory.attempts);
     }
+
+    /// Quoted inspector text for lone surrogates, including one at the end of
+    /// the shown window. Raw `print` of the same units stays U+FFFD.
+    pub fn case1() !void {
+        const rt = try zjs.Runtime.create(std.testing.allocator, .{});
+        defer rt.destroy();
+        const ctx = try zjs.Context.create(rt, .{});
+        defer ctx.destroy();
+        const global = try zjs.globalObjectPtr(ctx);
+        const expect = struct {
+            fn printed(context: *zjs.Context, realm: *zjs.Object, source: []const u8, expected: []const u8) !void {
+                const value = try context.eval(source, .{});
+                var bytes: [2048]u8 = undefined;
+                var writer = std.Io.Writer.fixed(&bytes);
+                try printHostArgument(context.core, realm, null, &writer, value);
+                try std.testing.expectEqualStrings(expected, writer.buffered());
+            }
+        }.printed;
+
+        try expect(ctx, global, "({v:\"\\uD800\"})", "{ v: \"\\ud800\" }");
+        try expect(ctx, global, "({v:\"\\uDC00\"})", "{ v: \"\\udc00\" }");
+        try expect(ctx, global, "({v:\"A\\uD800\"})", "{ v: \"A\\ud800\" }");
+        try expect(ctx, global, "({v:\"A\\uDC00\"})", "{ v: \"A\\udc00\" }");
+        try expect(ctx, global, "({v:\"\\uD800A\"})", "{ v: \"\\ud800A\" }");
+        try expect(ctx, global, "({v:\"\\uD83D\\uDE00\"})", "{ v: \"😀\" }");
+        try expect(ctx, global, "({v:\"Z\\uD83D\\uDE00\"})", "{ v: \"Z😀\" }");
+        try expect(ctx, global, "\"\\uD800\"", "\u{FFFD}");
+        try expect(ctx, global, "\"\\uDC00\"", "\u{FFFD}");
+        try expect(ctx, global, "\"A\\uD800\"", "A\u{FFFD}");
+        try expect(ctx, global, "/😀/u", "/😀/u");
+
+        var source: [1100]u8 = undefined;
+        var expected_bytes: [1200]u8 = undefined;
+        const open = "({v:\"";
+        const pair = "\\uD83D\\uDE00\"})";
+        @memcpy(source[0..open.len], open);
+        @memcpy(source[open.len + 999 ..][0..pair.len], pair);
+        @memset(source[open.len..][0..999], 'a');
+        const lead = "{ v: \"";
+        const cut = "\\ud83d\"... 1 more character }";
+        @memcpy(expected_bytes[0..lead.len], lead);
+        @memset(expected_bytes[lead.len..][0..999], 'a');
+        @memcpy(expected_bytes[lead.len + 999 ..][0..cut.len], cut);
+        try expect(ctx, global, source[0 .. open.len + 999 + pair.len], expected_bytes[0 .. lead.len + 999 + cut.len]);
+
+        @memset(source[open.len..][0..998], 'a');
+        @memcpy(source[open.len + 998 ..][0..pair.len], pair);
+        const whole = "😀\" }";
+        @memset(expected_bytes[lead.len..][0..998], 'a');
+        @memcpy(expected_bytes[lead.len + 998 ..][0..whole.len], whole);
+        try expect(ctx, global, source[0 .. open.len + 998 + pair.len], expected_bytes[0 .. lead.len + 998 + whole.len]);
+    }
 } else struct {};
 
 /// `console.warn` / `console.error` write to stderr, after flushing stdout so
@@ -286,8 +338,8 @@ const Units = union(enum) {
 /// Escape and print the first `len` units for a `"`-quoted string.
 fn printUnits(s: *State, units: Units, len: usize) Error!void {
     var i: usize = 0;
-    while (i < len) : (i += 1) {
-        var c: u32 = units.at(i);
+    while (i < len) {
+        const c = nextCodePoint(units, &i, len);
         const escaped: ?u8 = switch (c) {
             '\t' => 't',
             '\r' => 'r',
@@ -315,25 +367,13 @@ fn printUnits(s: *State, units: Units, len: usize) Error!void {
             try s.putUnicodeEscape(@intCast(c));
             continue;
         }
-        if (std.unicode.utf16IsHighSurrogate(@intCast(c))) {
-            if (i + 1 >= len) {
-                try s.putUnicodeEscape(@intCast(c));
-                continue;
-            }
-            const c1: u32 = units.at(i + 1);
-            if (!std.unicode.utf16IsLowSurrogate(@intCast(c1))) {
-                try s.putUnicodeEscape(@intCast(c));
-                continue;
-            }
-            i += 1;
-            c = 0x10000 + (((c & 0x3ff) << 10) | (c1 & 0x3ff));
-        } else if (std.unicode.utf16IsLowSurrogate(@intCast(c))) {
+        // A lone surrogate stays `\uXXXX`. `putUnitRaw` would replace it
+        // with U+FFFD, which is only the raw-print and encode-failure path.
+        if (c <= 0xffff and (std.unicode.utf16IsHighSurrogate(@intCast(c)) or std.unicode.utf16IsLowSurrogate(@intCast(c)))) {
             try s.putUnicodeEscape(@intCast(c));
             continue;
         }
-        var utf8: [4]u8 = undefined;
-        const n = std.unicode.utf8Encode(@intCast(c), &utf8) catch unreachable;
-        try s.puts(utf8[0..n]);
+        try putUnitRaw(s, c);
     }
 }
 
@@ -362,15 +402,16 @@ fn printRawString(s: *State, value: core.JSValue) Error!void {
     defer roots.deactivate(s.rt);
     const units = Units{ .string = value };
     var index: usize = 0;
-    while (index < units.len()) try putUnitRaw(s, nextCodePoint(units, &index));
+    const end = units.len();
+    while (index < end) try putUnitRaw(s, nextCodePoint(units, &index, end));
 }
 
-/// The code point at `index.*`, pairing a surrogate pair, and advance past
-/// it. A lone surrogate is returned as is.
-fn nextCodePoint(units: Units, index: *usize) u32 {
+/// The code point at `index.*`, pairing a surrogate pair that fits in
+/// `limit`, and advance past it. A lone surrogate is returned as is.
+fn nextCodePoint(units: Units, index: *usize, limit: usize) u32 {
     const unit: u32 = units.at(index.*);
     index.* += 1;
-    if (std.unicode.utf16IsHighSurrogate(@intCast(unit)) and index.* < units.len()) {
+    if (std.unicode.utf16IsHighSurrogate(@intCast(unit)) and index.* < limit) {
         const low: u32 = units.at(index.*);
         if (std.unicode.utf16IsLowSurrogate(@intCast(low))) {
             index.* += 1;
@@ -463,20 +504,23 @@ fn printClassName(s: *State, class_id: core.class.ClassId) Error!void {
     try printNameBytes(s, fallback);
 }
 
-/// `js_print_comma`: 0 = first item, 1 = `, `, 2 = the
-/// `[Function f]` / regexp / error heads that open ` { ` only if a property
-/// follows.
-fn printComma(s: *State, comma_state: *u8) Error!void {
+/// `.first` emits nothing, `.separator` emits `, `, `.open_brace` emits
+/// ` { `. Function, regexp, and error heads use `.open_brace` so the brace
+/// appears only when a property follows.
+const CommaState = enum { first, separator, open_brace };
+
+/// `js_print_comma`.
+fn printComma(s: *State, comma_state: *CommaState) Error!void {
     switch (comma_state.*) {
-        0 => {},
-        1 => try s.puts(", "),
-        else => try s.puts(" { "),
+        .first => {},
+        .separator => try s.puts(", "),
+        .open_brace => try s.puts(" { "),
     }
-    comma_state.* = 1;
+    comma_state.* = .separator;
 }
 
 /// `js_print_more_items`.
-fn printMoreItems(s: *State, comma_state: *u8, n: usize) Error!void {
+fn printMoreItems(s: *State, comma_state: *CommaState, n: usize) Error!void {
     try printComma(s, comma_state);
     try s.printf("... {d} more item{s}", .{ n, if (n > 1) "s" else "" });
 }
@@ -527,7 +571,7 @@ fn printRegExp(s: *State, object: *const core.Object) Error!void {
         var bra = false;
         var i: usize = 0;
         while (i < n) {
-            var c = nextCodePoint(units, &i);
+            var c = nextCodePoint(units, &i, n);
             var c2: ?u32 = null;
             switch (c) {
                 '\\' => {
@@ -637,7 +681,7 @@ fn printError(s: *State, object: *const core.Object) Error!void {
         var len = units.len();
         if (len > 0 and units.at(len - 1) == '\n') len -= 1;
         var i: usize = 0;
-        while (i < len) try putUnitRaw(s, nextCodePoint(units, &i));
+        while (i < len) try putUnitRaw(s, nextCodePoint(units, &i, len));
     }
 }
 
@@ -665,119 +709,85 @@ fn isCallableClass(class_id: core.class.ClassId) bool {
     };
 }
 
-/// `js_print_object`.
-fn printObject(s: *State, object: *const core.Object) Error!void {
-    var comma_state: u8 = 0;
-    var is_array = false;
-    const class_id = object.class_id;
+fn printArrayElements(s: *State, object: *const core.Object, comma_state: *CommaState) Error!void {
+    // Printing an element can run JS (Error.prepareStackTrace), which
+    // may grow, shrink or de-densify this array: re-read the storage
+    // for every element instead of iterating a stale slice.
+    var shown: usize = 0;
+    while (shown < default_max_item_count) : (shown += 1) {
+        const elements = object.arrayElements();
+        if (shown >= elements.len) break;
+        try printComma(s, comma_state);
+        try printValueRec(s, elements[shown]);
+    }
+    const count = object.arrayElements().len;
+    const len: usize = object.arrayLength();
+    if (shown < count) try printMoreItems(s, comma_state, count - shown);
+    if (count < len) {
+        const n = len - count;
+        try printComma(s, comma_state);
+        try s.printf("<{d} empty item{s}>", .{ n, if (n > 1) "s" else "" });
+    }
+}
 
-    if (class_id == core.class.ids.array) {
-        is_array = true;
-        try s.puts("[ ");
-        if (object.flags.fast_array) {
-            // Printing an element can run JS (Error.prepareStackTrace), which
-            // may grow, shrink or de-densify this array: re-read the storage
-            // for every element instead of iterating a stale slice.
-            var shown: usize = 0;
-            while (shown < default_max_item_count) : (shown += 1) {
-                const elements = object.arrayElements();
-                if (shown >= elements.len) break;
-                try printComma(s, &comma_state);
-                try printValueRec(s, elements[shown]);
-            }
-            const count = object.arrayElements().len;
-            const len: usize = object.arrayLength();
-            if (shown < count) try printMoreItems(s, &comma_state, count - shown);
-            if (count < len) {
-                const n = len - count;
-                try printComma(s, &comma_state);
-                try s.printf("<{d} empty item{s}>", .{ n, if (n > 1) "s" else "" });
-            }
-        }
-    } else if (isTypedArrayClass(class_id)) {
-        const payload = object.typedArrayPayloadFast();
-        const count: usize = if (payload) |p| p.live_length else 0;
-        try printClassName(s, class_id);
-        try s.printf("({d}) [ ", .{count});
-        is_array = true;
-        const shown = @min(count, default_max_item_count);
-        if (payload) |p| {
-            if (p.data) |data| {
-                const size: usize = p.element_size;
-                for (0..shown) |i| {
-                    const ptr = data + i * size;
-                    try printComma(s, &comma_state);
-                    switch (class_id) {
-                        core.class.ids.uint8c_array, core.class.ids.uint8_array => try s.printf("{d}", .{ptr[0]}),
-                        core.class.ids.int8_array => try s.printf("{d}", .{@as(i8, @bitCast(ptr[0]))}),
-                        core.class.ids.int16_array => try s.printf("{d}", .{std.mem.readInt(i16, ptr[0..2], .little)}),
-                        core.class.ids.uint16_array => try s.printf("{d}", .{std.mem.readInt(u16, ptr[0..2], .little)}),
-                        core.class.ids.int32_array => try s.printf("{d}", .{std.mem.readInt(i32, ptr[0..4], .little)}),
-                        core.class.ids.uint32_array => try s.printf("{d}", .{std.mem.readInt(u32, ptr[0..4], .little)}),
-                        core.class.ids.big_int64_array => try s.printf("{d}", .{std.mem.readInt(i64, ptr[0..8], .little)}),
-                        core.class.ids.big_uint64_array => try s.printf("{d}", .{std.mem.readInt(u64, ptr[0..8], .little)}),
-                        core.class.ids.float16_array => try printFloat64(s, @floatCast(@as(f16, @bitCast(std.mem.readInt(u16, ptr[0..2], .little))))),
-                        core.class.ids.float32_array => try printFloat64(s, @floatCast(@as(f32, @bitCast(std.mem.readInt(u32, ptr[0..4], .little))))),
-                        core.class.ids.float64_array => try printFloat64(s, @bitCast(std.mem.readInt(u64, ptr[0..8], .little))),
-                        else => unreachable,
-                    }
+fn printTypedArrayElements(s: *State, object: *const core.Object, class_id: core.class.ClassId, comma_state: *CommaState) Error!void {
+    const payload = object.typedArrayPayloadFast();
+    const count: usize = if (payload) |p| p.live_length else 0;
+    try printClassName(s, class_id);
+    try s.printf("({d}) [ ", .{count});
+    const shown = @min(count, default_max_item_count);
+    if (payload) |p| {
+        if (p.data) |data| {
+            const size: usize = p.element_size;
+            for (0..shown) |i| {
+                const ptr = data + i * size;
+                try printComma(s, comma_state);
+                switch (class_id) {
+                    core.class.ids.uint8c_array, core.class.ids.uint8_array => try s.printf("{d}", .{ptr[0]}),
+                    core.class.ids.int8_array => try s.printf("{d}", .{@as(i8, @bitCast(ptr[0]))}),
+                    core.class.ids.int16_array => try s.printf("{d}", .{std.mem.readInt(i16, ptr[0..2], .little)}),
+                    core.class.ids.uint16_array => try s.printf("{d}", .{std.mem.readInt(u16, ptr[0..2], .little)}),
+                    core.class.ids.int32_array => try s.printf("{d}", .{std.mem.readInt(i32, ptr[0..4], .little)}),
+                    core.class.ids.uint32_array => try s.printf("{d}", .{std.mem.readInt(u32, ptr[0..4], .little)}),
+                    core.class.ids.big_int64_array => try s.printf("{d}", .{std.mem.readInt(i64, ptr[0..8], .little)}),
+                    core.class.ids.big_uint64_array => try s.printf("{d}", .{std.mem.readInt(u64, ptr[0..8], .little)}),
+                    core.class.ids.float16_array => try printFloat64(s, @floatCast(@as(f16, @bitCast(std.mem.readInt(u16, ptr[0..2], .little))))),
+                    core.class.ids.float32_array => try printFloat64(s, @floatCast(@as(f32, @bitCast(std.mem.readInt(u32, ptr[0..4], .little))))),
+                    core.class.ids.float64_array => try printFloat64(s, @bitCast(std.mem.readInt(u64, ptr[0..8], .little))),
+                    else => unreachable,
                 }
             }
         }
-        if (shown < count) try printMoreItems(s, &comma_state, count - shown);
-    } else if (isCallableClass(class_id)) {
-        try s.puts("[Function ");
-        if (ownOrProtoDataString(object, core.atom.ids.name)) |name| {
-            if (core.string.stringValueLenUnchecked(name) == 0) {
-                try s.puts("(anonymous)");
-            } else {
-                try printRawString(s, name);
-            }
-        } else {
-            try s.puts("(anonymous)");
-        }
-        try s.putc(']');
-        comma_state = 2;
-    } else if ((class_id == core.class.ids.map or class_id == core.class.ids.set) and object.collectionPayloadBorrowed() != null) {
-        try printClassName(s, class_id);
-        try s.printf("({d}) {{ ", .{object.collectionPayloadBorrowed().?.active_count});
-        // Printing a key or value can run JS that mutates this collection,
-        // reallocating (and freeing) its entry array: index it afresh after
-        // every nested print, and read the value only after the key printed.
-        var shown: usize = 0;
-        var index: usize = 0;
-        while (shown < default_max_item_count) : (index += 1) {
-            const entries = object.collectionPayloadBorrowed().?.entries.items;
-            if (index >= entries.len) break;
-            if (!entries[index].active) continue;
-            try printComma(s, &comma_state);
-            try printValueRec(s, entries[index].key);
-            if (class_id == core.class.ids.map) {
-                try s.puts(" => ");
-                const current = object.collectionPayloadBorrowed().?.entries.items;
-                try printValueRec(s, if (index < current.len and current[index].active) current[index].value else core.JSValue.undefinedValue());
-            }
-            shown += 1;
-        }
-        const active_count = object.collectionPayloadBorrowed().?.active_count;
-        if (shown < active_count) try printMoreItems(s, &comma_state, active_count - shown);
-    } else if (class_id == core.class.ids.regexp) {
-        try printRegExp(s, object);
-        comma_state = 2;
-    } else if (class_id == core.class.ids.date and try dateIsoText(s, object)) {
-        comma_state = 2;
-    } else if (class_id == core.class.ids.error_) {
-        try printError(s, object);
-        comma_state = 2;
-    } else {
-        if (class_id != core.class.ids.object) {
-            try printClassName(s, class_id);
-            try s.putc(' ');
-        }
-        try s.puts("{ ");
     }
+    if (shown < count) try printMoreItems(s, comma_state, count - shown);
+}
 
-    // Shape properties in shape order; enumerable only (show_hidden is off).
+fn printCollectionEntries(s: *State, object: *const core.Object, class_id: core.class.ClassId, comma_state: *CommaState) Error!void {
+    try printClassName(s, class_id);
+    try s.printf("({d}) {{ ", .{object.collectionPayloadBorrowed().?.active_count});
+    // Printing a key or value can run JS that mutates this collection,
+    // reallocating (and freeing) its entry array: index it afresh after
+    // every nested print, and read the value only after the key printed.
+    var shown: usize = 0;
+    var index: usize = 0;
+    while (shown < default_max_item_count) : (index += 1) {
+        const entries = object.collectionPayloadBorrowed().?.entries.items;
+        if (index >= entries.len) break;
+        if (!entries[index].active) continue;
+        try printComma(s, comma_state);
+        try printValueRec(s, entries[index].key);
+        if (class_id == core.class.ids.map) {
+            try s.puts(" => ");
+            const current = object.collectionPayloadBorrowed().?.entries.items;
+            try printValueRec(s, if (index < current.len and current[index].active) current[index].value else core.JSValue.undefinedValue());
+        }
+        shown += 1;
+    }
+    const active_count = object.collectionPayloadBorrowed().?.active_count;
+    if (shown < active_count) try printMoreItems(s, comma_state, active_count - shown);
+}
+
+fn printShapeProperties(s: *State, object: *const core.Object, class_id: core.class.ClassId, comma_state: *CommaState) Error!void {
     var shown: usize = 0;
     var index: usize = 0;
     // A nested print can run JS that reshapes this object; bound every step
@@ -791,7 +801,7 @@ fn printObject(s: *State, object: *const core.Object) Error!void {
         // entries, so they are hidden here to keep `String {  }`.
         if (class_id == core.class.ids.string and object.propAtomAt(index).isTaggedInt()) continue;
         if (shown < default_max_item_count) {
-            try printComma(s, &comma_state);
+            try printComma(s, comma_state);
             try printAtom(s, object.propAtomAt(index));
             try s.puts(": ");
             switch (flags.kind) {
@@ -815,10 +825,58 @@ fn printObject(s: *State, object: *const core.Object) Error!void {
         }
         shown += 1;
     }
-    if (shown > default_max_item_count) try printMoreItems(s, &comma_state, shown - default_max_item_count);
+    if (shown > default_max_item_count) try printMoreItems(s, comma_state, shown - default_max_item_count);
+}
+
+/// `js_print_object`.
+fn printObject(s: *State, object: *const core.Object) Error!void {
+    var comma_state: CommaState = .first;
+    var is_array = false;
+    const class_id = object.class_id;
+
+    if (class_id == core.class.ids.array) {
+        is_array = true;
+        try s.puts("[ ");
+        if (object.flags.fast_array) try printArrayElements(s, object, &comma_state);
+    } else if (isTypedArrayClass(class_id)) {
+        is_array = true;
+        try printTypedArrayElements(s, object, class_id, &comma_state);
+    } else if (isCallableClass(class_id)) {
+        try s.puts("[Function ");
+        if (ownOrProtoDataString(object, core.atom.ids.name)) |name| {
+            if (core.string.stringValueLenUnchecked(name) == 0) {
+                try s.puts("(anonymous)");
+            } else {
+                try printRawString(s, name);
+            }
+        } else {
+            try s.puts("(anonymous)");
+        }
+        try s.putc(']');
+        comma_state = .open_brace;
+    } else if ((class_id == core.class.ids.map or class_id == core.class.ids.set) and object.collectionPayloadBorrowed() != null) {
+        try printCollectionEntries(s, object, class_id, &comma_state);
+    } else if (class_id == core.class.ids.regexp) {
+        try printRegExp(s, object);
+        comma_state = .open_brace;
+    } else if (class_id == core.class.ids.date and try dateIsoText(s, object)) {
+        comma_state = .open_brace;
+    } else if (class_id == core.class.ids.error_) {
+        try printError(s, object);
+        comma_state = .open_brace;
+    } else {
+        if (class_id != core.class.ids.object) {
+            try printClassName(s, class_id);
+            try s.putc(' ');
+        }
+        try s.puts("{ ");
+    }
+
+    // Shape properties in shape order; enumerable only (show_hidden is off).
+    try printShapeProperties(s, object, class_id, &comma_state);
 
     if (!is_array) {
-        if (comma_state != 2) try s.puts(" }");
+        if (comma_state != .open_brace) try s.puts(" }");
     } else {
         try s.puts(" ]");
     }

@@ -11702,6 +11702,234 @@ test "function predeclare scan skips slash-equals regexp literals" {
     try std.testing.expect(parsed.syntax_error == null);
 }
 
+test "slash after do starts a regexp while prescaning a class body" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+
+    var parsed = try compileForTest(
+        rt,
+        \\class C {
+        \\  m() {
+        \\    do /{/g; while (0)
+        \\    return this.#x;
+        \\  }
+        \\  #x = 1;
+        \\}
+    ,
+        .{ .mode = .script, .filename = "slash-after-do.js" },
+    );
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
+}
+
+test "slash after else starts a regexp while prescaning a class body" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+
+    var parsed = try compileForTest(
+        rt,
+        \\class C {
+        \\  m() {
+        \\    if (0) {} else /{/g
+        \\    return this.#x;
+        \\  }
+        \\  #x = 1;
+        \\}
+    ,
+        .{ .mode = .script, .filename = "slash-after-else.js" },
+    );
+    defer parsed.deinit();
+
+    try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
+}
+
+test "slash after of divides as an identifier and starts a regexp contextually" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+
+    var divided = try compileForTest(
+        rt,
+        "var of = 4, g = 2; of / g / 1;",
+        .{ .mode = .script, .filename = "slash-after-of-ident.js" },
+    );
+    defer divided.deinit();
+    try std.testing.expect(divided.syntax_error == null);
+    try std.testing.expectEqual(@as(usize, 2), countOpcode(divided.byteCode(), engine.bytecode.opcode.op.div));
+    try std.testing.expectEqual(@as(usize, 0), countOpcode(divided.byteCode(), engine.bytecode.opcode.op.regexp));
+
+    var contextual = try compileForTest(
+        rt,
+        "for (const x of /a/g[Symbol.split](\"bab\")) {}",
+        .{ .mode = .script, .filename = "slash-after-of-keyword.js" },
+    );
+    defer contextual.deinit();
+    try std.testing.expect(contextual.syntax_error == null);
+    try std.testing.expect(countOpcodeRecursive(&contextual, engine.bytecode.opcode.op.regexp) >= 1);
+
+    var semicolon_inside = try compileForTest(
+        rt,
+        "for (const x of /a;b/) {}",
+        .{ .mode = .script, .filename = "slash-after-of-semicolon.js" },
+    );
+    defer semicolon_inside.deinit();
+    try std.testing.expect(semicolon_inside.syntax_error == null);
+
+    var cstyle = try compileForTest(
+        rt,
+        "var of = 0; for (of / 2; of < 1; of++) {}",
+        .{ .mode = .script, .filename = "slash-after-of-cstyle.js" },
+    );
+    defer cstyle.deinit();
+    try std.testing.expect(cstyle.syntax_error == null);
+    try std.testing.expect(countOpcode(cstyle.byteCode(), engine.bytecode.opcode.op.div) >= 1);
+
+    const heads = [_][]const u8{
+        "for (const of of /a;b/) {}",
+        "for (let of of /a;b/) {}",
+        "for (var of of /a;b/) {}",
+        "for (of of /a;b/) {}",
+        "for (yield of /a;b/) {}",
+        "for (await of /a;b/) {}",
+        "for (package of /a;b/) {}",
+        "for ((of) of /a;b/) {}",
+        "for (x.of of /a;b/) {}",
+    };
+    for (heads) |source| {
+        var parsed = try compileForTest(rt, source, .{ .mode = .script, .filename = "slash-after-of-head.js" });
+        defer parsed.deinit();
+        try std.testing.expect(parsed.syntax_error == null);
+    }
+}
+
+test "for-of regexp in a class method survives prescan" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+
+    var parsed = try compileForTest(
+        rt,
+        \\class C {
+        \\  m() {
+        \\    for (const x of /{/) {}
+        \\    return this.#x;
+        \\  }
+        \\  #x = 1;
+        \\}
+    ,
+        .{ .mode = .script, .filename = "for-of-regexp-class.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
+
+    var divided = try compileForTest(
+        rt,
+        \\class C {
+        \\  m() {
+        \\    var of = 4, g = 2;
+        \\    return of / g;
+        \\  }
+        \\  #x = 1;
+        \\}
+    ,
+        .{ .mode = .script, .filename = "for-of-div-class.js" },
+    );
+    defer divided.deinit();
+    try std.testing.expect(divided.syntax_error == null);
+    try std.testing.expect(countOpcodeRecursive(&divided, engine.bytecode.opcode.op.div) >= 1);
+    try std.testing.expectEqual(@as(usize, 0), countOpcodeRecursive(&divided, engine.bytecode.opcode.op.regexp));
+
+    var cstyle = try compileForTest(
+        rt,
+        \\class C {
+        \\  m() {
+        \\    var of = 0;
+        \\    for (of / 2; of < 1; of++) {}
+        \\    return this.#x;
+        \\  }
+        \\  #x = 1;
+        \\}
+    ,
+        .{ .mode = .script, .filename = "for-of-cstyle-class.js" },
+    );
+    defer cstyle.deinit();
+    try std.testing.expect(cstyle.syntax_error == null);
+    try std.testing.expect(countOpcodeRecursive(&cstyle, engine.bytecode.opcode.op.div) >= 1);
+}
+
+test "for-of regexp in a namespace body survives prescan" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+
+    var parsed = try compileForTest(
+        rt,
+        \\namespace N {
+        \\  export function f() {
+        \\    for (const x of /{/) {}
+        \\  }
+        \\  export var exported = 1;
+        \\}
+    ,
+        .{ .mode = .script, .filename = "for-of-regexp-namespace.ts" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expectEqual(parser.CompilePath.normal, parsed.parse_path);
+
+    var divided = try compileForTest(
+        rt,
+        \\namespace N {
+        \\  export function f() {
+        \\    var of = 4, g = 2;
+        \\    return of / g;
+        \\  }
+        \\}
+    ,
+        .{ .mode = .script, .filename = "for-of-div-namespace.ts" },
+    );
+    defer divided.deinit();
+    try std.testing.expect(divided.syntax_error == null);
+    try std.testing.expect(countOpcodeRecursive(&divided, engine.bytecode.opcode.op.div) >= 1);
+    try std.testing.expectEqual(@as(usize, 0), countOpcodeRecursive(&divided, engine.bytecode.opcode.op.regexp));
+
+    var cstyle = try compileForTest(
+        rt,
+        \\namespace N {
+        \\  export function f() {
+        \\    var of = 0;
+        \\    for (of / 2; of < 1; of++) {}
+        \\  }
+        \\}
+    ,
+        .{ .mode = .script, .filename = "for-of-cstyle-namespace.ts" },
+    );
+    defer cstyle.deinit();
+    try std.testing.expect(cstyle.syntax_error == null);
+    try std.testing.expect(countOpcodeRecursive(&cstyle, engine.bytecode.opcode.op.div) >= 1);
+}
+
+test "for-of regexp inside a skipped function still sees a later direct eval" {
+    const rt = try core.JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+
+    var parsed = try compileForTest(
+        rt,
+        \\function outer() {
+        \\  unresolved = function () {
+        \\    for (const y of /{/) {}
+        \\  } + eval("1");
+        \\}
+    ,
+        .{ .mode = .script, .filename = "for-of-regexp-function-scan.js" },
+    );
+    defer parsed.deinit();
+    try std.testing.expect(parsed.syntax_error == null);
+    try std.testing.expect(countOpcodeRecursive(&parsed, op.eval) >= 1);
+    try std.testing.expect(countDynEnvProbeRecursive(&parsed, .make_ref) >= 1);
+}
+
 test "quick parser lowers supported Promise helpers to receiver-preserving property calls" {
     const rt = try core.JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();

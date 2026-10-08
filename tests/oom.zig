@@ -698,9 +698,11 @@ fn runEsmGraphLink(allocator: std.mem.Allocator) !void {
     ,
         &output,
         "/oom-fixture/main.mjs",
-        std.testing.io,
-        allocator,
-        std.math.maxInt(usize),
+        .{
+            .io = std.testing.io,
+            .allocator = allocator,
+            .max_source_size = std.math.maxInt(usize),
+        },
     );
 
     {
@@ -1168,16 +1170,16 @@ test "oom recovery canary: FunctionBytecode combined main FAM allocation" {
         .has_debug = true,
         .has_extension = true,
     };
-    const layout = try zjs.bytecode.FunctionLayout.init(
-        fixture_options.has_debug,
-        fixture_options.has_extension,
-        fixture_options.cpool_count,
-        fixture_options.arg_count,
-        fixture_options.var_count,
-        fixture_options.closure_var_count,
-        fixture_options.byte_code.len,
-        0,
-    );
+    const layout = try zjs.bytecode.FunctionLayout.init(.{
+        .has_debug = fixture_options.has_debug,
+        .has_extension = fixture_options.has_extension,
+        .cpool_count = fixture_options.cpool_count,
+        .arg_count = fixture_options.arg_count,
+        .var_count = fixture_options.var_count,
+        .closure_var_count = fixture_options.closure_var_count,
+        .byte_code_len = fixture_options.byte_code.len,
+        .prop_site_count = 0,
+    });
     // Above the slab ceiling, so the exact
     // GC allocation diagnostic charge is the main allocation plus its GC prefix
     // (standalone: request size, no extra MALLOC_OVERHEAD).

@@ -184,6 +184,11 @@ const PatternToken = struct {
     idx: ?u16 = null,
 };
 
+const DeferredRange = struct {
+    start: u32,
+    end: u32,
+};
+
 const SeqMatch = struct {
     end: u32,
     // Every consumer needs at most the first two operand positions. The
@@ -598,9 +603,12 @@ const Resolver = struct {
             const instruction = try decodeInstruction(self.code, position);
             const position_next = position + instruction.size;
             if (position_next > end) return error.InvalidBytecode;
-            const keep = keep_atom_position != null and keep_atom_position.? == position;
-            try self.consumeInstructionAtom(position, instruction, keep);
-            if (keep and instruction.hasAtom()) kept = true;
+            const disposition: AtomDisposition = if (keep_atom_position != null and keep_atom_position.? == position)
+                .keep
+            else
+                .discard;
+            try self.consumeInstructionAtom(position, instruction, disposition);
+            if (disposition == .keep and instruction.hasAtom()) kept = true;
             position = position_next;
         }
         if (position != end or (keep_atom_position != null and !kept))
@@ -613,11 +621,13 @@ const Resolver = struct {
     /// decoded every non-atom opcode a second time merely to discover that it
     /// had no atom.  QuickJS's atom operand is carried by that same bytecode
     /// instruction, so its resolve_labels walk pays no corresponding rescan.
+    const AtomDisposition = enum { discard, keep };
+
     fn consumeInstructionAtom(
         self: *Resolver,
         position: u32,
         instruction: Instruction,
-        keep: bool,
+        disposition: AtomDisposition,
     ) Error!void {
         if (!instruction.hasAtom()) return;
         if (self.atom_cursor >= self.input_atoms.len)
@@ -625,7 +635,7 @@ const Resolver = struct {
         const encoded = try readU32At(self.code, position, operand_off.atom);
         const ledger_atom = self.input_atoms[self.atom_cursor];
         if (encoded != ledger_atom.raw()) return error.InvalidBytecode;
-        if (keep) try self.appendOutputAtom(ledger_atom);
+        if (disposition == .keep) try self.appendOutputAtom(ledger_atom);
         self.atom_cursor += 1;
     }
 
@@ -726,6 +736,29 @@ const Resolver = struct {
         try self.ensureOutputSources(end - start);
         var index = start;
         while (index < end) : (index += 1) self.publishSource(index, output_pc);
+    }
+
+    fn publishDeferred(self: *Resolver, range: DeferredRange) Error!void {
+        try self.attachInputSourceRangeAt(range.start, range.end, self.output_len);
+    }
+
+    fn emitTypeofTest(
+        self: *Resolver,
+        position: u32,
+        defer_until: u32,
+        absorb_end: u32,
+        selected_test: u8,
+    ) Error!DeferredRange {
+        try self.attachSource();
+        const start = self.source_attach_cursor;
+        self.absorbSources(defer_until);
+        const end = self.source_cursor;
+        self.absorbSources(absorb_end);
+        self.source_attach_cursor = self.source_cursor;
+        try self.appendByte(op.ext0);
+        try self.appendByte(selected_test);
+        try self.consumeAtomsRange(position, absorb_end, null);
+        return .{ .start = start, .end = end };
     }
 
     fn lowerBoundBind(self: *const Resolver, position: u32) usize {
@@ -881,6 +914,13 @@ const Resolver = struct {
         if (self.hasBindInRange(start, position)) return null;
         result.end = position;
         return result;
+    }
+
+    inline fn matchOne(self: *const Resolver, start: u32, comptime form: Form) Error!?SeqMatch {
+        const pattern = [1]PatternToken{
+            .{ .options = &.{form} },
+        };
+        return self.matchSeq(start, &pattern);
     }
 
     fn addReloc(self: *Resolver, label_index: u32, addr_value: u32, size: u8) Error!void {
@@ -1723,7 +1763,7 @@ const Resolver = struct {
                 if (fusion_a.isSet(first)) self.noteFusionA(first, pc);
             }
         }
-        try self.consumeInstructionAtom(position, instruction, true);
+        try self.consumeInstructionAtom(position, instruction, .keep);
     }
 
     fn emitRawInstruction(
@@ -1734,7 +1774,7 @@ const Resolver = struct {
         try self.attachSource();
         const position_next = position + instruction.size;
         try self.appendRaw(self.code[position..position_next]);
-        try self.consumeInstructionAtom(position, instruction, true);
+        try self.consumeInstructionAtom(position, instruction, .keep);
     }
 
     /// Output bytes the lowered-direct instructions in the S3 range
@@ -1769,7 +1809,7 @@ const Resolver = struct {
         try self.attachSource();
         try self.appendByte(enc.carrier.carrier);
         try self.appendByte(enc.carrier.tag);
-        try self.consumeInstructionAtom(position, instruction, true);
+        try self.consumeInstructionAtom(position, instruction, .keep);
     }
 
     fn handleGoto(
@@ -1922,7 +1962,7 @@ const Resolver = struct {
                             try self.appendByte(op.tail_call_method);
                             try self.appendU16(argc);
                         }
-                        try self.consumeInstructionAtom(position, instruction, true);
+                        try self.consumeInstructionAtom(position, instruction, .keep);
                         // Keep the following `return` (do not skipDeadCode it).
                         // zjs inline frames resume the caller at the next pc;
                         // leaving `return` is the H3 shared return stub
@@ -1984,9 +2024,7 @@ const Resolver = struct {
                         _ = try self.product.updateLabel(label_index, -1);
                         try self.attachSource();
                         try self.appendByte(op.drop);
-                    } else if (try self.matchSeq(position_next, &.{
-                        .{ .options = &.{.goto} },
-                    })) |match| {
+                    } else if (try self.matchOne(position_next, .goto)) |match| {
                         if (!(try self.isSwitchDispatchBridgeAt(match.end)) and
                             try self.codeHasLabel(match.end, label_index))
                         {
@@ -2058,9 +2096,7 @@ const Resolver = struct {
 
                 // qjs:35136-35145.
                 .drop => {
-                    if (try self.matchSeq(position_next, &.{
-                        .{ .options = &.{.return_undef} },
-                    })) |match| {
+                    if (try self.matchOne(position_next, .return_undef)) |match| {
                         // The return is intentionally revisited by the main
                         // loop; only its carried source is absorbed here.
                         self.absorbSources(match.end);
@@ -2071,9 +2107,7 @@ const Resolver = struct {
 
                 // qjs:35146-35169, followed by the false constant-test case.
                 .null => {
-                    if (try self.matchSeq(position_next, &.{
-                        .{ .options = &.{.strict_eq} },
-                    })) |match| {
+                    if (try self.matchOne(position_next, .strict_eq)) |match| {
                         self.absorbSources(match.end);
                         try self.attachSource();
                         try self.appendByte(op.is_null);
@@ -2129,38 +2163,24 @@ const Resolver = struct {
                             value != 0,
                             match,
                         );
-                    } else if (value != std.math.minInt(i32) and value != 0) {
-                        if (try self.matchSeq(position_next, &.{
-                            .{ .options = &.{.neg} },
-                        })) |neg_match| {
-                            if (try self.matchSeq(neg_match.end, &.{
-                                .{ .options = &.{.drop} },
-                            })) |drop_match| {
-                                self.absorbSources(drop_match.end);
-                                position_next = drop_match.end;
-                            } else {
-                                self.absorbSources(neg_match.end);
-                                try self.attachSource();
-                                try self.pushShortInt(layout, -value);
-                                position_next = neg_match.end;
-                            }
-                        } else if (try self.matchSeq(position_next, &.{
-                            .{ .options = &.{.drop} },
-                        })) |drop_match| {
+                    } else {
+                        const neg_match = if (value != std.math.minInt(i32) and value != 0)
+                            try self.matchOne(position_next, .neg)
+                        else
+                            null;
+                        const after_neg = if (neg_match) |matched| matched.end else position_next;
+                        if (try self.matchOne(after_neg, .drop)) |drop_match| {
                             self.absorbSources(drop_match.end);
                             position_next = drop_match.end;
+                        } else if (neg_match) |matched| {
+                            self.absorbSources(matched.end);
+                            try self.attachSource();
+                            try self.pushShortInt(layout, -value);
+                            position_next = matched.end;
                         } else {
                             try self.attachSource();
                             try self.pushShortInt(layout, value);
                         }
-                    } else if (try self.matchSeq(position_next, &.{
-                        .{ .options = &.{.drop} },
-                    })) |drop_match| {
-                        self.absorbSources(drop_match.end);
-                        position_next = drop_match.end;
-                    } else {
-                        try self.attachSource();
-                        try self.pushShortInt(layout, value);
                     }
                 },
 
@@ -2168,24 +2188,20 @@ const Resolver = struct {
                 // discarded variant, against INT32_MIN.
                 .push_bigint_i32 => {
                     const value = try readI32(self.code, position);
-                    if (value != std.math.minInt(i32)) {
-                        if (try self.matchSeq(position_next, &.{
-                            .{ .options = &.{.neg} },
-                        })) |neg_match| {
-                            if (try self.matchSeq(neg_match.end, &.{
-                                .{ .options = &.{.drop} },
-                            })) |drop_match| {
-                                self.absorbSources(drop_match.end);
-                                position_next = drop_match.end;
-                            } else {
-                                self.absorbSources(neg_match.end);
-                                try self.attachSource();
-                                try self.appendByte(op.push_bigint_i32);
-                                try self.appendI32(-value);
-                                position_next = neg_match.end;
-                            }
+                    const neg_match = if (value != std.math.minInt(i32))
+                        try self.matchOne(position_next, .neg)
+                    else
+                        null;
+                    if (neg_match) |matched| {
+                        if (try self.matchOne(matched.end, .drop)) |drop_match| {
+                            self.absorbSources(drop_match.end);
+                            position_next = drop_match.end;
                         } else {
-                            try self.copyDefault(layout, position, instruction);
+                            self.absorbSources(matched.end);
+                            try self.attachSource();
+                            try self.appendByte(op.push_bigint_i32);
+                            try self.appendI32(-value);
+                            position_next = matched.end;
                         }
                     } else {
                         try self.copyDefault(layout, position, instruction);
@@ -2222,9 +2238,7 @@ const Resolver = struct {
 
                 // qjs:35276-35296.
                 .push_atom_value => {
-                    if (try self.matchSeq(position_next, &.{
-                        .{ .options = &.{.drop} },
-                    })) |match| {
+                    if (try self.matchOne(position_next, .drop)) |match| {
                         self.absorbSources(match.end);
                         try self.consumeAtomsRange(position, match.end, null);
                         position_next = match.end;
@@ -2252,14 +2266,10 @@ const Resolver = struct {
 
                 // qjs:35308-35351.
                 .undefined => {
-                    if (try self.matchSeq(position_next, &.{
-                        .{ .options = &.{.drop} },
-                    })) |match| {
+                    if (try self.matchOne(position_next, .drop)) |match| {
                         self.absorbSources(match.end);
                         position_next = match.end;
-                    } else if (try self.matchSeq(position_next, &.{
-                        .{ .options = &.{.@"return"} },
-                    })) |match| {
+                    } else if (try self.matchOne(position_next, .@"return")) |match| {
                         self.absorbSources(match.end);
                         try self.attachSource();
                         try self.appendByte(op.return_undef);
@@ -2280,9 +2290,7 @@ const Resolver = struct {
                             false,
                             match,
                         );
-                    } else if (try self.matchSeq(position_next, &.{
-                        .{ .options = &.{.strict_eq} },
-                    })) |match| {
+                    } else if (try self.matchOne(position_next, .strict_eq)) |match| {
                         self.absorbSources(match.end);
                         try self.attachSource();
                         try self.appendByte(op.ext0);
@@ -2321,6 +2329,29 @@ const Resolver = struct {
             if (slot.first_reloc != labels.no_reloc)
                 return error.InvalidBytecode;
         }
+    }
+
+    inline fn emitAddLocTail(self: *Resolver, idx: u16, end: u32, position_next: *u32) Error!void {
+        try self.appendByte(op.add_loc);
+        try self.appendByte(@intCast(idx));
+        position_next.* = end;
+    }
+
+    inline fn emitIncOrDecLoc(
+        self: *Resolver,
+        match: SeqMatch,
+        inc_form: Form,
+        idx: u16,
+        position_next: *u32,
+    ) Error!void {
+        self.absorbSources(match.end);
+        try self.attachSource();
+        try self.appendByte(if (opcode.decode.matchesFormAt(self.code, match.positions[0], inc_form))
+            op.inc_loc
+        else
+            op.dec_loc);
+        try self.appendByte(@intCast(idx));
+        position_next.* = match.end;
     }
 
     fn walkLateArm(
@@ -2370,9 +2401,7 @@ const Resolver = struct {
                     var result_op = family.set;
                     var final_end = put_match.end;
                     var delayed_source_end: ?u32 = null;
-                    if (try self.matchSeq(final_end, &.{
-                        .{ .options = &.{.drop} },
-                    })) |drop_match| {
+                    if (try self.matchOne(final_end, .drop)) |drop_match| {
                         self.absorbSources(drop_match.end);
                         result_op = family.put;
                         final_end = drop_match.end;
@@ -2412,28 +2441,14 @@ const Resolver = struct {
                     .{ .options = &.{.put_loc}, .idx = idx },
                     .{ .options = &.{.drop} },
                 })) |match| {
-                    self.absorbSources(match.end);
-                    try self.attachSource();
-                    try self.appendByte(if (opcode.decode.matchesFormAt(self.code, match.positions[0], .post_inc))
-                        op.inc_loc
-                    else
-                        op.dec_loc);
-                    try self.appendByte(@intCast(idx));
-                    position_next.* = match.end;
+                    try self.emitIncOrDecLoc(match, .post_inc, idx, position_next);
                 } else if (try self.matchSeq(position_next.*, &.{
                     .{ .options = &.{ .dec, .inc } },
                     .{ .options = &.{.dup} },
                     .{ .options = &.{.put_loc}, .idx = idx },
                     .{ .options = &.{.drop} },
                 })) |match| {
-                    self.absorbSources(match.end);
-                    try self.attachSource();
-                    try self.appendByte(if (opcode.decode.matchesFormAt(self.code, match.positions[0], .inc))
-                        op.inc_loc
-                    else
-                        op.dec_loc);
-                    try self.appendByte(@intCast(idx));
-                    position_next.* = match.end;
+                    try self.emitIncOrDecLoc(match, .inc, idx, position_next);
                 } else if (try self.matchSeq(position_next.*, &.{
                     .{ .options = &.{.push_atom_value} },
                     .{ .options = &.{.add} },
@@ -2457,9 +2472,7 @@ const Resolver = struct {
                             atom_position,
                         );
                     }
-                    try self.appendByte(op.add_loc);
-                    try self.appendByte(@intCast(idx));
-                    position_next.* = match.end;
+                    try self.emitAddLocTail(idx, match.end, position_next);
                 } else if (try self.matchSeq(position_next.*, &.{
                     .{ .options = &.{.push_i32} },
                     .{ .options = &.{.add} },
@@ -2470,9 +2483,7 @@ const Resolver = struct {
                     self.absorbSources(match.end);
                     try self.attachSource();
                     try self.pushShortInt(layout, try readI32(self.code, match.positions[0]));
-                    try self.appendByte(op.add_loc);
-                    try self.appendByte(@intCast(idx));
-                    position_next.* = match.end;
+                    try self.emitAddLocTail(idx, match.end, position_next);
                 } else if (try self.matchSeq(position_next.*, &.{
                     .{ .options = &.{ .get_loc, .get_arg, .get_var_ref } },
                     .{ .options = &.{.add} },
@@ -2487,9 +2498,7 @@ const Resolver = struct {
                         opId((try decodeInstruction(self.code, match.positions[0])).form),
                         try self.readIndex(match.positions[0]),
                     );
-                    try self.appendByte(op.add_loc);
-                    try self.appendByte(@intCast(idx));
-                    position_next.* = match.end;
+                    try self.emitAddLocTail(idx, match.end, position_next);
                 } else {
                     try self.attachSource();
                     try self.putShortCode(layout, op.get_loc, idx);
@@ -2609,42 +2618,22 @@ const Resolver = struct {
                             // while the later compare marker maps backwards
                             // and is not published. Preserve that ordering
                             // explicitly in the identity-coordinate stream.
-                            try self.attachSource();
-                            const deferred_start = self.source_attach_cursor;
-                            self.absorbSources(compare_match.positions[1]);
-                            const deferred_end = self.source_cursor;
-                            self.absorbSources(compare_match.end);
-                            self.source_attach_cursor = self.source_cursor;
-                            try self.appendByte(op.ext0);
-                            try self.appendByte(selected_test);
-                            try self.consumeAtomsRange(
+                            const deferred = try self.emitTypeofTest(
                                 position,
+                                compare_match.positions[1],
                                 compare_match.end,
-                                null,
+                                selected_test,
                             );
                             position_next.* = compare_match.end;
-                            try self.attachInputSourceRangeAt(
-                                deferred_start,
-                                deferred_end,
-                                self.output_len,
-                            );
+                            try self.publishDeferred(deferred);
                             return;
                         }
-                        if (try self.matchSeq(compare_match.end, &.{
-                            .{ .options = &.{.if_false} },
-                        })) |branch_match| {
-                            try self.attachSource();
-                            const deferred_start = self.source_attach_cursor;
-                            self.absorbSources(compare_match.positions[1]);
-                            const deferred_end = self.source_cursor;
-                            self.absorbSources(branch_match.end);
-                            self.source_attach_cursor = self.source_cursor;
-                            try self.appendByte(op.ext0);
-                            try self.appendByte(selected_test);
-                            try self.consumeAtomsRange(
+                        if (try self.matchOne(compare_match.end, .if_false)) |branch_match| {
+                            const deferred = try self.emitTypeofTest(
                                 position,
+                                compare_match.positions[1],
                                 branch_match.end,
-                                null,
+                                selected_test,
                             );
                             const label_index = try self.findFoldedBranchTarget(
                                 try readU32At(
@@ -2660,11 +2649,7 @@ const Resolver = struct {
                                 op.if_true,
                                 label_index,
                             );
-                            try self.attachInputSourceRangeAt(
-                                deferred_start,
-                                deferred_end,
-                                self.output_len,
-                            );
+                            try self.publishDeferred(deferred);
                             return;
                         }
                     }

@@ -591,6 +591,14 @@ pub fn failRedeclaration(s: *State, name: Atom) Error {
     return s.failNamed("redeclaration of '{s}'", "redeclaration", name);
 }
 
+/// Imported and module-declaration names live outside `vars` until module
+/// resolution, so `defineVar` cannot see that collision.
+pub fn rejectModuleRefRedeclaration(s: *State, name: Atom) Error!void {
+    if (s.top_level_lexical_as_module_ref and s.atProgramBodyScope() and identifiers.hasKnownBinding(s, name)) {
+        return failRedeclaration(s, name);
+    }
+}
+
 pub fn defineVar(s: *State, name: Atom, var_def_type: DefineVarType) Error!DefinedVar {
     const fd = s.curFunc();
     switch (var_def_type) {

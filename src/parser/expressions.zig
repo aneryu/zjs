@@ -77,7 +77,7 @@ fn parseArrowAssignment(s: *State, flags: ParseFlags) Error!bool {
     // this earlier dispatch cannot reinterpret either expression form (or
     // an escaped reserved word) as an arrow parameter.
     if (s.peekKind() == .kw_yield and
-        (s.ctx.in_generator or s.is_strict or s.curFunc().is_strict_mode)) return false;
+        (s.ctx.in_generator or s.isStrict())) return false;
     if (s.peekKind() == .kw_await and !identifiers.canUseAwaitAsIdentifier(s)) return false;
     if (s.peekKind() == .ident) {
         if (s.token.payload.ident.has_escape and
@@ -454,7 +454,7 @@ pub fn getLValue(s: *State, keep: bool) Error!LValue {
                 (!s.is_eval and !s.is_strict and !fd.is_strict_mode and
                     !closure.hasVisibleCurrentBinding(fd, name, @intCast(scope)) and
                     fd.findGlobalVarName(name) == null and
-                    State.rhsContainsDirectEval(s));
+                    try State.rhsContainsDirectEval(s));
             const owned_name = try v2b.takeTrailingAtomOpcodeOwned(pos, op_id, name);
             lvalue = .{
                 .opcode = .scope_var,
@@ -710,7 +710,7 @@ pub fn parseLogicalAndOr(s: *State, op_kind: tok.Kind, flags: ParseFlags) Error!
 /// nesting (not one per level) keeps deep parenthesization within the
 /// parser's native stack budget.
 pub fn parseExprBinary(s: *State, level: u32, flags: ParseFlags) Error!void {
-    if (level >= 4 and flags.in_accepted and s.peekKind() == .private_name and s.peekNextKind() == .kw_in) {
+    if (level >= 4 and flags.in_accepted and s.peekKind() == .private_name and try s.peekNextKind() == .kw_in) {
         // `#x in o` is itself a RelationalExpression (level 4): further
         // relational operators take it as their left operand.
         s.features.insert(.private_name);
@@ -900,8 +900,8 @@ fn parsePrefixUpdate(s: *State, flags: ParseFlags, k: tok.Kind) Error!void {
 /// YieldExpression, or `yield` as an identifier outside generators.
 fn parseYieldExpression(s: *State, flags: ParseFlags) Error!void {
     if (!s.ctx.in_generator) {
-        if (s.is_strict or s.curFunc().is_strict_mode) return Error.YieldOutsideGenerator;
-        const next_kind_peek = s.peekNext();
+        if (s.isStrict()) return Error.YieldOutsideGenerator;
+        const next_kind_peek = try s.peekNext();
         const next_kind = next_kind_peek.kind;
         const next_has_line_terminator = next_kind_peek.line_terminator;
         if (!next_has_line_terminator and
@@ -967,7 +967,7 @@ fn parseAwaitExpression(s: *State, flags: ParseFlags) Error!void {
     }
     const top_level_module_await = s.lex.is_module and s.cur_func_stack.len == 0;
     if (!s.ctx.in_async and !top_level_module_await) {
-        const next = s.peekNext();
+        const next = try s.peekNext();
         const next_kind = next.kind;
         // Outside async code `await` is an identifier; one followed by a
         // line break is an identifier statement that ASI terminates.
@@ -1292,10 +1292,11 @@ fn emitDeleteNonReference(s: *State) Error!void {
 /// atom-less getters are replaced transactionally by appending first and
 /// compacting only after every allocation succeeds.
 fn finishDelete(s: *State, delete_position: diagnostics.Position) Error!void {
+    const private_field_delete = "private fields cannot be deleted";
     const v2b = s.activeBuilder();
     const pos = v2b.last_opcode_pos orelse {
         if (s.private_opt_chain_end == v2b.code_len)
-            return s.failWithMessage(delete_position, "private fields cannot be deleted");
+            return s.failWithMessage(delete_position, private_field_delete);
         return emitDeleteNonReference(s);
     };
     if (pos >= v2b.code_len) return Error.ParserInvariant;
@@ -1310,7 +1311,7 @@ fn finishDelete(s: *State, delete_position: diagnostics.Position) Error!void {
             const atom_id = Atom.fromRaw(std.mem.readInt(u32, v2b.code[pos + 1 ..][0..4], .little));
             if (v2b.atom_operands[v2b.atom_len - 1] != atom_id) return Error.ParserInvariant;
             if (identifiers.atomNameIsPrivate(s, atom_id))
-                return s.failWithMessage(delete_position, "private fields cannot be deleted");
+                return s.failWithMessage(delete_position, private_field_delete);
             const snapshot = v2b.snapshot();
             errdefer v2b.rollback(snapshot);
             // qjs rewrites the getter into `push_atom_value` in place. The
@@ -1342,11 +1343,11 @@ fn finishDelete(s: *State, delete_position: diagnostics.Position) Error!void {
             if (name == atom_this.raw() or name == atom_new_target.raw()) {
                 return emitDeleteNonReference(s);
             }
-            if (s.is_strict or s.curFunc().is_strict_mode)
+            if (s.isStrict())
                 return s.failWithMessage(delete_position, "unqualified identifiers cannot be deleted in strict mode");
             v2b.code[pos] = opcode.op.scope_delete_var;
         },
-        opcode.op.scope_get_private_field => return s.failWithMessage(delete_position, "private fields cannot be deleted"),
+        opcode.op.scope_get_private_field => return s.failWithMessage(delete_position, private_field_delete),
         opcode.op.get_super_value => {
             if (pos + 1 != v2b.code_len) return Error.ParserInvariant;
             const snapshot = v2b.snapshot();
@@ -2308,7 +2309,7 @@ noinline fn parsePrimaryLeaf(s: *State) Error!void {
             s.last_was_super = true;
         },
         .kw_import => {
-            if (s.peekNextKind() == .dot) {
+            if (try s.peekNextKind() == .dot) {
                 if (!s.lex.is_module or s.is_eval) return s.failUnexpectedToken();
                 try s.advance();
                 try s.advance();
@@ -2352,7 +2353,7 @@ noinline fn parsePrimaryLeaf(s: *State) Error!void {
         => {
             if (!identifiers.isIdentifierLikeToken(s)) return s.failUnexpectedToken();
             if (s.peekKind() == .kw_await and !identifiers.canUseAwaitAsIdentifier(s)) return Error.AwaitOutsideAsyncFunction;
-            if (s.peekKind() == .kw_yield and (s.ctx.in_generator or s.is_strict or s.curFunc().is_strict_mode)) return Error.YieldOutsideGenerator;
+            if (s.peekKind() == .kw_yield and (s.ctx.in_generator or s.isStrict())) return Error.YieldOutsideGenerator;
             if (s.peekKind() == .ident and
                 identifiers.escapedIdentifierIsReservedWordForCurrentContext(s, s.token.payload.ident.atom, s.token.payload.ident.has_escape))
             {
@@ -2360,22 +2361,17 @@ noinline fn parsePrimaryLeaf(s: *State) Error!void {
             }
             if (s.peekKind() == .ident and
                 s.token.payload.ident.has_escape and
-                identifiers.atomNameEquals(s, s.token.payload.ident.atom, "import") and
-                s.peekNextKind() == .lparen)
+                identifiers.atomNameEquals(s, s.token.payload.ident.atom, "import"))
             {
-                return s.failUnexpectedToken();
-            }
-            if (s.peekKind() == .ident and
-                s.token.payload.ident.has_escape and
-                identifiers.atomNameEquals(s, s.token.payload.ident.atom, "import") and
-                s.peekNextKind() == .dot)
-            {
-                return s.failUnexpectedToken();
+                switch (try s.peekNextKind()) {
+                    .lparen, .dot => return s.failUnexpectedToken(),
+                    else => {},
+                }
             }
             const is_async_identifier = s.isAsyncIdentifier();
             if (is_async_identifier) {
                 // Check for async function (async is a contextual keyword)
-                if (s.peekNext().isBefore(.kw_function)) {
+                if ((try s.peekNext()).isBefore(.kw_function)) {
                     const source_start = s.currentFunctionSourceStart();
                     try s.advance(); // consume async
                     const func_kind: ParseFunctionKind = .async;
@@ -2397,7 +2393,7 @@ noinline fn parsePrimaryLeaf(s: *State) Error!void {
             s.last_was_super = false;
         },
         .kw_let => {
-            if (s.is_strict or s.curFunc().is_strict_mode) return s.failUnexpectedToken();
+            if (s.isStrict()) return s.failUnexpectedToken();
             try emitter.emitGrammarSource(s, s.currentSourcePosition());
             try s.emitScopeGetVar(tok.Kind.kw_let.keywordAtom());
             try s.advance();
@@ -2445,6 +2441,7 @@ fn parseDynamicImportCall(s: *State) Error!void {
 /// (`tag\`...\``) and lazy raw-string evaluation follow the `call=1`
 /// branch in `js_parse_template`.
 fn parseTemplate(s: *State) Error!void {
+    const too_many_template_substitutions = "too many template substitutions";
     var depth: u16 = 0;
     while (s.peekKind() == .template) {
         const part_payload = s.token.payload.str;
@@ -2464,7 +2461,7 @@ fn parseTemplate(s: *State) Error!void {
                 const concat_atom = try s.atoms.internString("concat");
                 try Emitter.opAtom(s, opcode.op.get_field2, concat_atom);
             }
-            depth = std.math.add(u16, depth, 1) catch return s.failWithMessage(null, "too many template substitutions");
+            depth = std.math.add(u16, depth, 1) catch return s.failWithMessage(null, too_many_template_substitutions);
         }
 
         if (part == .tail) {
@@ -2476,7 +2473,7 @@ fn parseTemplate(s: *State) Error!void {
         // resume template lexing after the closing `}`.
         try s.advance(); // consume head/middle TOK_TEMPLATE
         try parseExpr(s);
-        depth = std.math.add(u16, depth, 1) catch return s.failWithMessage(null, "too many template substitutions");
+        depth = std.math.add(u16, depth, 1) catch return s.failWithMessage(null, too_many_template_substitutions);
         if (s.peekKind() != .rbrace) return s.failExpectedToken(.rbrace);
         // The lookahead `}` has already moved lex.pos one byte past it;
         // free the token and ask the lexer for the next template part
@@ -2802,20 +2799,22 @@ fn parseObjectProperty(
         return parsePrefixedObjectMethod(s, .generator, capacity_hint, property_source_start);
     }
 
-    if (k == .ident and s.isIdent("async") and
-        s.peekNextKind() != .colon and
-        s.peekNextKind() != .lparen and
-        s.peekNextKind() != .lt and
-        s.peekNextKind() != .comma and
-        s.peekNextKind() != .rbrace)
-    {
-        try s.advance();
-        if (s.gotLineTerminator()) return s.failUnexpectedToken();
-        const func_kind: ParseFunctionKind = if (s.peekKind() == .star) blk: {
+    if (k == .ident and s.isIdent("async")) {
+        const async_next = try s.peekNextKind();
+        if (async_next != .colon and
+            async_next != .lparen and
+            async_next != .lt and
+            async_next != .comma and
+            async_next != .rbrace)
+        {
             try s.advance();
-            break :blk .async_generator;
-        } else .async;
-        return parsePrefixedObjectMethod(s, func_kind, capacity_hint, property_source_start);
+            if (s.gotLineTerminator()) return s.failUnexpectedToken();
+            const func_kind: ParseFunctionKind = if (s.peekKind() == .star) blk: {
+                try s.advance();
+                break :blk .async_generator;
+            } else .async;
+            return parsePrefixedObjectMethod(s, func_kind, capacity_hint, property_source_start);
+        }
     }
 
     // Computed property name: [expr]: value
@@ -2945,7 +2944,7 @@ pub fn parseObjectPropertyName(s: *State) Error!?ObjectPropertyName {
         try s.advance();
     } else if (k.isKeyword()) {
         atom_id = k.keywordAtom();
-        const strict = s.is_strict or s.curFunc().is_strict_mode;
+        const strict = s.isStrict();
         // Sloppy code may use the strict-reserved words as shorthand names.
         allow_shorthand = (k == .kw_yield and !s.ctx.in_generator and !strict) or
             (!strict and (k == .kw_let or k == .kw_static or identifiers.isSloppyFutureReservedToken(k)));

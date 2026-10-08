@@ -43,8 +43,6 @@ const typed_array_names = @import("typed_array_names.zig");
 const sort_erased = @import("sort_erased.zig");
 const builtin = @import("builtin");
 
-const ObjectVisitSet = std.AutoHashMap(usize, void);
-const ObjectGraphError = std.mem.Allocator.Error || error{PayloadMarkFailed};
 const OwnKeysError = std.mem.Allocator.Error;
 const PropertyReadError = errors.RuntimeError;
 
@@ -2429,6 +2427,16 @@ pub const Object = extern struct {
         return payload.rare;
     }
 
+    fn rareGet(self: *const Object, comptime field: []const u8, default: @FieldType(FunctionRarePayload, field)) @FieldType(FunctionRarePayload, field) {
+        if (self.functionRarePayloadConst()) |payload| return @field(payload, field);
+        return default;
+    }
+
+    fn setRareOptionalValue(self: *Object, rt: *JSRuntime, comptime field: []const u8, next_value: ?JSValue) !void {
+        const payload = try self.ensureFunctionRarePayload(rt);
+        try self.setOptionalValueSlot(rt, &@field(payload, field), next_value);
+    }
+
     pub fn installExternalClassPayload(self: *Object, rt: *JSRuntime, payload: *anyopaque) void {
         std.debug.assert(self.payloadArm().* == null);
         self.payloadArm().* = payload;
@@ -2974,6 +2982,13 @@ pub const Object = extern struct {
         return !self.flags.fast_array and
             self.flags.class_payload_kind == .ordinary and
             self.arrayArm().*.capacity == 0;
+    }
+
+    fn assertPlainAppendTarget(self: *const Object) void {
+        std.debug.assert(!self.hasExoticMethods());
+        std.debug.assert(self.supportsPlainNamedPropertyStorage());
+        std.debug.assert(self.class_id != class.ids.mapped_arguments);
+        std.debug.assert(self.flags.extensible);
     }
 
     pub inline fn isProxy(self: *const Object) bool {
@@ -3561,31 +3576,31 @@ pub const Object = extern struct {
     }
 
     pub fn setFunctionPromiseCapabilitySlot(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, &(try self.ensureFunctionRarePayload(rt)).promise_capability_slot, next_value);
+        try self.setRareOptionalValue(rt, "promise_capability_slot", next_value);
     }
 
     pub fn setFunctionPromiseResolvingTarget(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, &(try self.ensureFunctionRarePayload(rt)).promise_resolving_target, next_value);
+        try self.setRareOptionalValue(rt, "promise_resolving_target", next_value);
     }
 
     pub fn setFunctionPromiseResolvingState(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, &(try self.ensureFunctionRarePayload(rt)).promise_resolving_state, next_value);
+        try self.setRareOptionalValue(rt, "promise_resolving_state", next_value);
     }
 
     pub fn setFunctionPromiseCombinatorState(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, &(try self.ensureFunctionRarePayload(rt)).promise_combinator_state, next_value);
+        try self.setRareOptionalValue(rt, "promise_combinator_state", next_value);
     }
 
     pub fn setFunctionPromiseFinallyPayload(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, &(try self.ensureFunctionRarePayload(rt)).promise_finally_payload, next_value);
+        try self.setRareOptionalValue(rt, "promise_finally_payload", next_value);
     }
 
     pub fn setFunctionPromiseFinallyCallback(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, &(try self.ensureFunctionRarePayload(rt)).promise_finally_callback, next_value);
+        try self.setRareOptionalValue(rt, "promise_finally_callback", next_value);
     }
 
     pub fn setFunctionPromiseFinallyConstructor(self: *Object, rt: *JSRuntime, next_value: ?JSValue) !void {
-        try self.setOptionalValueSlot(rt, &(try self.ensureFunctionRarePayload(rt)).promise_finally_constructor, next_value);
+        try self.setRareOptionalValue(rt, "promise_finally_constructor", next_value);
     }
 
     pub fn varRefValueSlot(self: *Object) *?JSValue {
@@ -4836,7 +4851,7 @@ pub const Object = extern struct {
     }
 
     pub fn functionSource(self: *const Object) ?JSValue {
-        return (self.functionRarePayloadConst() orelse return null).source;
+        return self.rareGet("source", null);
     }
 
     pub fn hostFunctionKindSlot(self: *Object) *i32 {
@@ -4998,13 +5013,11 @@ pub const Object = extern struct {
     }
 
     pub fn arrayBuiltinMarker(self: *const Object) ArrayBuiltinMarker {
-        if (self.functionRarePayloadConst()) |payload| return payload.array_builtin_marker;
-        return .none;
+        return self.rareGet("array_builtin_marker", .none);
     }
 
     pub fn internalCallableTag(self: *const Object) host_function.InternalCallableTag {
-        if (self.functionRarePayloadConst()) |payload| return payload.internal_callable_tag;
-        return .none;
+        return self.rareGet("internal_callable_tag", .none);
     }
 
     pub fn setInternalCallableTag(self: *Object, rt: *JSRuntime, tag: host_function.InternalCallableTag) !void {
@@ -5016,13 +5029,11 @@ pub const Object = extern struct {
     }
 
     pub fn isArrayIteratorNextFunction(self: *const Object) bool {
-        if (self.functionRarePayloadConst()) |payload| return payload.array_iterator_next;
-        return false;
+        return self.rareGet("array_iterator_next", false);
     }
 
     pub fn isGeneratorNextFunction(self: *const Object) bool {
-        if (self.functionRarePayloadConst()) |payload| return payload.generator_next;
-        return false;
+        return self.rareGet("generator_next", false);
     }
 
     pub fn addGeneratorNextFunction(self: *Object, rt: *JSRuntime) !void {
@@ -5031,8 +5042,7 @@ pub const Object = extern struct {
     }
 
     pub fn isThrowTypeErrorIntrinsicFunction(self: *const Object) bool {
-        if (self.functionRarePayloadConst()) |payload| return payload.throw_type_error_intrinsic;
-        return false;
+        return self.rareGet("throw_type_error_intrinsic", false);
     }
 
     pub fn addArrayBuiltinMarker(self: *Object, rt: *JSRuntime, marker: ArrayBuiltinMarker) !bool {
@@ -5072,8 +5082,7 @@ pub const Object = extern struct {
     }
 
     pub fn collectionMethodOwnerClass(self: *const Object) class.ClassId {
-        if (self.functionRarePayloadConst()) |payload| return payload.collection_method_owner_class;
-        return class.invalid_class_id;
+        return self.rareGet("collection_method_owner_class", class.invalid_class_id);
     }
 
     pub fn setFunctionBytecodeValue(self: *Object, rt: *JSRuntime, next_value: JSValue) !void {
@@ -5136,15 +5145,15 @@ pub const Object = extern struct {
     }
 
     pub fn functionPromiseCapabilitySlot(self: *const Object) ?JSValue {
-        return (self.functionRarePayloadConst() orelse return null).promise_capability_slot;
+        return self.rareGet("promise_capability_slot", null);
     }
 
     pub fn functionPromiseResolvingTarget(self: *const Object) ?JSValue {
-        return (self.functionRarePayloadConst() orelse return null).promise_resolving_target;
+        return self.rareGet("promise_resolving_target", null);
     }
 
     pub fn functionPromiseResolvingState(self: *const Object) ?JSValue {
-        return (self.functionRarePayloadConst() orelse return null).promise_resolving_state;
+        return self.rareGet("promise_resolving_state", null);
     }
 
     pub fn functionPromiseResolvingRejectSlot(self: *Object, rt: *JSRuntime) !*bool {
@@ -5152,12 +5161,11 @@ pub const Object = extern struct {
     }
 
     pub fn functionPromiseResolvingReject(self: *const Object) bool {
-        if (self.functionRarePayloadConst()) |payload| return payload.promise_resolving_reject;
-        return false;
+        return self.rareGet("promise_resolving_reject", false);
     }
 
     pub fn functionPromiseCombinatorState(self: *const Object) ?JSValue {
-        return (self.functionRarePayloadConst() orelse return null).promise_combinator_state;
+        return self.rareGet("promise_combinator_state", null);
     }
 
     pub fn functionPromiseCombinatorModeSlot(self: *Object, rt: *JSRuntime) !*u8 {
@@ -5165,8 +5173,7 @@ pub const Object = extern struct {
     }
 
     pub fn functionPromiseCombinatorMode(self: *const Object) u8 {
-        if (self.functionRarePayloadConst()) |payload| return payload.promise_combinator_mode;
-        return 0;
+        return self.rareGet("promise_combinator_mode", 0);
     }
 
     pub fn functionPromiseCombinatorIndexSlot(self: *Object, rt: *JSRuntime) !*u32 {
@@ -5174,8 +5181,7 @@ pub const Object = extern struct {
     }
 
     pub fn functionPromiseCombinatorIndex(self: *const Object) u32 {
-        if (self.functionRarePayloadConst()) |payload| return payload.promise_combinator_index;
-        return 0;
+        return self.rareGet("promise_combinator_index", 0);
     }
 
     pub fn functionPromiseCombinatorCalledSlot(self: *Object, rt: *JSRuntime) !*bool {
@@ -5183,20 +5189,19 @@ pub const Object = extern struct {
     }
 
     pub fn functionPromiseCombinatorCalled(self: *const Object) bool {
-        if (self.functionRarePayloadConst()) |payload| return payload.promise_combinator_called;
-        return false;
+        return self.rareGet("promise_combinator_called", false);
     }
 
     pub fn functionPromiseFinallyPayload(self: *const Object) ?JSValue {
-        return (self.functionRarePayloadConst() orelse return null).promise_finally_payload;
+        return self.rareGet("promise_finally_payload", null);
     }
 
     pub fn functionPromiseFinallyCallback(self: *const Object) ?JSValue {
-        return (self.functionRarePayloadConst() orelse return null).promise_finally_callback;
+        return self.rareGet("promise_finally_callback", null);
     }
 
     pub fn functionPromiseFinallyConstructor(self: *const Object) ?JSValue {
-        return (self.functionRarePayloadConst() orelse return null).promise_finally_constructor;
+        return self.rareGet("promise_finally_constructor", null);
     }
 
     pub fn functionPromiseFinallyModeSlot(self: *Object, rt: *JSRuntime) !*u8 {
@@ -5204,8 +5209,7 @@ pub const Object = extern struct {
     }
 
     pub fn functionPromiseFinallyMode(self: *const Object) u8 {
-        if (self.functionRarePayloadConst()) |payload| return payload.promise_finally_mode;
-        return 0;
+        return self.rareGet("promise_finally_mode", 0);
     }
 
     pub fn functionAsyncDisposeStackSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
@@ -5213,7 +5217,7 @@ pub const Object = extern struct {
     }
 
     pub fn functionAsyncDisposeStack(self: *const Object) ?JSValue {
-        return (self.functionRarePayloadConst() orelse return null).async_dispose_stack;
+        return self.rareGet("async_dispose_stack", null);
     }
 
     pub fn functionAsyncDisposeRejectedSlot(self: *Object, rt: *JSRuntime) !*bool {
@@ -5221,8 +5225,7 @@ pub const Object = extern struct {
     }
 
     pub fn functionAsyncDisposeRejected(self: *const Object) bool {
-        if (self.functionRarePayloadConst()) |payload| return payload.async_dispose_rejected;
-        return false;
+        return self.rareGet("async_dispose_rejected", false);
     }
 
     pub fn functionAsyncContinuationSlot(self: *Object, rt: *JSRuntime) !*?JSValue {
@@ -5230,7 +5233,7 @@ pub const Object = extern struct {
     }
 
     pub fn functionAsyncContinuation(self: *const Object) ?JSValue {
-        return (self.functionRarePayloadConst() orelse return null).async_function_continuation;
+        return self.rareGet("async_function_continuation", null);
     }
 
     pub fn functionAsyncContinuationRejectedSlot(self: *Object, rt: *JSRuntime) !*bool {
@@ -5238,8 +5241,7 @@ pub const Object = extern struct {
     }
 
     pub fn functionAsyncContinuationRejected(self: *const Object) bool {
-        if (self.functionRarePayloadConst()) |payload| return payload.async_function_rejected;
-        return false;
+        return self.rareGet("async_function_rejected", false);
     }
 
     pub fn functionAsyncGeneratorActionSlot(self: *Object, rt: *JSRuntime) !*u8 {
@@ -5247,8 +5249,7 @@ pub const Object = extern struct {
     }
 
     pub fn functionAsyncGeneratorAction(self: *const Object) u8 {
-        if (self.functionRarePayloadConst()) |payload| return payload.async_generator_action;
-        return 0;
+        return self.rareGet("async_generator_action", 0);
     }
 
     pub fn functionAsyncFromSyncUnwrapDoneSlot(self: *Object, rt: *JSRuntime) !*u8 {
@@ -5256,8 +5257,7 @@ pub const Object = extern struct {
     }
 
     pub fn functionAsyncFromSyncUnwrapDone(self: *const Object) u8 {
-        if (self.functionRarePayloadConst()) |payload| return payload.async_from_sync_unwrap_done;
-        return 0;
+        return self.rareGet("async_from_sync_unwrap_done", 0);
     }
 
     pub fn functionCaptures(self: *const Object) []*var_ref_mod.VarRef {
@@ -5707,7 +5707,7 @@ pub const Object = extern struct {
     }
 
     pub fn functionRealmGlobal(self: *const Object) ?JSValue {
-        return (self.functionRarePayloadConst() orelse return null).realm_global;
+        return self.rareGet("realm_global", null);
     }
 
     pub fn setFunctionRealmGlobalPtr(self: *Object, rt: *JSRuntime, realm_global: ?*Object) !void {
@@ -6025,12 +6025,6 @@ pub const Object = extern struct {
         // `class_payload_kind == .none` while owning a real payload.
         if (self.payloadArm().* == null) return false;
         return rt.classes.markPayload(self.class_id, @ptrCast(rt), @ptrCast(self), &self.payloadArm().*, visitor);
-    }
-
-    fn collectReachableObjects(rt: *JSRuntime, visited: *ObjectVisitSet, current: *Object) ObjectGraphError!void {
-        const visit = try visited.getOrPut(@intFromPtr(current));
-        if (visit.found_existing) return;
-        try current.collectDirectChildObjects(rt, visited);
     }
 
     pub fn ClassPayloadTraceAdaptor(comptime VisitorType: type) type {
@@ -6367,6 +6361,8 @@ pub const Object = extern struct {
         }
     }
 
+    /// GC visitor name. The body is `traceChildEdgesFallible`; visitors that
+    /// cannot fail use `traceChildEdgesNoFail`.
     pub inline fn traceChildEdges(self: *Object, rt: *JSRuntime, visitor: anytype) !void {
         return self.traceChildEdgesFallible(rt, visitor);
     }
@@ -6377,53 +6373,6 @@ pub const Object = extern struct {
         // visitors use traceChildEdgesFallible directly, so no error can reach
         // this catch.
         self.traceChildEdgesFallible(rt, visitor) catch unreachable;
-    }
-
-    fn collectDirectChildObjects(self: *Object, rt: *JSRuntime, visited: *ObjectVisitSet) ObjectGraphError!void {
-        const CollectVisitor = struct {
-            rt: *JSRuntime,
-            visited: *ObjectVisitSet,
-            err: ?ObjectGraphError = null,
-
-            pub fn visitObject(cv: *@This(), obj_ptr: *?*Object) !void {
-                if (obj_ptr.*) |obj| {
-                    if (@intFromPtr(obj) == 0) return;
-                    try collectReachableObjects(cv.rt, cv.visited, obj);
-                }
-            }
-
-            pub fn visitValue(cv: *@This(), val_ptr: *JSValue) !void {
-                try collectValueObject(cv.rt, cv.visited, val_ptr.*);
-            }
-
-            pub fn visitWeakCollectionEntry(cv: *@This(), entry: *WeakCollectionEntry) !void {
-                try collectValueObject(cv.rt, cv.visited, entry.value);
-            }
-
-            pub fn visitFinalizationCell(cv: *@This(), entry: *FinalizationRegistryCell) !void {
-                if (entry.keepsHeldValuesAlive()) {
-                    try collectValueObject(cv.rt, cv.visited, entry.held_value);
-                }
-            }
-        };
-        var visitor = CollectVisitor{ .rt = rt, .visited = visited };
-        try self.traceChildEdgesFallible(rt, &visitor);
-    }
-
-    fn collectValueObject(rt: *JSRuntime, visited: *ObjectVisitSet, stored: JSValue) ObjectGraphError!void {
-        if (objectFromValue(stored)) |child| {
-            try collectReachableObjects(rt, visited, child);
-            return;
-        }
-        const function_bytecode = functionBytecodeFromValue(stored) orelse return;
-        try collectFunctionBytecodeChildObjects(rt, visited, function_bytecode);
-    }
-
-    fn collectFunctionBytecodeChildObjects(rt: *JSRuntime, visited: *ObjectVisitSet, function_bytecode: *const FunctionBytecode) ObjectGraphError!void {
-        if (function_bytecode.realmContext()) |realm| {
-            if (realm.global) |realm_global| try collectReachableObjects(rt, visited, realm_global);
-        }
-        for (function_bytecode.cpoolSlice()) |stored| try collectValueObject(rt, visited, stored);
     }
 
     /// Returns the weak identity for `stored`, registering objects in the
@@ -6506,7 +6455,7 @@ pub const Object = extern struct {
     /// [[PreventExtensions]] for ordinary objects and typed arrays: a typed
     /// array whose length can still change refuses (IsTypedArrayFixedLength).
     pub fn preventExtensionsChecked(self: *Object) bool {
-        if (isTypedArrayObject(self) and !typedArrayIsFixedLength(self)) return false;
+        if (isTypedArrayObject(self) and !@import("typed_array.zig").typedArrayIsFixedLength(self)) return false;
         self.preventExtensions();
         return true;
     }
@@ -7297,10 +7246,7 @@ pub const Object = extern struct {
         atom_id: atom.Atom,
         data_value: JSValue,
     ) !void {
-        std.debug.assert(!self.hasExoticMethods());
-        std.debug.assert(self.supportsPlainNamedPropertyStorage());
-        std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.flags.extensible);
+        self.assertPlainAppendTarget();
         try self.appendPreparedPropertyEntryImpl(
             true,
             false,
@@ -7457,10 +7403,7 @@ pub const Object = extern struct {
         resolved_realm: *context_mod.RealmContext,
         info: *const property.AutoInit,
     ) !void {
-        std.debug.assert(!self.hasExoticMethods());
-        std.debug.assert(self.supportsPlainNamedPropertyStorage());
-        std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.flags.extensible);
+        self.assertPlainAppendTarget();
         std.debug.assert(resolved_realm.runtime == rt);
         try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{
             .auto_init = property.AutoInitSlot.retainProp(&resolved_realm.header, info),
@@ -7564,10 +7507,7 @@ pub const Object = extern struct {
         realm_global: ?*Object,
         native_builtin_id: i32,
     ) !void {
-        std.debug.assert(!self.hasExoticMethods());
-        std.debug.assert(self.supportsPlainNamedPropertyStorage());
-        std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.flags.extensible);
+        self.assertPlainAppendTarget();
         // No descriptor conversion: the placeholder carries no JSValue, only
         // the (name, length, builtin id) record in the runtime auto-init
         // table. The shape entry keeps the atom alive like any property key.
@@ -7630,10 +7570,7 @@ pub const Object = extern struct {
         flags: property.Flags,
         realm_global: *Object,
     ) !void {
-        std.debug.assert(!self.hasExoticMethods());
-        std.debug.assert(self.supportsPlainNamedPropertyStorage());
-        std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.flags.extensible);
+        self.assertPlainAppendTarget();
         std.debug.assert(!flags.isAccessor());
         if (self.findProperty(atom_id)) |index| {
             if (!self.propFlagsAt(index).configurable) return error.IncompatibleDescriptor;
@@ -7672,10 +7609,7 @@ pub const Object = extern struct {
         entry: ?*const native_entry.NativeEntry,
     ) !void {
         std.debug.assert(host_function_kind != 0);
-        std.debug.assert(!self.hasExoticMethods());
-        std.debug.assert(self.supportsPlainNamedPropertyStorage());
-        std.debug.assert(self.class_id != class.ids.mapped_arguments);
-        std.debug.assert(self.flags.extensible);
+        self.assertPlainAppendTarget();
         try self.appendPreparedPropertyEntry(rt, atom_id, flags.withKind(.auto_init), .{ .auto_init = try self.createPropAutoInitSlot(rt, realm_global, .{
             .name = name,
             .length = length,
@@ -8155,7 +8089,7 @@ pub const Object = extern struct {
         if (self.hasExoticMethods() or self.proxyTarget() != null or self.isGlobal() or self.flags.is_with_environment) return false;
         if (!self.flags.extensible) return false;
         if (self.class_id == class.ids.module_ns or self.class_id == class.ids.mapped_arguments) return false;
-        if (isTypedArrayObjectForSetFastPath(self)) return false;
+        if (isTypedArrayObject(self)) return false;
         if (self.isArray() and atom_id == atom.ids.length) return false;
         // Index-form atoms: the tagged-int bit test runs for every class (a
         // folded `o['5'] = x` computed key reaches the set path with a
@@ -8170,7 +8104,7 @@ pub const Object = extern struct {
         var prototype = self.getPrototype();
         while (prototype) |proto| {
             if (proto.hasExoticMethods() or proto.proxyTarget() != null) return false;
-            if (isTypedArrayObjectForSetFastPath(proto)) return false;
+            if (isTypedArrayObject(proto)) return false;
             // An array's `length` lives outside the shape; the full resolver
             // honors its writability.
             if (atom_id == atom.ids.length and proto.isArray()) return false;
@@ -8243,11 +8177,7 @@ pub const Object = extern struct {
     /// quickjs.c): a non-extensible receiver whose chain holds a
     ///   setter must reach that setter, never a synthesized failure.
     pub fn setOrDefineOwnDataPropertyForPutFieldOwned(self: *Object, rt: *JSRuntime, atom_id: atom.Atom, new_value: JSValue) align(16) PutFieldFast {
-        // Generational barrier at the property funnels (§8.3). These carry
-        // both owner and child, which the raw slot stores below do not, so
-        // this is where an old-to-young edge can still be recorded without
-        // rewriting every prop_values write. The remaining direct and memcpy
-        // stores belong to §6.4's snapshot domain.
+        // Generational barrier: see `setOrDefineOwnDataPropertyForSimpleSet`.
         rt.gc.generationalBarrier(self.gcHeader(), new_value.cycleMarkHeader());
         // Admission runs ONCE: needsSlowPropertyAccess covers the exotic bit
         // plus the array/typed-array/dataview/mapped-arguments/module_ns/proxy
@@ -8341,7 +8271,7 @@ pub const Object = extern struct {
                 // fast_array + non-TA named miss: qjs falls through (atom
                 // already rejected tagged-int). TA canonical-index / oob
                 // and non-fast_array traps stay in the resolver.
-                if (!proto.flags.fast_array or isTypedArrayObjectForSetFastPath(proto))
+                if (!proto.flags.fast_array or isTypedArrayObject(proto))
                     return .slow;
             }
             // Proxy is not `has_exotic_methods` (traps live in the class
@@ -9761,254 +9691,6 @@ pub const Object = extern struct {
     }
 };
 
-test "home object old to young writes survive minor collection" {
-    for ([_]bool{ false, true }) |auxiliary| {
-        for ([_]bool{ false, true }) |nursery| {
-            const rt = try JSRuntime.create(std.testing.allocator, .{});
-            defer rt.destroy();
-            rt.gc.nursery.enabled = nursery;
-            var roots = runtime_mod.ExactValueRoots(1){};
-            try roots.activate(rt);
-            defer roots.deactivate();
-            const closure = try Object.create(rt, class.ids.bytecode_function, null);
-            try (try roots.ref(0)).set(rt, closure.value());
-            if (auxiliary) _ = try closure.ensureFunctionRarePayload(rt);
-            _ = try rt.collectForTest();
-            try std.testing.expect(!closure.gcHeader().meta().flags.young);
-            const home = try Object.createPlainObject(rt, null);
-            const before = @intFromPtr(home);
-            try closure.setFunctionHomeObject(rt, home);
-            try std.testing.expect(rt.gc.generation.remembered.contains(@intFromPtr(closure.gcHeader())));
-            _ = try @import("gc_trace_stw.zig").collectMinor(rt, .declared_only);
-            const stored = closure.functionHomeObject().?;
-            try std.testing.expect(rt.gc.containsHeader(stored.gcHeader()));
-            try std.testing.expectEqual(nursery, @intFromPtr(stored) != before);
-            try closure.setFunctionHomeObject(rt, null);
-            _ = try rt.collectForTest();
-            try std.testing.expect(!rt.gc.containsHeader(stored.gcHeader()));
-        }
-    }
-}
-
-test "home object tracing exposes real slots on success and failure" {
-    for ([_]bool{ false, true }) |auxiliary| {
-        for ([_]bool{ false, true }) |fail| {
-            const rt = try JSRuntime.create(std.testing.allocator, .{});
-            defer rt.destroy();
-            const closure = try Object.create(rt, class.ids.bytecode_function, null);
-            const original = try Object.createPlainObject(rt, null);
-            const replacement = try Object.createPlainObject(rt, null);
-            try closure.setFunctionHomeObject(rt, original);
-            if (auxiliary) _ = try closure.ensureFunctionRarePayload(rt);
-            const Probe = struct {
-                pub const gc_visit_policy: gc_visit.Policy = .partial;
-                expected: usize,
-                original: *Object,
-                replacement: *Object,
-                fail: bool,
-                actual_slot: bool = false,
-                pub fn visitObject(self: *@This(), slot: *?*Object) error{PayloadMarkFailed}!void {
-                    if (slot.* != self.original) return;
-                    self.actual_slot = @intFromPtr(slot) == self.expected;
-                    slot.* = self.replacement;
-                    if (self.fail) return error.PayloadMarkFailed;
-                }
-            };
-            var probe = Probe{
-                .expected = if (closure.bytecodeFunctionAux()) |aux| @intFromPtr(&aux.home_object) else @intFromPtr(&closure.bytecodeArm().*.home_or_aux),
-                .original = original,
-                .replacement = replacement,
-                .fail = fail,
-            };
-            if (fail) {
-                try std.testing.expectError(error.PayloadMarkFailed, closure.traceChildEdgesFallible(rt, &probe));
-            } else {
-                try closure.traceChildEdgesFallible(rt, &probe);
-            }
-            try std.testing.expect(probe.actual_slot);
-            try std.testing.expectEqual(replacement, closure.functionHomeObject().?);
-        }
-    }
-}
-
-test "home object tracing resolves auxiliary storage before child slots" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const closure = try Object.create(rt, class.ids.bytecode_function, null);
-    const original = try Object.createPlainObject(rt, null);
-    const replacement = try Object.createPlainObject(rt, null);
-    try closure.setFunctionHomeObject(rt, original);
-    _ = try closure.ensureFunctionRarePayload(rt);
-    const old_aux = closure.bytecodeFunctionAux().?;
-    old_aux.rare.source = JSValue.int32(11);
-    var moved_aux = old_aux.*;
-    moved_aux.rare.source = JSValue.int32(73);
-    const stored_word = closure.bytecodeArm().*.home_or_aux;
-    // This visitor simulates storage relocation into a local copy. Restore
-    // the registered allocation before Runtime tears down the real heap.
-    defer closure.bytecodeArm().*.home_or_aux = stored_word;
-    const Probe = struct {
-        pub const gc_visit_policy: gc_visit.Policy = .partial;
-        old_aux: *BytecodeFunctionAux,
-        moved_aux: *BytecodeFunctionAux,
-        replacement: *Object,
-        storage_repaired: bool = false,
-        home_repaired: bool = false,
-        source_visited: bool = false,
-        pub fn storageCell(self: *@This(), edge: gc_visit.CellSlot) void {
-            if (edge.address() != @intFromPtr(self.old_aux)) return;
-            edge.rebind(@intFromPtr(self.moved_aux));
-            self.storage_repaired = true;
-        }
-        pub fn visitObject(self: *@This(), slot: *?*Object) void {
-            if (slot != &self.moved_aux.home_object) return;
-            self.home_repaired = self.storage_repaired;
-            slot.* = self.replacement;
-        }
-        pub fn visitValue(self: *@This(), slot: *JSValue) void {
-            if (slot == &self.moved_aux.rare.source.?) self.source_visited = self.storage_repaired;
-        }
-    };
-    var probe = Probe{ .old_aux = old_aux, .moved_aux = &moved_aux, .replacement = replacement };
-    try closure.traceChildEdgesFallible(rt, &probe);
-    try std.testing.expect(probe.storage_repaired and probe.home_repaired and probe.source_visited);
-    try std.testing.expectEqual(replacement, closure.functionHomeObject().?);
-    try std.testing.expectEqual(original, old_aux.home_object.?);
-    try std.testing.expectEqual(Object.bytecode_function_aux_tag, @intFromPtr(closure.bytecodeArm().*.home_or_aux.?) & Object.bytecode_function_aux_tag);
-}
-
-test "root adapter bytecode preserves visitor repairs on failure" {
-    for ([_]bool{ false, true }) |fail| {
-        const rt = try JSRuntime.create(std.testing.allocator, .{});
-        defer rt.destroy();
-        const closure = try Object.create(rt, class.ids.bytecode_function, null);
-        // Only the carrier addresses are observed; no bytecode body or GC
-        // metadata is read by this partial visitor. Unlink before teardown.
-        var original: FunctionBytecode = undefined;
-        var replacement: FunctionBytecode = undefined;
-        closure.bytecodeArm().*.function_bytecode = &original;
-        defer closure.bytecodeArm().*.function_bytecode = null;
-        const Probe = struct {
-            pub const gc_visit_policy: gc_visit.Policy = .partial;
-            original: JSValue,
-            replacement: JSValue,
-            fail: bool,
-            pub fn visitValue(self: *@This(), slot: *JSValue) !void {
-                if (!slot.same(self.original)) return;
-                slot.* = self.replacement;
-                if (self.fail) return error.PayloadMarkFailed;
-            }
-        };
-        var probe = Probe{ .original = JSValue.functionBytecode(&original.header), .replacement = JSValue.functionBytecode(&replacement.header), .fail = fail };
-        if (fail) try std.testing.expectError(error.PayloadMarkFailed, closure.traceChildEdgesFallible(rt, &probe)) else try closure.traceChildEdgesFallible(rt, &probe);
-        try std.testing.expectEqual(&replacement, closure.bytecodeArm().*.function_bytecode.?);
-    }
-}
-
-test "root adapter AUTOINIT Realm preserves visitor repairs on failure" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const original = try context_mod.RealmContext.create(rt, .{});
-    defer original.destroy();
-    const replacement = try context_mod.RealmContext.create(rt, .{});
-    defer replacement.destroy();
-    for ([_]bool{ false, true }) |fail| {
-        var entry = property.Entry{ .slot = .{ .auto_init = property.AutoInitSlot.retainPrototype(&original.header) } };
-        const Probe = struct {
-            pub const gc_visit_policy: gc_visit.Policy = .partial;
-            replacement: *context_mod.RealmContext,
-            fail: bool,
-            pub fn visitRealm(self: *@This(), slot: *?*context_mod.RealmContext) !void {
-                slot.* = self.replacement;
-                if (self.fail) return error.PayloadMarkFailed;
-            }
-        };
-        var probe = Probe{ .replacement = replacement, .fail = fail };
-        if (fail) try std.testing.expectError(error.PayloadMarkFailed, Object.traceUnusualPropertyFallible(&probe, &entry, .{ .kind = .auto_init })) else try Object.traceUnusualPropertyFallible(&probe, &entry, .{ .kind = .auto_init });
-        try std.testing.expectEqual(&replacement.header, entry.slot.auto_init.realm_and_id.realmHeader().?);
-    }
-}
-
-test "accessor tracing exposes real slots and preserves repairs on failure" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const original = try Object.createPlainObject(rt, null);
-    const replacement = try Object.createPlainObject(rt, null);
-    for ([_]bool{ false, true }) |setter| {
-        for ([_]bool{ false, true }) |fail| {
-            var entry = property.Entry{ .slot = .{ .accessor = property.Accessor.fromBorrowedValues(
-                if (setter) JSValue.undefinedValue() else original.value(),
-                if (setter) original.value() else JSValue.undefinedValue(),
-            ) } };
-            const Probe = struct {
-                pub const gc_visit_policy: gc_visit.Policy = .partial;
-                expected_address: usize,
-                original: *Object,
-                replacement: *Object,
-                fail: bool,
-                actual_slot: bool = false,
-                pub fn visitValue(self: *@This(), slot: *JSValue) error{PayloadMarkFailed}!void {
-                    if (slot.bits != self.original.value().bits) return;
-                    self.actual_slot = @intFromPtr(slot) == self.expected_address;
-                    slot.* = self.replacement.value();
-                    if (self.fail) return error.PayloadMarkFailed;
-                }
-                pub fn visitObject(self: *@This(), slot: *?*Object) error{PayloadMarkFailed}!void {
-                    if (slot.* != self.original) return;
-                    self.actual_slot = @intFromPtr(slot) == self.expected_address;
-                    slot.* = self.replacement;
-                    if (self.fail) return error.PayloadMarkFailed;
-                }
-            };
-            var probe = Probe{
-                .expected_address = if (setter) @intFromPtr(&entry.slot.accessor.setter) else @intFromPtr(&entry.slot.accessor.getter),
-                .original = original,
-                .replacement = replacement,
-                .fail = fail,
-            };
-            if (fail) {
-                try std.testing.expectError(error.PayloadMarkFailed, Object.traceUnusualPropertyFallible(&probe, &entry, .{ .kind = .accessor }));
-            } else {
-                try Object.traceUnusualPropertyFallible(&probe, &entry, .{ .kind = .accessor });
-            }
-            try std.testing.expect(probe.actual_slot);
-            const repaired = if (setter) entry.slot.accessor.setterValue() else entry.slot.accessor.getterValue();
-            try std.testing.expectEqual(replacement.value().bits, repaired.bits);
-        }
-    }
-}
-
-test "object value refs keep nested symbol bodies without external symbol roots" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-
-    const object = try Object.create(rt, class.ids.object, null);
-    var object_value = object.value();
-
-    const key = try rt.internAtom("external-object-root-symbol-slot");
-    const nested_value = try rt.newSymbolValue("external-object-root-nested-symbol");
-    const nested_symbol = nested_value.asSymbolAtom().?;
-    try object.defineOwnProperty(rt, key, descriptor.Descriptor.data(nested_value, .all));
-
-    // The owner object is held only by this Zig local; the tracing sweep
-    // needs it declared for the keep phase. Deactivated before the release
-    // phase so the second collection can observe the symbol body dropping.
-    var object_slot: ?*Object = object;
-    var live_roots = runtime_mod.rootObjects(.{&object_slot});
-    live_roots.activate(rt);
-    var roots_active = true;
-    defer if (roots_active) live_roots.deactivate(rt);
-
-    _ = try rt.collectForTest();
-    try std.testing.expect(rt.atoms.name(nested_symbol) != null);
-
-    live_roots.deactivate(rt);
-    roots_active = false;
-    object_value = JSValue.undefinedValue();
-    _ = try rt.collectForTest();
-    try std.testing.expect(rt.atoms.name(nested_symbol) == null);
-}
-
 fn flagsFromDescriptor(desc: descriptor.Descriptor) property.Flags {
     return switch (desc.kind) {
         .generic => property.Flags.data(.{ .enumerable = desc.enumerable orelse false, .configurable = desc.configurable orelse false }),
@@ -10025,107 +9707,10 @@ fn slotFromDescriptor(desc: descriptor.Descriptor) property.Slot {
     };
 }
 
-fn isTypedArrayObjectForSetFastPath(object: *const Object) bool {
-    return isTypedArrayObject(object);
-}
-
-// --- TypedArray element mechanism (engine core) -----------------------------
-//
-// QuickJS source map: the typed-array length/bounds/detach helpers live in the
-// engine core (quickjs.c), with builtins as clients. These are thin predicates
-// over the core typed-array storage slots (`Object.typedArrayBuffer()`,
-// `typedArrayByteOffset()`, `typedArrayElementSize()`, `typedArrayFixedLength()`,
-// `arrayBufferDetached()`, ...); this block holds the storage-shape mechanism
-// the VM consults directly. The element read/write *value coercion*
-// (ToNumber/ToBigInt over primitives, shared with the DataView and ArrayBuffer
-// paths) and the buffer storage operations live in `src/core/typed_array.zig`,
-// which imports these predicates. `src/exec/buffer_ops.zig` owns the
-// JS-visible record surface that uses both blocks.
-
-pub fn isTypedArrayObject(object: *const Object) bool {
-    const payload = object.typedArrayPayloadFast() orelse return false;
-    return payload.buffer != null and payload.element_size != 0;
-}
-
-pub fn typedArrayOutOfBounds(object: *Object) !bool {
-    const payload = object.typedArrayPayloadFast() orelse return error.TypeError;
-    const backing = payload.backing_payload orelse return error.TypeError;
-    if (payload.byte_offset > backing.bytes.len) return true;
-    if (payload.fixed_length) |fixed| {
-        const bytes = std.math.mul(usize, fixed, payload.element_size) catch return true;
-        return bytes > backing.bytes.len - payload.byte_offset;
-    }
-    return false;
-}
-
-pub fn typedArrayDetached(object: *Object) !bool {
-    const payload = object.typedArrayPayloadFast() orelse return error.TypeError;
-    const backing = payload.backing_payload orelse return error.TypeError;
-    return backing.detached;
-}
-
-pub fn typedArrayLength(rt: *JSRuntime, object: *Object) !u32 {
-    _ = rt;
-    const payload = object.typedArrayPayloadFast() orelse return error.TypeError;
-    if (payload.element_size == 0 or payload.buffer == null or payload.backing_payload == null) return error.TypeError;
-    return payload.live_length;
-}
-
-pub fn typedArrayByteLength(rt: *JSRuntime, object: *Object) !usize {
-    const length = try typedArrayLength(rt, object);
-    return @as(usize, length) * object.typedArrayElementSize();
-}
-
-pub fn typedArrayEffectiveByteOffset(object: *Object) !usize {
-    if (try typedArrayDetached(object)) return 0;
-    if (try typedArrayOutOfBounds(object)) return 0;
-    return object.typedArrayByteOffset();
-}
-
-pub fn typedArrayIndexValid(rt: *JSRuntime, object: *Object, index: u32) !bool {
-    _ = rt;
-    const payload = object.typedArrayPayloadFast() orelse return error.TypeError;
-    if (payload.element_size == 0 or payload.buffer == null or payload.backing_payload == null) return error.TypeError;
-    return index < payload.live_length;
-}
-
-pub const TypedArrayCanonicalIndex = union(enum) {
-    none,
-    invalid,
-    index: u32,
-};
-
-pub fn typedArrayCanonicalNumericIndex(rt: *JSRuntime, atom_id: atom.Atom) !TypedArrayCanonicalIndex {
-    if (array.arrayIndexFromAtom(rt.atoms, atom_id)) |index| return .{ .index = index };
-    if (rt.atoms.kind(atom_id) != .string) return .none;
-    const name = rt.atoms.name(atom_id) orelse return .none;
-    if (name.len == 0) return .none;
-    if (std.mem.eql(u8, name, "-0")) return .invalid;
-
-    // CanonicalNumericIndexString: ToString(ToNumber(name)) must give name back.
-    const number: f64 = value_format.parseJsNumber(name);
-
-    var buf: [64]u8 = undefined;
-    const printed = if (std.math.isNan(number))
-        "NaN"
-    else if (std.math.isPositiveInf(number))
-        "Infinity"
-    else if (std.math.isNegativeInf(number))
-        "-Infinity"
-    else
-        value_format.formatFiniteNumberAssumeCapacity(&buf, number);
-    if (!std.mem.eql(u8, name, printed)) return .none;
-    if (!std.math.isFinite(number) or @trunc(number) != number or number < 0 or number > @as(f64, @floatFromInt(std.math.maxInt(u32)))) return .invalid;
-    return .{ .index = @intFromFloat(number) };
-}
-
-/// IsTypedArrayFixedLength: false for a length-tracking view or any view on
-/// a resizable (non-shared) ArrayBuffer.
-pub fn typedArrayIsFixedLength(object: *Object) bool {
-    const payload = object.typedArrayPayloadFast() orelse return true;
-    if (payload.fixed_length == null) return false;
-    const backing = payload.backing_payload orelse return true;
-    return backing.max_byte_length == null or backing.shared_store != null;
+/// `src/exec/vm_opcodes.zig` still calls this name. The predicate body lives
+/// in `typed_array.zig`.
+pub inline fn isTypedArrayObject(object: *const Object) bool {
+    return @import("typed_array.zig").isTypedArrayObject(object);
 }
 
 fn isCompatible(current_flags: property.Flags, current_slot: property.Slot, desc: descriptor.Descriptor) bool {
@@ -10263,190 +9848,252 @@ fn indexKeyLessThan(_: void, lhs: IndexKey, rhs: IndexKey) bool {
     return lhs.index < rhs.index;
 }
 
-// --- Object.keys/values/entries own-property iteration ----------------------
-//
-// `ownEntriesArray` builds the result array for the bare-runtime
-// Object.keys/values/entries fallback. Relocated to engine core in Phase 6b-3
-// STEP 2 (it is a pure property-iteration constructor with no exec/VM deps);
-// `exec/object_ops.zig` re-exports `EntriesMode`/`ownEntriesArray`
-// unchanged for Object native records.
-
-/// Selects which projection `ownEntriesArray` produces.
-pub const EntriesMode = enum {
-    keys,
-    values,
-    entries,
-};
-
-fn ownEntriesExpectObject(value: JSValue) !*Object {
-    const header = value.refHeader() orelse return error.TypeError;
-    if (!value.is(.object)) return error.TypeError;
-    return Object.fromHeader(header);
+/// Publish an initialized object to the GC with its allocation size
+/// supplied by the caller, which already computed the layout. The only
+/// object-creation threshold check is `collectBeforeObjectAllocation`,
+/// immediately before the body allocation (QuickJS `js_trigger_gc` in
+/// `JS_NewObjectFromShape`); registration never re-evaluates it.
+inline fn registerObjectWithBytes(rt: *JSRuntime, object: *Object, bytes: usize) !void {
+    // QuickJS `add_gc_object` has no owner check. A bare assert would still
+    // read the thread id in ReleaseFast, so the check exists only with safety.
+    if (comptime std.debug.runtime_safety) std.debug.assert(rt.isOwnerThread());
+    try rt.gc.addInitializedWithSize(object.gcHeader(), bytes);
 }
 
-fn entriesAtomToStringValue(rt: *JSRuntime, atom_id: atom.Atom) !JSValue {
-    return rt.atoms.toStringValue(rt, atom_id);
-}
-
-fn entryArrayValue(rt: *JSRuntime, key: atom.Atom, value: JSValue, prototype: ?*Object) !JSValue {
-    var rooted_value = value;
-    var rooted_key_value = JSValue.undefinedValue();
-    var rooted_array = JSValue.undefinedValue();
-    var root_frame = runtime_mod.rootValues(.{ &rooted_value, &rooted_key_value, &rooted_array });
-    root_frame.activate(rt);
-    defer root_frame.deactivate(rt);
-
-    const arr = try Object.createArray(rt, prototype);
-    rooted_array = arr.value();
-    errdefer {
-        Object.destroyFromHeader(rt, arr.gcHeader());
-        rooted_array = JSValue.undefinedValue();
+/// GC-list unlink and free-byte accounting for an object teardown, with
+/// the allocation size supplied by `destroyFromHeader` (the sole caller),
+/// which already computed the layout. The weak/borrowed side-table links
+/// were detached earlier in `destroyFromHeader`, because they borrow
+/// payload-owned storage.
+fn unregisterObjectWithBytes(rt: *JSRuntime, object: *Object, bytes: usize) void {
+    if (comptime std.debug.runtime_safety) std.debug.assert(rt.isOwnerThread());
+    if (builtin.mode == .Debug) {
+        // Catch any future payload finalizer that re-registers mid-teardown.
+        if (object.weakReferenceHolderLink()) |link| std.debug.assert(!link.registered);
+        std.debug.assert(!object.flags.is_borrowed_reference_holder);
     }
-    rooted_key_value = try entriesAtomToStringValue(rt, key);
-    // qjs js_create_array: pre-sized dense fast array instead of
-    // two per-element defineOwnProperty. The fresh array and the fresh key string
-    // both cross `createArrayStorageSlice`, so both are in the root frame above
-    // (the key string used to be a bare local, rooted by nothing).
-    // TGC S4-b spec 2.2: `.array_storage` GC cell.
-    const elements = try Object.createArrayStorageSlice(rt, 2);
-    elements[0] = rooted_key_value;
-    elements[1] = rooted_value;
-    arr.adoptDenseArrayElementsAssumingEmpty(rt, elements);
-    arr.flags.may_have_indexed_properties = true;
-    return arr.value();
+    // The tracing sweeps detach and stamp condemned objects before their
+    // resource pass. In that state the generic unlink boundary would only
+    // rediscover facts already established by condemnation; retain its
+    // mandatory byte debit without paying the outlined call.
+    if (gc.headerCondemned(object.gcHeaderConst())) {
+        rt.gc.recordDetachedHeapFreeWithBytes(object.gcHeader(), bytes);
+        return;
+    }
+    rt.gc.unlinkObjectWithBytes(object.gcHeader(), bytes);
 }
 
-pub fn ownEntriesArray(rt: *JSRuntime, value: JSValue, mode: EntriesMode, prototype: ?*Object) !JSValue {
-    var rooted_value = value;
-    var out_value = JSValue.undefinedValue();
-    var element_val = JSValue.undefinedValue();
-    var root_frame = runtime_mod.rootValues(.{ &rooted_value, &out_value, &element_val });
-    root_frame.activate(rt);
-    defer root_frame.deactivate(rt);
-
-    const object = try ownEntriesExpectObject(rooted_value);
-    const owned_keys = try object.ownKeys(rt);
-    defer Object.freeKeys(rt, owned_keys);
-
-    // qjs js_object_keys/values/entries uses JS_NewArray:
-    // the result walks the realm Array.prototype, not a class-name fallback.
-    const out = try Object.createArray(rt, prototype);
-    out_value = out.value();
-    errdefer {
-        Object.destroyFromHeader(rt, out.gcHeader());
-        out_value = JSValue.undefinedValue();
-    }
-    var out_index: u32 = 0;
-    for (owned_keys) |key| {
-        if (rt.atoms.isPublicSymbol(key)) continue;
-        const desc = (try object.getOwnProperty(rt, key)) orelse continue;
-        if (!(desc.enumerable orelse false)) continue;
-        element_val = switch (mode) {
-            .keys => try entriesAtomToStringValue(rt, key),
-            .values => try object.getProperty(key),
-            .entries => try entryArrayValue(rt, key, try object.getProperty(key), prototype),
-        };
-        defer {
-            element_val = JSValue.undefinedValue();
+test "home object old to young writes survive minor collection" {
+    for ([_]bool{ false, true }) |auxiliary| {
+        for ([_]bool{ false, true }) |nursery| {
+            const rt = try JSRuntime.create(std.testing.allocator, .{});
+            defer rt.destroy();
+            rt.gc.nursery.enabled = nursery;
+            var roots = runtime_mod.ExactValueRoots(1){};
+            try roots.activate(rt);
+            defer roots.deactivate();
+            const closure = try Object.create(rt, class.ids.bytecode_function, null);
+            try (try roots.ref(0)).set(rt, closure.value());
+            if (auxiliary) _ = try closure.ensureFunctionRarePayload(rt);
+            _ = try rt.collectForTest();
+            try std.testing.expect(!closure.gcHeader().meta().flags.young);
+            const home = try Object.createPlainObject(rt, null);
+            const before = @intFromPtr(home);
+            try closure.setFunctionHomeObject(rt, home);
+            try std.testing.expect(rt.gc.generation.remembered.contains(@intFromPtr(closure.gcHeader())));
+            _ = try @import("gc_trace_stw.zig").collectMinor(rt, .declared_only);
+            const stored = closure.functionHomeObject().?;
+            try std.testing.expect(rt.gc.containsHeader(stored.gcHeader()));
+            try std.testing.expectEqual(nursery, @intFromPtr(stored) != before);
+            try closure.setFunctionHomeObject(rt, null);
+            _ = try rt.collectForTest();
+            try std.testing.expect(!rt.gc.containsHeader(stored.gcHeader()));
         }
-        try out.defineOwnProperty(rt, atom.Atom.taggedInt(out_index), descriptor.Descriptor.data(element_val, .all));
-        out_index += 1;
     }
-    return out_value;
 }
-
-// --- String Iterator factory ------------------------------------------------
-//
-// `stringIterator` builds a fresh String Iterator object for a string (or
-// String wrapper) receiver. It is the fast-path engine primitive the exec
-// iteration machinery (for-of, spread, async-from-sync) uses instead of the
-// `String.prototype[Symbol.iterator]` property lookup. Relocated to engine core
-// in Phase 6b-3 STEP 6: it is a pure object/native-function constructor that
-// touches only core string/object/function primitives (no exec/VM deps and no
-// realm/global state). The produced iterator's `next` carries the
-// `(.string, iterator_next)` native id, so the actual `next` body still
-// dispatches through the record table into `exec/string_ops.zig`.
-
-/// Extract the primitive string value from a string or String-wrapper receiver.
-fn stringIteratorPrimitiveValue(value: JSValue) !JSValue {
-    if (value.isString()) return value;
-    const header = value.refHeader() orelse return error.TypeError;
-    if (!value.is(.object)) return error.TypeError;
-    const object = Object.fromHeader(header);
-    if (object.class_id != class.ids.string) return error.TypeError;
-    return (object.objectData() orelse return error.TypeError);
+test "home object tracing exposes real slots on success and failure" {
+    for ([_]bool{ false, true }) |auxiliary| {
+        for ([_]bool{ false, true }) |fail| {
+            const rt = try JSRuntime.create(std.testing.allocator, .{});
+            defer rt.destroy();
+            const closure = try Object.create(rt, class.ids.bytecode_function, null);
+            const original = try Object.createPlainObject(rt, null);
+            const replacement = try Object.createPlainObject(rt, null);
+            try closure.setFunctionHomeObject(rt, original);
+            if (auxiliary) _ = try closure.ensureFunctionRarePayload(rt);
+            const Probe = struct {
+                pub const gc_visit_policy: gc_visit.Policy = .partial;
+                expected: usize,
+                original: *Object,
+                replacement: *Object,
+                fail: bool,
+                actual_slot: bool = false,
+                pub fn visitObject(self: *@This(), slot: *?*Object) error{PayloadMarkFailed}!void {
+                    if (slot.* != self.original) return;
+                    self.actual_slot = @intFromPtr(slot) == self.expected;
+                    slot.* = self.replacement;
+                    if (self.fail) return error.PayloadMarkFailed;
+                }
+            };
+            var probe = Probe{
+                .expected = if (closure.bytecodeFunctionAux()) |aux| @intFromPtr(&aux.home_object) else @intFromPtr(&closure.bytecodeArm().*.home_or_aux),
+                .original = original,
+                .replacement = replacement,
+                .fail = fail,
+            };
+            if (fail) {
+                try std.testing.expectError(error.PayloadMarkFailed, closure.traceChildEdgesFallible(rt, &probe));
+            } else {
+                try closure.traceChildEdgesFallible(rt, &probe);
+            }
+            try std.testing.expect(probe.actual_slot);
+            try std.testing.expectEqual(replacement, closure.functionHomeObject().?);
+        }
+    }
 }
-
-fn defineStringIteratorToStringTag(rt: *JSRuntime, object: *Object, tag_name: []const u8) !void {
-    var values = [_]JSValue{ object.value(), JSValue.undefinedValue() };
-    const slots: []JSValue = &values;
-    const slices = [_]runtime_mod.ValueRootSlice{.{ .mutable = &slots }};
-    var roots = runtime_mod.ValueRootFrame{ .slices = &slices };
-    roots.activate(rt);
-    defer roots.deactivate(rt);
-    const tag_atom = atom.predefinedId("Symbol.toStringTag", .symbol) orelse return error.TypeError;
-    values[1] = (try string.String.createUtf8(rt, tag_name)).value();
-    try Object.fromHeader(values[0].refHeader().?).defineOwnProperty(rt, tag_atom, descriptor.Descriptor.data(values[1], .{ .configurable = true }));
-}
-
-fn stringIteratorPrototype(ctx: *context_mod.RealmContext, tag_name: []const u8) !*Object {
-    const rt = ctx.runtime;
-    var values = [_]JSValue{ JSValue.undefinedValue(), JSValue.undefinedValue(), JSValue.undefinedValue() };
-    const slots: []JSValue = &values;
-    const slices = [_]runtime_mod.ValueRootSlice{.{ .mutable = &slots }};
-    const headers = [_]runtime_mod.HeaderRootValue{.{ .header = &ctx.header }};
-    var roots = runtime_mod.ValueRootFrame{ .slices = &slices, .headers = &headers };
-    roots.activate(rt);
-    defer roots.deactivate(rt);
-    values[0] = (try Object.create(rt, class.ids.object, null)).value();
-    try defineStringIteratorToStringTag(rt, Object.fromHeader(values[0].refHeader().?), "Iterator");
-    values[1] = (try Object.create(rt, class.ids.object, Object.fromHeader(values[0].refHeader().?))).value();
-    try defineStringIteratorToStringTag(rt, Object.fromHeader(values[1].refHeader().?), tag_name);
-    values[2] = try function.nativeFunction(ctx, "next", 0);
-    const next_object = (values[2].refHeader() orelse return error.TypeError);
-    if (!values[2].is(.object)) return error.TypeError;
-    const next_function = Object.fromHeader(next_object);
-    next_function.setNativeBuiltinIdAndRecord(function.nativeBuiltinId(.string, @intFromEnum(host_function.builtin_method_ids.string.PrototypeMethod.iterator_next)));
-    try Object.fromHeader(values[1].refHeader().?).defineOwnProperty(rt, atom.predefinedId("next", .string).?, descriptor.Descriptor.data(values[2], .method));
-    return Object.fromHeader(values[1].refHeader().?);
-}
-
-pub fn stringIterator(ctx: *context_mod.RealmContext, receiver: JSValue) !JSValue {
-    const rt = ctx.runtime;
-    var values = [_]JSValue{ receiver, JSValue.undefinedValue(), JSValue.undefinedValue() };
-    const slots: []JSValue = &values;
-    const slices = [_]runtime_mod.ValueRootSlice{.{ .mutable = &slots }};
-    const headers = [_]runtime_mod.HeaderRootValue{.{ .header = &ctx.header }};
-    var root_frame = runtime_mod.ValueRootFrame{ .slices = &slices, .headers = &headers };
-    root_frame.activate(rt);
-    defer root_frame.deactivate(rt);
-
-    values[0] = try stringIteratorPrimitiveValue(values[0]);
-    values[1] = (try stringIteratorPrototype(ctx, "String Iterator")).value();
-    values[2] = (try Object.create(rt, class.ids.string_iterator, Object.fromHeader(values[1].refHeader().?))).value();
-    const object = Object.fromHeader(values[2].refHeader().?);
-    try object.setOptionalValueSlot(rt, object.iteratorTargetSlot(), values[0]);
-    Object.fromHeader(values[2].refHeader().?).iteratorIndexSlot().* = 0;
-    return values[2];
-}
-
-test "M-cut Object handle conversion keeps the head at the handle address" {
+test "home object tracing resolves auxiliary storage before child slots" {
     const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
-    const object = try Object.createPlainObject(rt, null);
-
-    // The Object pointer IS the GC handle and the body start; the metadata
-    // prefix sits at handle-8 and no resident successor word exists.
-    try std.testing.expectEqual(object, Object.fromHeader(object.gcHeader()));
-    try std.testing.expectEqual(
-        @intFromPtr(object) - gc.metadata_prefix_size,
-        @intFromPtr(object.gcHeader().meta()),
-    );
-    // TGC S4-e retired the Pass-B park, so nothing borrows the Shape word for
-    // a temporary successor any more.
-    try std.testing.expectEqual(class.ids.object, object.class_id);
+    const closure = try Object.create(rt, class.ids.bytecode_function, null);
+    const original = try Object.createPlainObject(rt, null);
+    const replacement = try Object.createPlainObject(rt, null);
+    try closure.setFunctionHomeObject(rt, original);
+    _ = try closure.ensureFunctionRarePayload(rt);
+    const old_aux = closure.bytecodeFunctionAux().?;
+    old_aux.rare.source = JSValue.int32(11);
+    var moved_aux = old_aux.*;
+    moved_aux.rare.source = JSValue.int32(73);
+    const stored_word = closure.bytecodeArm().*.home_or_aux;
+    // This visitor simulates storage relocation into a local copy. Restore
+    // the registered allocation before Runtime tears down the real heap.
+    defer closure.bytecodeArm().*.home_or_aux = stored_word;
+    const Probe = struct {
+        pub const gc_visit_policy: gc_visit.Policy = .partial;
+        old_aux: *BytecodeFunctionAux,
+        moved_aux: *BytecodeFunctionAux,
+        replacement: *Object,
+        storage_repaired: bool = false,
+        home_repaired: bool = false,
+        source_visited: bool = false,
+        pub fn storageCell(self: *@This(), edge: gc_visit.CellSlot) void {
+            if (edge.address() != @intFromPtr(self.old_aux)) return;
+            edge.rebind(@intFromPtr(self.moved_aux));
+            self.storage_repaired = true;
+        }
+        pub fn visitObject(self: *@This(), slot: *?*Object) void {
+            if (slot != &self.moved_aux.home_object) return;
+            self.home_repaired = self.storage_repaired;
+            slot.* = self.replacement;
+        }
+        pub fn visitValue(self: *@This(), slot: *JSValue) void {
+            if (slot == &self.moved_aux.rare.source.?) self.source_visited = self.storage_repaired;
+        }
+    };
+    var probe = Probe{ .old_aux = old_aux, .moved_aux = &moved_aux, .replacement = replacement };
+    try closure.traceChildEdgesFallible(rt, &probe);
+    try std.testing.expect(probe.storage_repaired and probe.home_repaired and probe.source_visited);
+    try std.testing.expectEqual(replacement, closure.functionHomeObject().?);
+    try std.testing.expectEqual(original, old_aux.home_object.?);
+    try std.testing.expectEqual(Object.bytecode_function_aux_tag, @intFromPtr(closure.bytecodeArm().*.home_or_aux.?) & Object.bytecode_function_aux_tag);
 }
-
+test "root adapter bytecode preserves visitor repairs on failure" {
+    for ([_]bool{ false, true }) |fail| {
+        const rt = try JSRuntime.create(std.testing.allocator, .{});
+        defer rt.destroy();
+        const closure = try Object.create(rt, class.ids.bytecode_function, null);
+        // Only the carrier addresses are observed; no bytecode body or GC
+        // metadata is read by this partial visitor. Unlink before teardown.
+        var original: FunctionBytecode = undefined;
+        var replacement: FunctionBytecode = undefined;
+        closure.bytecodeArm().*.function_bytecode = &original;
+        defer closure.bytecodeArm().*.function_bytecode = null;
+        const Probe = struct {
+            pub const gc_visit_policy: gc_visit.Policy = .partial;
+            original: JSValue,
+            replacement: JSValue,
+            fail: bool,
+            pub fn visitValue(self: *@This(), slot: *JSValue) !void {
+                if (!slot.same(self.original)) return;
+                slot.* = self.replacement;
+                if (self.fail) return error.PayloadMarkFailed;
+            }
+        };
+        var probe = Probe{ .original = JSValue.functionBytecode(&original.header), .replacement = JSValue.functionBytecode(&replacement.header), .fail = fail };
+        if (fail) try std.testing.expectError(error.PayloadMarkFailed, closure.traceChildEdgesFallible(rt, &probe)) else try closure.traceChildEdgesFallible(rt, &probe);
+        try std.testing.expectEqual(&replacement, closure.bytecodeArm().*.function_bytecode.?);
+    }
+}
+test "root adapter AUTOINIT Realm preserves visitor repairs on failure" {
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const original = try context_mod.RealmContext.create(rt, .{});
+    defer original.destroy();
+    const replacement = try context_mod.RealmContext.create(rt, .{});
+    defer replacement.destroy();
+    for ([_]bool{ false, true }) |fail| {
+        var entry = property.Entry{ .slot = .{ .auto_init = property.AutoInitSlot.retainPrototype(&original.header) } };
+        const Probe = struct {
+            pub const gc_visit_policy: gc_visit.Policy = .partial;
+            replacement: *context_mod.RealmContext,
+            fail: bool,
+            pub fn visitRealm(self: *@This(), slot: *?*context_mod.RealmContext) !void {
+                slot.* = self.replacement;
+                if (self.fail) return error.PayloadMarkFailed;
+            }
+        };
+        var probe = Probe{ .replacement = replacement, .fail = fail };
+        if (fail) try std.testing.expectError(error.PayloadMarkFailed, Object.traceUnusualPropertyFallible(&probe, &entry, .{ .kind = .auto_init })) else try Object.traceUnusualPropertyFallible(&probe, &entry, .{ .kind = .auto_init });
+        try std.testing.expectEqual(&replacement.header, entry.slot.auto_init.realm_and_id.realmHeader().?);
+    }
+}
+test "accessor tracing exposes real slots and preserves repairs on failure" {
+    const rt = try JSRuntime.create(std.testing.allocator, .{});
+    defer rt.destroy();
+    const original = try Object.createPlainObject(rt, null);
+    const replacement = try Object.createPlainObject(rt, null);
+    for ([_]bool{ false, true }) |setter| {
+        for ([_]bool{ false, true }) |fail| {
+            var entry = property.Entry{ .slot = .{ .accessor = property.Accessor.fromBorrowedValues(
+                if (setter) JSValue.undefinedValue() else original.value(),
+                if (setter) original.value() else JSValue.undefinedValue(),
+            ) } };
+            const Probe = struct {
+                pub const gc_visit_policy: gc_visit.Policy = .partial;
+                expected_address: usize,
+                original: *Object,
+                replacement: *Object,
+                fail: bool,
+                actual_slot: bool = false,
+                pub fn visitValue(self: *@This(), slot: *JSValue) error{PayloadMarkFailed}!void {
+                    if (slot.bits != self.original.value().bits) return;
+                    self.actual_slot = @intFromPtr(slot) == self.expected_address;
+                    slot.* = self.replacement.value();
+                    if (self.fail) return error.PayloadMarkFailed;
+                }
+                pub fn visitObject(self: *@This(), slot: *?*Object) error{PayloadMarkFailed}!void {
+                    if (slot.* != self.original) return;
+                    self.actual_slot = @intFromPtr(slot) == self.expected_address;
+                    slot.* = self.replacement;
+                    if (self.fail) return error.PayloadMarkFailed;
+                }
+            };
+            var probe = Probe{
+                .expected_address = if (setter) @intFromPtr(&entry.slot.accessor.setter) else @intFromPtr(&entry.slot.accessor.getter),
+                .original = original,
+                .replacement = replacement,
+                .fail = fail,
+            };
+            if (fail) {
+                try std.testing.expectError(error.PayloadMarkFailed, Object.traceUnusualPropertyFallible(&probe, &entry, .{ .kind = .accessor }));
+            } else {
+                try Object.traceUnusualPropertyFallible(&probe, &entry, .{ .kind = .accessor });
+            }
+            try std.testing.expect(probe.actual_slot);
+            const repaired = if (setter) entry.slot.accessor.setterValue() else entry.slot.accessor.getterValue();
+            try std.testing.expectEqual(replacement.value().bits, repaired.bits);
+        }
+    }
+}
 test "first named property allocates initial_prop_size slots" {
     const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
@@ -10458,331 +10105,6 @@ test "first named property allocates initial_prop_size slots" {
     try std.testing.expectEqual(@as(usize, shape.initial_prop_size), object.shape_ref.prop_size);
     try std.testing.expectEqual(@as(u32, 1), object.shape_ref.prop_count);
 }
-
-test "block Object accounting uses physical cell body capacity" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-
-    const objects = [_]*Object{
-        try Object.create(rt, class.ids.object, null),
-        try Object.createArray(rt, null),
-        try Object.createPlainObjectReserved2(rt, null),
-    };
-
-    const calculated = comptime [_]usize{
-        block_heap.accountedBodyBytesForRequest(
-            gc.metadata_prefix_size + Object.objectBodyBytes(class.ids.object, false),
-            gc.metadata_prefix_size,
-        ).?,
-        block_heap.accountedBodyBytesForRequest(
-            gc.metadata_prefix_size + Object.objectBodyBytes(class.ids.array, false),
-            gc.metadata_prefix_size,
-        ).?,
-        block_heap.accountedBodyBytesForRequest(
-            gc.metadata_prefix_size + Object.objectBodyBytes(class.ids.object, true),
-            gc.metadata_prefix_size,
-        ).?,
-    };
-    for (objects, calculated) |object, arithmetic_bytes| {
-        const raw_cell_bytes = rt.gc.block_heap.rawBytesForCell(
-            @intFromPtr(object),
-            gc.metadata_prefix_size,
-        ) orelse return error.TestUnexpectedResult;
-        const expected = raw_cell_bytes - gc.metadata_prefix_size;
-        try std.testing.expectEqual(expected, arithmetic_bytes);
-        try std.testing.expectEqual(expected, object.bodyBytes());
-        try std.testing.expectEqual(expected, object.allocationSize(rt));
-        try std.testing.expectEqual(
-            expected,
-            gc.Registry.heapByteSizeFromHeader(rt, object.gcHeaderConst()),
-        );
-    }
-}
-
-test "shape-sized trailing property storage grows externally and compacts in place" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-
-    // Put a wider empty root at the head of the same hash chain. Tracing's
-    // Reserved2 fast lookup must reject it and repair to an exact-capacity
-    // Shape; adopting it would make Shape.prop_size exceed the two-slot tail.
-    _ = try rt.shapes.createObjectRootWithPropertyCapacity(rt, null, 4);
-
-    const object = try Object.createPlainObjectReserved2(rt, null);
-    const object_address = @intFromPtr(object);
-    try std.testing.expectEqual(@as(u32, Object.trailing_property_capacity), object.shape_ref.prop_size);
-    try std.testing.expect(object.propertyStorageIsInline());
-    try std.testing.expect(object.hasSlots2Layout());
-    // TGC S4-e: the layout bit moved out of the retired `weakref_count` word
-    // into the flags word; nothing else in the flags may disturb it.
-    try std.testing.expect(object.flags.extensible);
-    try std.testing.expectEqual(class.PayloadKind.none, object.flags.class_payload_kind);
-    try std.testing.expectEqual(
-        object_address + Object.slots2_property_storage_offset,
-        @intFromPtr(object.propertyStorageBase()),
-    );
-    try std.testing.expectEqual(
-        Object.objectBodyBytes(class.ids.object, true),
-        object.allocationSize(rt),
-    );
-
-    const names = [_][]const u8{
-        "tail_0", "tail_1", "tail_2", "tail_3", "tail_4",
-        "tail_5", "tail_6", "tail_7", "tail_8", "tail_9",
-    };
-    var atoms: [names.len]atom.Atom = undefined;
-    for (names, 0..) |name, index| atoms[index] = try rt.internAtom(name);
-
-    for (atoms, 0..) |name, index| {
-        try object.defineOwnProperty(
-            rt,
-            name,
-            descriptor.Descriptor.data(JSValue.int32(@intCast(index)), .all),
-        );
-        try std.testing.expectEqual(object_address, @intFromPtr(object));
-    }
-    try std.testing.expect(!object.propertyStorageIsInline());
-    try std.testing.expect(object.hasSlots2Layout());
-    try std.testing.expectEqual(
-        Object.objectBodyBytes(class.ids.object, true),
-        object.allocationSize(rt),
-    );
-
-    // Eight tombstones meet the ordinary compaction trigger. The two live
-    // values fit the immutable tail, so compaction frees only the external
-    // buffer and retargets the descriptor; the Object never relocates.
-    for (atoms[0..8]) |name| try std.testing.expect(try object.deleteProperty(rt, name));
-    try std.testing.expectEqual(object_address, @intFromPtr(object));
-    try std.testing.expect(object.propertyStorageIsInline());
-    try std.testing.expect(object.hasSlots2Layout());
-    try std.testing.expectEqual(@as(u32, 2), object.shape_ref.prop_count);
-    try std.testing.expectEqual(@as(u32, 2), object.shape_ref.prop_size);
-    try std.testing.expectEqual(@as(?i32, 8), (try object.getProperty(atoms[8])).as(.int));
-    try std.testing.expectEqual(@as(?i32, 9), (try object.getProperty(atoms[9])).as(.int));
-
-    try rt.gc.verifyObjectPropertyStorageLayouts(rt);
-}
-
-test "slots2 spill OOM rollback restores inline representation" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const object = try Object.createPlainObjectReserved2(rt, null);
-    const names = [_][]const u8{ "m_oom_0", "m_oom_1", "m_oom_2" };
-    var atoms: [names.len]atom.Atom = undefined;
-    for (names, 0..) |name, index| atoms[index] = try rt.internAtom(name);
-    for (atoms[0..2], 0..) |name, index| {
-        try object.defineOwnProperty(
-            rt,
-            name,
-            descriptor.Descriptor.data(JSValue.int32(@intCast(index)), .all),
-        );
-    }
-    try std.testing.expect(object.propertyStorageIsInline());
-
-    const spill_bytes = @sizeOf(property.Entry) * shape.propertyCapacityForNeeded(3);
-    rt.setNativeBytesLimitForTest(rt.allocation_diagnostics.allocated_bytes + spill_bytes);
-    try std.testing.expectError(
-        error.OutOfMemory,
-        object.defineOwnProperty(rt, atoms[2], descriptor.Descriptor.data(JSValue.int32(2), .all)),
-    );
-    rt.setNativeBytesLimitForTest(null);
-
-    try std.testing.expect(object.propertyStorageIsInline());
-    try std.testing.expectEqual(@as(u32, 2), object.shape_ref.prop_count);
-    try std.testing.expectEqual(@as(?i32, 0), (try object.getProperty(atoms[0])).as(.int));
-    try std.testing.expectEqual(@as(?i32, 1), (try object.getProperty(atoms[1])).as(.int));
-    try rt.gc.verifyObjectPropertyStorageLayouts(rt);
-}
-
-test "deleteProperty reports OOM instead of a non-configurable property" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-    const list = try Object.createArray(rt, null);
-    for (0..3) |index| try std.testing.expect(try list.appendDenseArrayIndex(rt, @intCast(index), atom.Atom.taggedInt(@intCast(index)), JSValue.int32(@intCast(index))));
-    try std.testing.expect(list.flags.fast_array);
-
-    // Deleting a dense element first converts the elements to properties.
-    rt.setNativeBytesLimitForTest(rt.allocation_diagnostics.allocated_bytes);
-    try std.testing.expectError(error.OutOfMemory, list.deleteProperty(rt, atom.Atom.taggedInt(1)));
-    rt.setNativeBytesLimitForTest(null);
-
-    try std.testing.expect(try list.deleteProperty(rt, atom.Atom.taggedInt(1)));
-    try std.testing.expect(!list.hasProperty(atom.Atom.taggedInt(1)));
-    try std.testing.expectEqual(@as(?i32, 2), (try list.getProperty(atom.Atom.taggedInt(2))).as(.int));
-    try std.testing.expectEqual(@as(u32, 3), list.arrayLength());
-}
-
-test "plain objects do not allocate class payload storage" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-
-    const object = try Object.create(rt, class.ids.object, null);
-
-    try std.testing.expectEqual(null, object.payloadArm().*);
-    try std.testing.expectEqual(class.PayloadKind.none, object.flags.class_payload_kind);
-    try std.testing.expect(Object.objectBodyBytes(class.ids.object, false) <= Object.post_a_object_size_baseline / 2);
-}
-
-test "iterator classes store iterator state in class payload" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-
-    const iterator = try Object.create(rt, class.ids.array_iterator, null);
-
-    try std.testing.expect(iterator.payloadArm().* != null);
-    iterator.iteratorIndexSlot().* = 7;
-    iterator.iteratorKindSlot().* = 3;
-    try std.testing.expectEqual(@as(usize, 7), iterator.iteratorIndexSlot().*);
-    try std.testing.expectEqual(@as(u8, 3), iterator.iteratorKindSlot().*);
-}
-
-test "collection classes store entries in class payload" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-
-    const map = try Object.create(rt, class.ids.map, null);
-
-    try std.testing.expect(map.payloadArm().* != null);
-    try map.collectionEntriesSlot().append(rt.nativeAllocator(), .{ .key = JSValue.int32(1), .value = JSValue.int32(2), .active = true });
-    try std.testing.expectEqual(@as(usize, 1), map.collectionEntries().len);
-    try std.testing.expectEqual(@as(i32, 1), map.collectionEntries()[0].key.as(.int).?);
-    try std.testing.expectEqual(@as(i32, 2), map.collectionEntries()[0].value.as(.int).?);
-}
-
-test "buffer and typed array state use payload storage" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-
-    const buffer = try Object.create(rt, class.ids.array_buffer, null);
-    try std.testing.expect(buffer.payloadArm().* != null);
-    try std.testing.expectEqual(class.PayloadKind.buffer, buffer.flags.class_payload_kind);
-    const bytes = try rt.allocNative(u8, 3);
-    @memset(bytes, 9);
-    try buffer.installByteStorage(rt, bytes);
-    buffer.arrayBufferMaxByteLengthSlot().* = 8;
-    try std.testing.expectEqual(@as(usize, 3), buffer.byteStorage().len);
-    try std.testing.expectEqual(@as(u8, 9), buffer.byteStorage()[0]);
-    try std.testing.expectEqual(@as(?usize, 8), buffer.arrayBufferMaxByteLength());
-
-    const view = try Object.create(rt, class.ids.object, null);
-    try view.initTypedArrayView(rt, buffer.value(), 1, 2, 1, .int16);
-    try std.testing.expect(view.payloadArm().* != null);
-    try std.testing.expectEqual(class.PayloadKind.typed_array, view.flags.class_payload_kind);
-    try std.testing.expect(view.typedArrayBuffer() != null);
-    try std.testing.expectEqual(@as(usize, 1), view.typedArrayByteOffset());
-    try std.testing.expectEqual(@as(u32, 2), view.typedArrayElementSize());
-    try std.testing.expectEqual(@as(?u32, 1), view.typedArrayFixedLength());
-    try std.testing.expectEqual(typed_array_names.Kind.int16, view.typedArrayKind());
-}
-
-test "shared buffer store reports external memory for its owner runtime" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-
-    const byte_length: usize = 4096;
-    const account_before = rt.allocation_diagnostics.allocated_bytes;
-    const store = try SharedBufferStore.create(rt, byte_length);
-    try std.testing.expectEqual(byte_length, rt.gcStats().external_bytes);
-    // Shared bytes use the process page allocator, so unlike ordinary
-    // ArrayBuffer backing they are outside the runtime's allocation account
-    // and rely on the external-pressure path for major pacing. The token
-    // registry's small bookkeeping allocation is still charged there; pin that it is
-    // metadata rather than another byte-for-byte backing charge.
-    try std.testing.expect(rt.allocation_diagnostics.allocated_bytes < account_before + byte_length);
-    const debt_after_alloc = rt.gcStats().allocation_debt;
-
-    store.release();
-    try std.testing.expectEqual(@as(usize, 0), rt.gcStats().external_bytes);
-    try std.testing.expectEqual(@as(usize, 0), rt.gcStats().external_token_count);
-    // Debt is cumulative allocation work since the last major, not current
-    // live external bytes. The live ledger above is the symmetric one.
-    try std.testing.expectEqual(debt_after_alloc, rt.gcStats().allocation_debt);
-}
-
-test "regexp internals use inline storage and lastIndex uses first shape slot" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-
-    const source = try string.String.createAscii(rt, "a+");
-
-    const regexp = try Object.createWithOwnPropertyCapacity(rt, class.ids.regexp, null, 1);
-
-    try std.testing.expectEqual(class.PayloadKind.regexp, regexp.flags.class_payload_kind);
-    try regexp.initializeRegExpLastIndex(rt);
-    try regexp.setRegexpSource(rt, source.value());
-    try regexp.setRegexpCompiledBytecode(rt, &.{ 1, 2, 3 });
-    try regexp.defineOwnProperty(
-        rt,
-        atom.ids.lastIndex,
-        descriptor.Descriptor.data(JSValue.int32(3), .none),
-    );
-
-    try std.testing.expect(regexp.regexpSource() != null);
-    try std.testing.expectEqual(@as(usize, 3), regexp.regexpCompiledBytecode().len);
-    try std.testing.expectEqual(atom.ids.lastIndex, regexp.propAtomAt(0));
-    try std.testing.expectEqual(@as(?i32, 3), regexp.regexpLastIndex().?.as(.int));
-    try std.testing.expect(!regexp.regexpLastIndexWritable());
-}
-
-test "bound function state uses payload storage" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-
-    const bound = try Object.create(rt, class.ids.bound_function, null);
-
-    try std.testing.expect(bound.payloadArm().* != null);
-    try std.testing.expectEqual(class.PayloadKind.bound_function, bound.flags.class_payload_kind);
-    bound.boundTargetSlot().* = JSValue.int32(11);
-    bound.boundThisSlot().* = JSValue.int32(22);
-    // TGC S4-c: the bound-argument array is a subordinate `.payload` GC cell,
-    // so the fixture has to mint one -- a raw buffer installed here would sit
-    // behind a `storageCell` edge with no collector prefix.
-    const args = try Object.createPayloadSliceCell(rt, JSValue, 2);
-    args[0] = JSValue.int32(33);
-    args[1] = JSValue.int32(44);
-    bound.boundArgsSlot().* = args;
-
-    try std.testing.expectEqual(@as(?i32, 11), bound.boundTarget().?.as(.int));
-    try std.testing.expectEqual(@as(?i32, 22), bound.boundThis().?.as(.int));
-    try std.testing.expectEqual(@as(usize, 2), bound.boundArgs().len);
-    try std.testing.expectEqual(@as(?i32, 33), bound.boundArgs()[0].as(.int));
-    try std.testing.expectEqual(@as(?i32, 44), bound.boundArgs()[1].as(.int));
-}
-
-test "proxy state uses payload storage" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-
-    const proxy = try Object.create(rt, class.ids.proxy, null);
-    try proxy.ensureProxyPayload(rt);
-
-    try std.testing.expect(proxy.payloadArm().* != null);
-    try std.testing.expectEqual(class.PayloadKind.proxy, proxy.flags.class_payload_kind);
-    proxy.proxyTargetSlot().* = JSValue.int32(55);
-    proxy.proxyHandlerSlot().* = JSValue.int32(66);
-
-    try std.testing.expectEqual(@as(?i32, 55), proxy.proxyTarget().?.as(.int));
-    try std.testing.expectEqual(@as(?i32, 66), proxy.proxyHandler().?.as(.int));
-}
-
-test "mapped arguments state uses inline var-ref storage" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-
-    const arguments = try Object.create(rt, class.ids.mapped_arguments, null);
-
-    try std.testing.expectEqual(class.PayloadKind.none, arguments.flags.class_payload_kind);
-    const refs = try arguments.allocateMappedArgumentsVarRefsAssumingEmpty(rt, 2);
-    refs[0] = try var_ref_mod.VarRef.createClosed(rt, JSValue.int32(77));
-    refs[1] = try var_ref_mod.VarRef.createClosed(rt, JSValue.int32(88));
-
-    try std.testing.expectEqual(@intFromPtr(refs.ptr), @intFromPtr(arguments.arrayArm().*.values));
-    try std.testing.expect(arguments.externalClassPayload() == null);
-    try std.testing.expectEqual(@as(usize, 2), arguments.argumentsVarRefs().len);
-    try std.testing.expectEqual(@as(?i32, 77), arguments.argumentsVarRefs()[0].?.varRefValue().as(.int));
-    try std.testing.expectEqual(@as(?i32, 88), arguments.argumentsVarRefs()[1].?.varRefValue().as(.int));
-}
-
 test "unmapped arguments share a prepared shape and use dense element storage" {
     const rt = try JSRuntime.create(std.testing.allocator, .{});
     defer rt.destroy();
@@ -10837,37 +10159,6 @@ test "unmapped arguments share a prepared shape and use dense element storage" {
     try std.testing.expectEqual(@as(?i32, 41), (try arguments.getProperty(atom.Atom.taggedInt(1))).as(.int));
     try std.testing.expectEqual(@as(?i32, 0), (try template.getProperty(atom.ids.length)).as(.int));
 }
-
-test "object data state uses payload storage" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-
-    const object = try Object.create(rt, class.ids.string, null);
-
-    const data = try string.String.createAscii(rt, "wrapped");
-
-    try std.testing.expect(object.payloadArm().* != null);
-    try std.testing.expectEqual(class.PayloadKind.object_data, object.flags.class_payload_kind);
-    object.objectDataSlot().* = data.value();
-    try std.testing.expect(object.objectData() != null);
-}
-
-test "array element state uses inline fast-array storage" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-
-    const dense = try Object.createArray(rt, null);
-
-    try std.testing.expectEqual(@as(u32, 0), dense.arrayArm().*.count);
-    try std.testing.expectEqual(@as(u32, 0), dense.arrayArm().*.capacity);
-    try std.testing.expectEqual(class.PayloadKind.none, dense.flags.class_payload_kind);
-    try std.testing.expect(dense.flags.fast_array);
-    try std.testing.expectEqual(ArrayStorageMode.dense, dense.arrayElementStorageMode());
-    try std.testing.expect(try dense.appendDenseArrayIndex(rt, 0, atom.Atom.taggedInt(0), JSValue.int32(7)));
-    try std.testing.expectEqual(@as(usize, 1), dense.arrayElements().len);
-    try std.testing.expectEqual(@as(?i32, 7), dense.arrayElements()[0].as(.int));
-}
-
 test "finalizing tombstone shape reads as an empty props-first shape" {
     // A class finalizer reads properties through this shape; every bucket
     // must be empty so no lookup indexes past `prop_count == 0`.
@@ -10879,131 +10170,8 @@ test "finalizing tombstone shape reads as an empty props-first shape" {
     }
 }
 
-test "promise state uses payload storage" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-
-    const promise = try Object.create(rt, class.ids.promise, null);
-
-    try std.testing.expect(promise.payloadArm().* != null);
-    try std.testing.expectEqual(class.PayloadKind.promise, promise.flags.class_payload_kind);
-    try promise.setPromiseResult(rt, JSValue.int32(101));
-    promise.promiseIsRejectedSlot().* = true;
-
-    try std.testing.expectEqual(@as(?i32, 101), promise.promiseResult().?.as(.int));
-    try std.testing.expect(promise.promiseIsRejected());
-}
-
-test "generator state uses payload storage" {
-    const rt = try JSRuntime.create(std.testing.allocator, .{});
-    defer rt.destroy();
-
-    const generator = try Object.create(rt, class.ids.generator, null);
-
-    try std.testing.expect(generator.payloadArm().* != null);
-    try std.testing.expectEqual(class.PayloadKind.generator, generator.flags.class_payload_kind);
-    generator.generatorThisSlot().* = JSValue.int32(404);
-    const args = try rt.allocNative(JSValue, 1);
-    args[0] = JSValue.int32(505);
-    const stack_values = try rt.allocNative(JSValue, 1);
-    stack_values[0] = JSValue.int32(606);
-    var replacement = SuspendedExecutionStorage{
-        .stack = .{ .values = stack_values },
-        .frame = .{ .args = args },
-    };
-    generator.generatorExecutionStateSlot().replaceStorageOwned(12, std.math.maxInt(u32), &replacement, rt);
-    try std.testing.expect(replacement.isEmpty());
-    generator.generatorDoneSlot().* = true;
-    generator.generatorExecutingSlot().* = true;
-    generator.generatorStartedSlot().* = true;
-    generator.generatorJustYieldedSlot().* = true;
-
-    try std.testing.expectEqual(@as(?i32, 404), generator.generatorThis().?.as(.int));
-    try std.testing.expectEqual(@as(usize, 1), generator.generatorArgs().len);
-    try std.testing.expectEqual(@as(?i32, 505), generator.generatorArgs()[0].as(.int));
-    try std.testing.expectEqual(@as(usize, 12), generator.generatorPc());
-    try generator.generatorExecutionStateSlot().storage.stack.ensureAdditionalWithResidentBacking(rt, 8, 1, false);
-    try std.testing.expectEqual(@as(?i32, 606), generator.generatorExecutionState().storage.stack.values[0].as(.int));
-    var moved: SuspendedExecutionStorage = .{};
-    generator.generatorExecutionStateSlot().storage.moveInto(&moved);
-    defer moved.deinit(rt);
-    try std.testing.expect(generator.generatorExecutionState().storage.isEmpty());
-    try std.testing.expectEqual(@as(usize, 12), generator.generatorPc());
-    try std.testing.expectEqual(@as(?i32, 606), moved.stack.values[0].as(.int));
-    try std.testing.expect(generator.generatorDone());
-    try std.testing.expect(generator.generatorExecuting());
-    try std.testing.expect(generator.generatorStarted());
-    try std.testing.expect(generator.generatorJustYielded());
-}
-
-test "generator bound and proxy payloads carry no realm compensation" {
-    try std.testing.expect(!@hasField(GeneratorPayload, "realm_global_ptr"));
-    try std.testing.expect(!@hasField(GeneratorPayload, "borrowed_holder_index_lo"));
-    try std.testing.expect(!@hasField(GeneratorPayload, "borrowed_holder_index_mid"));
-    try std.testing.expect(!@hasField(GeneratorPayload, "borrowed_holder_index_hi"));
-    try std.testing.expect(!@hasField(BoundFunctionPayload, "realm_global"));
-    try std.testing.expect(!@hasField(BoundFunctionPayload, "realm_global_ptr"));
-    try std.testing.expect(!@hasField(ProxyPayload, "realm_global_ptr"));
-}
-
-test "leaf noncarrier payloads carry no borrowed realm compensation" {
-    try std.testing.expect(!@hasField(OrdinaryPayload, "realm_global_ptr"));
-    try std.testing.expect(!@hasField(ObjectDataPayload, "realm_global_ptr"));
-    try std.testing.expect(!@hasField(OrdinaryPayload, "typed_array_array_buffer_prototype"));
-    try std.testing.expect(!@hasField(FunctionRarePayload, "primitive_prototypes"));
-    try std.testing.expect(!@hasField(FunctionRarePayload, "realm_type_error_constructor"));
-    try std.testing.expect(!@hasField(BufferPayload, "realm_global_ptr"));
-    try std.testing.expect(!@hasField(ArgumentsPayload, "realm_global_ptr"));
-    try std.testing.expect(!@hasField(VarRefPayload, "realm_global_ptr"));
-    try std.testing.expectEqual(class.PayloadKind.none, class.standardPayloadKind(class.ids.module_ns));
-    try std.testing.expect(!@hasField(PromisePayload, "realm_global_ptr"));
-    try std.testing.expect(!@hasField(WeakRefPayload, "realm_global_ptr"));
-    try std.testing.expect(!@hasField(RegExpPayload, "realm_global_ptr"));
-    try std.testing.expect(!@hasField(TypedArrayPayload, "realm_global_ptr"));
-    try std.testing.expect(!@hasField(IteratorPayload, "realm_global_ptr"));
-    try std.testing.expect(!@hasField(CollectionPayload, "realm_global_ptr"));
-    try std.testing.expect(!@hasField(DisposableStackPayload, "realm_global_ptr"));
-}
-
-test "object payloads carry no private-name remap side tables" {
-    try std.testing.expect(!@hasField(OrdinaryPayload, "private_remap_from"));
-    try std.testing.expect(!@hasField(OrdinaryPayload, "private_remap_to"));
-    try std.testing.expect(!@hasField(FunctionRarePayload, "private_remap_from"));
-    try std.testing.expect(!@hasField(FunctionRarePayload, "private_remap_to"));
-    try std.testing.expect(!@hasField(FunctionRarePayload, "super_constructor"));
-}
-
-/// Publish an initialized object to the GC with its allocation size
-/// supplied by the caller, which already computed the layout. The only
-/// object-creation threshold check is `collectBeforeObjectAllocation`,
-/// immediately before the body allocation (QuickJS `js_trigger_gc` in
-/// `JS_NewObjectFromShape`); registration never re-evaluates it.
-inline fn registerObjectWithBytes(rt: *JSRuntime, object: *Object, bytes: usize) !void {
-    // QuickJS `add_gc_object` has no owner check. A bare assert would still
-    // read the thread id in ReleaseFast, so the check exists only with safety.
-    if (comptime std.debug.runtime_safety) std.debug.assert(rt.isOwnerThread());
-    try rt.gc.addInitializedWithSize(object.gcHeader(), bytes);
-}
-
-/// GC-list unlink and free-byte accounting for an object teardown, with
-/// the allocation size supplied by `destroyFromHeader` (the sole caller),
-/// which already computed the layout. The weak/borrowed side-table links
-/// were detached earlier in `destroyFromHeader`, because they borrow
-/// payload-owned storage.
-fn unregisterObjectWithBytes(rt: *JSRuntime, object: *Object, bytes: usize) void {
-    if (comptime std.debug.runtime_safety) std.debug.assert(rt.isOwnerThread());
-    if (builtin.mode == .Debug) {
-        // Catch any future payload finalizer that re-registers mid-teardown.
-        if (object.weakReferenceHolderLink()) |link| std.debug.assert(!link.registered);
-        std.debug.assert(!object.flags.is_borrowed_reference_holder);
-    }
-    // The tracing sweeps detach and stamp condemned objects before their
-    // resource pass. In that state the generic unlink boundary would only
-    // rediscover facts already established by condemnation; retain its
-    // mandatory byte debit without paying the outlined call.
-    if (gc.headerCondemned(object.gcHeaderConst())) {
-        rt.gc.recordDetachedHeapFreeWithBytes(object.gcHeader(), bytes);
-        return;
-    }
-    rt.gc.unlinkObjectWithBytes(object.gcHeader(), bytes);
+// Unnamed `test {}` blocks are always counted by `zig test`, so the suite
+// reference is an import under `builtin.is_test` rather than a new test.
+comptime {
+    if (builtin.is_test) _ = @import("object_test.zig");
 }

@@ -382,16 +382,16 @@ test "FunctionBytecode uses the exact QJS base and optional inline tails" {
 }
 
 test "FunctionLayout matches the QJS-order core pack" {
-    const layout = try bytecode.FunctionLayout.init(
-        true,
-        true,
-        2,
-        1,
-        2,
-        2,
-        3,
-        0,
-    );
+    const layout = try bytecode.FunctionLayout.init(.{
+        .has_debug = true,
+        .has_extension = true,
+        .cpool_count = 2,
+        .arg_count = 1,
+        .var_count = 2,
+        .closure_var_count = 2,
+        .byte_code_len = 3,
+        .prop_site_count = 0,
+    });
     const value_size = @sizeOf(core.JSValue);
     const expected_cpool_off = @sizeOf(bytecode.FunctionBytecode) +
         @sizeOf(bytecode.function_bytecode.DebugInfo);
@@ -473,16 +473,16 @@ test "FunctionLayout has no padding between QJS core segments or after extension
     };
 
     for (cases) |case| {
-        const layout = try bytecode.FunctionLayout.init(
-            case.has_debug,
-            false,
-            case.cpool_count,
-            case.arg_count,
-            case.var_count,
-            case.closure_count,
-            case.code_len,
-            0,
-        );
+        const layout = try bytecode.FunctionLayout.init(.{
+            .has_debug = case.has_debug,
+            .has_extension = false,
+            .cpool_count = case.cpool_count,
+            .arg_count = case.arg_count,
+            .var_count = case.var_count,
+            .closure_var_count = case.closure_count,
+            .byte_code_len = case.code_len,
+            .prop_site_count = 0,
+        });
         const core_end: usize = @sizeOf(bytecode.FunctionBytecode) +
             (if (case.has_debug) @as(usize, @sizeOf(bytecode.function_bytecode.DebugInfo)) else 0);
         try std.testing.expectEqual(core_end, layout.cpool_off);
@@ -529,7 +529,16 @@ test "FunctionLayout places the exact hot tail at every code-end residue" {
         });
         defer fb.destroyUnpublishedFixture(rt);
 
-        const expected = try bytecode.FunctionLayout.init(false, true, 0, 0, 0, 0, code_len, 0);
+        const expected = try bytecode.FunctionLayout.init(.{
+            .has_debug = false,
+            .has_extension = true,
+            .cpool_count = 0,
+            .arg_count = 0,
+            .var_count = 0,
+            .closure_var_count = 0,
+            .byte_code_len = code_len,
+            .prop_site_count = 0,
+        });
         const actual = fb.layout();
         const expected_hot_extension_off = actual.byte_code_end;
         const expected_total_size =
@@ -573,19 +582,55 @@ test "FunctionLayout rejects every checked size overflow class" {
     const max = std.math.maxInt(usize);
     try std.testing.expectError(
         error.BytecodeOverflow,
-        bytecode.FunctionLayout.init(false, false, max, 0, 0, 0, 0, 0),
+        bytecode.FunctionLayout.init(.{
+            .has_debug = false,
+            .has_extension = false,
+            .cpool_count = max,
+            .arg_count = 0,
+            .var_count = 0,
+            .closure_var_count = 0,
+            .byte_code_len = 0,
+            .prop_site_count = 0,
+        }),
     );
     try std.testing.expectError(
         error.BytecodeOverflow,
-        bytecode.FunctionLayout.init(false, false, 0, max, 1, 0, 0, 0),
+        bytecode.FunctionLayout.init(.{
+            .has_debug = false,
+            .has_extension = false,
+            .cpool_count = 0,
+            .arg_count = max,
+            .var_count = 1,
+            .closure_var_count = 0,
+            .byte_code_len = 0,
+            .prop_site_count = 0,
+        }),
     );
     try std.testing.expectError(
         error.BytecodeOverflow,
-        bytecode.FunctionLayout.init(false, false, 0, 0, 0, max, 0, 0),
+        bytecode.FunctionLayout.init(.{
+            .has_debug = false,
+            .has_extension = false,
+            .cpool_count = 0,
+            .arg_count = 0,
+            .var_count = 0,
+            .closure_var_count = max,
+            .byte_code_len = 0,
+            .prop_site_count = 0,
+        }),
     );
     try std.testing.expectError(
         error.BytecodeOverflow,
-        bytecode.FunctionLayout.init(true, true, 0, 0, 0, 0, max, 0),
+        bytecode.FunctionLayout.init(.{
+            .has_debug = true,
+            .has_extension = true,
+            .cpool_count = 0,
+            .arg_count = 0,
+            .var_count = 0,
+            .closure_var_count = 0,
+            .byte_code_len = max,
+            .prop_site_count = 0,
+        }),
     );
 }
 
@@ -686,7 +731,16 @@ test "FunctionBytecode raw flag bytes and packed nullable pointers are canonical
     try std.testing.expect(fb.cpool != null);
     try std.testing.expect(fb.cpoolSlice()[0].is(.undefined_value));
 
-    const expected_layout = try bytecode.FunctionLayout.init(true, true, 1, 1, 1, 1, 1, 0);
+    const expected_layout = try bytecode.FunctionLayout.init(.{
+        .has_debug = true,
+        .has_extension = true,
+        .cpool_count = 1,
+        .arg_count = 1,
+        .var_count = 1,
+        .closure_var_count = 1,
+        .byte_code_len = 1,
+        .prop_site_count = 0,
+    });
     const layout = fb.layout();
     try std.testing.expect(std.meta.eql(expected_layout, layout));
     try std.testing.expectEqual(@intFromPtr(fb) + layout.cpool_off, @intFromPtr(fb.cpool.?));
@@ -712,7 +766,16 @@ test "packed FunctionBytecode zero-count pointers stay null beside non-empty seg
     });
     defer fb.destroyUnpublishedFixture(rt);
 
-    const expected_layout = try bytecode.FunctionLayout.init(false, true, 1, 0, 1, 0, 0, 0);
+    const expected_layout = try bytecode.FunctionLayout.init(.{
+        .has_debug = false,
+        .has_extension = true,
+        .cpool_count = 1,
+        .arg_count = 0,
+        .var_count = 1,
+        .closure_var_count = 0,
+        .byte_code_len = 0,
+        .prop_site_count = 0,
+    });
     const layout = fb.layout();
     try std.testing.expect(std.meta.eql(expected_layout, layout));
     try std.testing.expect(fb.cpool != null);
@@ -745,7 +808,16 @@ test "non-empty W1c5 fixture does not force the optional extension" {
         .has_extension = false,
     });
 
-    const expected_layout = try bytecode.FunctionLayout.init(false, false, 0, 0, 0, 0, code.len, 0);
+    const expected_layout = try bytecode.FunctionLayout.init(.{
+        .has_debug = false,
+        .has_extension = false,
+        .cpool_count = 0,
+        .arg_count = 0,
+        .var_count = 0,
+        .closure_var_count = 0,
+        .byte_code_len = code.len,
+        .prop_site_count = 0,
+    });
     const layout = fb.layout();
     try std.testing.expect(std.meta.eql(expected_layout, layout));
     try std.testing.expect(!fb.hasDebug());
@@ -882,7 +954,16 @@ test "published packed FunctionBytecode preserves its exact FAM size through def
         .has_debug = true,
         .has_extension = true,
     });
-    const expected_layout = try bytecode.FunctionLayout.init(true, true, 1, 1, 1, 1, code.len, 0);
+    const expected_layout = try bytecode.FunctionLayout.init(.{
+        .has_debug = true,
+        .has_extension = true,
+        .cpool_count = 1,
+        .arg_count = 1,
+        .var_count = 1,
+        .closure_var_count = 1,
+        .byte_code_len = code.len,
+        .prop_site_count = 0,
+    });
     try std.testing.expect(std.meta.eql(expected_layout, fb.layout()));
     try std.testing.expect(fb.famBytes() > @sizeOf(bytecode.function_bytecode.DebugInfo));
     fb.publishFixtureNoFail(rt);

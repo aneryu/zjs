@@ -182,7 +182,7 @@ fn atomicsIsLockFree(
     global: *core.Object,
     args: []const core.JSValue,
 ) !core.JSValue {
-    const size_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const size_value = value_ops.argOrUndefined(args, 0);
     // ToIntegerOrInfinity, not ToInt32: 2^32 + 4 is not a lock-free size.
     const size = @trunc(try toNumberForAtomics(ctx, output, global, size_value));
     return core.JSValue.boolean(size == 1 or size == 2 or size == 4 or size == 8);
@@ -209,14 +209,14 @@ fn atomicsReadModifyWrite(
     args: []const core.JSValue,
     atomic_op: AtomicsReadModifyOp,
 ) !core.JSValue {
-    const view_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const view_value = value_ops.argOrUndefined(args, 0);
     const view = try atomicsTypedArray(ctx, global, view_value, false);
-    const index_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    const index_value = value_ops.argOrUndefined(args, 1);
     const index = try atomicsGetBufIndex(ctx, output, global, view, index_value);
 
     const is_bigint = view.typedArrayKind().isBigInt();
-    const value_arg = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
-    const replacement_arg = if (args.len >= 4) args[3] else core.JSValue.undefinedValue();
+    const value_arg = value_ops.argOrUndefined(args, 2);
+    const replacement_arg = value_ops.argOrUndefined(args, 3);
     const operand = if (atomic_op == .load) @as(u64, 0) else if (is_bigint)
         try toBigIntBitsForAtomics(ctx, output, global, value_arg)
     else
@@ -245,12 +245,12 @@ fn atomicsStore(
     global: *core.Object,
     args: []const core.JSValue,
 ) !core.JSValue {
-    const view_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const view_value = value_ops.argOrUndefined(args, 0);
     const view = try atomicsTypedArray(ctx, global, view_value, false);
-    const index_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    const index_value = value_ops.argOrUndefined(args, 1);
     const index = try atomicsGetBufIndex(ctx, output, global, view, index_value);
 
-    const value_arg = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
+    const value_arg = value_ops.argOrUndefined(args, 2);
     const is_bigint = view.typedArrayKind().isBigInt();
     const stored_value = if (is_bigint)
         try toBigIntValueForAtomics(ctx, output, global, value_arg)
@@ -275,14 +275,17 @@ fn atomicsNotify(
     global: *core.Object,
     args: []const core.JSValue,
 ) !core.JSValue {
-    const view_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const view_value = value_ops.argOrUndefined(args, 0);
     const view = try atomicsTypedArray(ctx, global, view_value, true);
     const buffer = try object_ops.atomicsBufferObject(view);
-    const index_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    const index_value = value_ops.argOrUndefined(args, 1);
     const index = try atomicsValidateAccess(ctx, output, global, view, index_value);
     const count = try atomicsNotifyCount(ctx, output, global, args);
     if (buffer.class_id != core.class.ids.shared_array_buffer or count == 0) return core.JSValue.int32(0);
-    try atomicsValidateIndex(ctx.runtime, view, index);
+    // Count coercion can run user code. Re-check detachment and bounds
+    // before touching the element; a SharedArrayBuffer cannot be detached,
+    // and a shrunk view must not reach the byte read.
+    try atomicsRevalidateIndex(ctx.runtime, view, index);
     const bytes = try atomicsElementBytes(view, index);
     const key = try atomicsWaiterKey(view, bytes);
     return core.JSValue.int32(@intCast(atomicsWakeWaiters(key, count)));
@@ -294,12 +297,12 @@ fn atomicsWait(
     global: *core.Object,
     args: []const core.JSValue,
 ) !core.JSValue {
-    const view_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const view_value = value_ops.argOrUndefined(args, 0);
     const view = try atomicsTypedArray(ctx, global, view_value, true);
     if ((try object_ops.atomicsBufferObject(view)).class_id != core.class.ids.shared_array_buffer) return throwAtomicsTypeError(ctx, global, "not a SharedArrayBuffer TypedArray");
-    const index_value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    const index_value = value_ops.argOrUndefined(args, 1);
     const index = try atomicsValidateAccess(ctx, output, global, view, index_value);
-    const expected_arg = if (args.len >= 3) args[2] else core.JSValue.undefinedValue();
+    const expected_arg = value_ops.argOrUndefined(args, 2);
     const expected = if (view.typedArrayKind().isBigInt())
         try toBigIntBitsForAtomics(ctx, output, global, expected_arg)
     else
@@ -311,7 +314,8 @@ fn atomicsWait(
     // a non-blockable thread throws TypeError instead of returning
     // "not-equal".
     if (!ctx.runtime.host_wait.can_block) return exception_ops.throwTypeErrorMessage(ctx, global, "cannot block in this thread");
-    try atomicsValidateIndex(ctx.runtime, view, index);
+    // Expected and timeout coercion can run user code before the load.
+    try atomicsRevalidateIndex(ctx.runtime, view, index);
     const bytes = try atomicsElementBytes(view, index);
     const current = atomicsReadBits(view, bytes);
     if (current != atomicsMaskBits(view, expected)) return value_ops.createStringValue(ctx.runtime, "not-equal");
@@ -831,7 +835,7 @@ fn atomicsValidateAccess(
     object: *core.Object,
     index_value: core.JSValue,
 ) !usize {
-    const length = try core.object.typedArrayLength(ctx.runtime, object);
+    const length = try core.typed_array.typedArrayLength(ctx.runtime, object);
     const index = try toIndexForAtomics(ctx, output, global, index_value);
     if (index >= length) {
         _ = try exception_ops.throwRangeErrorMessage(ctx, global, "out-of-bound access");
@@ -841,7 +845,7 @@ fn atomicsValidateAccess(
 }
 
 fn atomicsValidateIndex(rt: *core.JSRuntime, object: *core.Object, index: usize) !void {
-    const length = try core.object.typedArrayLength(rt, object);
+    const length = try core.typed_array.typedArrayLength(rt, object);
     if (index >= length) return error.InvalidArrayIndex;
 }
 
@@ -859,7 +863,7 @@ fn atomicsGetBufIndex(
     view: *core.Object,
     index_value: core.JSValue,
 ) !usize {
-    const old_len = try core.object.typedArrayLength(ctx.runtime, view);
+    const old_len = try core.typed_array.typedArrayLength(ctx.runtime, view);
     const index = try toIndexForAtomics(ctx, output, global, index_value);
     if (index >= old_len) {
         _ = try exception_ops.throwRangeErrorMessage(ctx, global, "out-of-bound access");
@@ -873,15 +877,18 @@ fn atomicsGetBufIndex(
 /// post-coercion re-check: typed_array_is_oob (detached or shrunk-resizable)
 /// -> TypeError, then the fresh count -> RangeError.
 fn atomicsRevalidateIndex(rt: *core.JSRuntime, view: *core.Object, index: usize) !void {
-    if (try core.object.typedArrayDetached(view) or try core.object.typedArrayOutOfBounds(view)) return error.TypedArrayOutOfBounds;
+    if (try core.typed_array.typedArrayDetached(view) or try core.typed_array.typedArrayOutOfBounds(view)) return error.TypedArrayOutOfBounds;
     try atomicsValidateIndex(rt, view, index);
 }
 
 fn atomicsElementBytes(object: *core.Object, index: usize) ![]u8 {
     const buffer = try object_ops.atomicsBufferObject(object);
-    if (buffer.arrayBufferDetached()) return error.TypeError;
+    // Callers revalidate detachment and bounds immediately before this read
+    // (waitAsync re-runs atomicsTypedArray). A failure here is that invariant
+    // slipping, reported as TypedArrayOutOfBounds rather than an empty error.
+    if (buffer.arrayBufferDetached()) return error.TypedArrayOutOfBounds;
     const offset = object.typedArrayByteOffset() + index * object.typedArrayElementSize();
-    if (offset + object.typedArrayElementSize() > buffer.byteStorage().len) return error.RangeError;
+    if (offset + object.typedArrayElementSize() > buffer.byteStorage().len) return error.TypedArrayOutOfBounds;
     return buffer.byteStorage()[offset..][0..object.typedArrayElementSize()];
 }
 
@@ -1006,7 +1013,7 @@ fn throwAtomicsTypeError(ctx: *core.JSContext, global: *core.Object, message: []
 /// Int32Array / BigInt64Array.
 fn atomicsTypedArray(ctx: *core.JSContext, global: *core.Object, value: core.JSValue, waitable: bool) !*core.Object {
     const object = objectFromValue(value) orelse return throwAtomicsTypeError(ctx, global, "integer TypedArray expected");
-    if (!core.object.isTypedArrayObject(object)) return throwAtomicsTypeError(ctx, global, "integer TypedArray expected");
+    if (!core.typed_array.isTypedArrayObject(object)) return throwAtomicsTypeError(ctx, global, "integer TypedArray expected");
     const kind = object.typedArrayKind();
     const ok = if (waitable)
         kind == .int32 or kind == .bigint64
@@ -1015,8 +1022,8 @@ fn atomicsTypedArray(ctx: *core.JSContext, global: *core.Object, value: core.JSV
     if (!ok) return throwAtomicsTypeError(ctx, global, "integer TypedArray expected");
     // ValidateTypedArray step 4: out of bounds (or detached) is a TypeError
     // before the index is converted.
-    if (try core.object.typedArrayDetached(object)) return throwAtomicsTypeError(ctx, global, "ArrayBuffer is detached");
-    if (try core.object.typedArrayOutOfBounds(object)) return throwAtomicsTypeError(ctx, global, "TypedArray is out of bounds");
+    if (try core.typed_array.typedArrayDetached(object)) return throwAtomicsTypeError(ctx, global, "ArrayBuffer is detached");
+    if (try core.typed_array.typedArrayOutOfBounds(object)) return throwAtomicsTypeError(ctx, global, "TypedArray is out of bounds");
     return object;
 }
 
@@ -1174,9 +1181,9 @@ fn waitAsyncRooted(
     const timeout_root = try roots.ref(4);
     const promise_root = try roots.ref(5);
     try global_root.set(rt, global.value());
-    try view_root.set(rt, if (args.len >= 1) args[0] else core.JSValue.undefinedValue());
-    try index_root.set(rt, if (args.len >= 2) args[1] else core.JSValue.undefinedValue());
-    try expected_root.set(rt, if (args.len >= 3) args[2] else core.JSValue.undefinedValue());
+    try view_root.set(rt, value_ops.argOrUndefined(args, 0));
+    try index_root.set(rt, value_ops.argOrUndefined(args, 1));
+    try expected_root.set(rt, value_ops.argOrUndefined(args, 2));
     try timeout_root.set(rt, if (args.len >= 4) args[3] else core.JSValue.float64(std.math.nan(f64)));
     var view = try atomicsTypedArray(ctx, objectFromValue(try global_root.get(rt)).?, try view_root.get(rt), true);
     if ((try object_ops.atomicsBufferObject(view)).class_id != core.class.ids.shared_array_buffer) return throwAtomicsTypeError(ctx, objectFromValue(try global_root.get(rt)).?, "not a SharedArrayBuffer TypedArray");

@@ -72,5 +72,10 @@ test {
         _ = @import("src/bytecode/tests.zig");
         _ = @import("src/libs/number_format.zig");
         _ = @import("src/libs/unicode.zig");
+        // No production decl references `core.local`, so this file-import is
+        // what collects its tests.
+        _ = @import("src/core/local.zig");
+        // Fixed list of non-CLI src files that contain a column-0 named test.
+        _ = @import("zig-out/unit_test_manifest.zig");
     }
 }

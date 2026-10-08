@@ -741,80 +741,12 @@ pub const compile_entry = struct {
         errdefer lex.freeToken(out);
 
         if ((out.kind == .slash or out.kind == .div_assign) and
-            fallbackSlashStartsRegexp(previous_token_kind))
+            token_mod.slashAfterStartsRegexp(previous_token_kind))
         {
             const slash_offset = lex.mark_pos;
             lex.freeToken(out);
             try lex.rescanRegexpInto(out, slash_offset);
         }
-    }
-
-    fn fallbackSlashStartsRegexp(previous_token_kind: ?token_mod.Kind) bool {
-        const previous = previous_token_kind orelse return true;
-        return switch (previous) {
-            .lparen,
-            .lbracket,
-            .lbrace,
-            .comma,
-            .semicolon,
-            .colon,
-            .question,
-            .assign,
-            .bang,
-            .tilde,
-            .plus,
-            .minus,
-            .star,
-            .percent,
-            .amp,
-            .pipe,
-            .caret,
-            .arrow,
-            .lte,
-            .gte,
-            .eq,
-            .strict_eq,
-            .neq,
-            .strict_neq,
-            .shl,
-            .sar,
-            .shr,
-            .land,
-            .lor,
-            .pow,
-            .double_question_mark,
-            .question_mark_dot,
-            .mul_assign,
-            .div_assign,
-            .mod_assign,
-            .plus_assign,
-            .minus_assign,
-            .shl_assign,
-            .sar_assign,
-            .shr_assign,
-            .and_assign,
-            .xor_assign,
-            .or_assign,
-            .pow_assign,
-            .land_assign,
-            .lor_assign,
-            .double_question_mark_assign,
-            .kw_return,
-            .kw_case,
-            .kw_throw,
-            .kw_delete,
-            .kw_void,
-            .kw_typeof,
-            .kw_new,
-            .kw_in,
-            .kw_instanceof,
-            .kw_do,
-            .kw_else,
-            .kw_yield,
-            .kw_await,
-            => true,
-            else => false,
-        };
     }
 
     pub const Feature = FeatureImpl;

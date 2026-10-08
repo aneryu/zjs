@@ -583,8 +583,7 @@ pub fn execPutVarRef(
         return;
     }
     if ((cell.varRefIsConstSlot().* or capture_is_const) and !isVarRefInitOpcode(opc)) {
-        _ = try throwTypeErrorMessage(ctx, global, "invalid assignment to const variable");
-        unreachable;
+        return exception_ops.throwInvalidConstVariable(ctx, global);
     }
     const assigned = adapterValueBorrow(value);
     cell.setVarRefValue(ctx.runtime, assigned);

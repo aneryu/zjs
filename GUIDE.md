@@ -206,6 +206,7 @@ mise run test-fast -- 'test-name substring'
 ```
 
 `test-fast` uses the unified test root and compile-time `--test-filter`.
+The unified root file-imports every non-CLI `src/` file that contains a column-0 `test "`, and `--test-filter` selects among those tests.
 Missing, empty, or unmatched filters fail. Use fully qualified substrings
 such as `tests.exec.` or `src.compiler.tests.`; titles containing `:` are
 unreliable filters. Changing the filter requires a new compile. Do not add

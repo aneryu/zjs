@@ -812,7 +812,9 @@ noinline fn callRawFunctionBytecode(
     args: []const core.JSValue,
     copy_argv: bool,
 ) HostError!core.JSValue {
-    _ = functionBytecodeFromValue(func) orelse return error.TypeError;
+    // The dispatcher already required the function_bytecode tag. A header
+    // that does not decode is a zero payload, not a user type mismatch.
+    _ = functionBytecodeFromValue(func) orelse return error.InvalidBytecode;
     // Class direct-call rejection is the bytecode entry OP_check_ctor, matching
     // qjs JS_CallInternal. Ordinary functions use this same undefined-new.target
     // path; no class-syntax fact is carried in the FunctionBytecode.
@@ -825,12 +827,7 @@ noinline fn callRawFunctionBytecode(
         &.{},
         output,
         global,
-        true,
-        null,
-        null,
-        core.JSValue.undefinedValue(),
-        copy_argv,
-        false,
+        .{ .copy_argv = copy_argv },
     );
 }
 
@@ -844,13 +841,25 @@ noinline fn callFunctionObjectBytecode(
     args: []const core.JSValue,
     copy_argv: bool,
 ) HostError!core.JSValue {
-    const function_value = function_object.functionBytecode() orelse return error.TypeError;
-    _ = functionBytecodeFromValue(function_value) orelse return error.TypeError;
+    // The dispatcher already selected a bytecode function class.
+    const function_value = function_object.functionBytecode() orelse return error.InvalidBytecode;
+    // functionBytecode() returns JSValue.functionBytecode of a live header.
+    _ = functionBytecodeFromValue(function_value) orelse unreachable;
     // Bound/Proxy dispatch has already recursed to this final bytecode arm.
     // The helper keeps this caller view through interrupt/stack preflight;
     // zjs_vm selects the FB Realm only after those checks.
     // OP_check_ctor owns class direct-call rejection in the function realm.
-    return callFunctionBytecodeModeStateAfterInterruptPoll(ctx, function_value, func, this_value, args, function_object.functionCaptures(), output, global, true, null, null, core.JSValue.undefinedValue(), copy_argv, false);
+    return callFunctionBytecodeModeStateAfterInterruptPoll(
+        ctx,
+        function_value,
+        func,
+        this_value,
+        args,
+        function_object.functionCaptures(),
+        output,
+        global,
+        .{ .copy_argv = copy_argv },
+    );
 }
 
 noinline fn callNativeCallableObject(
@@ -1108,7 +1117,7 @@ pub fn functionHasInstanceCall(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
-    const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const value = value_ops.argOrUndefined(args, 0);
     return core.JSValue.boolean(try ordinaryHasInstance(ctx, output, global, this_value, value, caller_function, caller_frame));
 }
 
@@ -1183,7 +1192,7 @@ pub fn functionCallCall(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError!core.JSValue {
-    const this_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const this_arg = value_ops.argOrUndefined(args, 0);
     const call_args = if (args.len >= 1) args[1..] else &.{};
     // qjs `js_function_call` forwards `argv + 1` straight to `JS_Call`. The
     // outer native call keeps `this_value` and `args` rooted for this complete
@@ -1210,8 +1219,8 @@ pub fn functionApplyCall(
 ) HostError!core.JSValue {
     // qjs:41221 `check_function(ctx, this_val)` precedes reading argv.
     if (!isCallableValue(this_value)) return throwApplyTypeError(ctx, global, "not a function");
-    const this_arg = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-    const arg_array = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    const this_arg = value_ops.argOrUndefined(args, 0);
+    const arg_array = value_ops.argOrUndefined(args, 1);
     // qjs:41224: undefined/null array_arg calls the target with no arguments.
     if (arg_array.is(.null_value) or arg_array.is(.undefined_value)) {
         return callValueOrBytecodeSyncInternal(ctx, output, global, this_arg, this_value, &.{}, caller_function, caller_frame);
@@ -1789,7 +1798,9 @@ fn constructValueOrBytecodeInEnvironment(
         if (function_object.class_id == core.class.ids.c_function) return exception_ops.throwTypeErrorMessage(ctx, global, "not a constructor");
     }
     if (func.is(.function_bytecode)) {
-        const fb = functionBytecodeFromValue(func) orelse return error.TypeError;
+        // The tag check above still allows a zero payload; that is corrupt
+        // bytecode, matching setFunctionBytecodeValue.
+        const fb = functionBytecodeFromValue(func) orelse return error.InvalidBytecode;
         if (!isConstructibleFunctionBytecode(fb)) return exception_ops.throwTypeErrorMessage(ctx, global, "not a constructor");
         // qjs JS_CallConstructorInternal: a DERIVED class ctor
         // allocates NO instance and does NO prototype lookup — `this` stays
@@ -1809,8 +1820,10 @@ fn constructValueOrBytecodeInEnvironment(
     if (object_ops.functionObjectFromValue(func)) |function_object| {
         // Ordinary user bytecode constructor (`new Vec(x, y, z)`, classes):
         // `callableObjectFromValue` above excludes the bytecode classes.
-        const function_value = function_object.functionBytecode() orelse return error.TypeError;
-        const fb = functionBytecodeFromValue(function_value) orelse return error.TypeError;
+        // functionObjectFromValue already required a bytecode function class.
+        const function_value = function_object.functionBytecode() orelse return error.InvalidBytecode;
+        // functionBytecode() returns JSValue.functionBytecode of a live header.
+        const fb = functionBytecodeFromValue(function_value) orelse unreachable;
         if (!isConstructibleBytecodeFunctionObject(function_object, fb)) return exception_ops.throwTypeErrorMessage(ctx, global, "not a constructor");
         return constructOrdinaryBytecodeFunctionObject(ctx, output, global, func, function_object, function_value, fb, args, caller_function, caller_frame, new_target, copy_argv);
     }
@@ -2116,7 +2129,7 @@ pub fn appendSpreadValuesEnumerate(
     values[2] = try getIteratorMethod(ctx, output, global, values[0]);
     if (!isCallableValue(values[2])) {
         _ = try exception_ops.throwTypeErrorMessage(ctx, global, "value is not iterable");
-        return error.TypeError;
+        unreachable;
     }
 
     // enumobj = src[@@iterator] (qjs GetIterator, quickjs.c)
@@ -2698,7 +2711,17 @@ pub fn callFunctionBytecodeConstruct(
     // after this point does the bytecode body switch to its function Realm.
     const interrupt_global = ctx.global orelse global;
     try exception_ops.pollInterrupt(ctx, interrupt_global);
-    return callFunctionBytecodeModeStateAfterInterruptPoll(ctx, func, current_function_value, this_value, args, var_refs, output, interrupt_global, true, null, null, new_target_value, copy_argv, false) catch |err| {
+    return callFunctionBytecodeModeStateAfterInterruptPoll(
+        ctx,
+        func,
+        current_function_value,
+        this_value,
+        args,
+        var_refs,
+        output,
+        interrupt_global,
+        .{ .new_target_value = new_target_value, .copy_argv = copy_argv },
+    ) catch |err| {
         if (err == error.DerivedThisUninitialized) {
             // `global` is already the final bytecode callee's realm, while
             // `ctx` is still JS_CallConstructorInternal's caller_ctx. QuickJS
@@ -2741,12 +2764,13 @@ pub fn callFunctionBytecodeModeState(
             var_refs,
             output,
             caller_global,
-            defer_generators,
-            generator_state,
-            resume_value,
-            new_target_value,
-            false,
-            true,
+            .{
+                .defer_generators = defer_generators,
+                .generator_state = generator_state,
+                .resume_value = resume_value,
+                .new_target_value = new_target_value,
+                .call_depth_precharged = true,
+            },
         );
     }
 
@@ -2760,14 +2784,25 @@ pub fn callFunctionBytecodeModeState(
         var_refs,
         output,
         caller_global,
-        defer_generators,
-        generator_state,
-        resume_value,
-        new_target_value,
-        false,
-        false,
+        .{
+            .defer_generators = defer_generators,
+            .generator_state = generator_state,
+            .resume_value = resume_value,
+            .new_target_value = new_target_value,
+        },
     );
 }
+
+/// Tail of an ordinary bytecode call: defer generators, no resume, undefined new.target.
+/// Passed by value. Defaults are the direct-call path.
+const BytecodeCallMode = struct {
+    defer_generators: bool = true,
+    generator_state: ?*core.Object = null,
+    resume_value: ?core.JSValue = null,
+    new_target_value: core.JSValue = core.JSValue.undefinedValue(),
+    copy_argv: bool = false,
+    call_depth_precharged: bool = false,
+};
 
 fn callFunctionBytecodeModeStateAfterInterruptPoll(
     ctx: *core.JSContext,
@@ -2778,25 +2813,22 @@ fn callFunctionBytecodeModeStateAfterInterruptPoll(
     var_refs: []const *core.VarRef,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    defer_generators: bool,
-    generator_state: ?*core.Object,
-    resume_value: ?core.JSValue,
-    new_target_value: core.JSValue,
-    copy_argv: bool,
-    call_depth_precharged: bool,
+    mode: BytecodeCallMode,
 ) HostError!core.JSValue {
-    const fb = functionBytecodeFromValue(func) orelse return error.TypeError;
-    const deferred_heap_entry = generator_state == null and
-        ((defer_generators and
+    // Callers already required a bytecode tag or a published functionBytecode()
+    // value. Decode fails only for a zero payload.
+    const fb = functionBytecodeFromValue(func) orelse return error.InvalidBytecode;
+    const deferred_heap_entry = mode.generator_state == null and
+        ((mode.defer_generators and
             (fb.functionKind() == .generator or fb.functionKind() == .async_generator)) or
             fb.functionKind() == .async);
-    const heap_resident_frame = fb.functionKind() != .normal or generator_state != null;
+    const heap_resident_frame = fb.functionKind() != .normal or mode.generator_state != null;
     const planned_stack_bytes = if (heap_resident_frame)
         0
     else
-        vm_opcodes.bytecodeFrameAllocaSize(fb, args.len, copy_argv);
+        vm_opcodes.bytecodeFrameAllocaSize(fb, args.len, mode.copy_argv);
     var call_depth_guard: ?vm_opcodes.CallDepthGuard = null;
-    if (!call_depth_precharged and !deferred_heap_entry) {
+    if (!mode.call_depth_precharged and !deferred_heap_entry) {
         call_depth_guard = try vm_opcodes.enterCallDepth(
             ctx,
             global,
@@ -2807,7 +2839,7 @@ fn callFunctionBytecodeModeStateAfterInterruptPoll(
 
     const function_ctx = fb.realmContext() orelse return error.InvalidBuiltinRegistry;
     const function_global = function_ctx.global orelse return error.InvalidBuiltinRegistry;
-    if (defer_generators and (fb.functionKind() == .generator or fb.functionKind() == .async_generator)) {
+    if (mode.defer_generators and (fb.functionKind() == .generator or fb.functionKind() == .async_generator)) {
         return object_ops.createGeneratorObject(
             function_ctx,
             func,
@@ -2825,7 +2857,7 @@ fn callFunctionBytecodeModeStateAfterInterruptPoll(
     }
 
     const fb_runtime_strict = fb.isStrictMode() or fb.runtimeStrictMode();
-    if (fb.functionKind() == .async and generator_state == null) {
+    if (fb.functionKind() == .async and mode.generator_state == null) {
         const effective_this = try coerceCallThis(function_ctx, function_global, fb_runtime_strict, this_value);
         return promise_ops.asyncFunctionStart(
             function_ctx,
@@ -2846,7 +2878,7 @@ fn callFunctionBytecodeModeStateAfterInterruptPoll(
     // their operand stack from the contiguous per-runtime VM stack arena
     // instead of heap-allocating per call. Generator/async resumption swaps
     // heap buffers in and out of the stack, so those keep heap mode.
-    const arena_eligible = fb.functionKind() == .normal and generator_state == null;
+    const arena_eligible = fb.functionKind() == .normal and mode.generator_state == null;
     const arena_mark = if (arena_eligible) ctx.runtime.vm_stack.mark() else null;
     defer if (arena_mark) |mark| ctx.runtime.vm_stack.restore(mark);
     const operand_window: ?[]core.JSValue = if (arena_eligible)
@@ -2857,7 +2889,7 @@ fn callFunctionBytecodeModeStateAfterInterruptPoll(
         stack_mod.Stack.initFrameWindow(ctx.runtime, ctx.runtime.stack.frame_storage, window)
     else
         stack_mod.Stack.init(ctx.runtime, ctx.runtime.stackSize());
-    defer if (generator_state) |generator| generator.finalizeGeneratorExecutionCompletion(ctx.runtime);
+    defer if (mode.generator_state) |generator| generator.finalizeGeneratorExecutionCompletion(ctx.runtime);
     defer nested_stack.deinit(ctx.runtime);
     // Async-generator bodies return their raw suspension/completion value to
     // the queue machine (exec/promise_ops.zig execBody) — no promise
@@ -2874,12 +2906,12 @@ fn callFunctionBytecodeModeStateAfterInterruptPoll(
         .global = global,
         .strict_unresolved_get_var = fb_runtime_strict,
         .stop_on_yield = stop_on_yield,
-        .generator_state = generator_state,
-        .resume_value = resume_value,
+        .generator_state = mode.generator_state,
+        .resume_value = mode.resume_value,
         .current_function_value = current_function_value,
-        .new_target_value = new_target_value,
-        .call_depth_precharged = call_depth_precharged or call_depth_guard != null,
-        .copy_argv = copy_argv,
+        .new_target_value = mode.new_target_value,
+        .call_depth_precharged = mode.call_depth_precharged or call_depth_guard != null,
+        .copy_argv = mode.copy_argv,
     });
 }
 
@@ -3108,7 +3140,7 @@ fn generatorAbruptCompletion(
     const payload = object.generatorPayloadPtr();
     if (payload.executing) return error.GeneratorRunning;
     const generator_global = object.generatorFunctionRealmGlobalPtr() orelse global;
-    const value = if (args.len > 0) args[0] else core.JSValue.undefinedValue();
+    const value = value_ops.argOrUndefined(args, 0);
     if (payload.yield_star_suspended or (object.generatorPc() != 0 and payload.started)) {
         return try resumeSyncGenerator(ctx, output, generator_global, receiver, object, value, completion);
     }
@@ -3656,7 +3688,7 @@ pub fn inOp(
     const lhs = try stack.pop();
     const object = core.value_semantics.objectFromValue(rhs) orelse {
         _ = try exception_ops.throwTypeErrorMessage(ctx, global, "invalid 'in' operand");
-        return error.TypeError;
+        unreachable;
     };
     const key = try object_ops.toPropertyKeyAtom(ctx, output, global, lhs, caller_function, caller_frame);
     const found = if (object.proxyTarget() != null)
@@ -3694,7 +3726,7 @@ pub fn instanceofValue(
 ) HostError!bool {
     _ = core.value_semantics.objectFromValue(rhs) orelse {
         _ = try exception_ops.throwTypeErrorMessage(ctx, global, "invalid 'instanceof' right operand");
-        return error.TypeError;
+        unreachable;
     };
     const has_instance = try instanceofMethod(ctx, output, global, rhs, caller_function, caller_frame);
     return instanceofValueWithMethod(ctx, output, global, lhs, rhs, has_instance, caller_function, caller_frame);
@@ -3813,7 +3845,8 @@ pub fn functionNameValueFromAtom(rt: *core.JSRuntime, atom_id: core.Atom, prefix
         try bytes.append(rt.nativeAllocator(), ' ');
     }
     if (atom_id.isTaggedInt()) {
-        var buf: [10]u8 = undefined;
+        var buf: [std.fmt.count("{d}", .{std.math.maxInt(u32)})]u8 = undefined;
+        // buf is sized by std.fmt.count for the widest value
         const text = std.fmt.bufPrint(&buf, "{d}", .{atom_id.toUInt32()}) catch unreachable;
         try bytes.appendSlice(rt.nativeAllocator(), text);
         return value_ops.createStringValue(rt, bytes.items);

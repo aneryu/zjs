@@ -330,6 +330,83 @@ pub inline fn callableRealm(call: NativeCall) HostError!CallRealmView {
     return call.callable_realm orelse error.InvalidBuiltinRegistry;
 }
 
+/// Global for the active callable. An observable call (`func_obj != null`)
+/// uses that callable's realm global. A synthetic call uses the
+/// algorithm-supplied global. Missing either is an internal invariant:
+/// `error.InvalidBuiltinRegistry` does not materialize an empty TypeError,
+/// matching `jsonParseRecordCall`.
+pub inline fn activeGlobal(call: NativeCall) HostError!*core.Object {
+    return (try activeGlobalOrNull(call)) orelse error.InvalidBuiltinRegistry;
+}
+
+/// Nullable form of `activeGlobal`. Handlers that treat a missing global as
+/// the engine-internal body arm (no function object and no supplied global)
+/// use this and require a global only on the observable paths.
+pub inline fn activeGlobalOrNull(call: NativeCall) HostError!?*core.Object {
+    if (call.func_obj != null) {
+        const realm = try callableRealm(call);
+        std.debug.assert(realm.realm == call.ctx);
+        return realm.global;
+    }
+    return call.global;
+}
+
+/// `nativeCall` → `callableRealm` → realm assert → `body`.
+/// `body` is `(ctx, output, global, this, args, caller, frame)`.
+/// The wrapper is `NativeGenericFn` and passes magic 0.
+pub fn realmMethod(comptime body: anytype) core.host_function.NativeGenericFn {
+    if (@typeInfo(@TypeOf(body)).@"fn".params.len != 7) @compileError("realmMethod body must take 7 parameters");
+    const Wrapper = struct {
+        fn generic(
+            native_ctx: *core.JSContext,
+            native_this: core.JSValue,
+            native_args: []const core.JSValue,
+        ) HostError!core.JSValue {
+            const host_call = nativeCall(native_ctx, native_this, native_args, 0) orelse return error.TypeError;
+            const realm = try callableRealm(host_call);
+            std.debug.assert(realm.realm == native_ctx);
+            return body(
+                native_ctx,
+                host_call.output,
+                realm.global,
+                native_this,
+                native_args,
+                host_call.caller_function,
+                host_call.caller_frame,
+            );
+        }
+    };
+    return &Wrapper.generic;
+}
+
+/// `nativeCall` → `callableRealm` → realm assert → `body`.
+/// `body` is `(ctx, output, global, args, caller, frame)` and omits `this`.
+/// The wrapper is `NativeGenericMagicFn` and forwards magic.
+pub fn realmMagicMethod(comptime body: anytype) core.host_function.NativeGenericMagicFn {
+    if (@typeInfo(@TypeOf(body)).@"fn".params.len != 6) @compileError("realmMagicMethod body must take 6 parameters");
+    const Wrapper = struct {
+        fn genericMagic(
+            native_ctx: *core.JSContext,
+            native_this: core.JSValue,
+            native_args: []const core.JSValue,
+            native_magic: i32,
+        ) HostError!core.JSValue {
+            const host_call = nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
+            const realm = try callableRealm(host_call);
+            std.debug.assert(realm.realm == native_ctx);
+            return body(
+                native_ctx,
+                host_call.output,
+                realm.global,
+                native_args,
+                host_call.caller_function,
+                host_call.caller_frame,
+            );
+        }
+    };
+    return &Wrapper.genericMagic;
+}
+
 /// An internal builtin table entry whose `magic` is its id and whose body
 /// is `handler` behind the generic-magic native signature.
 pub fn entryWithHandler(

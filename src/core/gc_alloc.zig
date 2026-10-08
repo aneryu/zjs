@@ -121,7 +121,7 @@ noinline fn allocSlowErased(self: *Registry, l: SlowLayout) ![*]u8 {
             l.kind_tag,
         );
     }
-    native_alloc.noteAllocDiagnostics(self.runtime.?, true);
+    native_alloc.noteAllocDiagnostics(self.runtime.?, .create);
     return @ptrFromInt(obj_addr);
 }
 
@@ -187,7 +187,7 @@ pub fn allocPromotedObjectCell(self: *Registry, request: usize) ?[*]u8 {
     if (comptime carrier_audit_enabled) {
         recordBlockGcAllocation(self, @intFromPtr(cell) + gc_prefix_size, accounted);
     }
-    native_alloc.noteAllocDiagnostics(self.runtime.?, true);
+    native_alloc.noteAllocDiagnostics(self.runtime.?, .create);
     return cell;
 }
 
@@ -480,7 +480,7 @@ fn createInternal(
                     if (comptime carrier_audit_enabled) {
                         recordBlockGcAllocation(self, @intFromPtr(cell) + gc_prefix_size, prospective_accounted);
                     }
-                    native_alloc.noteAllocDiagnostics(self.runtime.?, true);
+                    native_alloc.noteAllocDiagnostics(self.runtime.?, .create);
                     return @ptrFromInt(@intFromPtr(cell) + gc_prefix_size);
                 }
                 // Block heap declined (OOM in its backing): the slab
@@ -513,7 +513,7 @@ fn createInternal(
                 payload_size,
                 T.gc_kind_tag,
             );
-            native_alloc.noteAllocDiagnostics(self.runtime.?, true);
+            native_alloc.noteAllocDiagnostics(self.runtime.?, .create);
             return @ptrCast(@alignCast(raw));
         }
     }
@@ -583,7 +583,7 @@ noinline fn destroyErased(self: *Registry, ptr: [*]u8, l: DestroyLayout) void {
             if (objectCellHeap(self)) |heap| {
                 if (comptime carrier_audit_enabled) beginGcRawFree(self, @intFromPtr(ptr));
                 debitAlloc(self, l.accounted_block, null);
-                native_alloc.noteFreeDiagnostics(self.runtime.?, true);
+                native_alloc.noteFreeDiagnostics(self.runtime.?, .create);
                 heap.freeSmallCell(@ptrFromInt(@intFromPtr(ptr) - gc_prefix_size));
                 if (comptime carrier_audit_enabled) finishBlockGcRawFree(self, @intFromPtr(ptr));
                 return;
@@ -596,7 +596,7 @@ noinline fn destroyErased(self: *Registry, ptr: [*]u8, l: DestroyLayout) void {
             std.debug.assert(gcAllocInfoByte(ptr) & (alloc_info_standalone | alloc_info_class_mask) == slab_class);
             if (comptime carrier_audit_enabled) beginGcRawFree(self, @intFromPtr(ptr));
             debitAlloc(self, l.payload_size, slab_class);
-            native_alloc.noteFreeDiagnostics(self.runtime.?, true);
+            native_alloc.noteFreeDiagnostics(self.runtime.?, .create);
             self.cell_storage.slab.freeAtIndex(&self.allocator, ptr, slab_class);
             if (comptime carrier_audit_enabled) finishExtentGcRawFree(self, @intFromPtr(ptr));
             return;
@@ -604,7 +604,7 @@ noinline fn destroyErased(self: *Registry, ptr: [*]u8, l: DestroyLayout) void {
     }
     const bytes = l.standalone_prefix + l.payload_size;
     debitAlloc(self, bytes, null);
-    native_alloc.noteFreeDiagnostics(self.runtime.?, true);
+    native_alloc.noteFreeDiagnostics(self.runtime.?, .create);
     const base: [*]u8 = @ptrFromInt(@intFromPtr(ptr) - l.standalone_prefix);
     if (comptime carrier_audit_enabled) beginGcRawFree(self, @intFromPtr(ptr));
     self.allocator.rawFree(base[0..bytes], l.alignment, @returnAddress());
@@ -652,7 +652,7 @@ pub inline fn createWithFamComptime(self: *Registry, comptime T: type, comptime 
                 payload_bytes,
                 T.gc_kind_tag,
             );
-            native_alloc.noteAllocDiagnostics(self.runtime.?, true);
+            native_alloc.noteAllocDiagnostics(self.runtime.?, .create);
             return @ptrCast(@alignCast(raw));
         }
     }
@@ -699,7 +699,7 @@ fn createWithFamInternal(
                 if (comptime carrier_audit_enabled) {
                     recordBlockGcAllocation(self, @intFromPtr(cell) + gc_prefix_size, prospective_accounted);
                 }
-                native_alloc.noteAllocDiagnostics(self.runtime.?, true);
+                native_alloc.noteAllocDiagnostics(self.runtime.?, .create);
                 return @ptrFromInt(@intFromPtr(cell) + gc_prefix_size);
             }
         }
@@ -733,7 +733,7 @@ fn createWithFamInternal(
                     T.gc_kind_tag,
                 );
             }
-            native_alloc.noteAllocDiagnostics(self.runtime.?, true);
+            native_alloc.noteAllocDiagnostics(self.runtime.?, .create);
             return @ptrCast(@alignCast(raw));
         }
     }
@@ -742,7 +742,7 @@ fn createWithFamInternal(
 
 /// Cold continuation of `createWithFamInternal`. Same walk as
 /// `createInternalSlow`: one `allocSlowErased` body, runtime FAM size.
-/// Does not instantiate `allocAlignedBytesSlow(true)`.
+/// Does not instantiate `allocRawSlow`.
 inline fn createWithFamInternalSlow(self: *Registry, comptime T: type, fam_bytes: usize, comptime trigger_gc: bool) !*T {
     comptime std.debug.assert(@hasDecl(T, "gc_kind_tag"));
     const payload_bytes = std.math.add(usize, @sizeOf(T), fam_bytes) catch return error.OutOfMemory;
@@ -791,7 +791,7 @@ pub fn destroyWithFam(self: *Registry, comptime T: type, ptr: *T, fam_bytes: usi
                 ).?;
                 if (comptime carrier_audit_enabled) beginGcRawFree(self, @intFromPtr(ptr));
                 debitAlloc(self, accounted, null);
-                native_alloc.noteFreeDiagnostics(self.runtime.?, true);
+                native_alloc.noteFreeDiagnostics(self.runtime.?, .create);
                 heap.freeSmallCell(@ptrFromInt(@intFromPtr(ptr) - gc_prefix_size));
                 if (comptime carrier_audit_enabled) finishBlockGcRawFree(self, @intFromPtr(ptr));
                 return;
@@ -806,7 +806,7 @@ pub fn destroyWithFam(self: *Registry, comptime T: type, ptr: *T, fam_bytes: usi
         std.debug.assert(self.cell_storage.slab_enabled);
         if (comptime carrier_audit_enabled) beginGcRawFree(self, @intFromPtr(ptr));
         debitAlloc(self, payload_bytes, slab_class);
-        native_alloc.noteFreeDiagnostics(self.runtime.?, true);
+        native_alloc.noteFreeDiagnostics(self.runtime.?, .create);
         self.cell_storage.slab.freeAtIndex(&self.allocator, @ptrCast(ptr), slab_class);
         if (comptime carrier_audit_enabled) finishExtentGcRawFree(self, @intFromPtr(ptr));
         return;
@@ -814,7 +814,7 @@ pub fn destroyWithFam(self: *Registry, comptime T: type, ptr: *T, fam_bytes: usi
     const prefix = comptime gcPrefixSize(T);
     const bytes = prefix + payload_bytes;
     debitAlloc(self, bytes, null);
-    native_alloc.noteFreeDiagnostics(self.runtime.?, true);
+    native_alloc.noteFreeDiagnostics(self.runtime.?, .create);
     const base: [*]u8 = @ptrFromInt(@intFromPtr(ptr) - prefix);
     if (comptime carrier_audit_enabled) beginGcRawFree(self, @intFromPtr(ptr));
     self.allocator.rawFree(base[0..bytes], alignment, @returnAddress());
@@ -852,7 +852,7 @@ fn createCarrierCell(self: *Registry, kind_tag: u8, total_bytes: usize, allow_re
     if (comptime carrier_audit_enabled) {
         recordBlockGcAllocation(self, @intFromPtr(cell) + gc_prefix_size, accounted);
     }
-    native_alloc.noteAllocDiagnostics(self.runtime.?, false);
+    native_alloc.noteAllocDiagnostics(self.runtime.?, .alloc);
     return cell;
 }
 
@@ -864,7 +864,7 @@ pub fn destroyStringCell(self: *Registry, payload: *const anyopaque, total_bytes
     const accounted = gc_block_heap.accountedBodyBytesForRequest(total_bytes, gc_prefix_size).?;
     if (comptime carrier_audit_enabled) beginGcRawFree(self, @intFromPtr(payload));
     debitAlloc(self, accounted, null);
-    native_alloc.noteFreeDiagnostics(self.runtime.?, true);
+    native_alloc.noteFreeDiagnostics(self.runtime.?, .create);
     heap.freeSmallCell(@ptrFromInt(@intFromPtr(payload) - gc_prefix_size));
     if (comptime carrier_audit_enabled) finishBlockGcRawFree(self, @intFromPtr(payload));
 }
@@ -923,7 +923,7 @@ fn createExtentInner(self: *Registry, kind_tag: u8, total_bytes: usize, allow_re
             kind_tag,
         );
     }
-    native_alloc.noteAllocDiagnostics(self.runtime.?, false);
+    native_alloc.noteAllocDiagnostics(self.runtime.?, .alloc);
     return slice;
 }
 
@@ -935,7 +935,7 @@ pub fn destroyStringExtent(self: *Registry, payload: *const anyopaque, total_byt
     const body = @intFromPtr(payload);
     if (comptime carrier_audit_enabled) beginGcRawFree(self, body);
     debitAlloc(self, total_bytes, null);
-    native_alloc.noteFreeDiagnostics(self.runtime.?, true);
+    native_alloc.noteFreeDiagnostics(self.runtime.?, .create);
     heap.free(@ptrFromInt(body - gc_prefix_size));
     if (comptime carrier_audit_enabled) finishExtentGcRawFree(self, body);
 }
@@ -983,7 +983,7 @@ pub fn createStorageCell(self: *Registry, kind_tag: u8, total_bytes: usize) !Sto
 /// happened once at condemnation (`debitBlockBytes`).
 pub fn noteBlockCellBitmapReclaim(self: *Registry, payload: *const anyopaque) void {
     if (comptime carrier_audit_enabled) beginGcRawFree(self, @intFromPtr(payload));
-    native_alloc.noteFreeDiagnostics(self.runtime.?, true);
+    native_alloc.noteFreeDiagnostics(self.runtime.?, .create);
     if (comptime carrier_audit_enabled) finishBlockGcRawFree(self, @intFromPtr(payload));
 }
 
@@ -1102,7 +1102,7 @@ pub noinline fn allocStandaloneObject(
     try native_alloc.checkAllocation(self.runtime.?, allocation_size);
     const raw = self.allocator.rawAlloc(allocation_size, alignment, @returnAddress()) orelse return error.OutOfMemory;
     creditAlloc(self, allocation_size, null);
-    native_alloc.noteAllocDiagnostics(self.runtime.?, false);
+    native_alloc.noteAllocDiagnostics(self.runtime.?, .alloc);
     const body = raw + object_offset;
     if (comptime carrier_audit_enabled) {
         commitGcExtent(self, reservation, @intFromPtr(body), @intFromPtr(raw), object_size, allocation_size, object_size, gc_representation.object_kind_tag);
@@ -1121,7 +1121,7 @@ pub noinline fn freeStandaloneObject(
     const raw: [*]u8 = @ptrFromInt(@intFromPtr(body) - object_offset);
     if (comptime carrier_audit_enabled) beginGcRawFree(self, @intFromPtr(body));
     debitAlloc(self, allocation_size, null);
-    native_alloc.noteFreeDiagnostics(self.runtime.?, false);
+    native_alloc.noteFreeDiagnostics(self.runtime.?, .alloc);
     self.allocator.rawFree(raw[0..allocation_size], alignment, @returnAddress());
     if (comptime carrier_audit_enabled) finishExtentGcRawFree(self, @intFromPtr(body));
 }

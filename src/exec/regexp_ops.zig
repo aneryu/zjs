@@ -81,12 +81,12 @@ pub const internal_entries = regexpEntries: {
         // Prototype methods (the subset `prototypeMethodId` maps).
         regexpEntry("toString", 0, @intFromEnum(PrototypeMethod.to_string)),
         regexpEntry("test", 1, @intFromEnum(PrototypeMethod.test_)),
-        regexpGenericEntry("exec", 1, @intFromEnum(PrototypeMethod.exec), &regexpExecCall),
+        regexpGenericEntry("exec", 1, @intFromEnum(PrototypeMethod.exec), builtin_dispatch.realmMethod(regExpExecMethod)),
         regexpEntry("[Symbol.search]", 1, @intFromEnum(PrototypeMethod.symbol_search)),
-        regexpGenericEntry("[Symbol.match]", 1, @intFromEnum(PrototypeMethod.symbol_match), &regexpSymbolMatchCall),
+        regexpGenericEntry("[Symbol.match]", 1, @intFromEnum(PrototypeMethod.symbol_match), builtin_dispatch.realmMethod(string_ops.regExpSymbolMatch)),
         regexpEntry("[Symbol.matchAll]", 1, @intFromEnum(PrototypeMethod.symbol_match_all)),
         regexpEntry("[Symbol.replace]", 2, @intFromEnum(PrototypeMethod.symbol_replace)),
-        regexpGenericEntry("[Symbol.split]", 2, @intFromEnum(PrototypeMethod.symbol_split), &regexpSymbolSplitCall),
+        regexpGenericEntry("[Symbol.split]", 2, @intFromEnum(PrototypeMethod.symbol_split), builtin_dispatch.realmMethod(string_ops.regExpSymbolSplit)),
         regexpEntry("compile", 2, @intFromEnum(PrototypeMethod.compile)),
         // Flag/source accessor getters.
         regexpGetterEntry("get source", @intFromEnum(AccessorMethod.source), &regexpSourceAccessorCall),
@@ -200,11 +200,7 @@ fn regexpCall(
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const ctx = host_call.ctx;
-    const callable_global: ?*core.Object = if (host_call.func_obj != null) blk: {
-        const realm = try builtin_dispatch.callableRealm(host_call);
-        std.debug.assert(realm.realm == ctx);
-        break :blk realm.global;
-    } else host_call.global;
+    const callable_global = try builtin_dispatch.activeGlobalOrNull(host_call);
     const output = host_call.output;
     const id: u32 = host_call.magic;
     const args = host_call.args;
@@ -299,6 +295,13 @@ fn regexpFlagsAccessorCall(
     return createStringValue(native_ctx.runtime, str[0..count]);
 }
 
+fn accessorFallback(ctx: *core.JSContext, global: *core.Object, getter: *core.Object, receiver: *core.Object, comptime source_hit: bool) HostError!core.JSValue {
+    if (try object_ops.regExpPrototypeFromGlobal(ctx.runtime, global)) |prototype| if (receiver == prototype) {
+        return if (source_hit) createStringValue(ctx.runtime, "(?:)") else core.JSValue.undefinedValue();
+    };
+    return array_ops.throwRegExpAccessorTypeError(ctx, getter.value());
+}
+
 fn regexpSourceAccessorCall(
     native_ctx: *core.JSContext,
     native_this: core.JSValue,
@@ -315,11 +318,7 @@ fn regexpSourceAccessorCall(
     if (receiver.class_id == core.class.ids.regexp and (regexpFlags(receiver) catch null) != null) {
         return accessor(native_ctx.runtime, native_this, "source");
     }
-    if (try object_ops.regExpPrototypeFromGlobal(native_ctx.runtime, active_global)) |prototype| {
-        if (receiver == prototype) return createStringValue(native_ctx.runtime, "(?:)");
-    }
-    _ = try array_ops.throwRegExpAccessorTypeError(native_ctx, function_object.value());
-    return error.TypeError;
+    return accessorFallback(native_ctx, active_global, function_object, receiver, true);
 }
 
 fn regexpFlagAccessorCall(
@@ -342,71 +341,7 @@ fn regexpFlagAccessorCall(
             return core.JSValue.boolean((flags.bits() & mask) != 0);
         }
     }
-    if (try object_ops.regExpPrototypeFromGlobal(native_ctx.runtime, active_global)) |prototype| {
-        if (receiver == prototype) return core.JSValue.undefinedValue();
-    }
-    _ = try array_ops.throwRegExpAccessorTypeError(native_ctx, function_object.value());
-    return error.TypeError;
-}
-
-fn regexpExecCall(
-    native_ctx: *core.JSContext,
-    native_this: core.JSValue,
-    native_args: []const core.JSValue,
-) HostError!core.JSValue {
-    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, 0) orelse return error.TypeError;
-    const realm = try builtin_dispatch.callableRealm(host_call);
-    std.debug.assert(realm.realm == native_ctx);
-    const active_global = realm.global;
-    return try regExpExecMethod(
-        native_ctx,
-        host_call.output,
-        active_global,
-        native_this,
-        native_args,
-        host_call.caller_function,
-        host_call.caller_frame,
-    );
-}
-
-fn regexpSymbolMatchCall(
-    native_ctx: *core.JSContext,
-    native_this: core.JSValue,
-    native_args: []const core.JSValue,
-) HostError!core.JSValue {
-    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, 0) orelse return error.TypeError;
-    const realm = try builtin_dispatch.callableRealm(host_call);
-    std.debug.assert(realm.realm == native_ctx);
-    const active_global = realm.global;
-    return string_ops.regExpSymbolMatch(
-        native_ctx,
-        host_call.output,
-        active_global,
-        native_this,
-        native_args,
-        host_call.caller_function,
-        host_call.caller_frame,
-    );
-}
-
-fn regexpSymbolSplitCall(
-    native_ctx: *core.JSContext,
-    native_this: core.JSValue,
-    native_args: []const core.JSValue,
-) HostError!core.JSValue {
-    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, 0) orelse return error.TypeError;
-    const realm = try builtin_dispatch.callableRealm(host_call);
-    std.debug.assert(realm.realm == native_ctx);
-    const active_global = realm.global;
-    return string_ops.regExpSymbolSplit(
-        native_ctx,
-        host_call.output,
-        active_global,
-        native_this,
-        native_args,
-        host_call.caller_function,
-        host_call.caller_frame,
-    );
+    return accessorFallback(native_ctx, active_global, function_object, receiver, false);
 }
 
 pub fn constructWithPrototype(rt: *core.JSRuntime, pattern: core.JSValue, flags: core.JSValue, prototype: ?*core.Object) !core.JSValue {

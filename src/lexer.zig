@@ -192,7 +192,7 @@ pub const Lexer = struct {
         self.mark();
 
         if (self.pos >= self.source.len) {
-            self.emitInto(out, .eof, .{ .none = {} });
+            self.emitPunct(out, .eof);
             return;
         }
 
@@ -336,6 +336,18 @@ pub const Lexer = struct {
             .end = self.pos,
             .payload = payload,
         };
+    }
+
+    inline fn eat(self: *Lexer, c: u8) bool {
+        if (self.pos < self.source.len and self.peek() == c) {
+            self.bump();
+            return true;
+        }
+        return false;
+    }
+
+    inline fn emitPunct(self: *Lexer, out: *t.Token, kind: t.Kind) void {
+        self.emitInto(out, kind, .{ .none = {} });
     }
 
     fn skipTrivia(self: *Lexer) Error!void {
@@ -627,14 +639,14 @@ pub const Lexer = struct {
             self.bump();
             self.bump();
             self.bump();
-            self.emitInto(out, .ellipsis, .{ .none = {} });
+            self.emitPunct(out, .ellipsis);
             return;
         }
         if (isDecimalDigit(self.peekAt(1))) {
             return self.lexNumber(out, true);
         }
         self.bump();
-        self.emitInto(out, .dot, .{ .none = {} });
+        self.emitPunct(out, .dot);
     }
 
     fn lexNumber(self: *Lexer, out: *t.Token, leading_dot: bool) Error!void {
@@ -648,30 +660,21 @@ pub const Lexer = struct {
                     self.bump();
                     self.bump();
                     if (!consumeHexDigits(self)) return error.InvalidNumber;
-                    if (self.pos < self.source.len and self.peek() == 'n') {
-                        is_bigint = true;
-                        self.bump();
-                    }
+                    if (self.eat('n')) is_bigint = true;
                     return self.finishNumber(out, start, is_bigint, 16);
                 },
                 'o', 'O' => {
                     self.bump();
                     self.bump();
                     if (!consumeOctalDigits(self)) return error.InvalidNumber;
-                    if (self.pos < self.source.len and self.peek() == 'n') {
-                        is_bigint = true;
-                        self.bump();
-                    }
+                    if (self.eat('n')) is_bigint = true;
                     return self.finishNumber(out, start, is_bigint, 8);
                 },
                 'b', 'B' => {
                     self.bump();
                     self.bump();
                     if (!consumeBinaryDigits(self)) return error.InvalidNumber;
-                    if (self.pos < self.source.len and self.peek() == 'n') {
-                        is_bigint = true;
-                        self.bump();
-                    }
+                    if (self.eat('n')) is_bigint = true;
                     return self.finishNumber(out, start, is_bigint, 2);
                 },
                 else => {},
@@ -686,8 +689,7 @@ pub const Lexer = struct {
                 return self.finishNumber(out, start, false, 10);
             }
         }
-        if (self.pos < self.source.len and self.peek() == '.') {
-            self.bump();
+        if (self.eat('.')) {
             try consumeOptionalFractionDigits(self);
         } else if (leading_dot) {
             // .NNN form: bumps already done by caller, just consume more digits
@@ -697,9 +699,8 @@ pub const Lexer = struct {
             self.bump();
             if (self.pos < self.source.len and (self.peek() == '+' or self.peek() == '-')) self.bump();
             if (!consumeDecDigits(self)) return error.InvalidNumber;
-        } else if (self.pos < self.source.len and self.peek() == 'n') {
+        } else if (self.eat('n')) {
             is_bigint = true;
-            self.bump();
         }
         return self.finishNumber(out, start, is_bigint, 10);
     }
@@ -851,7 +852,7 @@ pub const Lexer = struct {
             }, // line continuation
             '\r' => {
                 self.bump();
-                if (self.pos < self.source.len and self.peek() == '\n') self.bump();
+                _ = self.eat('\n');
             },
             // U+2028 / U+2029 line continuation
             0xE2 => {
@@ -910,8 +911,7 @@ pub const Lexer = struct {
     fn consumeUnicodeEscapeAfterBackslash(self: *Lexer, join_surrogates: bool) Error!u21 {
         if (self.pos >= self.source.len or self.peek() != 'u') return error.InvalidUnicodeEscape;
         self.bump();
-        if (self.pos < self.source.len and self.peek() == '{') {
-            self.bump();
+        if (self.eat('{')) {
             var value: u32 = 0;
             var saw_digit = false;
             while (self.pos < self.source.len and self.peek() != '}') {
@@ -1054,7 +1054,7 @@ pub const Lexer = struct {
                 try buf.append(self.allocator, '\n');
                 try raw_buf.append(self.allocator, '\n');
                 self.bump();
-                if (self.pos < self.source.len and self.peek() == '\n') self.bump();
+                _ = self.eat('\n');
                 continue;
             }
             try raw_buf.append(self.allocator, c);
@@ -1154,7 +1154,7 @@ pub const Lexer = struct {
             '?' => return self.lexQuestion(out),
             '~', '(', ')', '[', ']', '{', '}', ',', ';', ':' => {
                 self.bump();
-                self.emitInto(out, @enumFromInt(c), .{ .none = {} });
+                self.emitPunct(out, @enumFromInt(c));
             },
             else => {
                 self.bump();
@@ -1168,16 +1168,16 @@ pub const Lexer = struct {
         if (self.pos < self.source.len) {
             if (self.peek() == '+') {
                 self.bump();
-                self.emitInto(out, .inc, .{ .none = {} });
+                self.emitPunct(out, .inc);
                 return;
             }
             if (self.peek() == '=') {
                 self.bump();
-                self.emitInto(out, .plus_assign, .{ .none = {} });
+                self.emitPunct(out, .plus_assign);
                 return;
             }
         }
-        self.emitInto(out, .plus, .{ .none = {} });
+        self.emitPunct(out, .plus);
     }
 
     fn lexMinus(self: *Lexer, out: *t.Token) Error!void {
@@ -1185,16 +1185,16 @@ pub const Lexer = struct {
         if (self.pos < self.source.len) {
             if (self.peek() == '-') {
                 self.bump();
-                self.emitInto(out, .dec, .{ .none = {} });
+                self.emitPunct(out, .dec);
                 return;
             }
             if (self.peek() == '=') {
                 self.bump();
-                self.emitInto(out, .minus_assign, .{ .none = {} });
+                self.emitPunct(out, .minus_assign);
                 return;
             }
         }
-        self.emitInto(out, .minus, .{ .none = {} });
+        self.emitPunct(out, .minus);
     }
 
     fn lexStar(self: *Lexer, out: *t.Token) Error!void {
@@ -1202,41 +1202,38 @@ pub const Lexer = struct {
         if (self.pos < self.source.len) {
             if (self.peek() == '*') {
                 self.bump();
-                if (self.pos < self.source.len and self.peek() == '=') {
-                    self.bump();
-                    self.emitInto(out, .pow_assign, .{ .none = {} });
+                if (self.eat('=')) {
+                    self.emitPunct(out, .pow_assign);
                     return;
                 }
-                self.emitInto(out, .pow, .{ .none = {} });
+                self.emitPunct(out, .pow);
                 return;
             }
             if (self.peek() == '=') {
                 self.bump();
-                self.emitInto(out, .mul_assign, .{ .none = {} });
+                self.emitPunct(out, .mul_assign);
                 return;
             }
         }
-        self.emitInto(out, .star, .{ .none = {} });
+        self.emitPunct(out, .star);
     }
 
     fn lexSlash(self: *Lexer, out: *t.Token) Error!void {
         self.bump();
-        if (self.pos < self.source.len and self.peek() == '=') {
-            self.bump();
-            self.emitInto(out, .div_assign, .{ .none = {} });
+        if (self.eat('=')) {
+            self.emitPunct(out, .div_assign);
             return;
         }
-        self.emitInto(out, .slash, .{ .none = {} });
+        self.emitPunct(out, .slash);
     }
 
     fn lexPercent(self: *Lexer, out: *t.Token) Error!void {
         self.bump();
-        if (self.pos < self.source.len and self.peek() == '=') {
-            self.bump();
-            self.emitInto(out, .mod_assign, .{ .none = {} });
+        if (self.eat('=')) {
+            self.emitPunct(out, .mod_assign);
             return;
         }
-        self.emitInto(out, .percent, .{ .none = {} });
+        self.emitPunct(out, .percent);
     }
 
     fn lexEquals(self: *Lexer, out: *t.Token) Error!void {
@@ -1244,36 +1241,33 @@ pub const Lexer = struct {
         if (self.pos < self.source.len) {
             if (self.peek() == '=') {
                 self.bump();
-                if (self.pos < self.source.len and self.peek() == '=') {
-                    self.bump();
-                    self.emitInto(out, .strict_eq, .{ .none = {} });
+                if (self.eat('=')) {
+                    self.emitPunct(out, .strict_eq);
                     return;
                 }
-                self.emitInto(out, .eq, .{ .none = {} });
+                self.emitPunct(out, .eq);
                 return;
             }
             if (self.peek() == '>') {
                 self.bump();
-                self.emitInto(out, .arrow, .{ .none = {} });
+                self.emitPunct(out, .arrow);
                 return;
             }
         }
-        self.emitInto(out, .assign, .{ .none = {} });
+        self.emitPunct(out, .assign);
     }
 
     fn lexBang(self: *Lexer, out: *t.Token) Error!void {
         self.bump();
-        if (self.pos < self.source.len and self.peek() == '=') {
-            self.bump();
-            if (self.pos < self.source.len and self.peek() == '=') {
-                self.bump();
-                self.emitInto(out, .strict_neq, .{ .none = {} });
+        if (self.eat('=')) {
+            if (self.eat('=')) {
+                self.emitPunct(out, .strict_neq);
                 return;
             }
-            self.emitInto(out, .neq, .{ .none = {} });
+            self.emitPunct(out, .neq);
             return;
         }
-        self.emitInto(out, .bang, .{ .none = {} });
+        self.emitPunct(out, .bang);
     }
 
     fn lexLt(self: *Lexer, out: *t.Token) Error!void {
@@ -1281,21 +1275,20 @@ pub const Lexer = struct {
         if (self.pos < self.source.len) {
             if (self.peek() == '=') {
                 self.bump();
-                self.emitInto(out, .lte, .{ .none = {} });
+                self.emitPunct(out, .lte);
                 return;
             }
             if (self.peek() == '<') {
                 self.bump();
-                if (self.pos < self.source.len and self.peek() == '=') {
-                    self.bump();
-                    self.emitInto(out, .shl_assign, .{ .none = {} });
+                if (self.eat('=')) {
+                    self.emitPunct(out, .shl_assign);
                     return;
                 }
-                self.emitInto(out, .shl, .{ .none = {} });
+                self.emitPunct(out, .shl);
                 return;
             }
         }
-        self.emitInto(out, .lt, .{ .none = {} });
+        self.emitPunct(out, .lt);
     }
 
     fn lexGt(self: *Lexer, out: *t.Token) Error!void {
@@ -1303,31 +1296,28 @@ pub const Lexer = struct {
         if (self.pos < self.source.len) {
             if (self.peek() == '=') {
                 self.bump();
-                self.emitInto(out, .gte, .{ .none = {} });
+                self.emitPunct(out, .gte);
                 return;
             }
             if (self.peek() == '>') {
                 self.bump();
-                if (self.pos < self.source.len and self.peek() == '>') {
-                    self.bump();
-                    if (self.pos < self.source.len and self.peek() == '=') {
-                        self.bump();
-                        self.emitInto(out, .shr_assign, .{ .none = {} });
+                if (self.eat('>')) {
+                    if (self.eat('=')) {
+                        self.emitPunct(out, .shr_assign);
                         return;
                     }
-                    self.emitInto(out, .shr, .{ .none = {} });
+                    self.emitPunct(out, .shr);
                     return;
                 }
-                if (self.pos < self.source.len and self.peek() == '=') {
-                    self.bump();
-                    self.emitInto(out, .sar_assign, .{ .none = {} });
+                if (self.eat('=')) {
+                    self.emitPunct(out, .sar_assign);
                     return;
                 }
-                self.emitInto(out, .sar, .{ .none = {} });
+                self.emitPunct(out, .sar);
                 return;
             }
         }
-        self.emitInto(out, .gt, .{ .none = {} });
+        self.emitPunct(out, .gt);
     }
 
     fn lexAmp(self: *Lexer, out: *t.Token) Error!void {
@@ -1335,21 +1325,20 @@ pub const Lexer = struct {
         if (self.pos < self.source.len) {
             if (self.peek() == '&') {
                 self.bump();
-                if (self.pos < self.source.len and self.peek() == '=') {
-                    self.bump();
-                    self.emitInto(out, .land_assign, .{ .none = {} });
+                if (self.eat('=')) {
+                    self.emitPunct(out, .land_assign);
                     return;
                 }
-                self.emitInto(out, .land, .{ .none = {} });
+                self.emitPunct(out, .land);
                 return;
             }
             if (self.peek() == '=') {
                 self.bump();
-                self.emitInto(out, .and_assign, .{ .none = {} });
+                self.emitPunct(out, .and_assign);
                 return;
             }
         }
-        self.emitInto(out, .amp, .{ .none = {} });
+        self.emitPunct(out, .amp);
     }
 
     fn lexPipe(self: *Lexer, out: *t.Token) Error!void {
@@ -1357,31 +1346,29 @@ pub const Lexer = struct {
         if (self.pos < self.source.len) {
             if (self.peek() == '|') {
                 self.bump();
-                if (self.pos < self.source.len and self.peek() == '=') {
-                    self.bump();
-                    self.emitInto(out, .lor_assign, .{ .none = {} });
+                if (self.eat('=')) {
+                    self.emitPunct(out, .lor_assign);
                     return;
                 }
-                self.emitInto(out, .lor, .{ .none = {} });
+                self.emitPunct(out, .lor);
                 return;
             }
             if (self.peek() == '=') {
                 self.bump();
-                self.emitInto(out, .or_assign, .{ .none = {} });
+                self.emitPunct(out, .or_assign);
                 return;
             }
         }
-        self.emitInto(out, .pipe, .{ .none = {} });
+        self.emitPunct(out, .pipe);
     }
 
     fn lexCaret(self: *Lexer, out: *t.Token) Error!void {
         self.bump();
-        if (self.pos < self.source.len and self.peek() == '=') {
-            self.bump();
-            self.emitInto(out, .xor_assign, .{ .none = {} });
+        if (self.eat('=')) {
+            self.emitPunct(out, .xor_assign);
             return;
         }
-        self.emitInto(out, .caret, .{ .none = {} });
+        self.emitPunct(out, .caret);
     }
 
     fn lexQuestion(self: *Lexer, out: *t.Token) Error!void {
@@ -1389,21 +1376,20 @@ pub const Lexer = struct {
         if (self.pos < self.source.len) {
             if (self.peek() == '?') {
                 self.bump();
-                if (self.pos < self.source.len and self.peek() == '=') {
-                    self.bump();
-                    self.emitInto(out, .double_question_mark_assign, .{ .none = {} });
+                if (self.eat('=')) {
+                    self.emitPunct(out, .double_question_mark_assign);
                     return;
                 }
-                self.emitInto(out, .double_question_mark, .{ .none = {} });
+                self.emitPunct(out, .double_question_mark);
                 return;
             }
             if (self.peek() == '.' and !isDecimalDigit(self.peekAt(1))) {
                 self.bump();
-                self.emitInto(out, .question_mark_dot, .{ .none = {} });
+                self.emitPunct(out, .question_mark_dot);
                 return;
             }
         }
-        self.emitInto(out, .question, .{ .none = {} });
+        self.emitPunct(out, .question);
     }
 
     // ---- utf-8 -------------------------------------------------------

@@ -21438,9 +21438,7 @@ test "dynamic import failures preserve unsupported not-found and host I/O mappin
     var state = engine.exec.module_graph.DynamicImportState{
         .runtime = js.runtime,
         .output = null,
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
-        .max_source_size = 8,
+        .env = .{ .io = std.testing.io, .allocator = std.testing.allocator, .max_source_size = 8 },
     };
     defer state.deinit();
     var loader_scope = try engine.exec.module_graph.installDynamicImport(&state);
@@ -22201,9 +22199,7 @@ test "Runtime loader keeps same-path TLA continuations and waiters in parent and
     var state = engine.exec.module_graph.DynamicImportState{
         .runtime = js.runtime,
         .output = null,
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
-        .max_source_size = 4096,
+        .env = .{ .io = std.testing.io, .allocator = std.testing.allocator, .max_source_size = 4096 },
     };
     defer state.deinit();
     var loader_scope = try engine.exec.module_graph.installDynamicImport(&state);
@@ -22426,9 +22422,7 @@ test "module TLA resumption allocates nothing from the loader allocator" {
     var state = engine.exec.module_graph.DynamicImportState{
         .runtime = js.runtime,
         .output = null,
-        .io = std.testing.io,
-        .allocator = injector.allocator(),
-        .max_source_size = 4096,
+        .env = .{ .io = std.testing.io, .allocator = injector.allocator(), .max_source_size = 4096 },
     };
     defer state.deinit();
     var dynamic_import_scope = try engine.exec.module_graph.installDynamicImport(&state);
@@ -28630,6 +28624,31 @@ test "Set combinator results use the realm intrinsic prototype after global muta
     try std.testing.expect(result.is(.undefined_value));
 }
 
+test "Map.groupBy rejects nullish items before checking the callback" {
+    var js = try helpers.TestEngine.init(std.testing.allocator);
+    defer js.deinit();
+
+    var output_buffer: [256]u8 = undefined;
+    var stream = std.Io.Writer.fixed(&output_buffer);
+    _ = try js.evalWithOutput(
+        \\function show(fn) { try { fn(); print("no throw"); } catch (e) { print(e.name + ":" + e.message); } }
+        \\show(() => Map.groupBy(null, 1));
+        \\show(() => Map.groupBy(undefined, () => 1));
+        \\show(() => Map.groupBy());
+        \\show(() => Map.groupBy([1], 1));
+        \\show(() => Map.groupBy([1], undefined));
+    , &stream);
+
+    try std.testing.expectEqualStrings(
+        \\TypeError:null or undefined are forbidden
+        \\TypeError:null or undefined are forbidden
+        \\TypeError:null or undefined are forbidden
+        \\TypeError:not a function
+        \\TypeError:not a function
+        \\
+    , stream.buffered());
+}
+
 test "Map.groupBy result uses the realm intrinsic prototype after global mutation" {
     const js = helpers.sharedTestEngine();
     defer helpers.endSharedTest();
@@ -31863,6 +31882,31 @@ test "restricted caller/arguments lookup, catch completion, and key collection r
     );
 }
 
+test "Array.prototype.slice defers an oversized length to ArraySpeciesCreate" {
+    try helpers.expectPrints(
+        \\const message = (f) => { try { return String(f()); } catch (e) { return e.name + ":" + e.message; } };
+        \\let species = 0;
+        \\const plain = { length: 2 ** 32 + 1, constructor: { get [Symbol.species]() { species++; return function () { return []; }; } } };
+        \\print(message(() => Array.prototype.slice.call(plain)), species);
+        \\let calls = 0;
+        \\const Species = function () { calls++; throw new Error("species"); };
+        \\const proxy = new Proxy([], {
+        \\    get(target, key, receiver) {
+        \\        if (key === "length") return 2 ** 32 + 1;
+        \\        if (key === "constructor") return { [Symbol.species]: Species };
+        \\        return Reflect.get(target, key, receiver);
+        \\    },
+        \\});
+        \\print(message(() => Array.prototype.slice.call(proxy)), calls);
+        \\print(message(() => new Array(-1)), message(() => new Array(2 ** 32)));
+    ,
+        \\RangeError:invalid array length 0
+        \\Error:species 1
+        \\RangeError:invalid array length RangeError:invalid array length
+        \\
+    );
+}
+
 test "Array.from lengths, sparse backward walks, sort order and generic splice review regressions" {
     try helpers.expectPrints(
         \\const message = (f) => { try { return String(f()); } catch (e) { return e.name + ":" + e.message; } };
@@ -33500,9 +33544,7 @@ test "import() waiting on a context-evaluated TLA module settles when it finishe
     var state = engine.exec.module_graph.DynamicImportState{
         .runtime = js.runtime,
         .output = null,
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
-        .max_source_size = 4096,
+        .env = .{ .io = std.testing.io, .allocator = std.testing.allocator, .max_source_size = 4096 },
     };
     defer state.deinit();
     var loader_scope = try engine.exec.module_graph.installDynamicImport(&state);

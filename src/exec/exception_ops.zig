@@ -385,6 +385,14 @@ pub fn throwTypeErrorMessage(ctx: *core.JSContext, global: *core.Object, message
     return error.TypeError;
 }
 
+/// Fixed TypeError text for a const-binding write that does not name the
+/// binding. Distinct from `vm_property.throwReadOnlyNamedBinding`, which
+/// formats "'name' is read-only" and consults the opcode catch target.
+pub fn throwInvalidConstVariable(ctx: *core.JSContext, global: *core.Object) HostError {
+    _ = try throwTypeErrorMessage(ctx, global, "invalid assignment to const variable");
+    unreachable;
+}
+
 pub fn throwRangeErrorMessage(ctx: *core.JSContext, global: *core.Object, message: []const u8) !core.JSValue {
     const error_value = try createNamedError(ctx, global, "RangeError", message);
     _ = ctx.throwValue(error_value);
@@ -471,8 +479,9 @@ pub fn throwReferenceErrorMessage(ctx: *core.JSContext, global: *core.Object, me
 /// after the lookup has already failed.
 pub fn throwReferenceErrorNotDefined(ctx: *core.JSContext, global: *core.Object, atom_id: core.Atom) !core.JSValue {
     const allocator = ctx.runtime.nativeAllocator();
-    var index_buf: [16]u8 = undefined;
+    var index_buf: [std.fmt.count("{d}", .{std.math.maxInt(u32)})]u8 = undefined;
     const name: []const u8 = if (atom_id.isTaggedInt())
+        // buf is sized by std.fmt.count for the widest value
         std.fmt.bufPrint(&index_buf, "{d}", .{atom_id.toUInt32()}) catch unreachable
     else
         ctx.runtime.atoms.name(atom_id) orelse "";
@@ -1206,7 +1215,7 @@ fn errorStackSetter(
     caller_frame: ?*frame_mod.Frame,
 ) !core.JSValue {
     const receiver = object_ops.objectFromValue(this_value) orelse return error.NotAnObject;
-    const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const value = value_ops.argOrUndefined(args, 0);
     if (!value.isString()) return error.NotAString;
 
     if (ctx.nativeErrorPrototypeObject(.error_)) |error_proto| {

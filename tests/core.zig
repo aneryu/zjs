@@ -5305,9 +5305,7 @@ test "dynamic import job wrapper propagates checkpoint exceptions and handler fa
     var state = zjs.exec.module_graph.DynamicImportState{
         .runtime = rt,
         .output = null,
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
-        .max_source_size = 4096,
+        .env = .{ .io = std.testing.io, .allocator = std.testing.allocator, .max_source_size = 4096 },
     };
     defer state.deinit();
     var probe: MicrotaskContractProbe = .{};
@@ -5347,9 +5345,7 @@ test "runtime review module scheduler rejects termination and preserves nested c
     var state = zjs.exec.module_graph.DynamicImportState{
         .runtime = rt,
         .output = null,
-        .io = std.testing.io,
-        .allocator = std.testing.allocator,
-        .max_source_size = 4096,
+        .env = .{ .io = std.testing.io, .allocator = std.testing.allocator, .max_source_size = 4096 },
     };
     defer state.deinit();
     const Probe = struct {

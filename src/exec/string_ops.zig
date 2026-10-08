@@ -4332,7 +4332,9 @@ fn stringConstructorEntry(comptime name: []const u8, comptime length: u8, compti
 /// observable ToString/ToNumber coercion tail into this shared handler. Keeping
 /// that rare path out of the direct index functions avoids cloning the whole
 /// coercion tower into each hot native entry.
-inline fn stringPrimitiveIndexRead(host_call: NativeCall, comptime mid: u32) HostError!?core.JSValue {
+const PrimitiveIndexMethod = enum { char_code_at, at, code_point_at };
+
+inline fn stringPrimitiveIndexRead(host_call: NativeCall, comptime method: PrimitiveIndexMethod) HostError!?core.JSValue {
     if (!host_call.this_value.isString()) return null;
     const args = host_call.args;
     const idx: i64 = if (args.len == 0)
@@ -4346,17 +4348,17 @@ inline fn stringPrimitiveIndexRead(host_call: NativeCall, comptime mid: u32) Hos
     // observable index conversion and its input roots.
     const string_value = stringIndexFlatValue(rt, host_call.this_value) catch |err| return @as(HostError, @errorCast(err));
     const len: i64 = @intCast(core.string.stringValueLenUnchecked(string_value));
-    switch (mid) {
-        29 => {
+    switch (method) {
+        .char_code_at => {
             if (idx < 0 or idx >= len) return core.JSValue.float64(std.math.nan(f64));
             return core.JSValue.int32(core.string.stringValueCodeUnitAtUnchecked(string_value, @intCast(idx)));
         },
-        30 => {
+        .at => {
             const index = if (idx < 0) len + idx else idx;
             if (index < 0 or index >= len) return core.JSValue.undefinedValue();
             return codeUnitStringValue(rt, core.string.stringValueCodeUnitAtUnchecked(string_value, @intCast(index))) catch |err| return @as(HostError, @errorCast(err));
         },
-        else => {
+        .code_point_at => {
             if (idx < 0 or idx >= len) return core.JSValue.undefinedValue();
             const unit = core.string.stringValueCodeUnitAtUnchecked(string_value, @intCast(idx));
             if (isHighSurrogateUnit(unit) and idx + 1 < len) {
@@ -4458,7 +4460,7 @@ fn stringConcatCall(
 
 fn stringFromCharCodeDirect(
     ctx: *core.JSContext,
-    this_value: core.JSValue,
+    _: core.JSValue,
     argv: [*]const core.JSValue,
     argc: u32,
     _: *const core.NativeEntry,
@@ -4466,17 +4468,11 @@ fn stringFromCharCodeDirect(
 ) callconv(.c) core.JSValue {
     const args = argv[0..argc];
     const global = ctx.global orelse return builtin_dispatch.hostErrorToValue(ctx, null, error.InvalidBuiltinRegistry);
-    const caller = builtin_dispatch.vmCallerView(ctx);
-    const output = caller.output;
-    const caller_function = caller.caller_function;
-    const caller_frame = caller.caller_frame;
-    _ = this_value;
-    _ = caller_function;
-    _ = caller_frame;
+    const output = builtin_dispatch.vmCallerView(ctx).output;
     const result = stringFromCharCode(ctx, output, global, args) catch |err| {
         return builtin_dispatch.hostErrorToValue(ctx, global, @as(HostError, @errorCast(err)));
     };
-    return (result);
+    return result;
 }
 
 fn stringFromCharCodeCall(
@@ -4486,11 +4482,7 @@ fn stringFromCharCodeCall(
     native_magic: i32,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
-    const global = if (host_call.func_obj != null) blk: {
-        const realm = try builtin_dispatch.callableRealm(host_call);
-        std.debug.assert(realm.realm == host_call.ctx);
-        break :blk realm.global;
-    } else host_call.global orelse return error.TypeError;
+    const global = try builtin_dispatch.activeGlobal(host_call);
     return stringFromCharCode(host_call.ctx, host_call.output, global, host_call.args) catch |err| return @as(HostError, @errorCast(err));
 }
 
@@ -4581,7 +4573,7 @@ inline fn stringCharCodeAtDirectHost(
         .caller_function = caller_function,
         .caller_frame = caller_frame,
     };
-    if (try stringPrimitiveIndexRead(host_call, 29)) |value| return value;
+    if (try stringPrimitiveIndexRead(host_call, .char_code_at)) |value| return value;
     // Do not bounce through `stringPrototypeMethod` / `callStringBody`:
     // that re-enters this record's exec_direct with a null func_obj and
     // raises InvalidBuiltinRegistry. Coerce with the explicit ABI instead.
@@ -4625,7 +4617,7 @@ fn stringCharCodeAtCall(
     native_magic: i32,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
-    if (try stringPrimitiveIndexRead(host_call, 29)) |value| return value;
+    if (try stringPrimitiveIndexRead(host_call, .char_code_at)) |value| return value;
     return stringCall(native_ctx, native_this, native_args, native_magic);
 }
 
@@ -4636,7 +4628,7 @@ fn stringAtCall(
     native_magic: i32,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
-    if (try stringPrimitiveIndexRead(host_call, 30)) |value| return value;
+    if (try stringPrimitiveIndexRead(host_call, .at)) |value| return value;
     return stringCall(native_ctx, native_this, native_args, native_magic);
 }
 
@@ -4647,7 +4639,7 @@ fn stringCodePointAtCall(
     native_magic: i32,
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
-    if (try stringPrimitiveIndexRead(host_call, 31)) |value| return value;
+    if (try stringPrimitiveIndexRead(host_call, .code_point_at)) |value| return value;
     return stringCall(native_ctx, native_this, native_args, native_magic);
 }
 
@@ -4659,11 +4651,7 @@ fn stringCaseCall(
 ) HostError!core.JSValue {
     const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
     const to_lower = host_call.magic == @intFromEnum(PrototypeMethod.to_lower_case);
-    const global = if (host_call.func_obj != null) blk: {
-        const realm = try builtin_dispatch.callableRealm(host_call);
-        std.debug.assert(realm.realm == host_call.ctx);
-        break :blk realm.global;
-    } else host_call.global orelse return error.TypeError;
+    const global = try builtin_dispatch.activeGlobal(host_call);
     const caller_function = builtin_dispatch.callerBytecode(host_call);
     const caller_frame = builtin_dispatch.callerFrame(host_call);
     const string_value = try toStringCheckObject(
@@ -4734,11 +4722,7 @@ fn stringCall(
         return methodCall(ctx.runtime, this_value, method_id, args) catch |err| return @as(HostError, @errorCast(err));
     }
 
-    const active_global = if (host_call.func_obj != null) blk: {
-        const realm = try builtin_dispatch.callableRealm(host_call);
-        std.debug.assert(realm.realm == ctx);
-        break :blk realm.global;
-    } else host_call.global orelse return error.TypeError;
+    const active_global = try builtin_dispatch.activeGlobal(host_call);
     return switch (id) {
         @intFromEnum(ConstructorMethod.call) => stringFunctionCall(ctx, output, active_global, args, caller_function, caller_frame),
         @intFromEnum(StaticMethod.from_char_code) => stringFromCharCode(ctx, output, active_global, args),
@@ -4783,16 +4767,71 @@ pub fn constructWithPrototype(rt: *core.JSRuntime, args: []const core.JSValue, p
     return values[2];
 }
 
-// The String Iterator factory (`iterator`) + its private prototype/toStringTag
-// helpers relocated to engine core (`core/object.zig` `stringIterator`) in Phase
-// 6b-3 STEP 6: they are pure object/native-function constructors over core
-// string/object primitives with no exec/VM deps, and the exec iteration
-// machinery consumes them directly. Re-exported here so this module's own
-// references (and any future builtin caller) keep the original name. The
-// produced iterator's `next` still carries the `(.string, iterator_next)`
-// native id, dispatching back into `stringIteratorNext` below through the record
-// table.
-pub const stringIterator = core.object.stringIterator;
+// String Iterator factory. The produced iterator's `next` carries the
+// `(.string, iterator_next)` native id, so the `next` body still dispatches
+// through the record table into `stringIteratorNext` below.
+
+fn stringIteratorPrimitiveValue(value: core.JSValue) !core.JSValue {
+    if (value.isString()) return value;
+    const header = value.refHeader() orelse return error.TypeError;
+    if (!value.is(.object)) return error.TypeError;
+    const object = core.Object.fromHeader(header);
+    if (object.class_id != core.class.ids.string) return error.TypeError;
+    return (object.objectData() orelse return error.TypeError);
+}
+
+fn defineStringIteratorToStringTag(rt: *core.JSRuntime, object: *core.Object, tag_name: []const u8) !void {
+    var values = [_]core.JSValue{ object.value(), core.JSValue.undefinedValue() };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    const tag_atom = core.atom.predefinedId("Symbol.toStringTag", .symbol) orelse return error.TypeError;
+    values[1] = (try core.string.String.createUtf8(rt, tag_name)).value();
+    try core.Object.fromHeader(values[0].refHeader().?).defineOwnProperty(rt, tag_atom, core.Descriptor.data(values[1], .{ .configurable = true }));
+}
+
+fn stringIteratorPrototype(ctx: *core.JSContext, tag_name: []const u8) !*core.Object {
+    const rt = ctx.runtime;
+    var values = [_]core.JSValue{ core.JSValue.undefinedValue(), core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    const headers = [_]core.runtime.HeaderRootValue{.{ .header = &ctx.header }};
+    var roots = core.runtime.ValueRootFrame{ .slices = &slices, .headers = &headers };
+    roots.activate(rt);
+    defer roots.deactivate(rt);
+    values[0] = (try core.Object.create(rt, core.class.ids.object, null)).value();
+    try defineStringIteratorToStringTag(rt, core.Object.fromHeader(values[0].refHeader().?), "Iterator");
+    values[1] = (try core.Object.create(rt, core.class.ids.object, core.Object.fromHeader(values[0].refHeader().?))).value();
+    try defineStringIteratorToStringTag(rt, core.Object.fromHeader(values[1].refHeader().?), tag_name);
+    values[2] = try core.function.nativeFunction(ctx, "next", 0);
+    const next_object = (values[2].refHeader() orelse return error.TypeError);
+    if (!values[2].is(.object)) return error.TypeError;
+    const next_function = core.Object.fromHeader(next_object);
+    next_function.setNativeBuiltinIdAndRecord(core.function.nativeBuiltinId(.string, @intFromEnum(method_ids.string.PrototypeMethod.iterator_next)));
+    try core.Object.fromHeader(values[1].refHeader().?).defineOwnProperty(rt, core.atom.predefinedId("next", .string).?, core.Descriptor.data(values[2], .method));
+    return core.Object.fromHeader(values[1].refHeader().?);
+}
+
+pub fn stringIterator(ctx: *core.JSContext, receiver: core.JSValue) !core.JSValue {
+    const rt = ctx.runtime;
+    var values = [_]core.JSValue{ receiver, core.JSValue.undefinedValue(), core.JSValue.undefinedValue() };
+    const slots: []core.JSValue = &values;
+    const slices = [_]core.runtime.ValueRootSlice{.{ .mutable = &slots }};
+    const headers = [_]core.runtime.HeaderRootValue{.{ .header = &ctx.header }};
+    var root_frame = core.runtime.ValueRootFrame{ .slices = &slices, .headers = &headers };
+    root_frame.activate(rt);
+    defer root_frame.deactivate(rt);
+
+    values[0] = try stringIteratorPrimitiveValue(values[0]);
+    values[1] = (try stringIteratorPrototype(ctx, "String Iterator")).value();
+    values[2] = (try core.Object.create(rt, core.class.ids.string_iterator, core.Object.fromHeader(values[1].refHeader().?))).value();
+    const object = core.Object.fromHeader(values[2].refHeader().?);
+    try object.setOptionalValueSlot(rt, object.iteratorTargetSlot(), values[0]);
+    core.Object.fromHeader(values[2].refHeader().?).iteratorIndexSlot().* = 0;
+    return values[2];
+}
 pub fn stringIteratorNext(rt: *core.JSRuntime, global: ?*core.Object, receiver: core.JSValue) !core.JSValue {
     var values = [_]core.JSValue{ receiver, if (global) |object| object.value() else core.JSValue.nullValue(), core.JSValue.undefinedValue() };
     const slots: []core.JSValue = &values;
@@ -5081,7 +5120,7 @@ fn unicodeCaseRootedString(rt: *core.JSRuntime, primitive: core.JSValue, to_lowe
     try source.set(rt, primitive);
     const slen = core.string.stringValueLenUnchecked(primitive);
     if (slen == 0) return primitive;
-    if (try core.string.String.createValueAsciiCaseMapped(rt, try source.get(rt), to_lower)) |mapped| {
+    if (try core.string.String.createValueAsciiCaseMapped(rt, try source.get(rt), if (to_lower) .lower else .upper)) |mapped| {
         try rt.interrupt.pollNativeBulkWork(slen);
         return mapped.value();
     }

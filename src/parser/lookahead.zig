@@ -11,7 +11,6 @@ const parse_state = @import("parse_state.zig");
 const identifiers = @import("identifiers.zig");
 const typescript = @import("typescript.zig");
 const Error = parse_state.Error;
-const FeatureImpl = parse_state.FeatureImpl;
 const State = parse_state.State;
 
 /// Check if `<ident> =>` is the arrow function head shape.
@@ -74,7 +73,7 @@ pub fn checkAsyncArrowHeadAfterAsync(s: *State, return_type_forbidden: bool) Err
 /// `async await => 1` at sloppy top-level.
 fn isAsyncArrowBindingIdentifierKind(s: *State, kind: tok.Kind) bool {
     if (kind == .ident) return true;
-    if (s.is_strict or s.curFunc().is_strict_mode) return false;
+    if (s.isStrict()) return false;
     return switch (kind) {
         .kw_yield => !s.ctx.in_generator,
         .kw_static, .kw_let => true,
@@ -149,6 +148,23 @@ pub fn peekNextDiagnosticToken(s: *State) Error!DiagnosticToken {
     return diagnosticTokenFromToken(&next);
 }
 
+/// One token past the lexer cursor. `null` is a non-fatal lexer error, the
+/// same "no match" the speculative peeks already returned. OutOfMemory and
+/// StackOverflow propagate. The caller frees a returned token. This does not
+/// restore the cursor, so one snapshot can cover several calls; arm that
+/// restore before the first call, because `nextInto` advances `pos` before an
+/// identifier intern can fail.
+pub fn peekAhead(s: *State) Error!?tok.Token {
+    if (s.runtime) |rt| {
+        if (rt.stack.checkNativeOverflow(0)) return error.StackOverflow;
+    }
+    const next = s.lex.next() catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null,
+    };
+    return next;
+}
+
 /// QuickJS `js_parse_skip_parens_token` keeps one `JSToken` in parse state
 /// and returns only the following token kind. Keep the speculative token
 /// owned inside this helper as well: callers never need its 80-byte payload,
@@ -168,6 +184,81 @@ fn rescanLookaheadTokenIfRegexp(s: *State, lookahead_token: *tok.Token, previous
     const slash_offset = s.lex.mark_pos;
     s.lex.freeToken(lookahead_token);
     s.lex.rescanRegexpInto(lookahead_token, slash_offset) catch |err| return mapLookaheadLexerError(s, err);
+}
+
+/// Delimiters seen by a brace-body scan, so `of` can be classified only at
+/// the top of the paren `for (` or `for await (` opened.
+pub const ForHeadDelim = struct {
+    frames: std.ArrayList(Frame) = .empty,
+    allocator: std.mem.Allocator,
+
+    const Frame = struct {
+        opener: tok.Kind,
+        for_head: bool,
+    };
+
+    pub fn init(allocator: std.mem.Allocator) ForHeadDelim {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *ForHeadDelim) void {
+        self.frames.deinit(self.allocator);
+    }
+
+    pub fn atForHead(self: *const ForHeadDelim) bool {
+        if (self.frames.items.len == 0) return false;
+        return self.frames.items[self.frames.items.len - 1].for_head;
+    }
+
+    pub fn onToken(self: *ForHeadDelim, kind: tok.Kind, previous: ?tok.Kind, before_previous: ?tok.Kind) Error!void {
+        switch (kind) {
+            .lparen, .lbracket, .lbrace => {
+                try self.frames.append(self.allocator, .{
+                    .opener = kind,
+                    .for_head = kind == .lparen and forParenOpener(previous, before_previous),
+                });
+            },
+            .rparen, .rbracket, .rbrace => {
+                if (self.frames.items.len == 0) return;
+                const top = self.frames.items[self.frames.items.len - 1];
+                if (closerOf(top.opener) != kind) return;
+                _ = self.frames.pop();
+            },
+            else => {},
+        }
+    }
+};
+
+fn forParenOpener(previous: ?tok.Kind, before_previous: ?tok.Kind) bool {
+    const prev = previous orelse return false;
+    if (prev == .kw_for) return true;
+    const earlier = before_previous orelse return false;
+    return prev == .kw_await and earlier == .kw_for;
+}
+
+/// The lexer keeps `of` as `.ident`. Inside a for-head this is `.kw_of`
+/// after a finished left-hand side, matching `forHeadSlashPrevious`.
+pub fn contextualOfKind(s: *State, token: *const tok.Token, previous: ?tok.Kind, at_for_head: bool) tok.Kind {
+    if (!at_for_head) return token.kind;
+    if (!identifiers.tokenIsPlainName(s, token, "of")) return token.kind;
+    const prev = previous orelse return token.kind;
+    return switch (prev) {
+        .ident,
+        .rparen,
+        .rbracket,
+        .rbrace,
+        .kw_yield,
+        .kw_await,
+        .kw_static,
+        .kw_implements,
+        .kw_interface,
+        .kw_package,
+        .kw_private,
+        .kw_protected,
+        .kw_public,
+        => .kw_of,
+        else => token.kind,
+    };
 }
 
 /// Skip the function a `function` token heads, the lexer sitting just past
@@ -200,23 +291,27 @@ pub fn skipFunctionInPredeclareScan(s: *State, before_keyword: ?tok.Kind) Error!
     }
     var depth: usize = 1;
     var previous_token_kind: ?tok.Kind = .lbrace;
+    var before_previous: ?tok.Kind = null;
+    var for_head = ForHeadDelim.init(s.scratch);
+    defer for_head.deinit();
     while (depth != 0) {
         var t = try s.lex.next();
         defer s.lex.freeToken(&t);
+        if (try skipOpaqueLiteral(s, t, previous_token_kind)) |skipped| {
+            before_previous = previous_token_kind;
+            previous_token_kind = skipped;
+            continue;
+        }
         switch (t.kind) {
             .eof => return,
             .lbrace => depth += 1,
             .rbrace => depth -= 1,
-            .template => try skipTemplateInPredeclareScan(s, t),
-            .slash, .div_assign => {
-                if (try skipRegexpInPredeclareScan(s, previous_token_kind)) {
-                    previous_token_kind = .regexp;
-                    continue;
-                }
-            },
             else => {},
         }
-        previous_token_kind = t.kind;
+        const at_for_head = for_head.atForHead();
+        try for_head.onToken(t.kind, previous_token_kind, before_previous);
+        before_previous = previous_token_kind;
+        previous_token_kind = contextualOfKind(s, &t, previous_token_kind, at_for_head);
     }
 }
 
@@ -237,22 +332,15 @@ pub fn skipTemplateInPredeclareScan(s: *State, first: tok.Token) Error!void {
         while (true) {
             var t = try s.lex.next();
             defer s.lex.freeToken(&t);
+            if (try skipOpaqueLiteral(s, t, previous_token_kind)) |skipped| {
+                previous_token_kind = skipped;
+                continue;
+            }
             switch (t.kind) {
                 .eof => {
                     return;
                 },
                 .kw_function => try skipFunctionInPredeclareScan(s, previous_token_kind),
-                .template => {
-                    try skipTemplateInPredeclareScan(s, t);
-                    previous_token_kind = .template;
-                    continue;
-                },
-                .slash, .div_assign => {
-                    if (try skipRegexpInPredeclareScan(s, previous_token_kind)) {
-                        previous_token_kind = .regexp;
-                        continue;
-                    }
-                },
                 .lbrace, .lparen, .lbracket => expr_depth += 1,
                 .rbrace, .rparen, .rbracket => {
                     if (t.kind == .rbrace and expr_depth == 0) {
@@ -286,80 +374,38 @@ pub fn skipRegexpInPredeclareScan(s: *State, previous_token_kind: ?tok.Kind) Err
     return true;
 }
 
+/// Skip one template or a `/` that starts a regexp in this context.
+/// Null means the token stays (a dividing slash). Callers that only
+/// pre-scan must not turn `error.OutOfMemory` into "not a regexp".
+pub fn skipOpaqueLiteral(s: *State, token: tok.Token, prev: ?tok.Kind) Error!?tok.Kind {
+    if (token.kind == .template) {
+        try skipTemplateInPredeclareScan(s, token);
+        return .template;
+    }
+    if (identifiers.tokenCanStartSlashRegexp(token.kind) and try skipRegexpInPredeclareScan(s, prev)) {
+        return .regexp;
+    }
+    return null;
+}
+
 fn predeclareSlashStartsRegexp(s: *State, previous_token_kind: ?tok.Kind) bool {
     const previous = previous_token_kind orelse return true;
-    if (previous == .kw_yield and !s.ctx.in_generator and !(s.is_strict or s.curFunc().is_strict_mode)) {
+    // Sloppy `yield` / non-async `await` are identifiers, so `/` divides.
+    // A generator or async function still starts a regexp after the keyword.
+    if (previous == .kw_yield and !s.ctx.in_generator and !s.isStrict()) {
         return false;
     }
     if (previous == .kw_await and identifiers.canUseAwaitAsIdentifier(s)) {
         return false;
     }
-    return switch (previous) {
-        .lparen,
-        .lbracket,
-        .lbrace,
-        .comma,
-        .semicolon,
-        .colon,
-        .question,
-        .assign,
-        .bang,
-        .tilde,
-        .plus,
-        .minus,
-        .star,
-        .percent,
-        .amp,
-        .pipe,
-        .caret,
-        .arrow,
-        .lte,
-        .gte,
-        .eq,
-        .strict_eq,
-        .neq,
-        .strict_neq,
-        .shl,
-        .sar,
-        .shr,
-        .land,
-        .lor,
-        .pow,
-        .double_question_mark,
-        .question_mark_dot,
-        .mul_assign,
-        .div_assign,
-        .mod_assign,
-        .plus_assign,
-        .minus_assign,
-        .shl_assign,
-        .sar_assign,
-        .shr_assign,
-        .and_assign,
-        .xor_assign,
-        .or_assign,
-        .pow_assign,
-        .land_assign,
-        .lor_assign,
-        .double_question_mark_assign,
-        .kw_return,
-        .kw_case,
-        .kw_throw,
-        .kw_delete,
-        .kw_void,
-        .kw_typeof,
-        .kw_new,
-        .kw_in,
-        .kw_instanceof,
-        .kw_yield,
-        .kw_await,
-        .kw_of,
-        => true,
-        else => false,
-    };
+    // `of` is lexed as `.ident`. One kind cannot mean both `for (x of /re/)`
+    // and `of / g`, so only a caller that has already classified the
+    // contextual keyword passes `.kw_of`.
+    if (previous == .kw_of) return true;
+    return tok.slashAfterStartsRegexp(previous);
 }
 
-pub const ParserSnapshot = struct {
+pub const LexerCursorSnapshot = struct {
     pos: usize,
     line: u32,
     col: u32,
@@ -367,58 +413,36 @@ pub const ParserSnapshot = struct {
     mark_pos: usize,
     mark_line: u32,
     mark_col: u32,
+};
+
+pub const ParserSnapshot = struct {
+    cursor: LexerCursorSnapshot,
     token: tok.Token,
     last_token_end_offset: usize,
     last_token_line_num: u32,
     last_token_col_num: u32,
-    last_opcode_source_offset: ?u32,
-    features: std.EnumSet(FeatureImpl),
 };
 
 pub fn takeParserSnapshot(s: *State) Error!ParserSnapshot {
     return .{
-        .pos = s.lex.pos,
-        .line = s.lex.line,
-        .col = s.lex.col,
-        .got_lf = s.lex.got_lf,
-        .mark_pos = s.lex.mark_pos,
-        .mark_line = s.lex.mark_line,
-        .mark_col = s.lex.mark_col,
+        .cursor = takeLexerCursorSnapshot(s),
         // qjs speculative scans restore via reparse_ident_token; retain
         // the complete token payload while the scan consumes its owner.
         .token = try s.lex.dupToken(s.token),
         .last_token_end_offset = s.last_token_end_offset,
         .last_token_line_num = s.last_token_line_num,
         .last_token_col_num = s.last_token_col_num,
-        .last_opcode_source_offset = s.last_opcode_source_offset,
-        .features = s.features,
     };
 }
 
 pub fn restoreParserLexerSnapshot(s: *State, snapshot: ParserSnapshot) void {
     s.lex.freeToken(&s.token);
-    s.lex.pos = snapshot.pos;
-    s.lex.line = snapshot.line;
-    s.lex.col = snapshot.col;
-    s.lex.got_lf = snapshot.got_lf;
-    s.lex.mark_pos = snapshot.mark_pos;
-    s.lex.mark_line = snapshot.mark_line;
-    s.lex.mark_col = snapshot.mark_col;
+    restoreLexerCursorSnapshot(s, snapshot.cursor);
     s.token = snapshot.token;
     s.last_token_end_offset = snapshot.last_token_end_offset;
     s.last_token_line_num = snapshot.last_token_line_num;
     s.last_token_col_num = snapshot.last_token_col_num;
 }
-
-const LexerCursorSnapshot = struct {
-    pos: usize,
-    line: u32,
-    col: u32,
-    got_lf: bool,
-    mark_pos: usize,
-    mark_line: u32,
-    mark_col: u32,
-};
 
 pub fn takeLexerCursorSnapshot(s: *State) LexerCursorSnapshot {
     return .{
@@ -441,6 +465,35 @@ pub fn restoreLexerCursorSnapshot(s: *State, snapshot: LexerCursorSnapshot) void
     s.lex.mark_line = snapshot.mark_line;
     s.lex.mark_col = snapshot.mark_col;
 }
+
+/// Owns a duplicate of the current token and the lexer cursor while a scan
+/// replaces `s.token`. `begin` returns null when that duplicate cannot be
+/// allocated. `advance` stays on the lexer and does not run `State.advance`.
+pub const TokenScanGuard = struct {
+    cursor: LexerCursorSnapshot,
+    token: tok.Token,
+
+    pub fn begin(s: *State) ?TokenScanGuard {
+        return .{
+            .cursor = takeLexerCursorSnapshot(s),
+            .token = s.lex.dupToken(s.token) catch return null,
+        };
+    }
+
+    pub fn restore(self: TokenScanGuard, s: *State) void {
+        s.lex.freeToken(&s.token);
+        restoreLexerCursorSnapshot(s, self.cursor);
+        s.token = self.token;
+    }
+
+    pub fn advance(s: *State) Error!bool {
+        s.lex.nextIntoReplacing(&s.token) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return false,
+        };
+        return true;
+    }
+};
 
 const BalancedTokenScan = struct {
     following: tok.Kind = .eof,

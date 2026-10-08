@@ -1103,19 +1103,19 @@ fn cloneAndExpand(
         (if (core.gc.Registry.isNurseryHeader(c.proto.gcHeader())) null else c)
     else
         null;
-    const new_layout = bytecode.FunctionLayout.init(
-        src_layout.has_debug,
-        true,
-        src_layout.cpool_count + 3 * @as(usize, site_n),
-        src_layout.arg_count,
-        new_var_count,
-        src_layout.closure_var_count,
-        new_len,
+    const new_layout = bytecode.FunctionLayout.init(.{
+        .has_debug = src_layout.has_debug,
+        .has_extension = true,
+        .cpool_count = src_layout.cpool_count + 3 * @as(usize, site_n),
+        .arg_count = src_layout.arg_count,
+        .var_count = new_var_count,
+        .closure_var_count = src_layout.closure_var_count,
+        .byte_code_len = new_len,
         // The copy keeps the caller's property-site `cache_idx` operands byte
         // for byte, so it needs the same slot count (its own fresh, empty
         // slots).
-        src_layout.prop_site_count,
-    ) catch return null;
+        .prop_site_count = src_layout.prop_site_count,
+    }) catch return null;
 
     const spec = FunctionBytecode.createProductionShell(rt, new_layout) catch return null;
     // cloneAndExpand reports failure as null, not an error, so the shell is

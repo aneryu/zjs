@@ -956,10 +956,10 @@ noinline fn arrayIteratorNext(
     if (iterator.class_id != core.class.ids.array_iterator) return error.IncompatibleReceiver;
     const target_value = (iterator.iteratorTargetSlot().*) orelse return try createIteratorResult(ctx.runtime, global, core.JSValue.undefinedValue(), true);
     const target = try property_ops.expectObject(target_value);
-    const length = if (core.object.isTypedArrayObject(target)) blk: {
-        if (try core.object.typedArrayDetached(target)) return error.TypedArrayOutOfBounds;
-        if (try core.object.typedArrayOutOfBounds(target)) return error.TypedArrayOutOfBounds;
-        break :blk try core.object.typedArrayLength(ctx.runtime, target);
+    const length = if (core.typed_array.isTypedArrayObject(target)) blk: {
+        if (try core.typed_array.typedArrayDetached(target)) return error.TypedArrayOutOfBounds;
+        if (try core.typed_array.typedArrayOutOfBounds(target)) return error.TypedArrayOutOfBounds;
+        break :blk try core.typed_array.typedArrayLength(ctx.runtime, target);
     } else if (target.isArray()) target.arrayLength() else blk: {
         const length_value = try object_ops.getValueProperty(ctx, output, global, target_value, core.atom.ids.length, null, null);
         break :blk @min(try value_ops.toLengthIndex(ctx, output, global, length_value), std.math.maxInt(u32));
@@ -986,7 +986,7 @@ fn arrayIteratorValue(
 ) !core.JSValue {
     return switch (kind) {
         .key => core.JSValue.int32(@intCast(index)),
-        .value => if (core.object.isTypedArrayObject(target))
+        .value => if (core.typed_array.isTypedArrayObject(target))
             try core.typed_array.typedArrayGetIndex(ctx.runtime, target, index)
         else
             try getValueProperty(ctx, output, global, target.value(), core.Atom.taggedInt(index), null, null),
@@ -1000,7 +1000,7 @@ fn arrayIteratorValue(
             const pair = try core.Object.createArray(ctx.runtime, array_ops.arrayPrototypeFromGlobal(ctx.runtime, global));
             errdefer core.Object.destroyFromHeader(ctx.runtime, pair.gcHeader());
             pair_value = pair.value();
-            value = if (core.object.isTypedArrayObject(target))
+            value = if (core.typed_array.isTypedArrayObject(target))
                 try core.typed_array.typedArrayGetIndex(ctx.runtime, target, index)
             else
                 try getValueProperty(ctx, output, global, target.value(), core.Atom.taggedInt(index), null, null);
@@ -1357,7 +1357,7 @@ pub const IteratorRecord = struct {
     next: core.JSValue,
 };
 
-pub const IteratorZipCompletion = struct {
+pub const IteratorCloseCompletion = struct {
     err: ?HostError = null,
     exception: core.JSValue = core.JSValue.uninitialized(),
     /// The saved exception was the engine's out-of-memory error; `restore`
@@ -1371,7 +1371,7 @@ pub const IteratorZipCompletion = struct {
     /// Activate at the final address immediately after construction. The
     /// saved exception must survive even while Runtime.exception.value is
     /// cleared or replaced by another iterator's close callback.
-    pub fn activateRoots(self: *IteratorZipCompletion, rt: *core.JSRuntime) void {
+    pub fn activateRoots(self: *IteratorCloseCompletion, rt: *core.JSRuntime) void {
         std.debug.assert(!self.roots_active);
         self.exception_slot = @as([*]core.JSValue, @ptrCast(&self.exception))[0..1];
         self.root_slices[0] = .{ .mutable = &self.exception_slot };
@@ -1380,24 +1380,24 @@ pub const IteratorZipCompletion = struct {
         self.roots_active = true;
     }
 
-    pub fn initNormal() IteratorZipCompletion {
+    pub fn initNormal() IteratorCloseCompletion {
         return .{};
     }
 
-    pub fn initThrow(ctx: *core.JSContext, err: anytype) IteratorZipCompletion {
-        var completion = IteratorZipCompletion.initNormal();
+    pub fn initThrow(ctx: *core.JSContext, err: anytype) IteratorCloseCompletion {
+        var completion = IteratorCloseCompletion.initNormal();
         completion.capture(ctx, err);
         return completion;
     }
 
-    pub fn capture(self: *IteratorZipCompletion, ctx: *core.JSContext, err: anytype) void {
+    pub fn capture(self: *IteratorCloseCompletion, ctx: *core.JSContext, err: anytype) void {
         self.exception = core.JSValue.uninitialized();
         self.err = @errorCast(err);
         self.out_of_memory = ctx.exceptionIsOutOfMemory();
         if (ctx.hasException()) self.exception = ctx.takeException();
     }
 
-    pub fn restore(self: *const IteratorZipCompletion, ctx: *core.JSContext) void {
+    pub fn restore(self: *const IteratorCloseCompletion, ctx: *core.JSContext) void {
         // An interruption raised while closing outranks the saved completion.
         if (ctx.exceptionIsUncatchable()) return;
         if (ctx.hasException()) ctx.clearException();
@@ -1407,7 +1407,7 @@ pub const IteratorZipCompletion = struct {
         }
     }
 
-    pub fn deinit(self: *IteratorZipCompletion, rt: *core.JSRuntime) void {
+    pub fn deinit(self: *IteratorCloseCompletion, rt: *core.JSRuntime) void {
         if (self.roots_active) {
             self.root_frame.deactivate(rt);
             self.roots_active = false;
@@ -1803,7 +1803,7 @@ fn iteratorZipCloseWithCompletion(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    completion: *IteratorZipCompletion,
+    completion: *IteratorCloseCompletion,
     iterator_value: core.JSValue,
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
@@ -1829,7 +1829,7 @@ pub fn iteratorZipCloseAllWithCompletion(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
     global: *core.Object,
-    completion: *IteratorZipCompletion,
+    completion: *IteratorCloseCompletion,
     iters: *core.Object,
     count: usize,
     caller_function: ?*const bytecode.FunctionBytecode,
@@ -1920,7 +1920,7 @@ pub fn iteratorZipCloseAllAndPropagate(
     var roots = core.runtime.ValueRootFrame{ .slices = &slices };
     roots.activate(ctx.runtime);
     defer roots.deactivate(ctx.runtime);
-    var completion = IteratorZipCompletion.initThrow(ctx, err);
+    var completion = IteratorCloseCompletion.initThrow(ctx, err);
     completion.activateRoots(ctx.runtime);
     defer completion.deinit(ctx.runtime);
     iteratorZipCloseAllWithCompletion(ctx, output, global, &completion, objectFromValue(values[0]).?, count, caller_function, caller_frame) catch |close_err| {
@@ -1955,7 +1955,7 @@ pub fn iteratorCloseWithCompletionAndPropagate(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError {
-    var completion = IteratorZipCompletion.initThrow(ctx, err);
+    var completion = IteratorCloseCompletion.initThrow(ctx, err);
     completion.activateRoots(ctx.runtime);
     defer completion.deinit(ctx.runtime);
     iteratorZipCloseWithCompletion(ctx, output, global, &completion, iterator_value, caller_function, caller_frame);
@@ -1972,7 +1972,7 @@ noinline fn iteratorHelperCloseWithCompletionAndPropagate(
     caller_function: ?*const bytecode.FunctionBytecode,
     caller_frame: ?*frame_mod.Frame,
 ) HostError {
-    var completion = IteratorZipCompletion.initThrow(ctx, err);
+    var completion = IteratorCloseCompletion.initThrow(ctx, err);
     completion.activateRoots(ctx.runtime);
     defer completion.deinit(ctx.runtime);
     iteratorHelperClose(ctx, output, global, helper, caller_function, caller_frame) catch |close_err| {
@@ -1981,8 +1981,6 @@ noinline fn iteratorHelperCloseWithCompletionAndPropagate(
         // only an uncatchable interruption or OOM overrides it.
         if (close_err == error.OutOfMemory or ctx.exceptionIsUncatchable()) return close_err;
         if (ctx.hasException()) ctx.clearException();
-        completion.restore(ctx);
-        return completion.err orelse err;
     };
     completion.restore(ctx);
     return completion.err orelse err;
@@ -2499,7 +2497,7 @@ fn iteratorZipCompleteAbrupt(
     roots.activate(ctx.runtime);
     defer roots.deactivate(ctx.runtime);
 
-    var completion = IteratorZipCompletion.initThrow(ctx, err);
+    var completion = IteratorCloseCompletion.initThrow(ctx, err);
     completion.activateRoots(ctx.runtime);
     defer completion.deinit(ctx.runtime);
     objectFromValue(rooted[0]).?.iteratorZipAliveSlot().* = 0;
@@ -2598,7 +2596,7 @@ noinline fn iteratorZipHelperNext(
 
         switch (mode) {
             .shortest => {
-                var completion = IteratorZipCompletion.initNormal();
+                var completion = IteratorCloseCompletion.initNormal();
                 completion.activateRoots(ctx.runtime);
                 defer completion.deinit(ctx.runtime);
                 try iteratorZipCloseAllWithCompletion(ctx, output, global, &completion, objectFromValue(rooted[1]).?, count, caller_function, caller_frame);
@@ -2662,7 +2660,7 @@ fn iteratorZipHelperReturn(
 
     if ((objectFromValue(rooted[0]).?.iteratorTargetSlot().*)) |iterator_value| {
         const iters = objectFromValue(iterator_value) orelse return error.TypeError;
-        var completion = IteratorZipCompletion.initNormal();
+        var completion = IteratorCloseCompletion.initNormal();
         completion.activateRoots(ctx.runtime);
         defer completion.deinit(ctx.runtime);
         try iteratorZipCloseAllWithCompletion(ctx, output, global, &completion, iters, (objectFromValue(rooted[0]).?.iteratorIndexSlot().*), caller_function, caller_frame);
@@ -3717,13 +3715,13 @@ fn createForInIterator(
 /// a fast array (zjs dense array / typed array) with no enumerable shape
 /// props stores only the element count. Returns null for the normal case.
 fn forInFastArrayCount(rt: *core.JSRuntime, source: *core.Object) ?u32 {
-    if (core.object.isTypedArrayObject(source)) {
+    if (core.typed_array.isTypedArrayObject(source)) {
         // "check that there are no enumerable normal fields".
         for (source.shapeProps()) |prop| {
             const prop_flags = core.property.Flags.fromBits(prop.flags);
             if (!prop_flags.deleted and prop_flags.enumerable) return null;
         }
-        return core.object.typedArrayLength(rt, source) catch 0;
+        return core.typed_array.typedArrayLength(rt, source) catch 0;
     }
     if (!source.isArray() or !source.flags.fast_array) return null;
     if (source.isProxy() or source.hasExoticMethods()) return null;
@@ -3833,10 +3831,10 @@ fn forInHasEnumerableStringKey(
     object: *core.Object,
 ) !bool {
     const rt = ctx.runtime;
-    if (core.object.isTypedArrayObject(object)) {
+    if (core.typed_array.isTypedArrayObject(object)) {
         // fast_array branch: every element is an
         // enumerable index key.
-        if ((core.object.typedArrayLength(rt, object) catch 0) != 0) return true;
+        if ((core.typed_array.typedArrayLength(rt, object) catch 0) != 0) return true;
     } else if (object.proxyTarget() != null or object.hasExoticMethods() or
         object.class_id == core.class.ids.module_ns)
     {

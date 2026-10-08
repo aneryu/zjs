@@ -29,6 +29,10 @@ test "host lazy factories keep distinct identities and retry failed materializat
     try host.testing.output.case0();
 }
 
+test "quoted inspector keeps lone surrogates as unicode escapes" {
+    try host.testing.output.case1();
+}
+
 test "file loader resolves bare specifiers verbatim and owns resolved paths" {
     try host.testing.file_modules.case0();
 }

@@ -1111,54 +1111,76 @@ pub const builtin_method_id_lookup = struct {
             return @intFromEnum(prototype_method_names.get(name) orelse return null);
         }
 
+        /// One row of the legacy string-method numbering. `encode` is false for
+        /// HTML wrapper bodies and exec-only `substr`: they decode, and
+        /// `encodePrototypeMethodId` returns null.
+        const MethodIdRow = struct {
+            method: PrototypeMethod,
+            decoded: u32,
+            encode: bool = true,
+        };
+
+        const prototype_method_rows = [_]MethodIdRow{
+            .{ .method = .char_at, .decoded = 0 },
+            .{ .method = .substring, .decoded = 1 },
+            .{ .method = .to_upper_case, .decoded = 2 },
+            .{ .method = .to_lower_case, .decoded = 3 },
+            .{ .method = .index_of, .decoded = 4 },
+            .{ .method = .includes, .decoded = 5 },
+            .{ .method = .starts_with, .decoded = 6 },
+            .{ .method = .ends_with, .decoded = 7 },
+            .{ .method = .trim, .decoded = 8 },
+            .{ .method = .concat, .decoded = 10 },
+            .{ .method = .anchor, .decoded = 11, .encode = false },
+            .{ .method = .big, .decoded = 12, .encode = false },
+            .{ .method = .blink, .decoded = 13, .encode = false },
+            .{ .method = .bold, .decoded = 14, .encode = false },
+            .{ .method = .fixed, .decoded = 15, .encode = false },
+            .{ .method = .fontcolor, .decoded = 16, .encode = false },
+            .{ .method = .fontsize, .decoded = 17, .encode = false },
+            .{ .method = .italics, .decoded = 18, .encode = false },
+            .{ .method = .link, .decoded = 19, .encode = false },
+            .{ .method = .small, .decoded = 20, .encode = false },
+            .{ .method = .trim_start, .decoded = 21 },
+            .{ .method = .trim_end, .decoded = 22 },
+            .{ .method = .strike, .decoded = 23, .encode = false },
+            .{ .method = .sub, .decoded = 24, .encode = false },
+            .{ .method = .substr, .decoded = 25, .encode = false },
+            .{ .method = .sup, .decoded = 26, .encode = false },
+            .{ .method = .split, .decoded = legacy_split_method_id },
+            .{ .method = .last_index_of, .decoded = 28 },
+            .{ .method = .char_code_at, .decoded = 29 },
+            .{ .method = .at, .decoded = 30 },
+            .{ .method = .code_point_at, .decoded = 31 },
+            .{ .method = .slice, .decoded = 32 },
+            .{ .method = .repeat, .decoded = 33 },
+            .{ .method = .pad_start, .decoded = 34 },
+            .{ .method = .pad_end, .decoded = 35 },
+            .{ .method = .locale_compare, .decoded = 36 },
+            .{ .method = .normalize, .decoded = legacy_normalize_method_id },
+            .{ .method = .is_well_formed, .decoded = 38 },
+            .{ .method = .to_well_formed, .decoded = 39 },
+            .{ .method = .search, .decoded = legacy_search_method_id },
+            .{ .method = .match, .decoded = legacy_match_method_id },
+            .{ .method = .replace_all, .decoded = legacy_replace_all_method_id },
+            .{ .method = .match_all, .decoded = legacy_match_all_method_id },
+            .{ .method = .replace, .decoded = legacy_replace_method_id },
+        };
+
+        comptime {
+            for (prototype_method_rows, 0..) |row, index| {
+                for (prototype_method_rows[index + 1 ..]) |other| {
+                    if (row.method == other.method) @compileError("duplicate string prototype method");
+                    if (row.decoded == other.decoded) @compileError("duplicate legacy string method id");
+                }
+            }
+        }
+
         pub fn decodePrototypeMethodId(id: u32) ?u32 {
-            return switch (id) {
-                @intFromEnum(PrototypeMethod.char_at) => 0,
-                @intFromEnum(PrototypeMethod.substring) => 1,
-                @intFromEnum(PrototypeMethod.to_upper_case) => 2,
-                @intFromEnum(PrototypeMethod.to_lower_case) => 3,
-                @intFromEnum(PrototypeMethod.index_of) => 4,
-                @intFromEnum(PrototypeMethod.includes) => 5,
-                @intFromEnum(PrototypeMethod.starts_with) => 6,
-                @intFromEnum(PrototypeMethod.ends_with) => 7,
-                @intFromEnum(PrototypeMethod.trim) => 8,
-                @intFromEnum(PrototypeMethod.concat) => 10,
-                @intFromEnum(PrototypeMethod.trim_start) => 21,
-                @intFromEnum(PrototypeMethod.trim_end) => 22,
-                @intFromEnum(PrototypeMethod.split) => legacy_split_method_id,
-                @intFromEnum(PrototypeMethod.last_index_of) => 28,
-                @intFromEnum(PrototypeMethod.char_code_at) => 29,
-                @intFromEnum(PrototypeMethod.at) => 30,
-                @intFromEnum(PrototypeMethod.code_point_at) => 31,
-                @intFromEnum(PrototypeMethod.slice) => 32,
-                @intFromEnum(PrototypeMethod.repeat) => 33,
-                @intFromEnum(PrototypeMethod.pad_start) => 34,
-                @intFromEnum(PrototypeMethod.pad_end) => 35,
-                @intFromEnum(PrototypeMethod.locale_compare) => 36,
-                @intFromEnum(PrototypeMethod.normalize) => legacy_normalize_method_id,
-                @intFromEnum(PrototypeMethod.is_well_formed) => 38,
-                @intFromEnum(PrototypeMethod.to_well_formed) => 39,
-                @intFromEnum(PrototypeMethod.search) => legacy_search_method_id,
-                @intFromEnum(PrototypeMethod.match) => legacy_match_method_id,
-                @intFromEnum(PrototypeMethod.replace_all) => legacy_replace_all_method_id,
-                @intFromEnum(PrototypeMethod.match_all) => legacy_match_all_method_id,
-                @intFromEnum(PrototypeMethod.replace) => legacy_replace_method_id,
-                @intFromEnum(PrototypeMethod.anchor) => 11,
-                @intFromEnum(PrototypeMethod.big) => 12,
-                @intFromEnum(PrototypeMethod.blink) => 13,
-                @intFromEnum(PrototypeMethod.bold) => 14,
-                @intFromEnum(PrototypeMethod.fixed) => 15,
-                @intFromEnum(PrototypeMethod.fontcolor) => 16,
-                @intFromEnum(PrototypeMethod.fontsize) => 17,
-                @intFromEnum(PrototypeMethod.italics) => 18,
-                @intFromEnum(PrototypeMethod.link) => 19,
-                @intFromEnum(PrototypeMethod.small) => 20,
-                @intFromEnum(PrototypeMethod.strike) => 23,
-                @intFromEnum(PrototypeMethod.sub) => 24,
-                @intFromEnum(PrototypeMethod.substr) => 25,
-                @intFromEnum(PrototypeMethod.sup) => 26,
-                else => null,
-            };
+            inline for (prototype_method_rows) |row| {
+                if (id == @intFromEnum(row.method)) return row.decoded;
+            }
+            return null;
         }
 
         /// Inverse of `decodePrototypeMethodId`: map a legacy decoded method id
@@ -1168,44 +1190,12 @@ pub const builtin_method_id_lookup = struct {
         /// (`builtin_dispatch.callInternalRecord`) of the reused `methodCall` /
         /// `charAtValue` bodies, so they route through the table instead of
         /// naming the builtin directly. Returns null for decoded ids with no
-        /// installed record (e.g. the exec-only `substr` id 25, or the HTML
-        /// wrapper bodies). The switch below is the authority on what IS
-        /// mapped: pad/normalize/locale/search (34-37, 40) are mapped, even
-        /// though an older version of this note claimed they were not.
+        /// installed record (HTML wrapper bodies and exec-only `substr`).
         pub fn encodePrototypeMethodId(decoded: u32) ?u32 {
-            return switch (decoded) {
-                0 => @intFromEnum(PrototypeMethod.char_at),
-                1 => @intFromEnum(PrototypeMethod.substring),
-                2 => @intFromEnum(PrototypeMethod.to_upper_case),
-                3 => @intFromEnum(PrototypeMethod.to_lower_case),
-                4 => @intFromEnum(PrototypeMethod.index_of),
-                5 => @intFromEnum(PrototypeMethod.includes),
-                6 => @intFromEnum(PrototypeMethod.starts_with),
-                7 => @intFromEnum(PrototypeMethod.ends_with),
-                8 => @intFromEnum(PrototypeMethod.trim),
-                10 => @intFromEnum(PrototypeMethod.concat),
-                21 => @intFromEnum(PrototypeMethod.trim_start),
-                22 => @intFromEnum(PrototypeMethod.trim_end),
-                legacy_split_method_id => @intFromEnum(PrototypeMethod.split),
-                28 => @intFromEnum(PrototypeMethod.last_index_of),
-                29 => @intFromEnum(PrototypeMethod.char_code_at),
-                30 => @intFromEnum(PrototypeMethod.at),
-                31 => @intFromEnum(PrototypeMethod.code_point_at),
-                32 => @intFromEnum(PrototypeMethod.slice),
-                33 => @intFromEnum(PrototypeMethod.repeat),
-                34 => @intFromEnum(PrototypeMethod.pad_start),
-                35 => @intFromEnum(PrototypeMethod.pad_end),
-                36 => @intFromEnum(PrototypeMethod.locale_compare),
-                legacy_normalize_method_id => @intFromEnum(PrototypeMethod.normalize),
-                38 => @intFromEnum(PrototypeMethod.is_well_formed),
-                39 => @intFromEnum(PrototypeMethod.to_well_formed),
-                legacy_search_method_id => @intFromEnum(PrototypeMethod.search),
-                legacy_match_method_id => @intFromEnum(PrototypeMethod.match),
-                legacy_replace_all_method_id => @intFromEnum(PrototypeMethod.replace_all),
-                legacy_match_all_method_id => @intFromEnum(PrototypeMethod.match_all),
-                legacy_replace_method_id => @intFromEnum(PrototypeMethod.replace),
-                else => null,
-            };
+            inline for (prototype_method_rows) |row| {
+                if (row.encode and decoded == row.decoded) return @intFromEnum(row.method);
+            }
+            return null;
         }
     };
 
@@ -1297,34 +1287,6 @@ pub const builtin_method_id_lookup = struct {
 
         pub fn prototypeMethodId(name: []const u8) ?u32 {
             return name_id.lookup(name, &prototype_method_ids);
-        }
-
-        fn legacyBasePrototypeMethodId(id: u32) ?u32 {
-            return switch (id) {
-                @intFromEnum(PrototypeMethod.set),
-                @intFromEnum(PrototypeMethod.get),
-                @intFromEnum(PrototypeMethod.has),
-                @intFromEnum(PrototypeMethod.delete),
-                @intFromEnum(PrototypeMethod.clear),
-                @intFromEnum(PrototypeMethod.add),
-                @intFromEnum(PrototypeMethod.keys),
-                @intFromEnum(PrototypeMethod.values),
-                @intFromEnum(PrototypeMethod.entries),
-                @intFromEnum(PrototypeMethod.for_each),
-                @intFromEnum(PrototypeMethod.get_or_insert),
-                @intFromEnum(PrototypeMethod.get_or_insert_computed),
-                => id,
-                else => null,
-            };
-        }
-
-        pub fn legacyClosureMethodId(name: []const u8) ?u32 {
-            const id = prototypeMethodId(name) orelse return null;
-            if (legacyBasePrototypeMethodId(id)) |method_id| return method_id;
-            return switch (id) {
-                @intFromEnum(PrototypeMethod.iterator_next) => id,
-                else => null,
-            };
         }
 
         pub fn fastPrototypeMethodIdForClass(class_id: ClassId, name: []const u8) ?u32 {
@@ -1433,38 +1395,33 @@ pub const builtin_method_id_lookup = struct {
             return null;
         }
 
+        const data_view_kinds = [_]u32{ 1, 2, 3, 4, 5, 6, 11, 7, 8, 9, 10 };
+
+        fn dataViewKindFromOrdinal(ordinal: u32) ?u32 {
+            if (ordinal >= data_view_kinds.len) return null;
+            return data_view_kinds[ordinal];
+        }
+
+        fn dataViewKindFromRecordId(comptime Method: type, id: u32) ?u32 {
+            comptime {
+                const methods = std.enums.values(Method);
+                if (methods.len != data_view_kinds.len) @compileError("DataView kind map covers every get/set method");
+                const base = @intFromEnum(methods[0]);
+                for (methods, 0..) |method, index| {
+                    if (@intFromEnum(method) != base + @as(u32, @intCast(index))) @compileError("DataView method tags must stay contiguous from int8");
+                }
+            }
+            const base = @intFromEnum(std.enums.values(Method)[0]);
+            if (id < base) return null;
+            return dataViewKindFromOrdinal(id - base);
+        }
+
         pub fn dataViewGetKindFromRecordId(id: u32) ?u32 {
-            return switch (id) {
-                @intFromEnum(DataViewGetMethod.int8) => 1,
-                @intFromEnum(DataViewGetMethod.uint8) => 2,
-                @intFromEnum(DataViewGetMethod.int16) => 3,
-                @intFromEnum(DataViewGetMethod.uint16) => 4,
-                @intFromEnum(DataViewGetMethod.int32) => 5,
-                @intFromEnum(DataViewGetMethod.uint32) => 6,
-                @intFromEnum(DataViewGetMethod.float16) => 11,
-                @intFromEnum(DataViewGetMethod.float32) => 7,
-                @intFromEnum(DataViewGetMethod.float64) => 8,
-                @intFromEnum(DataViewGetMethod.big_int64) => 9,
-                @intFromEnum(DataViewGetMethod.big_uint64) => 10,
-                else => null,
-            };
+            return dataViewKindFromRecordId(DataViewGetMethod, id);
         }
 
         pub fn dataViewSetKindFromRecordId(id: u32) ?u32 {
-            return switch (id) {
-                @intFromEnum(DataViewSetMethod.int8) => 1,
-                @intFromEnum(DataViewSetMethod.uint8) => 2,
-                @intFromEnum(DataViewSetMethod.int16) => 3,
-                @intFromEnum(DataViewSetMethod.uint16) => 4,
-                @intFromEnum(DataViewSetMethod.int32) => 5,
-                @intFromEnum(DataViewSetMethod.uint32) => 6,
-                @intFromEnum(DataViewSetMethod.float16) => 11,
-                @intFromEnum(DataViewSetMethod.float32) => 7,
-                @intFromEnum(DataViewSetMethod.float64) => 8,
-                @intFromEnum(DataViewSetMethod.big_int64) => 9,
-                @intFromEnum(DataViewSetMethod.big_uint64) => 10,
-                else => null,
-            };
+            return dataViewKindFromRecordId(DataViewSetMethod, id);
         }
 
         pub fn arrayBufferAccessorNameFromRecordId(id: u32) ?[]const u8 {
@@ -1535,67 +1492,26 @@ pub const builtin_method_id_lookup = struct {
             return name_id.lookup(name, &accessor_method_ids);
         }
 
-        pub fn accessorNameFromId(id: u32) ?[]const u8 {
-            return switch (id) {
-                @intFromEnum(AccessorMethod.source) => "source",
-                @intFromEnum(AccessorMethod.flags) => "flags",
-                @intFromEnum(AccessorMethod.global) => "global",
-                @intFromEnum(AccessorMethod.ignore_case) => "ignoreCase",
-                @intFromEnum(AccessorMethod.multiline) => "multiline",
-                @intFromEnum(AccessorMethod.dot_all) => "dotAll",
-                @intFromEnum(AccessorMethod.unicode) => "unicode",
-                @intFromEnum(AccessorMethod.sticky) => "sticky",
-                @intFromEnum(AccessorMethod.has_indices) => "hasIndices",
-                @intFromEnum(AccessorMethod.unicode_sets) => "unicodeSets",
-                else => null,
-            };
-        }
-
-        pub fn accessorNameFromGetterName(name: []const u8) ?[]const u8 {
-            const id = accessorIdFromGetterName(name) orelse return null;
-            return accessorNameFromId(id);
-        }
-
-        /// Map a `get <accessor>` getter name directly to its accessor id.
-        pub fn accessorIdFromGetterName(name: []const u8) ?u32 {
-            if (!std.mem.startsWith(u8, name, "get ")) return null;
-            return accessorMethodId(name["get ".len..]);
-        }
-
         pub fn legacyAccessorMethodFromId(id: u32) ?LegacyAccessorMethod {
-            return switch (id) {
-                @intFromEnum(LegacyAccessorMethod.get_input) => .get_input,
-                @intFromEnum(LegacyAccessorMethod.set_input) => .set_input,
-                @intFromEnum(LegacyAccessorMethod.get_last_match) => .get_last_match,
-                @intFromEnum(LegacyAccessorMethod.get_last_paren) => .get_last_paren,
-                @intFromEnum(LegacyAccessorMethod.get_left_context) => .get_left_context,
-                @intFromEnum(LegacyAccessorMethod.get_right_context) => .get_right_context,
-                @intFromEnum(LegacyAccessorMethod.get_capture_1) => .get_capture_1,
-                @intFromEnum(LegacyAccessorMethod.get_capture_2) => .get_capture_2,
-                @intFromEnum(LegacyAccessorMethod.get_capture_3) => .get_capture_3,
-                @intFromEnum(LegacyAccessorMethod.get_capture_4) => .get_capture_4,
-                @intFromEnum(LegacyAccessorMethod.get_capture_5) => .get_capture_5,
-                @intFromEnum(LegacyAccessorMethod.get_capture_6) => .get_capture_6,
-                @intFromEnum(LegacyAccessorMethod.get_capture_7) => .get_capture_7,
-                @intFromEnum(LegacyAccessorMethod.get_capture_8) => .get_capture_8,
-                @intFromEnum(LegacyAccessorMethod.get_capture_9) => .get_capture_9,
-                else => null,
-            };
+            return std.enums.fromInt(LegacyAccessorMethod, id);
         }
 
         pub fn legacyCaptureIndex(method: LegacyAccessorMethod) ?usize {
-            return switch (method) {
-                .get_capture_1 => 0,
-                .get_capture_2 => 1,
-                .get_capture_3 => 2,
-                .get_capture_4 => 3,
-                .get_capture_5 => 4,
-                .get_capture_6 => 5,
-                .get_capture_7 => 6,
-                .get_capture_8 => 7,
-                .get_capture_9 => 8,
-                else => null,
-            };
+            const first = @intFromEnum(LegacyAccessorMethod.get_capture_1);
+            const last = @intFromEnum(LegacyAccessorMethod.get_capture_9);
+            comptime {
+                const captures = [_]LegacyAccessorMethod{
+                    .get_capture_1, .get_capture_2, .get_capture_3,
+                    .get_capture_4, .get_capture_5, .get_capture_6,
+                    .get_capture_7, .get_capture_8, .get_capture_9,
+                };
+                for (captures, 0..) |capture, index| {
+                    if (@intFromEnum(capture) != first + @as(u32, @intCast(index))) @compileError("legacy capture ids must stay dense from get_capture_1");
+                }
+            }
+            const raw = @intFromEnum(method);
+            if (raw < first or raw > last) return null;
+            return raw - first;
         }
     };
 
@@ -1643,7 +1559,6 @@ test "builtin method-id helpers preserve load-bearing id values" {
     try testing.expectEqual(@as(?u32, null), lookup.collection.prototypeMethodId("nope"));
     try testing.expectEqual(@as(?u32, null), lookup.collection.fastPrototypeMethodIdForClass(class.ids.set, "get"));
     try testing.expectEqual(@as(?u32, null), lookup.collection.fastPrototypeMethodIdForClass(class.ids.regexp, "get"));
-    try testing.expect(lookup.collection.legacyClosureMethodId("set") != null);
 
     // regexp accessors share the same name-id walker.
     try testing.expectEqual(@as(?u32, 201), lookup.regexp.accessorMethodId("source"));
@@ -1667,6 +1582,133 @@ test "builtin method-id helpers preserve load-bearing id values" {
     try testing.expectEqual(@as(?u32, 1), lookup.buffer.dataViewGetKindFromRecordId(get_int8));
     try testing.expectEqualStrings("byteLength", lookup.buffer.arrayBufferAccessorNameFromRecordId(401).?);
     try testing.expectEqual(@as(?u32, 465), lookup.buffer.typedArrayAccessorMethodId("[Symbol.toStringTag]"));
+}
+
+test "string prototype method ids round-trip the legacy numbering" {
+    const testing = std.testing;
+    const string = builtin_method_id_lookup.string;
+    const PrototypeMethod = builtin_method_ids.string.PrototypeMethod;
+    const Row = struct { method: PrototypeMethod, decoded: u32, encode: bool };
+    const rows = [_]Row{
+        .{ .method = .char_at, .decoded = 0, .encode = true },
+        .{ .method = .substring, .decoded = 1, .encode = true },
+        .{ .method = .to_upper_case, .decoded = 2, .encode = true },
+        .{ .method = .to_lower_case, .decoded = 3, .encode = true },
+        .{ .method = .index_of, .decoded = 4, .encode = true },
+        .{ .method = .includes, .decoded = 5, .encode = true },
+        .{ .method = .starts_with, .decoded = 6, .encode = true },
+        .{ .method = .ends_with, .decoded = 7, .encode = true },
+        .{ .method = .trim, .decoded = 8, .encode = true },
+        .{ .method = .concat, .decoded = 10, .encode = true },
+        .{ .method = .anchor, .decoded = 11, .encode = false },
+        .{ .method = .big, .decoded = 12, .encode = false },
+        .{ .method = .blink, .decoded = 13, .encode = false },
+        .{ .method = .bold, .decoded = 14, .encode = false },
+        .{ .method = .fixed, .decoded = 15, .encode = false },
+        .{ .method = .fontcolor, .decoded = 16, .encode = false },
+        .{ .method = .fontsize, .decoded = 17, .encode = false },
+        .{ .method = .italics, .decoded = 18, .encode = false },
+        .{ .method = .link, .decoded = 19, .encode = false },
+        .{ .method = .small, .decoded = 20, .encode = false },
+        .{ .method = .trim_start, .decoded = 21, .encode = true },
+        .{ .method = .trim_end, .decoded = 22, .encode = true },
+        .{ .method = .strike, .decoded = 23, .encode = false },
+        .{ .method = .sub, .decoded = 24, .encode = false },
+        .{ .method = .substr, .decoded = 25, .encode = false },
+        .{ .method = .sup, .decoded = 26, .encode = false },
+        .{ .method = .split, .decoded = string.legacy_split_method_id, .encode = true },
+        .{ .method = .last_index_of, .decoded = 28, .encode = true },
+        .{ .method = .char_code_at, .decoded = 29, .encode = true },
+        .{ .method = .at, .decoded = 30, .encode = true },
+        .{ .method = .code_point_at, .decoded = 31, .encode = true },
+        .{ .method = .slice, .decoded = 32, .encode = true },
+        .{ .method = .repeat, .decoded = 33, .encode = true },
+        .{ .method = .pad_start, .decoded = 34, .encode = true },
+        .{ .method = .pad_end, .decoded = 35, .encode = true },
+        .{ .method = .locale_compare, .decoded = 36, .encode = true },
+        .{ .method = .normalize, .decoded = string.legacy_normalize_method_id, .encode = true },
+        .{ .method = .is_well_formed, .decoded = 38, .encode = true },
+        .{ .method = .to_well_formed, .decoded = 39, .encode = true },
+        .{ .method = .search, .decoded = string.legacy_search_method_id, .encode = true },
+        .{ .method = .match, .decoded = string.legacy_match_method_id, .encode = true },
+        .{ .method = .replace_all, .decoded = string.legacy_replace_all_method_id, .encode = true },
+        .{ .method = .match_all, .decoded = string.legacy_match_all_method_id, .encode = true },
+        .{ .method = .replace, .decoded = string.legacy_replace_method_id, .encode = true },
+    };
+
+    for (std.enums.values(PrototypeMethod)) |method| {
+        const native: u32 = @intFromEnum(method);
+        var expected: ?u32 = null;
+        for (rows) |row| {
+            if (row.method == method) expected = row.decoded;
+        }
+        try testing.expectEqual(expected, string.decodePrototypeMethodId(native));
+    }
+
+    var decoded: u32 = 0;
+    while (decoded < 64) : (decoded += 1) {
+        var expected: ?u32 = null;
+        for (rows) |row| {
+            if (row.encode and row.decoded == decoded) expected = @intFromEnum(row.method);
+        }
+        const encoded = string.encodePrototypeMethodId(decoded);
+        try testing.expectEqual(expected, encoded);
+        if (expected) |native| {
+            try testing.expectEqual(@as(?u32, decoded), string.decodePrototypeMethodId(native));
+            try testing.expectEqual(@as(?u32, native), string.encodePrototypeMethodId(string.decodePrototypeMethodId(native).?));
+        }
+    }
+}
+
+test "legacy accessor and dataview kind maps stay exhaustive" {
+    const testing = std.testing;
+    const buffer = builtin_method_id_lookup.buffer;
+    const regexp = builtin_method_id_lookup.regexp;
+    const DataViewGetMethod = builtin_method_ids.buffer.DataViewGetMethod;
+    const DataViewSetMethod = builtin_method_ids.buffer.DataViewSetMethod;
+    const LegacyAccessorMethod = builtin_method_ids.regexp.LegacyAccessorMethod;
+
+    const kinds = [_]u32{ 1, 2, 3, 4, 5, 6, 11, 7, 8, 9, 10 };
+    const gets = std.enums.values(DataViewGetMethod);
+    const sets = std.enums.values(DataViewSetMethod);
+    try testing.expectEqual(kinds.len, gets.len);
+    try testing.expectEqual(kinds.len, sets.len);
+    for (gets, kinds) |method, kind| {
+        try testing.expectEqual(@as(?u32, kind), buffer.dataViewGetKindFromRecordId(@intFromEnum(method)));
+    }
+    for (sets, kinds) |method, kind| {
+        try testing.expectEqual(@as(?u32, kind), buffer.dataViewSetKindFromRecordId(@intFromEnum(method)));
+    }
+    try testing.expectEqual(@as(?u32, null), buffer.dataViewGetKindFromRecordId(@intFromEnum(DataViewGetMethod.int8) - 1));
+    try testing.expectEqual(@as(?u32, null), buffer.dataViewGetKindFromRecordId(@intFromEnum(DataViewGetMethod.big_uint64) + 1));
+    try testing.expectEqual(@as(?u32, null), buffer.dataViewSetKindFromRecordId(@intFromEnum(DataViewSetMethod.int8) - 1));
+    try testing.expectEqual(@as(?u32, null), buffer.dataViewSetKindFromRecordId(@intFromEnum(DataViewSetMethod.big_uint64) + 1));
+
+    for (std.enums.values(LegacyAccessorMethod)) |method| {
+        try testing.expectEqual(@as(?LegacyAccessorMethod, method), regexp.legacyAccessorMethodFromId(@intFromEnum(method)));
+    }
+    var gap: u32 = 307;
+    while (gap <= 310) : (gap += 1) {
+        try testing.expectEqual(@as(?LegacyAccessorMethod, null), regexp.legacyAccessorMethodFromId(gap));
+    }
+    try testing.expectEqual(@as(?LegacyAccessorMethod, null), regexp.legacyAccessorMethodFromId(300));
+    try testing.expectEqual(@as(?LegacyAccessorMethod, null), regexp.legacyAccessorMethodFromId(320));
+
+    const captures = [_]LegacyAccessorMethod{
+        .get_capture_1, .get_capture_2, .get_capture_3,
+        .get_capture_4, .get_capture_5, .get_capture_6,
+        .get_capture_7, .get_capture_8, .get_capture_9,
+    };
+    for (captures, 0..) |method, index| {
+        try testing.expectEqual(@as(?usize, index), regexp.legacyCaptureIndex(method));
+    }
+    const non_captures = [_]LegacyAccessorMethod{
+        .get_input,      .set_input,        .get_last_match,
+        .get_last_paren, .get_left_context, .get_right_context,
+    };
+    for (non_captures) |method| {
+        try testing.expectEqual(@as(?usize, null), regexp.legacyCaptureIndex(method));
+    }
 }
 
 /// The generic-magic native handler an internal entry carries, if it is that

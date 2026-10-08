@@ -197,30 +197,19 @@ fn pendingMetadataError(err: anyerror) error{ OutOfMemory, InvalidBytecode } {
 }
 
 pub fn preloadFileModuleGraphWithOrder(
-    io: std.Io,
-    allocator: std.mem.Allocator,
+    env: ModuleEnv,
     context: *core.JSContext,
     root_source: []const u8,
     root_path: []const u8,
-    max_source_size: usize,
     postorder: *std.ArrayList([]const u8),
 ) !void {
     var seen: std.StringHashMapUnmanaged(void) = .empty;
     defer {
         var keys = seen.keyIterator();
-        while (keys.next()) |path| allocator.free(path.*);
-        seen.deinit(allocator);
+        while (keys.next()) |path| env.allocator.free(path.*);
+        seen.deinit(env.allocator);
     }
-    try preloadFileModuleGraphInner(
-        io,
-        allocator,
-        context,
-        root_source,
-        root_path,
-        max_source_size,
-        &seen,
-        postorder,
-    );
+    try preloadFileModuleGraphInner(env, context, root_source, root_path, &seen, postorder);
 }
 
 fn resolveModuleSource(context: *core.JSContext, allocator: std.mem.Allocator, referrer: ?[]const u8, specifier: []const u8, mode: core.context.ModuleSourceLoader.Resolution) ![]u8 {
@@ -960,15 +949,14 @@ fn exportNameBytes(rt: *core.JSRuntime, atom_id: core.Atom, digits: *[10]u8) []c
 /// `seen` set plus the "record with resolved requests is done" check give
 /// every entry point the same behaviour.
 fn preloadFileModuleGraphInner(
-    io: std.Io,
-    allocator: std.mem.Allocator,
+    env: ModuleEnv,
     context: *core.JSContext,
     source_text: []const u8,
     path: []const u8,
-    max_source_size: usize,
     seen: *std.StringHashMapUnmanaged(void),
     postorder: *std.ArrayList([]const u8),
 ) !void {
+    const allocator = env.allocator;
     const runtime = context.runtime;
     const Frame = struct { record: *core.module.ModuleRecord, path: []const u8, next_request: usize = 0 };
     var frames: std.ArrayList(Frame) = .empty;
@@ -1006,7 +994,7 @@ fn preloadFileModuleGraphInner(
         if ((existing_dependency == null or !existing_dependency.?.requestsResolved()) and
             !seen.contains(dependency_name))
         {
-            const dependency_source = try readModuleSourceOrThrow(context, io, allocator, dependency_name, dependency_name, max_source_size);
+            const dependency_source = try readModuleSourceOrThrow(context, env, dependency_name, dependency_name);
             defer allocator.free(dependency_source);
             loaded = try preloadModuleRecord(context, allocator, dependency_source, dependency_name, seen);
         }
@@ -1083,8 +1071,8 @@ fn preloadModuleRecord(
 /// Read a module's source. Allocation failure propagates, a missing file is
 /// the QuickJS ReferenceError naming `display_name`, and any other host I/O
 /// failure is thrown as its mapped host error.
-fn readModuleSourceOrThrow(context: *core.JSContext, io: std.Io, allocator: std.mem.Allocator, path: []const u8, display_name: []const u8, max_source_size: usize) ![]u8 {
-    return readModuleSource(context, io, allocator, path, max_source_size) catch |err| switch (err) {
+fn readModuleSourceOrThrow(context: *core.JSContext, env: ModuleEnv, path: []const u8, display_name: []const u8) ![]u8 {
+    return readModuleSource(context, env.io, env.allocator, path, env.max_source_size) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.FileNotFound => {
             try throwCouldNotLoadModule(context, display_name);
@@ -1105,6 +1093,24 @@ fn readModuleSourceOrThrow(context: *core.JSContext, io: std.Io, allocator: std.
             _ = context.throwValue(reason);
             return error.JSException;
         },
+    };
+}
+
+/// Resolve a specifier, or throw the loader's ReferenceError when it cannot
+/// be resolved. The caller frees the returned path.
+fn resolveModuleSourceOrThrow(
+    context: *core.JSContext,
+    allocator: std.mem.Allocator,
+    referrer: ?[]const u8,
+    specifier: []const u8,
+    mode: core.context.ModuleSourceLoader.Resolution,
+) ![]u8 {
+    return resolveModuleSource(context, allocator, referrer, specifier, mode) catch |err| switch (err) {
+        error.ModuleNotFound => {
+            try throwCouldNotLoadModule(context, specifier);
+            return error.JSException;
+        },
+        else => |e| return e,
     };
 }
 
@@ -1347,13 +1353,7 @@ fn resolvedRequestAtom(ctx: *core.JSContext, request_atom: core.Atom, referrer_p
     if (ctx.module_source_loader == null) return request_atom;
     const runtime = ctx.runtime;
     const specifier = runtime.atoms.name(request_atom) orelse return error.InvalidAtom;
-    const resolved = resolveModuleSource(ctx, runtime.nativeAllocator(), referrer, specifier, .static_import) catch |err| switch (err) {
-        error.ModuleNotFound => {
-            try throwCouldNotLoadModule(ctx, specifier);
-            return error.JSException;
-        },
-        else => |e| return e,
-    };
+    const resolved = try resolveModuleSourceOrThrow(ctx, runtime.nativeAllocator(), referrer, specifier, .static_import);
     defer runtime.nativeAllocator().free(resolved);
     return runtime.internAtom(resolved);
 }
@@ -1443,12 +1443,17 @@ fn importLoaderTypeFromAttributes(ctx: *core.JSContext, attributes: core.JSValue
     return .none;
 }
 
-pub const DynamicImportState = struct {
-    runtime: *core.JSRuntime,
-    output: ?*std.Io.Writer,
+/// Host I/O, the allocator that owns loaded module bytes, and the read limit.
+pub const ModuleEnv = struct {
     io: std.Io,
     allocator: std.mem.Allocator,
     max_source_size: usize,
+};
+
+pub const DynamicImportState = struct {
+    runtime: *core.JSRuntime,
+    output: ?*std.Io.Writer,
+    env: ModuleEnv,
     /// Parked TLA bodies and async completions, and the import() promises
     /// waiting on an evaluation. Both are rooted by this state for its whole
     /// lifetime rather than only while jobs drain: a module that suspends on
@@ -1470,6 +1475,37 @@ pub const DynamicImportState = struct {
     /// job leaves the promise alone.
     pending_import_capability: ?struct { resolve: core.JSValue, reject: core.JSValue } = null,
     import_deferred: bool = false,
+
+    /// Previous load-slot values for one dynamic-import job. `exit` restores
+    /// them so a re-entrant graph drain sees the outer job's attribute.
+    const JobScope = struct {
+        state: *DynamicImportState,
+        prev: ImportLoaderType,
+        prev_capability: @FieldType(DynamicImportState, "pending_import_capability"),
+        prev_deferred: bool,
+
+        fn exit(self: JobScope) void {
+            self.state.pending_import_type = self.prev;
+            self.state.pending_import_capability = self.prev_capability;
+            self.state.import_deferred = self.prev_deferred;
+        }
+    };
+
+    /// Jobs run one at a time on this thread, so restoring the previous
+    /// value keeps re-entrant graph drains correct. Host-hook loaders resolve
+    /// their own module kind and ignore this slot.
+    fn enterJob(self: *DynamicImportState, import_type: ImportLoaderType, resolve: core.JSValue, reject: core.JSValue) JobScope {
+        const scope = JobScope{
+            .state = self,
+            .prev = self.pending_import_type,
+            .prev_capability = self.pending_import_capability,
+            .prev_deferred = self.import_deferred,
+        };
+        self.pending_import_type = import_type;
+        self.pending_import_capability = .{ .resolve = resolve, .reject = reject };
+        self.import_deferred = false;
+        return scope;
+    }
 
     /// Drain Promise/finalization/host jobs, interleaved with module work
     /// (TLA resumptions, async completions) as each becomes ready.
@@ -1521,9 +1557,9 @@ pub const DynamicImportState = struct {
     pub fn deinit(self: *DynamicImportState) void {
         self.deactivateRoots();
         for (self.continuations.items) |*item| item.realm.deinit();
-        self.continuations.deinit(self.allocator);
+        self.continuations.deinit(self.env.allocator);
         for (self.waiters.items) |*waiter| waiter.realm.deinit();
-        self.waiters.deinit(self.allocator);
+        self.waiters.deinit(self.env.allocator);
     }
 
     fn load(
@@ -1821,31 +1857,17 @@ fn dynamicImportJobRun(
     // Thread the load-relevant `type` attribute to the file loader through the
     // installed DynamicImportState (mirrors qjs passing `attributes` into
     // js_dynamic_import_job → js_module_loader, quickjs.c /
-    // quickjs-libc.c:703). Host-hook loaders resolve their own module kind and
-    // ignore this. Jobs run one at a time on this thread, so restoring the
-    // previous value keeps re-entrant graph drains correct.
+    // quickjs-libc.c:703).
     const import_type = try importLoaderTypeFromAttributes(ctx, attributes_value);
-    var restore_import_type: ?struct {
-        state: *DynamicImportState,
-        prev: ImportLoaderType,
-        prev_capability: @FieldType(DynamicImportState, "pending_import_capability"),
-        prev_deferred: bool,
-    } = null;
+    var job_scope: ?DynamicImportState.JobScope = null;
     const loader = rt.dynamic_import_loader;
     if (loader.callback == DynamicImportState.load) {
         if (loader.userdata) |userdata| {
             const state: *DynamicImportState = @ptrCast(@alignCast(userdata));
-            restore_import_type = .{ .state = state, .prev = state.pending_import_type, .prev_capability = state.pending_import_capability, .prev_deferred = state.import_deferred };
-            state.pending_import_type = import_type;
-            state.pending_import_capability = .{ .resolve = resolve_value, .reject = reject_value };
-            state.import_deferred = false;
+            job_scope = state.enterJob(import_type, resolve_value, reject_value);
         }
     }
-    defer if (restore_import_type) |r| {
-        r.state.pending_import_type = r.prev;
-        r.state.pending_import_capability = r.prev_capability;
-        r.state.import_deferred = r.prev_deferred;
-    };
+    defer if (job_scope) |scope| scope.exit();
 
     const load_result: (core.context.DynamicImportError || error{OperationUnsupported})!core.JSValue = blk: {
         const callback = loader.callback orelse break :blk error.OperationUnsupported;
@@ -1854,7 +1876,7 @@ fn dynamicImportJobRun(
 
     if (load_result) |namespace| {
         // A waiter now owns the capability (the module is still evaluating).
-        if (restore_import_type) |r| if (r.state.import_deferred) return core.JSValue.undefinedValue();
+        if (job_scope) |scope| if (scope.state.import_deferred) return core.JSValue.undefinedValue();
         if (namespace.is(.object)) {
             const object = try exec.property_ops.expectObject(namespace);
             if (object.class_id == core.class.ids.promise) {
@@ -1944,23 +1966,16 @@ pub fn evalModuleGraph(
     source_text: []const u8,
     output: *std.Io.Writer,
     filename: []const u8,
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    max_source_size: usize,
+    env: ModuleEnv,
 ) !core.JSValue {
+    const allocator = env.allocator;
     // Arm the native recursion guard at this outermost ES-module entry (analogue
     // of eval()'s JS_UpdateStackTop refresh) so module parse/exec on this thread
     // measures against a precise base. The construction-time baseline already
     // covers it; this tightens it for the running thread (test262 workers run on
     // a different C stack than where the runtime was constructed).
     if (context.runtime.stack.call_depth == 0) runtime.stack.captureNativeTop();
-    const normalized_filename = resolveModuleSource(context, allocator, null, filename, .entry) catch |err| switch (err) {
-        error.ModuleNotFound => {
-            try throwCouldNotLoadModule(context, filename);
-            return error.JSException;
-        },
-        else => |e| return e,
-    };
+    const normalized_filename = try resolveModuleSourceOrThrow(context, allocator, null, filename, .entry);
     defer allocator.free(normalized_filename);
 
     var module_postorder = std.ArrayList([]const u8).empty;
@@ -1968,7 +1983,7 @@ pub fn evalModuleGraph(
         for (module_postorder.items) |path| allocator.free(path);
         module_postorder.deinit(allocator);
     }
-    try preloadFileModuleGraphWithOrder(io, allocator, context, source_text, normalized_filename, max_source_size, &module_postorder);
+    try preloadFileModuleGraphWithOrder(env, context, source_text, normalized_filename, &module_postorder);
     const root_module_name = try runtime.internAtom(normalized_filename);
     // TGC S3 §4 class B: bare module-name id held across module work.
     var root_module_name_roots = core.runtime.rootAtoms(.{&root_module_name});
@@ -1976,7 +1991,7 @@ pub fn evalModuleGraph(
     defer root_module_name_roots.deactivate(runtime);
     const root_record = context.modules.find(root_module_name) orelse return error.ModuleNotFound;
     root_record.import_meta_main = true;
-    try initializeSyntheticFileModules(runtime, context, io, allocator, max_source_size, module_postorder.items);
+    try initializeSyntheticFileModules(runtime, context, env, module_postorder.items);
     var link_diagnostic: LinkDiagnostic = .{};
     linkModule(context, root_record, &link_diagnostic) catch |err| {
         try throwModuleLinkError(runtime, context, normalized_filename, err, &link_diagnostic);
@@ -1985,9 +2000,7 @@ pub fn evalModuleGraph(
     var dynamic_import_state = DynamicImportState{
         .runtime = runtime,
         .output = output,
-        .io = io,
-        .allocator = allocator,
-        .max_source_size = max_source_size,
+        .env = env,
     };
     defer dynamic_import_state.deinit();
     var dynamic_import_scope = try installDynamicImport(&dynamic_import_state);
@@ -2027,9 +2040,7 @@ pub fn evalModuleGraph(
 fn initializeSyntheticFileModules(
     runtime: *core.JSRuntime,
     context: *core.JSContext,
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    max_source_size: usize,
+    env: ModuleEnv,
     graph_paths: []const []const u8,
 ) !void {
     const global_object = try exec.zjs_vm.contextGlobal(context);
@@ -2044,8 +2055,8 @@ fn initializeSyntheticFileModules(
             if (record.synthetic_kind == .none or moduleBindingInitialized(record, atom_default)) continue;
             const record_path = runtime.atoms.name(record.module_name) orelse return error.InvalidAtom;
             const source_path = syntheticModuleFilePath(record_path);
-            const module_source = try readModuleSourceOrThrow(context, io, allocator, source_path, source_path, max_source_size);
-            defer allocator.free(module_source);
+            const module_source = try readModuleSourceOrThrow(context, env, source_path, source_path);
+            defer env.allocator.free(module_source);
             _ = try initializeSyntheticFileModule(context, global_object, record.module_name, module_source);
         }
     }
@@ -2055,9 +2066,7 @@ fn initializeSyntheticFileModules(
 /// reachable from `root`. A linked record's dependencies already are.
 fn initializeUnlinkedSyntheticDependencies(
     context: *core.JSContext,
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    max_source_size: usize,
+    env: ModuleEnv,
     root: *core.module.ModuleRecord,
 ) !void {
     const runtime = context.runtime;
@@ -2079,8 +2088,8 @@ fn initializeUnlinkedSyntheticDependencies(
             if (moduleBindingInitialized(record, atom_default)) continue;
             const record_path = runtime.atoms.name(record.module_name) orelse return error.InvalidAtom;
             const source_path = syntheticModuleFilePath(record_path);
-            const module_source = try readModuleSourceOrThrow(context, io, allocator, source_path, source_path, max_source_size);
-            defer allocator.free(module_source);
+            const module_source = try readModuleSourceOrThrow(context, env, source_path, source_path);
+            defer env.allocator.free(module_source);
             _ = try initializeSyntheticFileModule(context, global_object, record.module_name, module_source);
         }
     }
@@ -2158,7 +2167,7 @@ fn evaluateModule(
     module.has_top_level_capability = true;
 
     var stack: std.ArrayList(*ModuleRecord) = .empty;
-    defer stack.deinit(state.allocator);
+    defer stack.deinit(state.env.allocator);
     innerModuleEvaluation(state, context, output, module, &stack) catch |err| {
         // Step 9 runs whatever failed, so no record is left `.evaluating`
         // for a later Evaluate to wait on forever. A failure that must reach
@@ -2223,10 +2232,10 @@ fn innerModuleEvaluation(
 ) !void {
     const Frame = struct { record: *ModuleRecord, next_request: usize = 0 };
     var frames: std.ArrayList(Frame) = .empty;
-    defer frames.deinit(state.allocator);
+    defer frames.deinit(state.env.allocator);
     var index: u32 = 0;
     if (!try enterModuleEvaluation(state, context, root, &index, stack)) return;
-    try frames.append(state.allocator, .{ .record = root });
+    try frames.append(state.env.allocator, .{ .record = root });
     while (frames.items.len != 0) {
         const frame = &frames.items[frames.items.len - 1];
         const module = frame.record;
@@ -2234,7 +2243,7 @@ fn innerModuleEvaluation(
             const required = module.requests[frame.next_request].module orelse return error.ModuleNotFound;
             frame.next_request += 1;
             if (try enterModuleEvaluation(state, context, required, &index, stack)) {
-                try frames.append(state.allocator, .{ .record = required });
+                try frames.append(state.env.allocator, .{ .record = required });
                 continue;
             }
             try noteEvaluatedDependency(context, module, required);
@@ -2264,7 +2273,7 @@ fn enterModuleEvaluation(
         .linked => {},
         .unlinked, .linking => return error.ModuleLinkFailed,
     }
-    try stack.ensureUnusedCapacity(state.allocator, 1);
+    try stack.ensureUnusedCapacity(state.env.allocator, 1);
     module.status = .evaluating;
     module.eval_dfs_index = index.*;
     module.eval_dfs_ancestor_index = index.*;
@@ -2439,7 +2448,7 @@ fn appendModuleContinuation(
     var roots = core.runtime.rootValues(.{ &queued.awaited, &queued.continuation, &queued.reaction });
     roots.activate(rt);
     defer roots.deactivate(rt);
-    try state.continuations.ensureUnusedCapacity(state.allocator, 1);
+    try state.continuations.ensureUnusedCapacity(state.env.allocator, 1);
     const capability = try exec.promise_ops.internalPromiseCapability(context, global, exec.promise_ops.promisePrototypeFromGlobal(rt, global));
     queued.reaction = capability.promise;
     var resolve = capability.resolve;
@@ -2468,8 +2477,8 @@ fn asyncModuleExecutionFulfilled(
 
     if (module.async_parent_modules.items.len == 0) return;
     var exec_list: std.ArrayList(*ModuleRecord) = .empty;
-    defer exec_list.deinit(state.allocator);
-    try gatherAvailableAncestors(state.allocator, module, &exec_list);
+    defer exec_list.deinit(state.env.allocator);
+    try gatherAvailableAncestors(state.env.allocator, module, &exec_list);
     std.mem.sort(*ModuleRecord, exec_list.items, {}, struct {
         fn lessThan(_: void, lhs: *ModuleRecord, rhs: *ModuleRecord) bool {
             return lhs.async_evaluation_order < rhs.async_evaluation_order;
@@ -2527,9 +2536,9 @@ fn asyncModuleExecutionRejected(
     defer roots.deactivate(state.runtime);
     const Frame = struct { record: *ModuleRecord, next_parent: usize = 0 };
     var frames: std.ArrayList(Frame) = .empty;
-    defer frames.deinit(state.allocator);
+    defer frames.deinit(state.env.allocator);
     if (!try rejectAsyncModule(state, module, rooted_reason)) return;
-    try frames.append(state.allocator, .{ .record = module });
+    try frames.append(state.env.allocator, .{ .record = module });
     while (frames.items.len != 0) {
         const frame = &frames.items[frames.items.len - 1];
         if (frame.next_parent == frame.record.async_parent_modules.items.len) {
@@ -2538,7 +2547,7 @@ fn asyncModuleExecutionRejected(
         }
         const parent = frame.record.async_parent_modules.items[frame.next_parent];
         frame.next_parent += 1;
-        if (try rejectAsyncModule(state, parent, rooted_reason)) try frames.append(state.allocator, .{ .record = parent });
+        if (try rejectAsyncModule(state, parent, rooted_reason)) try frames.append(state.env.allocator, .{ .record = parent });
     }
 }
 
@@ -2601,7 +2610,7 @@ fn addModuleEvaluationWaiter(
     resolve: core.JSValue,
     reject: core.JSValue,
 ) !void {
-    try state.waiters.ensureUnusedCapacity(state.allocator, 1);
+    try state.waiters.ensureUnusedCapacity(state.env.allocator, 1);
     state.waiters.appendAssumeCapacity(.{
         .realm = core.RealmRef.retain(context),
         .root = root,
@@ -2721,9 +2730,8 @@ fn evalDynamicImportModule(
 ) !core.JSValue {
     const runtime = state.runtime;
     std.debug.assert(context.runtime == runtime);
-    const io = state.io;
-    const allocator = state.allocator;
-    const max_source_size = state.max_source_size;
+    const env = state.env;
+    const allocator = env.allocator;
     if (referrer_path.len == 0) {
         try throwCouldNotLoadModule(context, specifier);
         return error.JSException;
@@ -2731,13 +2739,7 @@ fn evalDynamicImportModule(
     // An unresolvable specifier rejects the import() promise with the
     // loader's ReferenceError (mirrors js_module_loader quickjs-libc.c:699)
     // instead of aborting the evaluation with a host error.
-    const target_path_base = resolveModuleSource(context, allocator, referrer_path, specifier, .dynamic_import) catch |err| switch (err) {
-        error.ModuleNotFound => {
-            try throwCouldNotLoadModule(context, specifier);
-            return error.JSException;
-        },
-        else => |e| return e,
-    };
+    const target_path_base = try resolveModuleSourceOrThrow(context, allocator, referrer_path, specifier, .dynamic_import);
     defer allocator.free(target_path_base);
 
     // A `.json` target — or one tagged `with { type: 'json' }` — loads as a
@@ -2777,12 +2779,12 @@ fn evalDynamicImportModule(
     const existing_record = context.modules.find(module_name);
     if (existing_record == null or !existing_record.?.requestsResolved()) {
         if (!is_synthetic) {
-            const source = try readModuleSourceOrThrow(context, io, allocator, target_path, target_path, max_source_size);
+            const source = try readModuleSourceOrThrow(context, env, target_path, target_path);
             defer allocator.free(source);
             // skip-existing preload: records already in the registry keep
             // their live bindings and status (re-instantiating them would
             // reset already-evaluated modules).
-            try preloadFileModuleGraphWithOrder(io, allocator, context, source, target_path, max_source_size, &preload_postorder);
+            try preloadFileModuleGraphWithOrder(env, context, source, target_path, &preload_postorder);
         } else {
             _ = try preloadSyntheticFileModuleTracked(context, target_path, synthetic_kind.?);
         }
@@ -2795,16 +2797,16 @@ fn evalDynamicImportModule(
         // retained export-cell authority as source modules.
         if (is_synthetic) {
             const source_path = syntheticModuleFilePath(target_path);
-            const module_source = try readModuleSourceOrThrow(context, io, allocator, source_path, target_path_base, max_source_size);
+            const module_source = try readModuleSourceOrThrow(context, env, source_path, target_path_base);
             defer allocator.free(module_source);
             const global_object = try exec.zjs_vm.contextGlobal(context);
             _ = try initializeSyntheticFileModule(context, global_object, module_name, module_source);
         } else if (preload_postorder.items.len != 0) {
-            try initializeSyntheticFileModules(runtime, context, io, allocator, max_source_size, preload_postorder.items);
+            try initializeSyntheticFileModules(runtime, context, env, preload_postorder.items);
         } else {
             // The graph loaded on an earlier attempt whose synthetic
             // dependency failed to initialize: retry every one still pending.
-            try initializeUnlinkedSyntheticDependencies(context, io, allocator, max_source_size, target_record);
+            try initializeUnlinkedSyntheticDependencies(context, env, target_record);
         }
         var link_diagnostic: LinkDiagnostic = .{};
         linkModule(context, target_record, &link_diagnostic) catch |err| {

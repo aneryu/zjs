@@ -34,7 +34,7 @@ pub const RuntimeOptions = struct {
     bytecode_fingerprint: bool = false,
     bytecode_fingerprint_verbose: bool = false,
     /// Collector-side census switches the stats panels read; applied to the
-    /// engine by `applyRuntimeOptions`, never during argument parsing.
+    /// engine by `setupHost`, never during argument parsing.
     gc_detailed_reports: bool = false,
     include_paths: [max_include_paths][]const u8 = @splat(""),
     include_count: usize = 0,
@@ -272,8 +272,8 @@ const usage_options = blk: {
     break :blk text;
 };
 
-fn printUsage(io: std.Io) !void {
-    try cli_process.printError(io, "usage: zjs" ++ usage_options ++ " -e <script>\n       zjs" ++ usage_options ++ " [-m|-s] <file.js> [args...]\n");
+fn printUsage(io: std.Io) void {
+    cli_process.printError(io, "usage: zjs" ++ usage_options ++ " -e <script>\n       zjs" ++ usage_options ++ " [-m|-s] <file.js> [args...]\n");
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -282,9 +282,9 @@ pub fn main(init: std.process.Init) !void {
     var command = parseArgsExplained(argv[1..], &problem) catch {
         if (problem) |p| {
             const separator: []const u8 = if (p.arg.len == 0) "" else ": ";
-            cli_process.printErrorJoin(init.io, &.{ "zjs: ", p.what, separator, p.arg, "\n" }) catch {};
+            cli_process.printErrorJoin(init.io, &.{ "zjs: ", p.what, separator, p.arg, "\n" });
         }
-        printUsage(init.io) catch {};
+        printUsage(init.io);
         std.process.exit(2);
     };
     execute(init, &command) catch |err| {
@@ -300,7 +300,7 @@ fn execute(init: std.process.Init, command: *Command) !void {
     const io = init.io;
     const runtime_options = command.options;
 
-    const owned_source = try loadSource(command, allocator, io);
+    const owned_source = loadSource(command, allocator, io);
     defer if (owned_source) |bytes| allocator.free(bytes);
     const source = command.source.?;
     const path = command.path;
@@ -323,15 +323,10 @@ fn execute(init: std.process.Init, command: *Command) !void {
         .memory_limit = runtime_options.memory_limit,
         .gc_threshold = zjs.default_gc_threshold,
         .stack_size = runtime_options.stack_size orelse zjs.default_stack_size,
-    }) catch |err| {
-        try cli_process.printErrorJoin(io, &.{ "zjs: engine init failed: ", @errorName(err), "\n" });
-        std.process.exit(1);
-    };
+    }) catch |err| cli_process.fatal(io, 1, &.{ "zjs: engine init failed: ", @errorName(err), "\n" });
     errdefer rt.destroy();
-    const ctx = zjs.Context.create(rt, .{}) catch |err| {
-        try cli_process.printErrorJoin(io, &.{ "zjs: context init failed: ", @errorName(err), "\n" });
-        std.process.exit(1);
-    };
+    const ctx = zjs.Context.create(rt, .{}) catch |err|
+        cli_process.fatal(io, 1, &.{ "zjs: context init failed: ", @errorName(err), "\n" });
     errdefer ctx.destroy();
     var event_loop = host.EventLoop.init(ctx, .{ .output = stdout });
     // `install` publishes `*EventLoop` to the context. Do that only after the
@@ -341,10 +336,8 @@ fn execute(init: std.process.Init, command: *Command) !void {
     errdefer event_loop.deinit();
 
     host.file_modules.install(ctx.core);
-    installHost(ctx, script_args, runtime_options, &opcode_profile, io) catch |err| {
-        try cli_process.printErrorJoin(io, &.{ "zjs: context init failed: ", @errorName(err), "\n" });
-        std.process.exit(1);
-    };
+    setupHost(ctx, script_args, runtime_options, &opcode_profile, io) catch |err|
+        cli_process.fatal(io, 1, &.{ "zjs: context init failed: ", @errorName(err), "\n" });
     // Install the file-loader dynamic import for every mode, mirroring qjs
     // installing js_module_loader unconditionally (qjs.c JS_SetModuleLoaderFunc):
     // import() works from scripts and -e, not only under -m. The state lives
@@ -353,9 +346,7 @@ fn execute(init: std.process.Init, command: *Command) !void {
     var dynamic_import_state = zjs.exec.module_graph.DynamicImportState{
         .runtime = ctx.runtimePtr(),
         .output = stdout,
-        .io = io,
-        .allocator = allocator,
-        .max_source_size = max_source_size,
+        .env = .{ .io = io, .allocator = allocator, .max_source_size = max_source_size },
     };
     var dynamic_import_scope = try zjs.exec.module_graph.installDynamicImport(&dynamic_import_state);
     defer dynamic_import_scope.deinit();
@@ -365,8 +356,7 @@ fn execute(init: std.process.Init, command: *Command) !void {
     // OS reclaims the memory; in-process tests keep the full teardown and its
     // no-outstanding-allocations assertion.
     if (runtime_options.bytecode_fingerprint and owned_source == null) {
-        try cli_process.printError(io, "zjs: --bytecode-fingerprint requires a file argument\n");
-        std.process.exit(2);
+        cli_process.fatal(io, 2, &.{"zjs: --bytecode-fingerprint requires a file argument\n"});
     }
     // The fingerprint compiles only: include files would run code first.
     if (runtime_options.bytecode_fingerprint) {
@@ -389,17 +379,21 @@ fn execute(init: std.process.Init, command: *Command) !void {
     ) catch |err| try failEvaluation(ctx, rt, stdout, io, err);
     try stdout.flush();
 
-    if (value.is(.exception)) {
-        try cli_process.printError(io, "zjs: uncaught exception\n");
-        std.process.exit(1);
-    }
+    if (value.is(.exception)) cli_process.fatal(io, 1, &.{"zjs: uncaught exception\n"});
 
     try dynamic_import_state.runJobs(ctx.core);
     // Post-eval jobs (module-mode microtasks in particular) print into the
     // buffered stdout writer; flush before any exit path so their output is
     // not dropped (qjs.c main: js_std_loop writes unbuffered per job).
     try stdout.flush();
-    if (ctx.hasUnhandledRejection() or ctx.hasException()) {
+    // Theoretically unreachable defensive path. evalSource and runJobs return
+    // a pending exception as a Zig error, and failEvaluation prints it. This
+    // stays so a ReleaseFast build still prints one and exits 1.
+    if (ctx.hasException()) {
+        try reportPendingException(io, ctx, rt);
+        std.process.exit(1);
+    }
+    if (ctx.hasUnhandledRejection()) {
         try reportUnhandledRejections(io, ctx, rt);
         std.process.exit(1);
     }
@@ -434,30 +428,42 @@ fn finishProcess(
     rt.destroy();
 }
 
-fn loadSource(command: *Command, allocator: std.mem.Allocator, io: std.Io) !?[]const u8 {
+fn loadSource(command: *Command, allocator: std.mem.Allocator, io: std.Io) ?[]const u8 {
     if (command.source != null) return null;
-    const bytes = host.file_modules.readFile(io, command.path, allocator, max_source_size) catch |err| {
-        try cli_process.printErrorJoin(io, &.{ "zjs: unable to read ", command.path, ": ", @errorName(err), "\n" });
-        std.process.exit(1);
-    };
+    const bytes = readSourceOrExit(io, command.path, allocator);
     command.source = bytes;
     return bytes;
 }
 
-fn configureRuntime(
-    rt: *zjs.Runtime,
+/// File bytes owned by `allocator`. A failed read exits 1.
+fn readSourceOrExit(io: std.Io, path: []const u8, allocator: std.mem.Allocator) []u8 {
+    return host.file_modules.readFile(io, path, allocator, max_source_size) catch |err|
+        cli_process.fatal(io, 1, &.{ "zjs: unable to read ", path, ": ", @errorName(err), "\n" });
+}
+
+/// Host globals and runtime options. A failure here (typically the memory
+/// limit) is reported like a context-init failure, not as a Zig error trace.
+fn setupHost(
     ctx: *zjs.Context,
     script_args: []const []const u8,
     runtime_options: RuntimeOptions,
     opcode_profile: *zjs.OpcodeProfile,
     io: std.Io,
 ) !void {
-    applyRuntimeOptions(rt, runtime_options);
+    try host.globals.install(ctx.core, try zjs.globalObjectPtr(ctx));
+    const rt = ctx.runtimePtr();
+    zjs.core.gc_trace_stw.detailed_reports = runtime_options.gc_detailed_reports;
+    // `detailed_reports` is one input of the barrier gate; a flip against a
+    // live Registry must republish it (gc.refreshBarrierGate contract).
+    rt.gc.refreshBarrierGate();
+    rt.host_wait.can_block = runtime_options.can_block;
+    if (runtime_options.memory_limit) |limit| rt.setMemoryLimit(limit);
+    if (runtime_options.stack_size) |size| rt.setStackSize(size);
+    if (runtime_options.native_stack_size) |size| rt.setNativeStackSize(clampToThreadStack(size));
     ctx.setTrackUnhandledRejections(true);
     if (runtime_options.profile_opcodes) {
         if (!zjs.opcode_profile_build_enabled) {
-            try cli_process.printError(io, "zjs: --profile-opcodes requires a profiling build; run 'zig build zjs-profile' or rebuild with -Dzjs_enable_opcode_profile=true (refusing to emit an all-zero profile)\n");
-            std.process.exit(2);
+            cli_process.fatal(io, 2, &.{"zjs: --profile-opcodes requires a profiling build; run 'zig build zjs-profile' or rebuild with -Dzjs_enable_opcode_profile=true (refusing to emit an all-zero profile)\n"});
         }
         rt.opcode_profile = opcode_profile;
     }
@@ -467,10 +473,8 @@ fn configureRuntime(
     defer args_arena.deinit();
     const js_args = try args_arena.allocator().alloc([]const u8, script_args.len);
     for (script_args, js_args) |arg, *js_arg| js_arg.* = try utf8Lossy(args_arena.allocator(), arg);
-    ctx.defineScriptArgs(js_args) catch |err| {
-        try cli_process.printErrorJoin(io, &.{ "zjs: scriptArgs setup failed: ", @errorName(err), "\n" });
-        std.process.exit(1);
-    };
+    ctx.defineScriptArgs(js_args) catch |err|
+        cli_process.fatal(io, 1, &.{ "zjs: scriptArgs setup failed: ", @errorName(err), "\n" });
     ctx.setPreserveUncaughtException(true);
 }
 
@@ -479,17 +483,6 @@ fn configureRuntime(
 fn utf8Lossy(allocator: std.mem.Allocator, bytes: []const u8) ![]const u8 {
     if (std.unicode.utf8ValidateSlice(bytes)) return bytes;
     return std.fmt.allocPrint(allocator, "{f}", .{std.unicode.fmtUtf8(bytes)});
-}
-
-fn applyRuntimeOptions(rt: *zjs.Runtime, runtime_options: RuntimeOptions) void {
-    zjs.core.gc_trace_stw.detailed_reports = runtime_options.gc_detailed_reports;
-    // `detailed_reports` is one input of the barrier gate; a flip against a
-    // live Registry must republish it (gc.refreshBarrierGate contract).
-    rt.gc.refreshBarrierGate();
-    rt.host_wait.can_block = runtime_options.can_block;
-    if (runtime_options.memory_limit) |limit| rt.setMemoryLimit(limit);
-    if (runtime_options.stack_size) |size| rt.setStackSize(size);
-    if (runtime_options.native_stack_size) |size| rt.setNativeStackSize(clampToThreadStack(size));
 }
 
 /// A native budget beyond the thread's real stack would turn the engine's
@@ -523,22 +516,6 @@ fn failEvaluation(
 
 const max_source_size = 64 * 1024 * 1024;
 
-fn evalScript(
-    ctx: *zjs.Context,
-    source_text: []const u8,
-    output: *std.Io.Writer,
-    filename: []const u8,
-) !zjs.Value {
-    return ctx.eval(source_text, .{
-        .mode = .script,
-        .filename = filename,
-        .output = output,
-        .parse_strict = false,
-        .runtime_strict = false,
-        .discard_script_result = true,
-    });
-}
-
 fn evalSource(
     ctx: *zjs.Context,
     source_text: []const u8,
@@ -549,30 +526,23 @@ fn evalSource(
     allocator: std.mem.Allocator,
 ) !zjs.Value {
     if (mode == .module) {
-        return runFileModule(ctx, source_text, output, path, io, allocator, max_source_size);
+        return zjs.exec.module_graph.evalModuleGraph(
+            ctx.runtimePtr(),
+            ctx.core,
+            source_text,
+            output,
+            path,
+            .{ .io = io, .allocator = allocator, .max_source_size = max_source_size },
+        );
     }
-    return evalScript(ctx, source_text, output, path);
-}
-
-fn runFileModule(
-    ctx: *zjs.Context,
-    source_text: []const u8,
-    output: *std.Io.Writer,
-    path: []const u8,
-    io: std.Io,
-    allocator: std.mem.Allocator,
-    max_size: usize,
-) !zjs.Value {
-    return try zjs.exec.module_graph.evalModuleGraph(
-        ctx.runtimePtr(),
-        ctx.core,
-        source_text,
-        output,
-        path,
-        io,
-        allocator,
-        max_size,
-    );
+    return ctx.eval(source_text, .{
+        .mode = .script,
+        .filename = path,
+        .output = output,
+        .parse_strict = false,
+        .runtime_strict = false,
+        .discard_script_result = true,
+    });
 }
 
 fn runIncludeFiles(
@@ -583,10 +553,7 @@ fn runIncludeFiles(
     allocator: std.mem.Allocator,
 ) !void {
     for (runtime_options.includes()) |path| {
-        const source = host.file_modules.readFile(io, path, allocator, max_source_size) catch |err| {
-            try cli_process.printErrorJoin(io, &.{ "zjs: unable to read ", path, ": ", @errorName(err), "\n" });
-            std.process.exit(1);
-        };
+        const source = readSourceOrExit(io, path, allocator);
         defer allocator.free(source);
         // An include defines globals for what follows, so it runs as a
         // script; `.mjs` files are modules.
@@ -684,13 +651,6 @@ fn fingerprintFunctionBytecode(hasher: *std.hash.Wyhash, fb: *const zjs.bytecode
             hasher.update(std.mem.asBytes(&bits));
         }
     }
-}
-
-/// Host globals and runtime options. A failure here (typically the memory
-/// limit) is reported like a context-init failure, not as a Zig error trace.
-fn installHost(ctx: *zjs.Context, script_args: anytype, runtime_options: anytype, opcode_profile: anytype, io: std.Io) !void {
-    try host.globals.install(ctx.core, try zjs.globalObjectPtr(ctx));
-    try configureRuntime(ctx.runtimePtr(), ctx, script_args, runtime_options, opcode_profile, io);
 }
 
 fn printEvaluationError(io: std.Io, ctx: *zjs.Context, rt: *zjs.Runtime, err: anyerror) !void {
@@ -809,6 +769,19 @@ fn printThrownValue(stderr: *std.Io.Writer, ctx: *zjs.Context, rt: *zjs.Runtime,
         try stderr.print("{s}\n", .{text});
     }
     try stderr.flush();
+}
+
+/// Theoretically unreachable defensive path for a pending exception that
+/// survived `evalSource` and `runJobs`. Same report as `failEvaluation`:
+/// the thrown value, then the caller exits 1. A stderr write failure leaves
+/// nowhere to report; the exit status still says the program failed.
+fn reportPendingException(io: std.Io, ctx: *zjs.Context, rt: *zjs.Runtime) !void {
+    var stderr_buf: [4096]u8 = undefined;
+    var stderr_writer = std.Io.File.stderr().writerStreaming(io, &stderr_buf);
+    printThrownValue(&stderr_writer.interface, ctx, rt, ctx.takeException()) catch |err| switch (err) {
+        error.WriteFailed => {},
+        else => |other| return other,
+    };
 }
 
 /// Mirrors qjs `js_std_promise_rejection_check` (quickjs-libc.c:4276-4290):
@@ -1508,7 +1481,7 @@ test "zjs lone surrogates reach stderr as U+FFFD" {
 
 test "zjs loadSource keeps inline eval source as script" {
     var command = try parseArgs(&.{ "-e", "export const x = 1" });
-    const owned = try loadSource(&command, std.testing.allocator, undefined);
+    const owned = loadSource(&command, std.testing.allocator, undefined);
     try std.testing.expect(owned == null);
     try std.testing.expectEqualStrings("export const x = 1", command.source.?);
     try std.testing.expectEqual(zjs.Context.EvalMode.script, command.mode);

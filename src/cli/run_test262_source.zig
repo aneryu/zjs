@@ -7,6 +7,8 @@
 
 const std = @import("std");
 const runner_metadata = @import("run_test262_metadata.zig");
+const runner_reporter = @import("run_test262_reporter.zig");
+const Reporter = runner_reporter.Reporter;
 const TestMetadata = runner_metadata.TestMetadata;
 pub const HarnessCache = struct {
     const Entry = struct {
@@ -141,9 +143,9 @@ pub const override_manifest = [_]Test262Override{
     },
 };
 
-pub fn readTestSource(allocator: std.mem.Allocator, io: std.Io, test_path: []const u8) ![]u8 {
+pub fn readTestSource(allocator: std.mem.Allocator, io: std.Io, test_path: []const u8, reporter: ?*Reporter) ![]u8 {
     if (test262Override(test_path)) |override| {
-        try verifyTest262OverrideUpstream(allocator, io, override);
+        try verifyTest262OverrideUpstream(allocator, io, override, reporter);
         const override_path = try test262OverridePath(allocator, test_path);
         defer allocator.free(override_path);
         return std.Io.Dir.cwd().readFileAlloc(io, override_path, allocator, .limited(16 * 1024 * 1024));
@@ -159,17 +161,20 @@ pub fn test262Override(test_path: []const u8) ?Test262Override {
     return null;
 }
 
-fn verifyTest262OverrideUpstream(allocator: std.mem.Allocator, io: std.Io, override: Test262Override) !void {
+fn verifyTest262OverrideUpstream(allocator: std.mem.Allocator, io: std.Io, override: Test262Override, reporter: ?*Reporter) !void {
     const upstream_path = try test262UpstreamPath(allocator, override.path);
     defer allocator.free(upstream_path);
     const upstream_source = try std.Io.Dir.cwd().readFileAlloc(io, upstream_path, allocator, .limited(16 * 1024 * 1024));
     defer allocator.free(upstream_source);
     const actual_sha256 = computeSha256Hex(upstream_source);
     if (!std.mem.eql(u8, override.upstream_sha256, &actual_sha256)) {
-        std.debug.print(
-            "test262 override source drifted: {s}\nexpected upstream {s} sha256 {s}\nactual sha256 {s}\nreason: {s}\n",
-            .{ upstream_path, override.upstream_commit, override.upstream_sha256, actual_sha256, override.reason },
-        );
+        if (reporter) |out| {
+            out.lockedPrint(
+                io,
+                "test262 override source drifted: {s}\nexpected upstream {s} sha256 {s}\nactual sha256 {s}\nreason: {s}\n",
+                .{ upstream_path, override.upstream_commit, override.upstream_sha256, actual_sha256, override.reason },
+            ) catch {};
+        }
         return error.Test262OverrideSourceDrift;
     }
 }

@@ -320,11 +320,11 @@ fn toMathNumber(ctx: *core.JSContext, output: ?*std.Io.Writer, global: *core.Obj
     const primitive = try toPrimitiveForNumber(ctx, output, global, value);
     if (primitive.isBigInt()) {
         _ = try exception_ops.throwTypeErrorMessage(ctx, global, "cannot convert bigint to number");
-        return error.TypeError;
+        unreachable;
     }
     if (primitive.is(.symbol)) {
         _ = try exception_ops.throwTypeErrorMessage(ctx, global, "cannot convert symbol to number");
-        return error.TypeError;
+        unreachable;
     }
     const number_value = try value_ops.toNumberValue(ctx.runtime, primitive);
     return value_ops.numberValue(number_value).?;

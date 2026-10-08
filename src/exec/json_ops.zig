@@ -47,7 +47,7 @@ pub const internal_entries = [_]core.host_function.InternalEntry{
     jsonEntry("isRawJSON", 1, @intFromEnum(StaticMethod.is_raw_json), &jsonIsRawJsonCall),
     jsonEntry("parse", 2, @intFromEnum(StaticMethod.parse), &jsonParseRecordCall),
     jsonEntry("rawJSON", 1, @intFromEnum(StaticMethod.raw_json), &jsonRawJsonCall),
-    jsonEntry("stringify", 3, @intFromEnum(StaticMethod.stringify), &jsonStringifyRecordCall),
+    jsonEntry("stringify", 3, @intFromEnum(StaticMethod.stringify), builtin_dispatch.realmMagicMethod(jsonStringifyCall)),
 };
 
 fn jsonEntry(
@@ -119,19 +119,6 @@ fn jsonParseRecordCall(
         break :blk host_call.global orelse return error.InvalidBuiltinRegistry;
     };
     return jsonParseCall(ctx, host_call.output, global, host_call.args, builtin_dispatch.callerBytecode(host_call), builtin_dispatch.callerFrame(host_call));
-}
-
-fn jsonStringifyRecordCall(
-    native_ctx: *core.JSContext,
-    native_this: core.JSValue,
-    native_args: []const core.JSValue,
-    native_magic: i32,
-) HostError!core.JSValue {
-    const host_call = builtin_dispatch.nativeCall(native_ctx, native_this, native_args, native_magic) orelse return error.TypeError;
-    const ctx = host_call.ctx;
-    const realm = try builtin_dispatch.callableRealm(host_call);
-    std.debug.assert(realm.realm == ctx);
-    return jsonStringifyCall(ctx, host_call.output, realm.global, host_call.args, builtin_dispatch.callerBytecode(host_call), builtin_dispatch.callerFrame(host_call));
 }
 
 pub fn parse(rt: *core.JSRuntime, global: ?*core.Object, value: core.JSValue) !core.JSValue {

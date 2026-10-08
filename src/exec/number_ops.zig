@@ -103,21 +103,21 @@ fn numberCall(
     return switch (id) {
         @intFromEnum(StaticMethod.parse_int) => {
             if (call_global) |global| return builtin_glue.globalParseInt(ctx, host_call.output, global, args, caller_function, caller_frame);
-            const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            const input = value_ops.argOrUndefined(args, 0);
             const radix = if (args.len >= 2) args[1] else null;
             return value_ops.numberToValue(try parseIntValue(ctx.runtime, input, radix));
         },
         @intFromEnum(StaticMethod.parse_float) => {
             if (call_global) |global| return builtin_glue.globalParseFloat(ctx, host_call.output, global, args, caller_function, caller_frame);
-            const input = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            const input = value_ops.argOrUndefined(args, 0);
             return value_ops.numberToValue(try parseFloatValue(ctx.runtime, input));
         },
         @intFromEnum(StaticMethod.is_nan) => {
-            const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            const value = value_ops.argOrUndefined(args, 0);
             return core.JSValue.boolean(value.isNumber() and std.math.isNan(value_ops.numberValue(value).?));
         },
         @intFromEnum(StaticMethod.is_finite) => {
-            const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            const value = value_ops.argOrUndefined(args, 0);
             return core.JSValue.boolean(value.isNumber() and std.math.isFinite(value_ops.numberValue(value).?));
         },
         @intFromEnum(StaticMethod.global_is_nan), @intFromEnum(StaticMethod.global_is_finite) => {
@@ -125,11 +125,11 @@ fn numberCall(
             return builtin_glue.globalIsNaNOrFinite(ctx, host_call.output, global, args, id == @intFromEnum(StaticMethod.global_is_nan));
         },
         @intFromEnum(StaticMethod.is_integer) => {
-            const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            const value = value_ops.argOrUndefined(args, 0);
             return core.JSValue.boolean(numberIsInteger(value));
         },
         @intFromEnum(StaticMethod.is_safe_integer) => {
-            const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            const value = value_ops.argOrUndefined(args, 0);
             if (!numberIsInteger(value)) return core.JSValue.boolean(false);
             const number = value_ops.numberValue(value).?;
             return core.JSValue.boolean(@abs(number) <= 9007199254740991.0);
@@ -251,6 +251,7 @@ fn toStringMethod(rt: *core.JSRuntime, receiver: core.JSValue, args: []const cor
     var out = std.ArrayList(u8).empty;
     defer out.deinit(rt.nativeAllocator());
     try out.resize(rt.nativeAllocator(), needed);
+    // formatRadix returns NoSpaceLeft only when the buffer is shorter than radixMaxLen, which `needed` is.
     const text = dtoa.formatRadix(out.items, number, @intCast(radix), 0, options) catch unreachable;
     const string = try core.string.String.createAscii(rt, text);
     return string.value();

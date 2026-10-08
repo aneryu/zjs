@@ -473,107 +473,62 @@ pub const JSContext = struct {
         return created.value();
     }
 
-    fn getPropertyAtom(self: *JSContext, val: JSValue, property_name: atom.Atom) !JSValue {
-        const global = try self.globalPtr();
-        return exec.zjs_vm.getValueProperty(self.core, self.hostOutput(null), global, val, property_name, null, null);
+    fn getPropertyAtom(self: *JSContext, val: JSValue, property_name: atom.Atom, options: core.PropertyAccessOptions) !JSValue {
+        const global = options.realm_global orelse try self.globalPtr();
+        return exec.zjs_vm.getValueProperty(self.core, self.hostOutput(options.output), global, val, property_name, null, null);
+    }
+
+    /// Name-keyed public calls share one root order: discard, intern, root the
+    /// atom, then the operation. The call can run a JS accessor or a proxy trap
+    /// (TGC S3 §4 class B).
+    fn withInternedPropertyName(self: *JSContext, val: JSValue, property_name: []const u8, comptime call: anytype) @typeInfo(@TypeOf(call)).@"fn".return_type.? {
+        self.discardStaleException();
+        const key = try self.core.runtime.internAtom(property_name);
+        var key_roots = core.runtime.rootAtoms(.{&key});
+        key_roots.activate(self.core.runtime);
+        defer key_roots.deactivate(self.core.runtime);
+        return call(self, val, key, .{});
+    }
+
+    /// Key-valued public calls share one root order: window of receiver then
+    /// key, realm global, then `toPropertyKeyAtom` on the rooted key.
+    fn withResolvedPropertyKey(self: *JSContext, val: JSValue, property_key: JSValue, options: core.PropertyAccessOptions, comptime call: anytype) @typeInfo(@TypeOf(call)).@"fn".return_type.? {
+        self.discardStaleException();
+        var roots = PublicValueRootWindow(2).init(.{ val, property_key });
+        roots.activate(self.core.runtime);
+        defer roots.deactivate(self.core.runtime);
+        const global = options.realm_global orelse try self.globalPtr();
+        const output = self.hostOutput(options.output);
+        const key = try exec.object_ops.toPropertyKeyAtom(self.core, output, global, roots.values[1], null, null);
+        return call(self, roots.values[0], key, .{ .output = output, .realm_global = global });
     }
 
     pub fn getProperty(self: *JSContext, val: JSValue, property_name: []const u8) Error!JSValue {
-        return self.getPropertyImpl(val, property_name) catch |err| self.apiError(err);
-    }
-
-    fn getPropertyImpl(self: *JSContext, val: JSValue, property_name: []const u8) !JSValue {
-        self.discardStaleException();
-        const key = try self.core.runtime.internAtom(property_name);
-        // TGC S3 §4 class B: the getter below can run a JS accessor.
-        var key_roots = core.runtime.rootAtoms(.{&key});
-        key_roots.activate(self.core.runtime);
-        defer key_roots.deactivate(self.core.runtime);
-        return self.getPropertyAtom(val, key);
+        return self.withInternedPropertyName(val, property_name, getPropertyAtom) catch |err| self.apiError(err);
     }
 
     pub fn getPropertyKey(self: *JSContext, val: JSValue, property_key: JSValue, options: core.PropertyAccessOptions) Error!JSValue {
-        return self.getPropertyKeyImpl(val, property_key, options) catch |err| self.apiError(err);
-    }
-
-    fn getPropertyKeyImpl(self: *JSContext, val: JSValue, property_key: JSValue, options: core.PropertyAccessOptions) !JSValue {
-        self.discardStaleException();
-        var roots = PublicValueRootWindow(2).init(.{ val, property_key });
-        roots.activate(self.core.runtime);
-        defer roots.deactivate(self.core.runtime);
-        const global = options.realm_global orelse try self.globalPtr();
-        const key = try exec.object_ops.toPropertyKeyAtom(self.core, self.hostOutput(options.output), global, roots.values[1], null, null);
-        return exec.object_ops.getValueProperty(self.core, self.hostOutput(options.output), global, roots.values[0], key, null, null);
+        return self.withResolvedPropertyKey(val, property_key, options, getPropertyAtom) catch |err| self.apiError(err);
     }
 
     pub fn deleteProperty(self: *JSContext, val: JSValue, property_name: []const u8) Error!bool {
-        return self.deletePropertyImpl(val, property_name) catch |err| self.apiError(err);
-    }
-
-    fn deletePropertyImpl(self: *JSContext, val: JSValue, property_name: []const u8) !bool {
-        self.discardStaleException();
-        const key = try self.core.runtime.internAtom(property_name);
-        // TGC S3 §4 class B: delete can reach a proxy trap.
-        var key_roots = core.runtime.rootAtoms(.{&key});
-        key_roots.activate(self.core.runtime);
-        defer key_roots.deactivate(self.core.runtime);
-        return self.deletePropertyAtom(val, key, .{});
+        return self.withInternedPropertyName(val, property_name, deletePropertyAtom) catch |err| self.apiError(err);
     }
 
     pub fn deletePropertyKey(self: *JSContext, val: JSValue, property_key: JSValue, options: core.PropertyAccessOptions) Error!bool {
-        return self.deletePropertyKeyImpl(val, property_key, options) catch |err| self.apiError(err);
-    }
-
-    fn deletePropertyKeyImpl(self: *JSContext, val: JSValue, property_key: JSValue, options: core.PropertyAccessOptions) !bool {
-        self.discardStaleException();
-        var roots = PublicValueRootWindow(2).init(.{ val, property_key });
-        roots.activate(self.core.runtime);
-        defer roots.deactivate(self.core.runtime);
-        const global = options.realm_global orelse try self.globalPtr();
-        const key = try exec.object_ops.toPropertyKeyAtom(self.core, self.hostOutput(options.output), global, roots.values[1], null, null);
-        return self.deletePropertyAtom(roots.values[0], key, .{ .output = self.hostOutput(options.output), .realm_global = global });
+        return self.withResolvedPropertyKey(val, property_key, options, deletePropertyAtom) catch |err| self.apiError(err);
     }
 
     pub fn hasOwnProperty(self: *JSContext, val: JSValue, property_name: []const u8) Error!bool {
-        return self.hasOwnPropertyImpl(val, property_name) catch |err| self.apiError(err);
-    }
-
-    fn hasOwnPropertyImpl(self: *JSContext, val: JSValue, property_name: []const u8) !bool {
-        self.discardStaleException();
-        const key = try self.core.runtime.internAtom(property_name);
-        // TGC S3 §4 class B: hasOwn can reach a proxy trap.
-        var key_roots = core.runtime.rootAtoms(.{&key});
-        key_roots.activate(self.core.runtime);
-        defer key_roots.deactivate(self.core.runtime);
-        return self.hasOwnPropertyAtom(val, key, .{});
+        return self.withInternedPropertyName(val, property_name, hasOwnPropertyAtom) catch |err| self.apiError(err);
     }
 
     pub fn hasOwnPropertyKey(self: *JSContext, val: JSValue, property_key: JSValue, options: core.PropertyAccessOptions) Error!bool {
-        return self.hasOwnPropertyKeyImpl(val, property_key, options) catch |err| self.apiError(err);
-    }
-
-    fn hasOwnPropertyKeyImpl(self: *JSContext, val: JSValue, property_key: JSValue, options: core.PropertyAccessOptions) !bool {
-        self.discardStaleException();
-        var roots = PublicValueRootWindow(2).init(.{ val, property_key });
-        roots.activate(self.core.runtime);
-        defer roots.deactivate(self.core.runtime);
-        const global = options.realm_global orelse try self.globalPtr();
-        const key = try exec.object_ops.toPropertyKeyAtom(self.core, self.hostOutput(options.output), global, roots.values[1], null, null);
-        return self.hasOwnPropertyAtom(roots.values[0], key, .{ .output = self.hostOutput(options.output), .realm_global = global });
+        return self.withResolvedPropertyKey(val, property_key, options, hasOwnPropertyAtom) catch |err| self.apiError(err);
     }
 
     pub fn ownPropertyDescriptor(self: *JSContext, val: JSValue, property_key: JSValue, options: core.PropertyAccessOptions) Error!?core.PropertyDescriptor {
-        return self.ownPropertyDescriptorImpl(val, property_key, options) catch |err| self.apiError(err);
-    }
-
-    fn ownPropertyDescriptorImpl(self: *JSContext, val: JSValue, property_key: JSValue, options: core.PropertyAccessOptions) !?core.PropertyDescriptor {
-        self.discardStaleException();
-        var roots = PublicValueRootWindow(2).init(.{ val, property_key });
-        roots.activate(self.core.runtime);
-        defer roots.deactivate(self.core.runtime);
-        const global = options.realm_global orelse try self.globalPtr();
-        const key = try exec.object_ops.toPropertyKeyAtom(self.core, self.hostOutput(options.output), global, roots.values[1], null, null);
-        return self.ownPropertyDescriptorAtom(roots.values[0], key, .{ .output = self.hostOutput(options.output), .realm_global = global });
+        return self.withResolvedPropertyKey(val, property_key, options, ownPropertyDescriptorAtom) catch |err| self.apiError(err);
     }
 
     pub fn toString(self: *JSContext, val: JSValue) Error!JSValue {
@@ -721,7 +676,7 @@ pub const JSContext = struct {
 
     fn realmGlobalImpl(self: *JSContext, realm: JSValue) !JSValue {
         self.discardStaleException();
-        return try self.getPropertyAtom(realm, atom.ids.global);
+        return try self.getPropertyAtom(realm, atom.ids.global, .{});
     }
 
     pub fn realmGlobalObject(self: *JSContext, realm: JSValue) Error!*Object {
@@ -761,7 +716,7 @@ pub const JSContext = struct {
         // Tagged-int atoms stop at max_int_atom; a larger index is a string key.
         const key = try exec.object_ops.propertyAtomFromLengthIndex(self.core.runtime, index);
         defer key.deinit(self.core.runtime);
-        return self.getPropertyAtom(val, key.atom);
+        return self.getPropertyAtom(val, key.atom, .{});
     }
 
     fn hasOwnPropertyAtom(self: *JSContext, val: JSValue, property_name: atom.Atom, options: core.PropertyAccessOptions) !bool {
@@ -869,9 +824,11 @@ pub const JSContext = struct {
             source_text,
             output,
             options.filename,
-            std.Io.Threaded.global_single_threaded.io(),
-            self.core.runtime.nativeAllocator(),
-            max_module_source_size,
+            .{
+                .io = std.Io.Threaded.global_single_threaded.io(),
+                .allocator = self.core.runtime.nativeAllocator(),
+                .max_source_size = max_module_source_size,
+            },
         );
     }
 

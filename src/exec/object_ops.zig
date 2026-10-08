@@ -725,10 +725,6 @@ fn createErrorWithMessageAndCause(
     return instance;
 }
 
-fn argOrUndefined(args: []const core.JSValue, index: usize) core.JSValue {
-    return if (index < args.len) args[index] else core.JSValue.undefinedValue();
-}
-
 pub fn aggregateErrorConstructWithPrototype(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -743,8 +739,8 @@ pub fn aggregateErrorConstructWithPrototype(
     defer rooted_args_buffer.deinit();
     const rooted_args = rooted_args_buffer.values();
 
-    const instance = try createErrorWithMessageAndCause(ctx, output, global, prototype, argOrUndefined(rooted_args, 1), argOrUndefined(rooted_args, 2), caller_function, caller_frame);
-    const errors_array = try aggregateErrorsIterableToArray(ctx, output, global, argOrUndefined(rooted_args, 0), caller_function, caller_frame);
+    const instance = try createErrorWithMessageAndCause(ctx, output, global, prototype, value_ops.argOrUndefined(rooted_args, 1), value_ops.argOrUndefined(rooted_args, 2), caller_function, caller_frame);
+    const errors_array = try aggregateErrorsIterableToArray(ctx, output, global, value_ops.argOrUndefined(rooted_args, 0), caller_function, caller_frame);
     try instance.defineOwnProperty(rt, core.atom.ids.errors, core.Descriptor.data(errors_array.value(), .method));
 
     try captureErrorStack(ctx, global, instance);
@@ -820,16 +816,16 @@ pub fn suppressedErrorConstructWithPrototype(
     const instance = try core.Object.create(rt, core.class.ids.error_, prototype);
     const instance_value = instance.value();
 
-    const message_arg = argOrUndefined(rooted_args, 2);
+    const message_arg = value_ops.argOrUndefined(rooted_args, 2);
     if (!message_arg.is(.undefined_value)) {
         const message = try toStringForAnnexB(ctx, output, global, message_arg, caller_function, caller_frame);
         try instance.defineOwnProperty(rt, core.atom.ids.message, core.Descriptor.data(message, .method));
     }
 
-    const error_value = argOrUndefined(rooted_args, 0);
+    const error_value = value_ops.argOrUndefined(rooted_args, 0);
     try instance.defineOwnProperty(rt, core.atom.ids.error_, core.Descriptor.data(error_value, .method));
 
-    const suppressed_value = argOrUndefined(rooted_args, 1);
+    const suppressed_value = value_ops.argOrUndefined(rooted_args, 1);
     try instance.defineOwnProperty(rt, core.atom.ids.suppressed, core.Descriptor.data(suppressed_value, .method));
 
     try captureErrorStack(ctx, global, instance);
@@ -897,7 +893,7 @@ pub fn errorConstructWithPrototype(
     defer rooted_args_buffer.deinit();
     const rooted_args = rooted_args_buffer.values();
 
-    const instance = try createErrorWithMessageAndCause(ctx, output, global, prototype, argOrUndefined(rooted_args, 0), argOrUndefined(rooted_args, 1), caller_function, caller_frame);
+    const instance = try createErrorWithMessageAndCause(ctx, output, global, prototype, value_ops.argOrUndefined(rooted_args, 0), value_ops.argOrUndefined(rooted_args, 1), caller_function, caller_frame);
     try captureErrorStack(ctx, global, instance);
     return instance.value();
 }
@@ -1213,6 +1209,47 @@ pub noinline fn populateRegExpGroupsFromCaptureValues(
     }
 }
 
+/// `.primitive` builtin ids are `class * primitive_builtin_stride + method`.
+pub const primitive_builtin_stride: i32 = 10;
+
+pub const PrimitiveClass = enum(i32) {
+    number = 1,
+    boolean = 2,
+    big_int = 3,
+    symbol = 4,
+    string = 5,
+
+    pub fn classId(self: PrimitiveClass) core.class.ClassId {
+        return switch (self) {
+            .number => core.class.ids.number,
+            .boolean => core.class.ids.boolean,
+            .big_int => core.class.ids.big_int,
+            .symbol => core.class.ids.symbol,
+            .string => core.class.ids.string,
+        };
+    }
+
+    fn typeErrorMessage(self: PrimitiveClass) []const u8 {
+        return switch (self) {
+            .number => "not a number",
+            .boolean => "not a boolean",
+            .big_int => "not a bigint",
+            .symbol => "not a symbol",
+            .string => "not a string",
+        };
+    }
+};
+
+pub const PrimitiveMethod = enum(i32) {
+    to_string = 1,
+    value_of = 2,
+    /// Constructor called as a function (`Boolean(...)`, `Symbol(...)`).
+    constructor_call = 3,
+    description_get = 4,
+    to_primitive = 5,
+    to_locale_string = 8,
+};
+
 pub fn primitivePrototypeMethod(
     ctx: *core.JSContext,
     output: ?*std.Io.Writer,
@@ -1226,51 +1263,54 @@ pub fn primitivePrototypeMethod(
 ) !core.JSValue {
     const rt = ctx.runtime;
     const tag: i32 = @intCast(id);
-    const class_tag = @divTrunc(tag, 10);
-    const method_tag = @mod(tag, 10);
-    // Methods 3..5 do not coerce `this` through the wrapper-prototype rules:
-    // 3 is the constructor-called-as-function path, 4/5 are the Symbol
-    // `description` getter and `[Symbol.toPrimitive]`, which validate their
-    // receiver themselves (ids: standard_globals primitive_*_id constants).
-    switch (method_tag) {
-        3 => switch (class_tag) {
-            2 => return core.JSValue.boolean(args.len >= 1 and value_ops.isTruthy(args[0])),
-            4 => return symbolConstructorCall(ctx, output, global, args),
+    const class = std.enums.fromInt(PrimitiveClass, @divTrunc(tag, primitive_builtin_stride));
+    const method = std.enums.fromInt(PrimitiveMethod, @mod(tag, primitive_builtin_stride));
+    // Constructor-call, description, and toPrimitive validate `this` themselves
+    // and must not coerce it through the wrapper-prototype rules.
+    if (method) |decoded| switch (decoded) {
+        .constructor_call => switch (class orelse return error.TypeError) {
+            .boolean => return core.JSValue.boolean(args.len >= 1 and value_ops.isTruthy(args[0])),
+            .symbol => return symbolConstructorCall(ctx, output, global, args),
             else => return error.TypeError,
         },
-        4 => {
-            if (class_tag != 4) return error.TypeError;
+        .description_get => {
+            if (class != @as(?PrimitiveClass, .symbol)) return error.TypeError;
             return symbolDescriptionValue(rt, this_value) catch |err| switch (err) {
                 error.TypeError => return throwTypeErrorMessage(ctx, global, "not a symbol"),
                 else => err,
             };
         },
-        5 => {
-            if (class_tag != 4) return error.TypeError;
+        .to_primitive => {
+            if (class != @as(?PrimitiveClass, .symbol)) return error.TypeError;
             return symbolPrimitiveValue(this_value) catch |err| switch (err) {
                 error.TypeError => return throwTypeErrorMessage(ctx, global, "not a symbol"),
             };
         },
-        else => {},
-    }
+        .to_string, .value_of, .to_locale_string => {},
+    };
+    const class_tag = @divTrunc(tag, primitive_builtin_stride);
     const primitive = primitivePrototypeThisValue(this_value, class_tag) catch return throwPrimitivePrototypeTypeError(ctx, global, function_object, class_tag);
-    return switch (method_tag) {
-        1 => if (class_tag == 1) blk: {
-            // `Number.prototype.toString` body lives in `number_ops.zig`;
-            // route the already-coerced number primitive through the `.number`
-            // record (`primitivePrototypeThisValue` is idempotent for a number,
-            // so the record's receiver re-check is a no-op) instead of naming
-            // the builtin from exec.
-            const native_ref = core.function.NativeBuiltinRef{ .domain = .number, .id = @intFromEnum(method_ids.number.PrototypeMethod.to_string) };
-            break :blk (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, null, primitive, native_ref, args, caller_function, caller_frame)) orelse error.TypeError;
-        } else if (class_tag == 3)
-            bigIntPrototypeToString(ctx, output, global, primitive, args, caller_function, caller_frame)
-        else
-            value_ops.toStringValue(rt, primitive),
-        2 => primitive,
+    // `primitivePrototypeThisValue` rejects a tag that is not a PrimitiveClass,
+    // so a successful coercion has a class.
+    const class_value = class orelse return error.TypeError;
+    return switch (method orelse return error.TypeError) {
+        .to_string => switch (class_value) {
+            .number => blk: {
+                // `Number.prototype.toString` body lives in `number_ops.zig`;
+                // route the already-coerced number primitive through the `.number`
+                // record (`primitivePrototypeThisValue` is idempotent for a number,
+                // so the record's receiver re-check is a no-op) instead of naming
+                // the builtin from exec.
+                const native_ref = core.function.NativeBuiltinRef{ .domain = .number, .id = @intFromEnum(method_ids.number.PrototypeMethod.to_string) };
+                break :blk (try builtin_dispatch.callInternalRecord(ctx, output, global, &.{}, null, primitive, native_ref, args, caller_function, caller_frame)) orelse error.TypeError;
+            },
+            .big_int => bigIntPrototypeToString(ctx, output, global, primitive, args, caller_function, caller_frame),
+            else => value_ops.toStringValue(rt, primitive),
+        },
+        .value_of => primitive,
         // BigInt.prototype.toLocaleString: no Intl, so the base-10 form.
-        8 => if (class_tag == 3) bigIntPrototypeToString(ctx, output, global, primitive, &.{}, caller_function, caller_frame) else error.TypeError,
-        else => error.TypeError,
+        .to_locale_string => if (class_value == .big_int) bigIntPrototypeToString(ctx, output, global, primitive, &.{}, caller_function, caller_frame) else error.TypeError,
+        .constructor_call, .description_get, .to_primitive => error.TypeError,
     };
 }
 
@@ -1329,36 +1369,27 @@ pub fn throwPrimitivePrototypeTypeError(
     class_tag: i32,
 ) !core.JSValue {
     const error_global = objectRealmGlobal(function_object) orelse global;
-    const message = switch (class_tag) {
-        1 => "not a number",
-        2 => "not a boolean",
-        3 => "not a bigint",
-        4 => "not a symbol",
-        5 => "not a string",
-        else => "",
-    };
+    const message = if (std.enums.fromInt(PrimitiveClass, class_tag)) |class|
+        class.typeErrorMessage()
+    else
+        "";
     const error_value = try exception_ops.createNamedError(ctx, error_global, "TypeError", message);
     _ = ctx.throwValue(error_value);
     return error.JSException;
 }
 
 pub fn primitivePrototypeThisValue(value: core.JSValue, class_tag: i32) !core.JSValue {
-    if (class_tag == 1 and value.isNumber()) return value;
-    if (class_tag == 2 and value.as(.boolean) != null) return value;
-    if (class_tag == 3 and value.isBigInt()) return value;
-    if (class_tag == 4 and value.is(.symbol)) return value;
-    if (class_tag == 5 and value.isString()) return value;
+    const class = std.enums.fromInt(PrimitiveClass, class_tag) orelse return error.TypeError;
+    switch (class) {
+        .number => if (value.isNumber()) return value,
+        .boolean => if (value.as(.boolean) != null) return value,
+        .big_int => if (value.isBigInt()) return value,
+        .symbol => if (value.is(.symbol)) return value,
+        .string => if (value.isString()) return value,
+    }
     if (!value.is(.object)) return error.TypeError;
     const object = objectFromValue(value).?;
-    const matches = switch (class_tag) {
-        1 => object.class_id == core.class.ids.number,
-        2 => object.class_id == core.class.ids.boolean,
-        3 => object.class_id == core.class.ids.big_int,
-        4 => object.class_id == core.class.ids.symbol,
-        5 => object.class_id == core.class.ids.string,
-        else => false,
-    };
-    if (!matches) return error.TypeError;
+    if (object.class_id != class.classId()) return error.TypeError;
     return object.objectData() orelse error.TypeError;
 }
 
@@ -1690,7 +1721,7 @@ pub fn objectRestOwnKeys(
     global: *core.Object,
     source: *core.Object,
 ) HostError![]core.Atom {
-    if (source.proxyTarget() == null and core.object.isTypedArrayObject(source)) {
+    if (source.proxyTarget() == null and core.typed_array.isTypedArrayObject(source)) {
         return try typedArrayOwnKeys(ctx.runtime, source);
     }
     if (source.proxyTarget() == null) {
@@ -2556,7 +2587,7 @@ pub fn getValuePropertyWithReceiver(
         if (object.proxyTarget() != null) return getProxyProperty(ctx, output, global, receiver_value, object, atom_id, caller_function, caller_frame);
         // TypedArray [[Get]] (§10.4.5.4): a canonical numeric key never
         // reaches the prototype chain.
-        if (core.object.isTypedArrayObject(object)) {
+        if (core.typed_array.isTypedArrayObject(object)) {
             if (try typedArrayCanonicalGet(ctx.runtime, object, atom_id)) |indexed| return indexed;
         }
         if (try object.getOwnProperty(ctx.runtime, atom_id)) |desc| {
@@ -2708,7 +2739,7 @@ pub fn setValuePropertyWithThrow(
     }
     if (object.flags.is_with_environment and is_strict and !object.hasProperty(atom_id)) return error.ReferenceError;
     if (try setMappedArgumentsValue(ctx, object, atom_id, value)) return core.JSValue.undefinedValue();
-    if (core.object.isTypedArrayObject(object)) {
+    if (core.typed_array.isTypedArrayObject(object)) {
         if (try array_ops.typedArrayNumericSet(ctx, output, global, object, object_value, atom_id, value, caller_function, caller_frame)) |ok| {
             if (!ok and throw_on_set_failure) return throwSetFailureTypeError(ctx, global, atom_id, error.ReadOnly);
             return core.JSValue.undefinedValue();
@@ -3365,7 +3396,7 @@ noinline fn getSlowPropertyValueFromObject(
     // (in-range load, OOB / non-canonical numeric → undefined) before the
     // walk continues. Receiver-side `getValueProperty` already has the same
     // call; HAS's proto walk has `typedArrayCanonicalHas`.
-    if (core.object.isTypedArrayObject(object)) {
+    if (core.typed_array.isTypedArrayObject(object)) {
         if (try typedArrayCanonicalGet(ctx.runtime, object, atom_id)) |indexed| return indexed;
     }
     if (try object.getOwnProperty(ctx.runtime, atom_id)) |desc| {
@@ -3514,7 +3545,7 @@ pub fn ordinaryHasValueProperty(
 
 pub fn indexedExoticHasProperty(rt: *core.JSRuntime, object: *core.Object, atom_id: core.Atom) bool {
     if (stringObjectHasIndexProperty(rt, object, atom_id)) return true;
-    if (!core.object.isTypedArrayObject(object)) return false;
+    if (!core.typed_array.isTypedArrayObject(object)) return false;
     return typedArrayCanonicalHas(rt, object, atom_id) orelse false;
 }
 
@@ -5157,7 +5188,7 @@ fn assignSourceIsOrdinary(source: *core.Object) bool {
     if (source.proxyTarget() != null) return false;
     if (source.hasExoticMethods()) return false;
     if (source.class_id == core.class.ids.module_ns) return false;
-    if (core.object.isTypedArrayObject(source)) return false;
+    if (core.typed_array.isTypedArrayObject(source)) return false;
     return true;
 }
 

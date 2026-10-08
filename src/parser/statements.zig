@@ -88,62 +88,66 @@ fn caseTailCanFallthrough(s: *State, scan_start: u32, body_start: u32) bool {
     return v2b.hasReferencedBindAt(v2b.code_len);
 }
 
-fn usingDeclarationStart(s: *State) bool {
+fn usingDeclarationStart(s: *State) Error!bool {
     if (s.peekKind() != .ident or !s.isIdent("using")) return false;
     if (s.token.payload.ident.has_escape) return false;
-    const next_peek = s.peekNext();
+    const next_peek = try s.peekNext();
     const next = next_peek.kind;
     const has_line_terminator = next_peek.line_terminator;
     if (has_line_terminator) return false;
     return tokenKindCanStartUsingBinding(s, next);
 }
 
-fn awaitUsingDeclarationStart(s: *State) bool {
+fn awaitUsingDeclarationStart(s: *State) Error!bool {
     if (s.peekKind() != .kw_await) return false;
     const saved_cursor = lookahead.takeLexerCursorSnapshot(s);
     defer lookahead.restoreLexerCursorSnapshot(s, saved_cursor);
 
-    var using_token = s.lex.next() catch return false;
+    var using_token = try lookahead.peekAhead(s) orelse return false;
     defer s.lex.freeToken(&using_token);
     if (s.lex.gotLineTerminator()) return false;
-    if (using_token.kind != .ident) return false;
-    if (using_token.payload.ident.has_escape) return false;
-    if (!identifiers.atomNameEquals(s, using_token.payload.ident.atom, "using")) return false;
+    if (!identifiers.tokenIsPlainName(s, &using_token, "using")) return false;
 
-    var binding_token = s.lex.next() catch return false;
+    var binding_token = try lookahead.peekAhead(s) orelse return false;
     defer s.lex.freeToken(&binding_token);
     if (s.lex.gotLineTerminator()) return false;
     return tokenKindCanStartUsingBinding(s, binding_token.kind);
 }
 
-fn directUsingDeclarationKind(s: *State) ?DisposalHint {
-    if (awaitUsingDeclarationStart(s)) return .async;
-    if (usingDeclarationStart(s)) return .sync;
+fn directUsingDeclarationKind(s: *State) Error!?DisposalHint {
+    if (try awaitUsingDeclarationStart(s)) return .async;
+    if (try usingDeclarationStart(s)) return .sync;
     return null;
 }
 
 fn tokenKindCanStartUsingBinding(s: *State, kind: tok.Kind) bool {
     return kind == .ident or
         (kind == .kw_await and identifiers.canUseAwaitAsIdentifier(s)) or
-        (kind == .kw_yield and !s.ctx.in_generator and !(s.is_strict or s.curFunc().is_strict_mode)) or
-        (!(s.is_strict or s.curFunc().is_strict_mode) and
+        (kind == .kw_yield and !s.ctx.in_generator and !s.isStrict()) or
+        (!s.isStrict() and
             (kind == .kw_static or kind == .kw_let or
                 kind == .kw_implements or kind == .kw_interface or kind == .kw_package or
                 kind == .kw_private or kind == .kw_protected or kind == .kw_public));
 }
 
-fn advanceUsingDeclarationPrefixForLookahead(s: *State, kind: DisposalHint) bool {
+fn advanceOneForUsingLookahead(s: *State) Error!bool {
+    s.advance() catch |err| switch (err) {
+        error.OutOfMemory, error.StackOverflow => return err,
+        else => return false,
+    };
+    return true;
+}
+
+fn advanceUsingDeclarationPrefixForLookahead(s: *State, kind: DisposalHint) Error!bool {
     switch (kind) {
         .sync => {
-            if (!usingDeclarationStart(s)) return false;
-            s.advance() catch return false;
-            return true;
+            if (!try usingDeclarationStart(s)) return false;
+            return advanceOneForUsingLookahead(s);
         },
         .async => {
-            if (!awaitUsingDeclarationStart(s)) return false;
-            s.advance() catch return false;
-            s.advance() catch return false;
-            return true;
+            if (!try awaitUsingDeclarationStart(s)) return false;
+            if (!try advanceOneForUsingLookahead(s)) return false;
+            return advanceOneForUsingLookahead(s);
         },
     }
 }
@@ -151,7 +155,7 @@ fn advanceUsingDeclarationPrefixForLookahead(s: *State, kind: DisposalHint) bool
 fn usingDeclarationBindingIsOf(s: *State, kind: DisposalHint) Error!bool {
     const snapshot = try lookahead.takeParserSnapshot(s);
     defer lookahead.restoreParserLexerSnapshot(s, snapshot);
-    if (!advanceUsingDeclarationPrefixForLookahead(s, kind)) return false;
+    if (!try advanceUsingDeclarationPrefixForLookahead(s, kind)) return false;
     return s.isOfToken();
 }
 
@@ -525,7 +529,7 @@ pub fn parseStatementOrDecl(s: *State, decl_mask: DeclMask) Error!void {
     }
     if (tok_kind == .ident and
         s.isIdent("async") and
-        s.peekNext().isBefore(.kw_function))
+        (try s.peekNext()).isBefore(.kw_function))
     {
         if (!decl_mask.func and !decl_mask.func_with_label) return s.failUnexpectedToken();
         const source_start = s.currentFunctionSourceStart();
@@ -540,7 +544,7 @@ pub fn parseStatementOrDecl(s: *State, decl_mask: DeclMask) Error!void {
 fn parseStatementOrDeclSlow(s: *State, decl_mask: DeclMask) Error!void {
     const tok_kind = s.peekKind();
 
-    if (s.labelStartAtom()) |label_atom| {
+    if (try s.labelStartAtom()) |label_atom| {
         // LabelFrame deliberately does not own atoms, so this local owner
         // spans `advance()` and the complete labelled statement.
         if (s.isReservedLabelIdentifier(label_atom)) return s.failUnexpectedToken();
@@ -549,7 +553,7 @@ fn parseStatementOrDeclSlow(s: *State, decl_mask: DeclMask) Error!void {
         try s.advance();
         try s.expectToken(.colon);
 
-        if (s.labelStartAtom() != null) {
+        if (try s.labelStartAtom() != null) {
             // An outer label of a chain: the innermost label registers the
             // statement and aliases this one to it.
             try s.pending_label_chain.append(s.scratch, label_atom);
@@ -584,8 +588,8 @@ fn parseStatementOrDeclSlow(s: *State, decl_mask: DeclMask) Error!void {
         emitter.pushControlBlock(s, &label_block, .{ .label = label_atom, .has_break_target = true, .is_regular_stmt = true, .scope_level = s.scope_level });
         defer emitter.popControlBlock(s, &label_block);
         if (labelled_kind == .kw_class or
-            (labelled_kind == .kw_function and s.peekNextKind() == .star) or
-            (labelled_kind == .ident and s.isIdent("async") and s.peekNextKind() == .kw_function))
+            (labelled_kind == .kw_function and try s.peekNextKind() == .star) or
+            (labelled_kind == .ident and s.isIdent("async") and try s.peekNextKind() == .kw_function))
         {
             return s.failUnexpectedToken();
         }
@@ -603,7 +607,7 @@ fn parseStatementOrDeclSlow(s: *State, decl_mask: DeclMask) Error!void {
         .lbrace => try parseBlockStatement(s),
         .string => try parseStringStatement(s),
         .kw_enum => try typescript.parseEnumDeclaration(s),
-        .kw_interface => if (typescript.tsDeclarationStart(s) == .interface)
+        .kw_interface => if (try typescript.tsDeclarationStart(s) == .interface)
             try typescript.tsParseInterfaceDeclaration(s)
         else
             try parseExpressionStatement(s),
@@ -666,11 +670,11 @@ fn parseThrowStatement(s: *State) Error!void {
 }
 
 fn parseVariableStatement(s: *State, tok_kind: tok.Kind, decl_mask: DeclMask) Error!void {
-    if (tok_kind == .kw_let and canTreatLetAsExpressionStatement(s, decl_mask)) {
+    if (tok_kind == .kw_let and try canTreatLetAsExpressionStatement(s, decl_mask)) {
         try parseLetKeywordExpressionStatement(s);
         return;
     }
-    if (tok_kind == .kw_const and s.peekNextKind() == .kw_enum) {
+    if (tok_kind == .kw_const and try s.peekNextKind() == .kw_enum) {
         try s.advance();
         try typescript.parseEnumDeclaration(s);
         return;
@@ -703,7 +707,7 @@ fn parseClassDeclarationStatement(s: *State, decl_mask: DeclMask) Error!void {
 }
 
 fn parseIdentifierStatement(s: *State, decl_mask: DeclMask) Error!void {
-    switch (typescript.tsDeclarationStart(s)) {
+    switch (try typescript.tsDeclarationStart(s)) {
         .none => {},
         .interface => return typescript.tsParseInterfaceDeclaration(s),
         .type_alias => return typescript.tsParseTypeAliasDeclaration(s),
@@ -716,14 +720,14 @@ fn parseIdentifierStatement(s: *State, decl_mask: DeclMask) Error!void {
             return;
         },
     }
-    if (usingDeclarationStart(s)) {
+    if (try usingDeclarationStart(s)) {
         if (!decl_mask.other) return s.failUnexpectedToken();
         try parseUsingDeclaration(s, .sync);
         _ = try s.expectSemicolon();
         return;
     }
     // Check for async function declaration (async is a contextual keyword)
-    if (s.isIdent("async") and s.peekNext().isBefore(.kw_function)) {
+    if (s.isIdent("async") and (try s.peekNext()).isBefore(.kw_function)) {
         if (!decl_mask.func and !decl_mask.func_with_label) {
             return s.failUnexpectedToken();
         }
@@ -740,7 +744,7 @@ fn parseIdentifierStatement(s: *State, decl_mask: DeclMask) Error!void {
 }
 
 fn parseAwaitStatement(s: *State, decl_mask: DeclMask) Error!void {
-    if (awaitUsingDeclarationStart(s)) {
+    if (try awaitUsingDeclarationStart(s)) {
         if (!decl_mask.other) return s.failUnexpectedToken();
         try parseUsingDeclaration(s, .async);
         _ = try s.expectSemicolon();
@@ -750,12 +754,12 @@ fn parseAwaitStatement(s: *State, decl_mask: DeclMask) Error!void {
 }
 
 fn parseImportStatement(s: *State, decl_mask: DeclMask) Error!void {
-    const import_next = s.peekNextKind();
+    const import_next = try s.peekNextKind();
     if (import_next == .lparen or import_next == .dot) {
         try parseExpressionStatementTail(s);
         return;
     }
-    if (typescript.tsImportAliasAhead(s)) {
+    if (try typescript.tsImportAliasAhead(s)) {
         // TypeScript `import x = A.B;` is a declaration in any goal.
         if (!decl_mask.other) return s.failUnexpectedToken();
         try s.advance();
@@ -783,11 +787,11 @@ fn parseIfStatement(s: *State) Error!void {
     // qjs TOK_IF: emit_goto(OP_if_false) / emit_goto(OP_goto) / emit_label at each merge.
     const if_false_label = try Emitter.newLabel(s);
     try Emitter.jump(s, opcode.op.if_false, if_false_label);
-    const allow_annex_b_if_function = !s.is_strict and !s.curFunc().is_strict_mode;
+    const allow_annex_b_if_function = !s.isStrict();
     const then_is_annex_b_function =
         allow_annex_b_if_function and
         s.peekKind() == .kw_function and
-        s.peekNextKind() != .star;
+        try s.peekNextKind() != .star;
     const then_decl_mask = if (then_is_annex_b_function) DeclMask{ .func = true } else DeclMask{};
     const saved_annex_b_if_function_decl_clause = s.annex_b_if_function_decl_clause;
     s.annex_b_if_function_decl_clause = then_is_annex_b_function;
@@ -803,7 +807,7 @@ fn parseIfStatement(s: *State) Error!void {
         const else_is_annex_b_function =
             allow_annex_b_if_function and
             s.peekKind() == .kw_function and
-            s.peekNextKind() != .star;
+            try s.peekNextKind() != .star;
         const else_decl_mask = if (else_is_annex_b_function) DeclMask{ .func = true } else DeclMask{};
         s.annex_b_if_function_decl_clause = else_is_annex_b_function;
         try parseIfClause(s, else_decl_mask);
@@ -907,7 +911,7 @@ fn parseForStatement(s: *State) Error!void {
     // QuickJS routes every head without a top-level semicolon to
     // the for-in/of grammar; that parser performs the real LHS and
     // `in`/`of` validation.
-    const is_for_in_of = s.forHeadHasNoTopLevelSemicolon();
+    const is_for_in_of = try s.forHeadHasNoTopLevelSemicolon();
     if (is_for_in_of) {
         s.pending_label_atom = loop_label;
         try parseForInOf(s, false);
@@ -927,14 +931,14 @@ fn parseForStatement(s: *State) Error!void {
         errdefer for_scope.pop(s);
         var for_using_block: ?OpenUsingBlock = null;
         errdefer if (for_using_block) |*block| block.unwind(s);
-        if (directUsingDeclarationKind(s)) |using_kind| {
+        if (try directUsingDeclarationKind(s)) |using_kind| {
             for_head_is_lexical = true;
             for_has_initializer = true;
             for_using_block = try openUsingBlock(s);
             try parseUsingDeclaration(s, using_kind);
             try s.expectToken(.semicolon);
         } else if ((s.peekKind() == .kw_var or s.peekKind() == .kw_let or s.peekKind() == .kw_const) and
-            !s.canTreatLetAsForInitializerExpression())
+            !try s.canTreatLetAsForInitializerExpression())
         {
             const var_tok = s.peekKind();
             try s.advance();
@@ -957,13 +961,12 @@ fn parseForStatement(s: *State) Error!void {
         }
         if (for_has_initializer) try s.closeScopes(s.scope_level, block_scope_level);
 
-        var top_label: compiler.LabelId = undefined;
         const v2b = s.activeBuilder();
         const snapshot = v2b.snapshot();
         errdefer v2b.rollback(snapshot);
         // qjs TOK_FOR binds label_test before the condition;
         // labels themselves carry no source event.
-        top_label = try Emitter.newLabel(s);
+        const top_label = try Emitter.newLabel(s);
         // Bind a physical-label analogue so the sequential-match
         // barrier stays even once the backedge dies (a loop body
         // whose only exit is an outer `continue` leaves this label
@@ -979,8 +982,7 @@ fn parseForStatement(s: *State) Error!void {
         }
         try s.expectToken(.semicolon);
 
-        var exit_label: compiler.LabelId = undefined;
-        exit_label = try Emitter.newLabel(s);
+        const exit_label = try Emitter.newLabel(s);
         try Emitter.jump(s, opcode.op.if_false, exit_label);
 
         // Parse the update while still inside the parenthesized
@@ -1072,10 +1074,15 @@ fn parseBreakOrContinueStatement(s: *State) Error!void {
 fn parseSwitchClauseStatement(s: *State) Error!void {
     // Early error: a UsingDeclaration must not be contained directly in the
     // StatementList of a CaseClause or DefaultClause (it may sit in a block).
-    if (directUsingDeclarationKind(s) != null) {
+    if (try directUsingDeclarationKind(s) != null) {
         return s.failWithMessage(null, "using declaration is not allowed directly in a switch clause");
     }
     try parseStatementOrDecl(s, DeclMask{ .func = true, .func_with_label = true, .other = true });
+}
+
+fn atClauseEnd(s: *State) bool {
+    const kind = s.peekKind();
+    return kind == .kw_case or kind == .kw_default or kind == .rbrace or kind == .eof;
 }
 
 fn parseSwitchStatement(s: *State) Error!void {
@@ -1107,8 +1114,7 @@ fn parseSwitchStatement(s: *State) Error!void {
     // Keep unmatched case-test exits separate from matched
     // fallthrough jumps: once a case has matched, later case tests
     // are skipped and only their bodies run.
-    var no_match_labels: [64]compiler.LabelId = undefined;
-    var no_match_jumps_count: usize = 0;
+    var no_match_label: ?compiler.LabelId = null;
     var fallthrough_label: ?compiler.LabelId = null;
     var has_default = false;
     var default_label: ?compiler.LabelId = null;
@@ -1125,10 +1131,10 @@ fn parseSwitchStatement(s: *State) Error!void {
         if (s.peekKind() == .kw_case) {
             // qjs TOK_SWITCH: label_case binds at
             // the next case test before dispatch continues.
-            for (no_match_labels[0..no_match_jumps_count]) |label| {
+            if (no_match_label) |label| {
                 try Emitter.bind(s, label);
+                no_match_label = null;
             }
-            no_match_jumps_count = 0;
 
             try s.advance();
             // dup ; case_expr ; strict_eq ; if_false → next_case
@@ -1142,9 +1148,7 @@ fn parseSwitchStatement(s: *State) Error!void {
             try Emitter.op(s, opcode.op.strict_eq);
             const next_case_label = try Emitter.newLabel(s);
             try Emitter.jump(s, opcode.op.if_false, next_case_label);
-            if (no_match_jumps_count >= no_match_labels.len) return Error.ParserInvariant;
-            no_match_labels[no_match_jumps_count] = next_case_label;
-            no_match_jumps_count += 1;
+            no_match_label = next_case_label;
             if (fallthrough_label) |label| {
                 try Emitter.bind(s, label);
                 fallthrough_label = null;
@@ -1154,21 +1158,14 @@ fn parseSwitchStatement(s: *State) Error!void {
             // common switch epilogue, matching QuickJS's case shape.
             var body_start: u32 = undefined;
             body_start = s.activeBuilder().code_len;
-            const has_case_body = s.peekKind() != .kw_case and
-                s.peekKind() != .kw_default and
-                s.peekKind() != .rbrace and
-                s.peekKind() != .eof;
+            const has_case_body = !atClauseEnd(s);
             if (default_waiting_for_body and has_case_body) {
                 const clause_default_label = try Emitter.newLabel(s);
                 try Emitter.bind(s, clause_default_label);
                 default_label = clause_default_label;
                 default_waiting_for_body = false;
             }
-            while (s.peekKind() != .kw_case and
-                s.peekKind() != .kw_default and
-                s.peekKind() != .rbrace and
-                s.peekKind() != .eof)
-            {
+            while (!atClauseEnd(s)) {
                 try parseSwitchClauseStatement(s);
             }
             // qjs TOK_SWITCH always emits
@@ -1188,12 +1185,10 @@ fn parseSwitchStatement(s: *State) Error!void {
             if (has_default) return s.failUnexpectedToken();
             try s.advance();
             try s.expectToken(.colon);
-            if (no_match_jumps_count == 0) {
-                if (no_match_jumps_count >= no_match_labels.len) return Error.ParserInvariant;
-                const no_match_label = try Emitter.newLabel(s);
-                try Emitter.jump(s, opcode.op.goto, no_match_label);
-                no_match_labels[no_match_jumps_count] = no_match_label;
-                no_match_jumps_count += 1;
+            if (no_match_label == null) {
+                const label = try Emitter.newLabel(s);
+                try Emitter.jump(s, opcode.op.goto, label);
+                no_match_label = label;
             }
             var body_start: u32 = undefined;
             body_start = s.activeBuilder().code_len;
@@ -1203,17 +1198,12 @@ fn parseSwitchStatement(s: *State) Error!void {
             }
 
             // Default body label.
-            var default_candidate: compiler.LabelId = undefined;
             // Eager candidate: legacy decides default_body_start after parsing the
             // body; the v2 bind must happen at the body-start position itself.
-            default_candidate = try Emitter.newLabel(s);
+            const default_candidate = try Emitter.newLabel(s);
             try Emitter.bind(s, default_candidate);
             has_default = true;
-            while (s.peekKind() != .kw_case and
-                s.peekKind() != .kw_default and
-                s.peekKind() != .rbrace and
-                s.peekKind() != .eof)
-            {
+            while (!atClauseEnd(s)) {
                 try parseSwitchClauseStatement(s);
             }
             if (s.activeBuilder().code_len == body_start and s.peekKind() == .kw_case) {
@@ -1240,17 +1230,13 @@ fn parseSwitchStatement(s: *State) Error!void {
     // jump, but the unmatched-dispatch boundary and the default body are
     // one program point, so the references move onto the default label
     // (`retargetLabelRefs`) instead of going through a trampoline.
-    if (no_match_jumps_count != 0) {
+    if (no_match_label) |label| {
         if (default_label) |bound_default_label| {
-            for (no_match_labels[0..no_match_jumps_count]) |label| {
-                try Emitter.retargetLabel(s, label, bound_default_label);
-            }
+            try Emitter.retargetLabel(s, label, bound_default_label);
         } else {
             // No default clause: unmatched dispatch falls through to
             // the common discriminant drop.
-            for (no_match_labels[0..no_match_jumps_count]) |label| {
-                try Emitter.bind(s, label);
-            }
+            try Emitter.bind(s, label);
         }
     }
     if (fallthrough_label) |label| try Emitter.bind(s, label);
@@ -1267,18 +1253,15 @@ fn parseTryStatement(s: *State) Error!void {
     try s.advance();
     try s.setEvalReturnUndefined();
 
-    var label_catch: compiler.LabelId = undefined;
-    var label_catch2: compiler.LabelId = undefined;
-    var label_finally: compiler.LabelId = undefined;
-    var label_end: compiler.LabelId = undefined;
     // qjs TOK_TRY creates all four labels upfront;
     // v2 label discipline requires every created label to end up bound, and
     // a no-catch try never binds catch2 — so catch2 is created at its first
     // use in the catch clause (id order differs from qjs; resolved output
     // is unaffected because ids are per-function creation indices).
-    label_catch = try Emitter.newLabel(s);
-    label_finally = try Emitter.newLabel(s);
-    label_end = try Emitter.newLabel(s);
+    var label_catch2: compiler.LabelId = undefined;
+    const label_catch = try Emitter.newLabel(s);
+    const label_finally = try Emitter.newLabel(s);
+    const label_end = try Emitter.newLabel(s);
     const finally_ref: FinallyLabel = label_finally;
 
     // qjs TOK_TRY: emit_goto(OP_catch, label_catch) — the handler target is born as a LabelId.
@@ -1331,7 +1314,7 @@ fn parseTryStatement(s: *State) Error!void {
             } else {
                 if (!identifiers.isIdentifierLikeToken(s) or identifiers.identifierLikeHasInvalidEscapeForBinding(s)) return s.failUnexpectedToken();
                 const catch_atom = identifiers.identifierLikeAtom(s);
-                if ((s.is_strict or s.curFunc().is_strict_mode) and
+                if (s.isStrict() and
                     (identifiers.atomNameEquals(s, catch_atom, "eval") or identifiers.atomNameEquals(s, catch_atom, "arguments")))
                 {
                     return s.failUnexpectedToken();
@@ -1449,7 +1432,7 @@ fn parseUsingDeclaration(s: *State, kind: DisposalHint) Error!void {
         if (identifiers.identifierLikeHasInvalidEscapeForBinding(s)) return s.failUnexpectedToken();
         const atom_id = identifiers.identifierLikeAtom(s);
         if (identifiers.atomNameEquals(s, atom_id, "let")) return s.failUnexpectedToken();
-        if ((s.is_strict or s.curFunc().is_strict_mode) and
+        if (s.isStrict() and
             (identifiers.atomNameEquals(s, atom_id, "eval") or identifiers.atomNameEquals(s, atom_id, "arguments")))
         {
             return s.failUnexpectedToken();
@@ -1494,8 +1477,8 @@ fn canParseModuleDeclarationHere(s: *State) bool {
 /// (decl_mask & DECL_MASK_OTHER). Anything else is an expression. In
 /// strict mode qjs lexes `let` as TOK_LET and never consults is_let, so
 /// `let` is always a declaration there.
-pub fn canTreatLetAsExpressionStatement(s: *State, decl_mask: DeclMask) bool {
-    if (s.is_strict or s.curFunc().is_strict_mode) return false;
+pub fn canTreatLetAsExpressionStatement(s: *State, decl_mask: DeclMask) Error!bool {
+    if (s.isStrict()) return false;
     const saved_cursor = lookahead.takeLexerCursorSnapshot(s);
     const current_line = s.token.line_num;
     // The lexer restore must be armed before the fallible scan: `nextInto()`
@@ -1503,7 +1486,7 @@ pub fn canTreatLetAsExpressionStatement(s: *State, decl_mask: DeclMask) bool {
     // atom is interned last), so a failure that escaped this frame with the
     // restore still unarmed would leave the parser mid-token.
     defer lookahead.restoreLexerCursorSnapshot(s, saved_cursor);
-    var peek_token = s.lex.next() catch return false;
+    var peek_token = try lookahead.peekAhead(s) orelse return false;
     defer s.lex.freeToken(&peek_token);
     const val = peek_token.kind;
     if (val == .lbracket) {
@@ -1582,7 +1565,7 @@ pub fn parseVar(s: *State, declared_tok: tok.Kind, export_decl: bool, parse_flag
             s.peekKind() == .kw_let or
             s.peekKind() == .kw_await or
             identifiers.isSloppyFutureReservedBindingToken(s)) and
-            !(s.is_strict or s.curFunc().is_strict_mode) and
+            !s.isStrict() and
             !(s.peekKind() == .kw_yield and s.ctx.in_generator) and
             !(s.peekKind() == .kw_await and !identifiers.canUseAwaitAsIdentifier(s));
         const binding_identifier = identifiers.isIdentifierLikeToken(s);
@@ -1599,7 +1582,7 @@ pub fn parseVar(s: *State, declared_tok: tok.Kind, export_decl: bool, parse_flag
                 return s.failUnexpectedToken();
             }
             if (is_lexical and identifiers.atomNameEquals(s, atom_id, "let")) return s.failUnexpectedToken();
-            if ((s.is_strict or s.curFunc().is_strict_mode) and
+            if (s.isStrict() and
                 (identifiers.atomNameEquals(s, atom_id, "eval") or identifiers.atomNameEquals(s, atom_id, "arguments")))
             {
                 return s.failUnexpectedToken();
@@ -1614,9 +1597,7 @@ pub fn parseVar(s: *State, declared_tok: tok.Kind, export_decl: bool, parse_flag
             // vars/global_vars until module resolution.  Preserve that
             // QJS module-name collision at the token wrapper boundary;
             // all ordinary declaration collisions are owned by defineVar.
-            if (is_lexical and s.top_level_lexical_as_module_ref and s.atProgramBodyScope() and identifiers.hasKnownBinding(s, atom_id)) {
-                return s.failNamed("redeclaration of '{s}'", "redeclaration", atom_id);
-            }
+            if (is_lexical) try declarations.rejectModuleRefRedeclaration(s, atom_id);
 
             var hoisted_arguments_var_idx: ?u16 = null;
             if (!is_lexical and identifiers.atomNameEquals(s, atom_id, "arguments") and
@@ -1743,7 +1724,7 @@ pub fn parseVar(s: *State, declared_tok: tok.Kind, export_decl: bool, parse_flag
 }
 
 fn parseWith(s: *State) Error!void {
-    if (s.is_strict or s.curFunc().is_strict_mode) return s.failWithMessage(null, "'with' is not allowed in strict mode");
+    if (s.isStrict()) return s.failWithMessage(null, "'with' is not allowed in strict mode");
     try s.advance();
     try s.expectToken(.lparen);
     try expressions.parseExpr(s);
@@ -1812,7 +1793,7 @@ fn parseForInOfUsingTarget(s: *State, using_kind: DisposalHint, target: *ForInOf
     }
     const atom_id = identifiers.identifierLikeAtom(s);
     if (identifiers.atomNameEquals(s, atom_id, "let")) return s.failUnexpectedToken();
-    if ((s.is_strict or s.curFunc().is_strict_mode) and
+    if (s.isStrict() and
         (identifiers.atomNameEquals(s, atom_id, "eval") or identifiers.atomNameEquals(s, atom_id, "arguments")))
     {
         return s.failUnexpectedToken();
@@ -1856,14 +1837,14 @@ fn parseForInOfDeclarationTarget(s: *State, var_tok: tok.Kind, target: *ForInOfT
             (s.peekKind() == .kw_yield or s.peekKind() == .kw_static or
                 s.peekKind() == .kw_let or s.peekKind() == .kw_await or
                 identifiers.isSloppyFutureReservedBindingToken(s)) and
-            !(s.is_strict or s.curFunc().is_strict_mode) and
+            !s.isStrict() and
             !(s.peekKind() == .kw_yield and s.ctx.in_generator) and
             !(s.peekKind() == .kw_await and !identifiers.canUseAwaitAsIdentifier(s));
         if (!identifiers.isIdentifierLikeToken(s) and !sloppy_keyword_var) return s.failExpectedDescription("binding name");
         if (identifiers.identifierLikeHasInvalidEscapeForBinding(s)) return s.failUnexpectedToken();
         const atom_id = identifiers.identifierLikeAtom(s);
         if (is_lexical and identifiers.atomNameEquals(s, atom_id, "let")) return s.failUnexpectedToken();
-        if ((s.is_strict or s.curFunc().is_strict_mode) and
+        if (s.isStrict() and
             (identifiers.atomNameEquals(s, atom_id, "eval") or identifiers.atomNameEquals(s, atom_id, "arguments")))
         {
             return s.failUnexpectedToken();
@@ -1887,9 +1868,8 @@ fn parseForInOfDeclarationTarget(s: *State, var_tok: tok.Kind, target: *ForInOfT
 /// `for (lhs in/of ...)` with an assignment target or a pattern.
 fn parseForInOfExpressionTarget(s: *State, var_tok: tok.Kind, is_for_await: bool, target: *ForInOfTarget) Error!void {
     if (!is_for_await and var_tok == .ident and
-        !s.token.payload.ident.has_escape and
-        identifiers.atomNameEquals(s, s.token.payload.ident.atom, "async") and
-        s.peekNextIsOfToken())
+        identifiers.tokenIsPlainName(s, &s.token, "async") and
+        try s.peekNextIsOfToken())
     {
         return s.failUnexpectedToken();
     }
@@ -1977,6 +1957,89 @@ fn emitForAwaitThrowClose(s: *State, close: ForAwaitThrowClose) Error!void {
     try Emitter.bind(s, after);
 }
 
+const IterKind = enum { in, of, await_of };
+
+fn emitForInOfUsingSetup(s: *State, target: *const ForInOfTarget, out: *?OpenUsingBlock) Error!void {
+    // Publish the block before the later tries: the caller's errdefer
+    // unwinds it if arming the frame or emitting the resource fails.
+    out.* = try openUsingBlock(s);
+    const stack_loc = try armCurrentUsingBlockFrame(s);
+
+    const atom_id = target.atom orelse return Error.ParserInvariant;
+    const value_loc = target.using_value_loc orelse return Error.ParserInvariant;
+    // zjs-only `for (using ... of ...)` lowering: mirror the
+    // legacy iteration-value load and duplicate exactly.
+    try Emitter.opU16(s, opcode.op.get_loc, value_loc);
+    try Emitter.op(s, opcode.op.dup);
+    try s.emitScopePutVarInit(atom_id);
+    const resource_loc = try functions.appendAnonymousTempLocal(s);
+    // zjs-only `for (using ... of ...)` lowering: retain the
+    // resource in the same anonymous local as legacy.
+    try Emitter.opU16(s, opcode.op.put_loc, resource_loc);
+    try emitUsingAddResource(s, target.using_kind, stack_loc, resource_loc);
+    try noteUsingResourceHint(s, target.using_kind);
+    try s.emitCloseLoc(resource_loc);
+    try s.emitCloseLoc(value_loc);
+}
+
+fn emitForInOfEpilogue(
+    s: *State,
+    kind: IterKind,
+    block_scope_level: i32,
+    label_frame: ?usize,
+    next_label: compiler.LabelId,
+    assign_label: compiler.LabelId,
+    throw_close: ?ForAwaitThrowClose,
+    for_scope: *parse_state.OpenScope,
+) Error!void {
+    try s.closeScopes(s.scope_level, block_scope_level);
+    try emitter.patchContinueFrame(s);
+    if (label_frame) |idx| try s.patchLabelContinues(idx);
+    try Emitter.bind(s, next_label);
+    switch (kind) {
+        .await_of => {
+            try Emitter.opNoSource(s, opcode.op.for_await_of_next);
+            try Emitter.opNoSource(s, opcode.op.await);
+            try Emitter.opNoSource(s, opcode.op.iterator_get_value_done);
+        },
+        .of => try Emitter.opU8(s, opcode.op.for_of_next, 0),
+        .in => try Emitter.op(s, opcode.op.for_in_next),
+    }
+
+    switch (kind) {
+        .await_of => try Emitter.jumpNoSource(s, opcode.op.if_false, assign_label),
+        .of, .in => try Emitter.jump(s, opcode.op.if_false, assign_label),
+    }
+
+    switch (kind) {
+        .await_of => {
+            // Breaks out of `for await` (labelled or not) carry
+            // `shared_iterator_close_marker`: they land here, before the one
+            // shared AsyncIteratorClose.
+            try Emitter.opNoSource(s, opcode.op.drop);
+            try emitter.popBreakFrameAndPatch(s);
+            if (label_frame) |idx| try s.patchLabelBreaks(idx);
+            try emitter.emitAsyncIteratorClose(s);
+            try emitForAwaitThrowClose(s, throw_close.?);
+        },
+        .of => {
+            try Emitter.op(s, opcode.op.drop);
+            try Emitter.op(s, opcode.op.iterator_close);
+            try emitter.popBreakFrameAndPatch(s);
+        },
+        .in => {
+            try Emitter.op(s, opcode.op.drop);
+            try Emitter.op(s, opcode.op.drop);
+            try emitter.popBreakFrameAndPatch(s);
+        },
+    }
+    if (label_frame) |idx| {
+        if (kind != .await_of) try s.patchLabelBreaks(idx);
+        s.popLabelFrame(idx);
+    }
+    try for_scope.close(s);
+}
+
 fn parseForInOf(s: *State, is_for_await: bool) Error!void {
     const block_scope_level = s.scope_level;
     const var_tok = s.peekKind();
@@ -1985,13 +2048,11 @@ fn parseForInOf(s: *State, is_for_await: bool) Error!void {
     var for_scope = try s.openScope();
     errdefer for_scope.pop(s);
 
-    var expr_label: compiler.LabelId = undefined;
-    var assign_label: compiler.LabelId = undefined;
     // qjs js_parse_for_in_of: goto label_expr; label_assign bound at the
     // one-pass target block (backward if_false re-enters it).
-    expr_label = try Emitter.newLabel(s);
+    const expr_label = try Emitter.newLabel(s);
     try Emitter.jump(s, opcode.op.goto, expr_label);
-    assign_label = try Emitter.newLabel(s);
+    const assign_label = try Emitter.newLabel(s);
     try Emitter.bind(s, assign_label);
 
     // A `for await` whose assignment or body completes abruptly with a throw
@@ -2016,9 +2077,9 @@ fn parseForInOf(s: *State, is_for_await: bool) Error!void {
     // Sloppy `let` is a declaration only when a ForBinding can follow; `let.x`
     // and `let(...)` are LeftHandSideExpressions (for-of still rejects them).
     const let_as_identifier = var_tok == .kw_let and
-        !s.is_strict and !s.curFunc().is_strict_mode and
-        !canStartForBinding(s.peekNextKind());
-    const direct_using_kind = directUsingDeclarationKind(s);
+        !s.isStrict() and
+        !canStartForBinding(try s.peekNextKind());
+    const direct_using_kind = try directUsingDeclarationKind(s);
     const parse_using_decl = if (direct_using_kind) |using_kind|
         using_kind == .async or !(try usingDeclarationBindingIsOf(s, using_kind))
     else
@@ -2034,8 +2095,7 @@ fn parseForInOf(s: *State, is_for_await: bool) Error!void {
         try parseForInOfExpressionTarget(s, var_tok, is_for_await, &target);
     }
 
-    var body_label: compiler.LabelId = undefined;
-    body_label = try Emitter.newLabel(s);
+    const body_label = try Emitter.newLabel(s);
     try Emitter.jump(s, opcode.op.goto, body_label);
     try Emitter.bind(s, expr_label);
 
@@ -2044,7 +2104,7 @@ fn parseForInOf(s: *State, is_for_await: bool) Error!void {
     var has_var_initializer = false;
     if (s.peekKind() == .assign) {
         if (target.var_initializer_atom == null or target.is_pattern or
-            target.is_lexical_decl or s.is_strict or s.curFunc().is_strict_mode)
+            target.is_lexical_decl or s.isStrict())
         {
             return s.failUnexpectedToken();
         }
@@ -2062,39 +2122,49 @@ fn parseForInOf(s: *State, is_for_await: bool) Error!void {
     // for-of: [lookahead ∉ { let, async of }] LeftHandSideExpression.
     if (let_as_identifier and is_for_of) return s.failUnexpectedToken();
     if (is_for_await and !is_for_of) return s.failUnexpectedToken();
+    const kind: IterKind = if (is_for_await) .await_of else if (is_for_of) .of else .in;
     try s.advance();
 
-    if (is_for_of) {
-        try expressions.parseAssignExpr(s);
-    } else {
-        try expressions.parseExpr(s);
+    switch (kind) {
+        .of, .await_of => try expressions.parseAssignExpr(s),
+        .in => try expressions.parseExpr(s),
     }
     try s.closeScopes(s.scope_level, block_scope_level);
     try s.expectToken(.rparen);
 
-    if (is_for_of) {
-        try Emitter.op(s, if (is_for_await) opcode.op.for_await_of_start else opcode.op.for_of_start);
-    } else {
-        try Emitter.op(s, opcode.op.for_in_start);
+    switch (kind) {
+        .await_of => try Emitter.op(s, opcode.op.for_await_of_start),
+        .of => try Emitter.op(s, opcode.op.for_of_start),
+        .in => try Emitter.op(s, opcode.op.for_in_start),
     }
 
-    var next_label: compiler.LabelId = undefined;
-    next_label = try Emitter.newLabel(s);
+    const next_label = try Emitter.newLabel(s);
     try Emitter.jump(s, opcode.op.goto, next_label);
     try Emitter.bind(s, body_label);
 
     const loop_label = s.pending_label_atom;
     s.pending_label_atom = null;
     try emitter.pushBreakFrame(s);
-    if (is_for_of) {
-        emitter.setCurrentBreakCleanupDrops(s, if (is_for_await) shared_iterator_close_marker else direct_iterator_close_marker);
-    } else {
-        emitter.setCurrentBreakCleanupDrops(s, 1);
+    switch (kind) {
+        .await_of => emitter.setCurrentBreakCleanupDrops(s, shared_iterator_close_marker),
+        .of => emitter.setCurrentBreakCleanupDrops(s, direct_iterator_close_marker),
+        .in => emitter.setCurrentBreakCleanupDrops(s, 1),
     }
     const label_frame = if (loop_label) |atom_id| try s.pushLabelFrame(atom_id, true) else null;
 
     var loop_block: BlockEnv = undefined;
-    emitter.pushControlBlock(s, &loop_block, .{ .label = loop_label, .has_break_target = true, .has_continue_target = true, .scope_level = block_scope_level, .drop_count = if (is_for_of) 3 else 1, .has_iterator = is_for_of, .is_async_iterator = is_for_await });
+    emitter.pushControlBlock(s, &loop_block, .{
+        .label = loop_label,
+        .has_break_target = true,
+        .has_continue_target = true,
+        .scope_level = block_scope_level,
+        .drop_count = switch (kind) {
+            .in => 1,
+            .of, .await_of => 3,
+        },
+        .has_iterator = kind != .in,
+        .is_async_iterator = kind == .await_of,
+    });
     defer emitter.popControlBlock(s, &loop_block);
 
     // The throw-close catch marker sits above the loop record: break,
@@ -2105,26 +2175,7 @@ fn parseForInOf(s: *State, is_for_await: bool) Error!void {
 
     var iteration_using_block: ?OpenUsingBlock = null;
     errdefer if (iteration_using_block) |*block| block.unwind(s);
-    if (target.is_using_decl) {
-        iteration_using_block = try openUsingBlock(s);
-        const stack_loc = try armCurrentUsingBlockFrame(s);
-
-        const atom_id = target.atom orelse return Error.ParserInvariant;
-        const value_loc = target.using_value_loc orelse return Error.ParserInvariant;
-        // zjs-only `for (using ... of ...)` lowering: mirror the
-        // legacy iteration-value load and duplicate exactly.
-        try Emitter.opU16(s, opcode.op.get_loc, value_loc);
-        try Emitter.op(s, opcode.op.dup);
-        try s.emitScopePutVarInit(atom_id);
-        const resource_loc = try functions.appendAnonymousTempLocal(s);
-        // zjs-only `for (using ... of ...)` lowering: retain the
-        // resource in the same anonymous local as legacy.
-        try Emitter.opU16(s, opcode.op.put_loc, resource_loc);
-        try emitUsingAddResource(s, target.using_kind, stack_loc, resource_loc);
-        try noteUsingResourceHint(s, target.using_kind);
-        try s.emitCloseLoc(resource_loc);
-        try s.emitCloseLoc(value_loc);
-    }
+    if (target.is_using_decl) try emitForInOfUsingSetup(s, &target, &iteration_using_block);
 
     try parseStatementOrDecl(s, DeclMask{});
 
@@ -2136,51 +2187,7 @@ fn parseForInOf(s: *State, is_for_await: bool) Error!void {
         s.active_catch_marker_depth = loop_catch_depth;
     }
 
-    try s.closeScopes(s.scope_level, block_scope_level);
-    try emitter.patchContinueFrame(s);
-    if (label_frame) |idx| try s.patchLabelContinues(idx);
-    try Emitter.bind(s, next_label);
-    if (is_for_of) {
-        if (is_for_await) {
-            try Emitter.opNoSource(s, opcode.op.for_await_of_next);
-            try Emitter.opNoSource(s, opcode.op.await);
-            try Emitter.opNoSource(s, opcode.op.iterator_get_value_done);
-        } else {
-            try Emitter.opU8(s, opcode.op.for_of_next, 0);
-        }
-    } else {
-        try Emitter.op(s, opcode.op.for_in_next);
-    }
-
-    if (is_for_await) {
-        try Emitter.jumpNoSource(s, opcode.op.if_false, assign_label);
-    } else {
-        try Emitter.jump(s, opcode.op.if_false, assign_label);
-    }
-
-    if (is_for_await) {
-        // Breaks out of `for await` (labelled or not) carry
-        // `shared_iterator_close_marker`: they land here, before the one
-        // shared AsyncIteratorClose.
-        try Emitter.opNoSource(s, opcode.op.drop);
-        try emitter.popBreakFrameAndPatch(s);
-        if (label_frame) |idx| try s.patchLabelBreaks(idx);
-        try emitter.emitAsyncIteratorClose(s);
-        try emitForAwaitThrowClose(s, throw_close.?);
-    } else if (is_for_of) {
-        try Emitter.op(s, opcode.op.drop);
-        try Emitter.op(s, opcode.op.iterator_close);
-        try emitter.popBreakFrameAndPatch(s);
-    } else {
-        try Emitter.op(s, opcode.op.drop);
-        try Emitter.op(s, opcode.op.drop);
-        try emitter.popBreakFrameAndPatch(s);
-    }
-    if (label_frame) |idx| {
-        if (!is_for_await) try s.patchLabelBreaks(idx);
-        s.popLabelFrame(idx);
-    }
-    try for_scope.close(s);
+    try emitForInOfEpilogue(s, kind, block_scope_level, label_frame, next_label, assign_label, throw_close, &for_scope);
 }
 
 /// Tokens that can begin a ForBinding after `let`: an identifier (including

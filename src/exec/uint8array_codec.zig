@@ -112,7 +112,7 @@ fn uint8ArrayCheckOptionsObject(options: core.JSValue) !void {
 
 pub fn expectUint8ArrayObject(value: core.JSValue) !*core.Object {
     const object = try property_ops.expectObject(value);
-    if (!core.object.isTypedArrayObject(object) or object.typedArrayKind() != .uint8) return error.NotAUint8Array;
+    if (!core.typed_array.isTypedArrayObject(object) or object.typedArrayKind() != .uint8) return error.NotAUint8Array;
     return object;
 }
 
@@ -220,11 +220,11 @@ pub fn createUint8ArrayFromBytes(rt: *core.JSRuntime, global: *core.Object, byte
 /// GetUint8ArrayBytes / the setFrom* target: the view's bytes, or a
 /// TypeError when its buffer is detached or has shrunk below the view.
 fn uint8ArrayViewBytes(ctx: *core.JSContext, global: *core.Object, object: *core.Object) ![]u8 {
-    if (try core.object.typedArrayDetached(object) or try core.object.typedArrayOutOfBounds(object)) {
+    if (try core.typed_array.typedArrayDetached(object) or try core.typed_array.typedArrayOutOfBounds(object)) {
         _ = try throwTypeErrorMessage(ctx, global, "ArrayBuffer is detached or resized");
         unreachable;
     }
-    const length = try core.object.typedArrayLength(ctx.runtime, object);
+    const length = try core.typed_array.typedArrayLength(ctx.runtime, object);
     const buffer = try atomicsBufferObject(object);
     const start = object.typedArrayByteOffset();
     return buffer.byteStorage()[start..][0..length];

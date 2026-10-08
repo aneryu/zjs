@@ -213,7 +213,11 @@ pub const TestEngine = struct {
     ) !core.JSValue {
         try self.ensureTest262GlobalsInstalled();
         modules.install(self.context);
-        return module_graph.evalModuleGraph(self.runtime, self.context, source_text, output, filename, std.testing.io, allocator, std.math.maxInt(usize));
+        return module_graph.evalModuleGraph(self.runtime, self.context, source_text, output, filename, .{
+            .io = std.testing.io,
+            .allocator = allocator,
+            .max_source_size = std.math.maxInt(usize),
+        });
     }
 
     pub fn evalModuleGraph(
@@ -226,7 +230,11 @@ pub const TestEngine = struct {
         max_source_size: usize,
     ) !core.JSValue {
         try self.ensureTest262GlobalsInstalled();
-        return module_graph.evalModuleGraph(self.runtime, self.context, source_text, output, filename, io, allocator, max_source_size);
+        return module_graph.evalModuleGraph(self.runtime, self.context, source_text, output, filename, .{
+            .io = io,
+            .allocator = allocator,
+            .max_source_size = max_source_size,
+        });
     }
 
     pub fn runJobs(self: *TestEngine) !void {

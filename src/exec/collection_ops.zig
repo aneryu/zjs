@@ -313,27 +313,27 @@ fn methodCallResolved(
     const method_id = std.enums.fromInt(PrototypeMethod, method) orelse return error.TypeError;
     return switch (method_id) {
         .set => {
-            const key = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            const value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+            const key = value_ops.argOrUndefined(args, 0);
+            const value = value_ops.argOrUndefined(args, 1);
             return mapSet(rt, object, key, value);
         },
         .get => {
-            const key = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            const key = value_ops.argOrUndefined(args, 0);
             return mapGet(rt, object, key);
         },
         .has => {
-            const key = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            const key = value_ops.argOrUndefined(args, 0);
             return collectionHas(rt, object, key);
         },
         .delete => {
-            const key = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            const key = value_ops.argOrUndefined(args, 0);
             return collectionDelete(rt, object, key);
         },
         .clear => {
             return collectionClear(rt, object);
         },
         .add => {
-            const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            const value = value_ops.argOrUndefined(args, 0);
             return setAdd(rt, object, value);
         },
         .keys => {
@@ -347,8 +347,8 @@ fn methodCallResolved(
         },
         .for_each => return collectionForEach(object, args, host),
         .get_or_insert => {
-            const key = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            return mapGetOrInsert(rt, object, key, if (args.len >= 2) args[1] else core.JSValue.undefinedValue());
+            const key = value_ops.argOrUndefined(args, 0);
+            return mapGetOrInsert(rt, object, key, value_ops.argOrUndefined(args, 1));
         },
         .get_or_insert_computed => {
             if (args.len < 2) return error.NotAFunction;
@@ -367,18 +367,18 @@ fn methodCallResolved(
 fn methodCallDroppedResult(rt: *core.JSRuntime, object: *core.Object, method: u32, args: []const core.JSValue) !bool {
     switch (method) {
         @intFromEnum(PrototypeMethod.set) => {
-            const key = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
-            const value = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+            const key = value_ops.argOrUndefined(args, 0);
+            const value = value_ops.argOrUndefined(args, 1);
             try mapSetNoResult(rt, object, key, value);
             return true;
         },
         @intFromEnum(PrototypeMethod.add) => {
-            const value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            const value = value_ops.argOrUndefined(args, 0);
             try setAddNoResult(rt, object, value);
             return true;
         },
         @intFromEnum(PrototypeMethod.delete) => {
-            const key = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+            const key = value_ops.argOrUndefined(args, 0);
             try collectionDeleteNoResult(rt, object, key);
             return true;
         },
@@ -702,8 +702,16 @@ fn testCallbackCallWithThis(
     return args[0];
 }
 
+fn isStrongCollection(obj: *const core.Object) bool {
+    return obj.class_id == core.class.ids.map or obj.class_id == core.class.ids.set;
+}
+
+fn isWeakCollection(obj: *const core.Object) bool {
+    return obj.class_id == core.class.ids.weakmap or obj.class_id == core.class.ids.weakset;
+}
+
 fn collectionSize(object: *core.Object) !core.JSValue {
-    if (object.class_id != core.class.ids.map and object.class_id != core.class.ids.set) return error.TypeError;
+    if (!isStrongCollection(object)) return error.TypeError;
     return core.JSValue.int32(@intCast(strongSize(object)));
 }
 
@@ -712,9 +720,9 @@ fn collectionForEach(
     args: []const core.JSValue,
     host: CallbackHost,
 ) !core.JSValue {
-    if (object.class_id != core.class.ids.map and object.class_id != core.class.ids.set) return error.TypeError;
+    if (!isStrongCollection(object)) return error.TypeError;
     if (args.len < 1 or !call_runtime.isCallableValue(args[0])) return error.TypeError;
-    const this_arg = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    const this_arg = value_ops.argOrUndefined(args, 1);
     // js_map_forEach locks the current record for the
     // duration of the callback and only then advances. zjs walks by index, so
     // the lock is on the entry array: the callback may delete entries, but the
@@ -794,11 +802,11 @@ fn canonicalizeKey(key: core.JSValue) core.JSValue {
 }
 
 fn collectionHas(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue) !core.JSValue {
-    if (object.class_id == core.class.ids.weakmap or object.class_id == core.class.ids.weakset) {
+    if (isWeakCollection(object)) {
         const key_identity = weakKeyIdentityPeek(rt, key) orelse return core.JSValue.boolean(false);
         return core.JSValue.boolean(findWeakEntry(object, key_identity) != null);
     }
-    if (object.class_id == core.class.ids.map or object.class_id == core.class.ids.set) {
+    if (isStrongCollection(object)) {
         return core.JSValue.boolean(findStrongEntry(object, key) != null);
     }
     return error.TypeError;
@@ -813,25 +821,25 @@ fn collectionDeleteNoResult(rt: *core.JSRuntime, object: *core.Object, key: core
 }
 
 fn collectionDeleteBool(rt: *core.JSRuntime, object: *core.Object, key: core.JSValue) !bool {
-    if (object.class_id == core.class.ids.weakmap or object.class_id == core.class.ids.weakset) {
+    if (isWeakCollection(object)) {
         const key_identity = weakKeyIdentityPeek(rt, key) orelse return false;
         const index = findWeakEntry(object, key_identity) orelse return false;
         try removeWeakEntry(rt, object, index);
         return true;
     }
 
-    if (object.class_id != core.class.ids.map and object.class_id != core.class.ids.set) return error.TypeError;
+    if (!isStrongCollection(object)) return error.TypeError;
     const index = findStrongEntry(object, key) orelse return false;
     removeStrongEntry(rt, object, index);
     return true;
 }
 
 fn collectionClear(rt: *core.JSRuntime, object: *core.Object) !core.JSValue {
-    if (object.class_id == core.class.ids.map or object.class_id == core.class.ids.set) {
+    if (isStrongCollection(object)) {
         clearStrongEntries(object);
         return core.JSValue.undefinedValue();
     }
-    if (object.class_id == core.class.ids.weakmap or object.class_id == core.class.ids.weakset) {
+    if (isWeakCollection(object)) {
         clearWeakEntries(rt, object);
         return core.JSValue.undefinedValue();
     }
@@ -1132,10 +1140,10 @@ fn collectionForEachRecord(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !core.JSValue {
-    if (receiver.class_id != core.class.ids.map and receiver.class_id != core.class.ids.set) return throwCollectionReceiverTypeError(ctx, global, receiver.class_id);
+    if (!isStrongCollection(receiver)) return throwCollectionReceiverTypeError(ctx, global, receiver.class_id);
     if (args.len < 1 or !call_runtime.isCallableValue(args[0])) return error.NotAFunction;
     const callback = args[0];
-    const this_arg = if (args.len >= 2) args[1] else core.JSValue.undefinedValue();
+    const this_arg = value_ops.argOrUndefined(args, 1);
     var callback_call = CallSite.initInternal(
         ctx,
         output,
@@ -1173,7 +1181,7 @@ fn setMethodRecord(
     caller_frame: ?*builtin_dispatch.Frame,
 ) !core.JSValue {
     if (receiver.class_id != core.class.ids.set) return throwCollectionReceiverTypeError(ctx, global, core.class.ids.set);
-    const other_value = if (args.len >= 1) args[0] else core.JSValue.undefinedValue();
+    const other_value = value_ops.argOrUndefined(args, 0);
     const other_record = try getSetRecord(ctx, output, global, other_value, caller_function, caller_frame);
     // Keep entry indices stable across the set-like has/keys user calls.
     receiver.retainCollectionCursor();
@@ -1566,6 +1574,10 @@ fn mapGroupByCall(
     caller_function: ?*const builtin_dispatch.Bytecode,
     caller_frame: ?*builtin_dispatch.Frame,
 ) !core.JSValue {
+    // GroupBy checks RequireObjectCoercible(items) before IsCallable(callbackfn).
+    if (args.len < 1 or args[0].is(.null_value) or args[0].is(.undefined_value)) {
+        return exception_ops.throwTypeErrorMessage(ctx, global, "null or undefined are forbidden");
+    }
     if (args.len < 2 or !call_runtime.isCallableValue(args[1])) return error.NotAFunction;
     const map_proto = ctx.classPrototypeObject(core.class.ids.map) orelse return error.InvalidBuiltinRegistry;
 
@@ -1665,6 +1677,10 @@ fn throwCollectionReceiverTypeError(ctx: *core.JSContext, global: *core.Object, 
     return exception_ops.throwTypeErrorMessage(ctx, global, collectionReceiverMessage(owner_class));
 }
 
+/// Method bodies return a bare `error.TypeError` for a wrong receiver or a
+/// weak key. This attaches the message: the weak-key text when that is the
+/// cause, otherwise `collectionReceiverMessage`. `error.NotAFunction` is not
+/// rewritten; `runtimeErrorInfo` already reports "not a function".
 fn throwCollectionMethodTypeError(
     ctx: *core.JSContext,
     global: *core.Object,

@@ -38,17 +38,17 @@ pub fn evalScriptValue(ctx: *core.JSContext, source_value: core.JSValue, options
 /// Intern the module name, if this is a module at all.
 ///
 /// `noinline` for the frame, not for the code: the `<eval>#N` fallback inlines
-/// `std.fmt.bufPrint`, which puts a 64-byte buffer AND an `std.Io.Writer`
-/// (whose `buffer.ptr` slot R1-a fingerprinted at `fp-272`) in whatever frame
-/// it lands in. That frame must not be the one the interpreter runs under.
+/// `std.fmt.bufPrint`, which puts the count-sized name buffer and an `std.Io.Writer`
+/// in whatever frame it lands in. That frame must not be the interpreter frame.
 noinline fn resolveModuleName(ctx: *core.JSContext, options: core.context.ContextEvalOptions) !core.Atom {
     if (options.mode != .module) return core.atom.null_atom;
     if (!std.mem.eql(u8, options.filename, "<eval>")) return ctx.runtime.internAtom(options.filename);
     // An unnamed module gets the first free `<eval>#N`, so it never meets a
     // record an embedder named that way.
-    var module_name_buf: [64]u8 = undefined;
+    var module_name_buf: [std.fmt.count("<eval>#{d}", .{std.math.maxInt(usize)})]u8 = undefined;
     var index = ctx.modules.count();
     while (true) : (index += 1) {
+        // buf is sized by std.fmt.count for the widest value
         const name = try ctx.runtime.internAtom(std.fmt.bufPrint(&module_name_buf, "<eval>#{d}", .{index}) catch unreachable);
         if (ctx.modules.find(name) == null) return name;
     }
@@ -98,7 +98,7 @@ noinline fn prepareRootFunction(
         const message = try std.fmt.allocPrint(rt.nativeAllocator(), "module '{s}' is already loaded; evaluate new module source under a new filename", .{options.filename});
         defer rt.nativeAllocator().free(message);
         _ = try exception_ops.throwTypeErrorMessage(ctx, global, message);
-        return error.TypeError;
+        unreachable;
     }
     // A module's parsed record names are rooted here from the compile until
     // the install has copied them into the module record.
@@ -140,7 +140,7 @@ noinline fn prepareRootFunction(
         // Always an error return; the `!JSValue` signature is for the other
         // call sites.
         _ = try exception_ops.throwParseSyntaxError(ctx, global, parse_filename, err.position.line, err.position.column, err.message);
-        return error.SyntaxError;
+        unreachable;
     }
     prepared.first_execute_start = if (options.mode != .module and options.timing != null)
         ctx.runtime.diagnosticNanos()
